@@ -546,6 +546,7 @@ fn run(
         had.notes.push(format!("peer {}'s files come through a relay: a long pull", s.id));
     }
     let outcome = ran.map_err(|stop| (Some(p.summary.clone()), Halt::Card(stop)))?;
+    had.notes.extend(outcome.notes.iter().cloned());
     if let Err(why) = &outcome.stored {
         had.notes.push(format!("the card's settings weren't stored: {why}"));
     }
@@ -2020,6 +2021,7 @@ fn report_json(r: &Report) -> Value {
     json!({
         "edited": r.edited, "gone": r.gone, "unknown": r.unknown, "kept": r.kept,
         "refused": refused, "bigFolders": r.big_folders, "failed": failed, "spared": r.spared,
+        "unfollowed": r.unfollowed,
     })
 }
 

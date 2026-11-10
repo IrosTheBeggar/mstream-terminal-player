@@ -17,6 +17,7 @@ use super::super::contract::mptg::{
     SOURCE_SOFTWARE,
 };
 use super::super::contract::mspd::{OP_FOLDER, OP_WRITE};
+use super::super::contract::order::valid_rel_path;
 use super::super::contract::text::Run;
 use super::super::names::match_key;
 use super::super::tags::PARSER_VERSION;
@@ -174,6 +175,16 @@ pub(super) struct Survey {
     pub(super) thumbs: BTreeSet<String>,
     /// The tags file's skew over this listing (2.3.4), in seconds; 0 none.
     pub(super) skew: i32,
+    /// Ledger files the card now has at a path no record may name (past
+    /// 2.6.3's 248 bytes, as the listener moved or spelled it): not
+    /// followed there, their rows missing, the files the listener's.
+    pub(super) unfollowed: Vec<String>,
+}
+
+/// A path the card's records and plans may name (2.6.3, 2.12.5): a file
+/// found at another is never one a run records or plans for.
+fn recordable(path: &str) -> bool {
+    valid_rel_path(path.as_bytes())
 }
 
 pub(super) fn survey(
@@ -210,8 +221,15 @@ pub(super) fn survey(
     let skew = skew(pairs.collect::<Vec<_>>());
 
     let mut claimed: HashSet<String> = HashSet::new();
+    let mut unfollowed = Vec::new();
     for (row, f) in rows.iter_mut().zip(found) {
         let Some((path, item)) = f else { continue };
+        // Its spelling on the card (another case, or the listener's longer
+        // form of its characters) is one no record can hold: left missing.
+        if !recordable(&path) {
+            unfollowed.push(path);
+            continue;
+        }
         claimed.insert(path.clone());
         let size = item.size == row.rec.size as u64;
         let printed = |card: &dyn CardFs| card_qfp(card, &music.card_path(&path), item.size);
@@ -246,14 +264,18 @@ pub(super) fn survey(
                     hits.push((path.clone(), item.fat_time));
                 }
             }
-            if let [(path, fat_time)] = hits.as_slice() {
-                loose.retain(|(p, _)| p != path);
-                row.side = Side::Moved { path: path.clone(), fat_time: *fat_time };
+            match hits.as_slice() {
+                [(path, _)] if !recordable(path) => unfollowed.push(path.clone()),
+                [(path, fat_time)] => {
+                    loose.retain(|(p, _)| p != path);
+                    row.side = Side::Moved { path: path.clone(), fat_time: *fat_time };
+                }
+                _ => {}
             }
         }
     }
-    let (recover, unclaimed): (Vec<_>, Vec<_>) =
-        loose.into_iter().partition(|(p, _)| targets.contains(&key_path(p)));
+    let ours = |p: &str| targets.contains(&key_path(p)) && recordable(p);
+    let (recover, unclaimed): (Vec<_>, Vec<_>) = loose.into_iter().partition(|(p, _)| ours(p));
     let recover = recover.into_iter().map(|(p, _)| p).collect();
 
     // The folders the software owns, and the albums with a thumbnail, as
@@ -261,7 +283,9 @@ pub(super) fn survey(
     let mut owned = BTreeSet::new();
     let mut thumbs = BTreeSet::new();
     for f in whole.iter().flat_map(|t| t.folders.iter()).filter(|f| !f.path.is_empty()) {
-        let Some((path, _)) = music.find(&f.path, true) else { continue };
+        let Some((path, _)) = music.find(&f.path, true).filter(|(p, _)| recordable(p)) else {
+            continue;
+        };
         if f.flags & FOLDER_OWNED != 0 {
             owned.insert(path.clone());
         }
@@ -270,7 +294,7 @@ pub(super) fn survey(
         }
     }
     for op in settled.pending.iter().flat_map(|p| p.ops.iter()).filter(|o| o.op == OP_FOLDER) {
-        if let Some((path, _)) = music.find(&op.path, true) {
+        if let Some((path, _)) = music.find(&op.path, true).filter(|(p, _)| recordable(p)) {
             owned.insert(path);
         }
     }
@@ -278,5 +302,7 @@ pub(super) fn survey(
         let reader = (t.source, t.parser_version, t.read_rules);
         reader != (SOURCE_SOFTWARE, PARSER_VERSION, READ_RULES)
     });
-    Ok(Survey { rows, reread, unclaimed, recover, owned, thumbs, skew })
+    unfollowed.sort();
+    unfollowed.dedup();
+    Ok(Survey { rows, reread, unclaimed, recover, owned, thumbs, skew, unfollowed })
 }

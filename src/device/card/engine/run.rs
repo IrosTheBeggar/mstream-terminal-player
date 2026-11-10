@@ -44,6 +44,7 @@ use super::super::contract::order::{
 };
 use super::super::contract::prim::{Md5Sum, hash_sampled, path_hash};
 use super::super::contract::MAX_FILE;
+use super::super::names::fits_fat32;
 use super::super::contract::server::{Server, Servers};
 use super::super::contract::text::Run;
 use super::super::names::match_key;
@@ -173,6 +174,10 @@ struct Runner<'r, 'c> {
     /// The files of the selection passed by (Step::Skipped): each origin
     /// and server path ([`Outcome::missed`]).
     missed: Vec<(usize, String)>,
+    /// The last skip left the listener's file at a write's target (spared,
+    /// or a name the card had): the plan on the card is written again at
+    /// once, so no cut leaves that file named as the run's work (2.12.3).
+    unclaim: bool,
 }
 
 impl<'r, 'c> Runner<'r, 'c> {
@@ -243,6 +248,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             deleted: 0,
             report: plan.report.clone(),
             missed: Vec::new(),
+            unclaim: false,
         };
         runner.carried()?;
         Ok(runner)
@@ -285,31 +291,27 @@ impl<'r, 'c> Runner<'r, 'c> {
         // Step 6: the plan on the card before anything is deleted or written,
         // the card checked again first: a commit made since the session
         // opened (another computer's run) stops this one.
+        // A cut run's leftovers no write of this plan takes go first, while
+        // the plan on the card still names them as its targets: once this
+        // plan replaces it they are no target of any, and a cut among them
+        // would leave them for the listener's (2.12.3).
         self.s.bound.check(true)?;
-        if !self.plan.deletes.is_empty() || !self.plan.writes.is_empty() {
+        let plan = self.plan;
+        let (ours, theirs): (Vec<_>, Vec<_>) = plan.deletes.iter().partition(|d| d.ours);
+        for d in ours {
+            self.delete(d, events)?;
+        }
+        if !plan.deletes.is_empty() || !plan.writes.is_empty() {
             self.write_pending()?;
         }
 
         // Step 7: the deletes, each only while its file is still what the
         // listing said.
-        let plan = self.plan;
-        if !plan.deletes.is_empty() {
+        if !theirs.is_empty() {
             self.s.bound.check(true)?;
         }
-        for d in &plan.deletes {
-            let path = self.s.music.card_path(&d.path);
-            let now = self.s.card.stat(&path).map_err(|e| self.s.bound.failed(e))?;
-            let Some(item) = now else { continue };
-            if !d.ours && (item.size != d.size || item.fat_time != d.fat_time) {
-                self.report.spared.push(d.path.clone());
-                self.spared.insert(key_path(&d.path));
-                continue;
-            }
-            self.may(&d.path)?;
-            self.s.bound.alive()?.delete(&path).map_err(|e| self.s.bound.failed(e))?;
-            self.ledger.remove(&d.path);
-            self.deleted += 1;
-            events(Event::Deleted(d.path.clone()));
+        for d in theirs {
+            self.delete(d, events)?;
         }
 
         // Step 8: each file, in the plan's order; the server's own bytes of
@@ -355,6 +357,9 @@ impl<'r, 'c> Runner<'r, 'c> {
                     self.done.insert(k);
                     let file = &plan.wanted.files[w.file];
                     self.missed.push((file.origin, file.ledger.server_path.clone()));
+                    if std::mem::take(&mut self.unclaim) && self.pending {
+                        self.write_pending()?;
+                    }
                 }
                 Step::Park(why) => {
                     self.commit(false, hooks, events)?;
@@ -395,16 +400,49 @@ impl<'r, 'c> Runner<'r, 'c> {
             self.commit(false, hooks, events)?;
         }
         self.commit(true, hooks, events)?;
+        // Step 13 and the last look. The commit stands: what the card
+        // refuses of the clean-up after it is the next run's to finish, a
+        // note of this one's, never a stop that would leave the card's
+        // settings unwritten. Only a card that is gone stops it.
+        let mut notes = Vec::new();
+        match self.drop_plan().and_then(|()| self.collect()) {
+            Ok(()) => {}
+            Err(stop @ (Stop::Pulled | Stop::DifferentCard)) => return Err(stop),
+            Err(stop) => notes.push(format!("the clean-up after the last commit: {stop}")),
+        }
+        let verified = self.verify();
+        Ok(Outcome { notes, ..self.outcome(None, verified) })
+    }
+
+    /// `pending.bin` deleted once the final commit is made.
+    fn drop_plan(&mut self) -> Result<(), Stop> {
         if self.pending || self.s.settled.pending.is_some() {
             let card = self.s.bound.alive()?;
             if card.stat(&ms("pending.bin")).map_err(|e| self.s.bound.failed(e))?.is_some() {
                 self.s.bound.alive()?.delete(&ms("pending.bin")).map_err(|e| self.s.bound.failed(e))?;
             }
         }
-        // Step 13 and the last look.
-        self.collect()?;
-        let verified = self.verify();
-        Ok(self.outcome(None, verified))
+        Ok(())
+    }
+
+    /// Step 7's delete of a file, while it is still what the listing said;
+    /// else it is spared, the listener's now (2.11). A cut run's target is
+    /// held to its listing too: a file written there since is no leftover.
+    fn delete(&mut self, d: &super::plan::Delete, events: &mut dyn FnMut(Event)) -> Result<(), Stop> {
+        let path = self.s.music.card_path(&d.path);
+        let now = self.s.card.stat(&path).map_err(|e| self.s.bound.failed(e))?;
+        let Some(item) = now else { return Ok(()) };
+        if item.dir || item.size != d.size || item.fat_time != d.fat_time {
+            self.report.spared.push(d.path.clone());
+            self.spared.insert(key_path(&d.path));
+            return Ok(());
+        }
+        self.may(&d.path)?;
+        self.s.bound.alive()?.delete(&path).map_err(|e| self.s.bound.failed(e))?;
+        self.ledger.remove(&d.path);
+        self.deleted += 1;
+        events(Event::Deleted(d.path.clone()));
+        Ok(())
     }
 
     fn outcome(&self, parked: Option<String>, verified: Result<(), String>) -> Outcome {
@@ -623,14 +661,16 @@ impl<'r, 'c> Runner<'r, 'c> {
         if card.stat(&ms("stage")).map_err(|e| self.failed(e))?.is_none() {
             self.s.bound.alive()?.mkdir(&ms("stage")).map_err(|e| self.failed(e))?;
         }
-        // 8.1: the bytes, with the MD5 when the server's hash is one of the
-        // whole file: a `hash-v` 2 digest under 25 MiB (mStream's older
+        // 8.1: the bytes, with the MD5 when the server's hash may be one of
+        // the whole file: a `hash-v` 2 digest under 25 MiB (mStream's older
         // digests may not be one, and a false mismatch would skip a good
-        // file).
+        // file). A file whose listing gave no size is summed as it comes,
+        // and its bytes say at the end whether the hash is the whole file's.
         let l = &file.ledger;
+        let known = file.server_size();
         let full = file.original()
             && l.hash_v >= 2
-            && !hash_sampled(l.hash_v, l.server_size)
+            && known.is_none_or(|size| !hash_sampled(l.hash_v, size))
             && l.file_hash != [0; 16];
         let mut f = self.s.bound.alive()?.create(&stage).map_err(|e| self.failed(e))?;
         let path = w.path.clone();
@@ -669,9 +709,12 @@ impl<'r, 'c> Runner<'r, 'c> {
 
         // 8.2: what came is what was asked for.
         let mut verified = false;
-        let checked = if file.original() && bytes != l.server_size {
+        let sampled = known.is_none() && hash_sampled(l.hash_v, bytes);
+        let checked = if file.original() && known.is_some_and(|size| bytes != size) {
             Err(format!("{bytes} bytes, where the server's file has {}", l.server_size))
-        } else if let Some(sum) = md5 {
+        } else if !fits_fat32(bytes) {
+            Err(format!("{bytes} bytes, past FAT32's largest file"))
+        } else if let Some(sum) = md5.filter(|_| !sampled) {
             verified = sum.finish() == l.file_hash;
             if verified { Ok(()) } else { Err("its MD5 isn't the server's".to_string()) }
         } else if !file.original() {
@@ -724,6 +767,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             if e.kind() != io::ErrorKind::AlreadyExists {
                 return Err(self.failed(e));
             }
+            self.unclaim = true;
             return self.skip(file, "the card has a file of that name".into(), events).map(Some);
         }
 
@@ -819,11 +863,14 @@ impl<'r, 'c> Runner<'r, 'c> {
         // the card, the kept bytes too; the MD5 when the server's hash is
         // one of the whole file (as for a stage file).
         let l = &file.ledger;
-        let full =
-            l.hash_v >= 2 && !hash_sampled(l.hash_v, l.server_size) && l.file_hash != [0; 16];
+        let known = file.server_size();
+        let whole = !hash_sampled(l.hash_v, known.unwrap_or(len));
+        let full = l.hash_v >= 2 && whole && l.file_hash != [0; 16];
         let mut verified = false;
-        let checked = if len != l.server_size {
+        let checked = if known.is_some_and(|size| len != size) {
             Err(format!("{len} bytes, where the server's file has {}", l.server_size))
+        } else if !fits_fat32(len) {
+            Err(format!("{len} bytes, past FAT32's largest file"))
         } else if full {
             let sum = card_md5(self.s.card, &part, len).map_err(|e| self.failed(e))?;
             verified = sum == l.file_hash;
@@ -955,7 +1002,10 @@ impl<'r, 'c> Runner<'r, 'c> {
                 Ok(None)
             }
             Some(_) => Ok(Some(self.spare(&w.path))),
-            None => self.skip(file, "the card has a file of that name".into(), events).map(Some),
+            None => {
+                self.unclaim = true;
+                self.skip(file, "the card has a file of that name".into(), events).map(Some)
+            }
         }
     }
 
@@ -963,6 +1013,7 @@ impl<'r, 'c> Runner<'r, 'c> {
     /// listing: kept as it is, its row dropped (2.11: the listener's now),
     /// and reported.
     fn spare(&mut self, path: &str) -> Step {
+        self.unclaim = true;
         self.report.spared.push(path.to_string());
         self.spared.insert(key_path(path));
         self.ledger.remove(path);
@@ -1035,6 +1086,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             if e.kind() != io::ErrorKind::AlreadyExists {
                 return Err(self.failed(e));
             }
+            self.unclaim = true;
             return self.skip(file, "the card has a file of that name".into(), events);
         }
         self.ledger.remove(from);
@@ -1075,8 +1127,16 @@ impl<'r, 'c> Runner<'r, 'c> {
             let hash = path_hash(folder);
             let file = ms(&thumb_path_of(folder));
             let had = self.thumbs.contains(folder);
+            // One the card can't read is no thumbnail on it: made again, or
+            // none (only a card that is gone stops the run).
             let bytes = match had {
-                true => self.s.card.read(&file, mpth::BYTES).map_err(|e| self.failed(e))?,
+                true => match self.s.card.read(&file, mpth::BYTES) {
+                    Ok(bytes) => bytes,
+                    Err(e) => match self.failed(e) {
+                        Stop::Card(_) => None,
+                        stop => return Err(stop),
+                    },
+                },
                 false => None,
             };
             let on_card = bytes.is_some_and(|b| mpth::check(&b, hash));
@@ -1362,6 +1422,12 @@ impl<'r, 'c> Runner<'r, 'c> {
         self.put(&ms("manifest.tmp"), &manifest)?;
         self.s.bound.committed(self.card_id, commit_id);
         self.replace(&ms("manifest.tmp"), &ms("manifest.bin"))?;
+        // The rename flushed to the card before the tags file it replaced
+        // goes, or anything is collected: a pull then never finds the root
+        // before naming a file that is gone.
+        let card = self.s.bound.alive()?;
+        let flushed = card.open(&ms("manifest.bin")).and_then(|mut root| root.sync());
+        flushed.map_err(|e| self.failed(e))?;
 
         // The tags file before goes; so, at the end, does an index no longer
         // named (the collection's, of either kind).
@@ -1438,16 +1504,26 @@ impl<'r, 'c> Runner<'r, 'c> {
         let mut owned: Vec<String> = self.owned.iter().cloned().collect();
         owned.sort_by_key(|f| std::cmp::Reverse(f.matches('/').count()));
         for folder in owned {
-            let path = self.s.music.card_path(&folder);
-            let there = self.s.card.stat(&path).map_err(|e| self.failed(e))?.is_some_and(|i| i.dir);
-            if !there {
-                self.owned.remove(&folder);
-                continue;
+            // A folder the card won't remove now (another program has it
+            // open) stays, OWNED: the next run's prune takes it.
+            match self.prune_one(&folder) {
+                Ok(()) | Err(Stop::Card(_)) => {}
+                Err(stop) => return Err(stop),
             }
-            if entries(self.s.card, &path).map_err(|e| self.failed(e))?.is_empty() {
-                self.s.bound.alive()?.rmdir(&path).map_err(|e| self.failed(e))?;
-                self.owned.remove(&folder);
-            }
+        }
+        Ok(())
+    }
+
+    fn prune_one(&mut self, folder: &str) -> Result<(), Stop> {
+        let path = self.s.music.card_path(folder);
+        let there = self.s.card.stat(&path).map_err(|e| self.failed(e))?.is_some_and(|i| i.dir);
+        if !there {
+            self.owned.remove(folder);
+            return Ok(());
+        }
+        if entries(self.s.card, &path).map_err(|e| self.failed(e))?.is_empty() {
+            self.s.bound.alive()?.rmdir(&path).map_err(|e| self.failed(e))?;
+            self.owned.remove(folder);
         }
         Ok(())
     }

@@ -118,6 +118,9 @@ pub(crate) struct Library {
     /// `/api/` names no transcode block: the server converts nothing (its
     /// ffmpeg still starting, say).
     pub(crate) no_transcode: bool,
+    /// The manifest gives no `file-size` (mStream's null for a row it has
+    /// none for).
+    pub(crate) no_sizes: bool,
     /// Rock's folder on this computer: the session is an admin's, which
     /// may ask `admin/directories`.
     pub(crate) disk: Option<PathBuf>,
@@ -317,8 +320,15 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             tracks.sort_by_key(|t| t.id);
             let page: Vec<&Track> = tracks.iter().take(limit).copied().collect();
             let next = (tracks.len() > limit).then(|| page.last().map(|t| t.id)).flatten();
+            let entry = |t: &Track| {
+                let mut e = entry_json(t);
+                if lib.no_sizes {
+                    e["file-size"] = Value::Null;
+                }
+                e
+            };
             let body = json!({"revision": lib.revision, "scanning": lib.scanning, "next": next,
-                              "entries": page.iter().map(|t| entry_json(t)).collect::<Vec<_>>()});
+                              "entries": page.iter().map(|t| entry(t)).collect::<Vec<_>>()});
             let headers = [("Content-Type", "application/json"), ("ETag", quoted.as_str())];
             reply("200 OK", &headers, body.to_string().as_bytes())
         }
@@ -1791,6 +1801,27 @@ fn an_ogg_whose_first_bytes_dont_come_is_passed_over_never_converted_on_a_guess(
     let outcome = ran(&synced);
     assert_eq!((outcome.records, outcome.verified.clone()), (4, Ok(())));
     assert_eq!(root_revision(&sim), "", "the next run asks again");
+}
+
+#[test]
+fn a_listing_with_no_sizes_is_copied_whole_and_read_again_as_the_same() {
+    let scratch = Scratch::new("no-sizes");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    fake.lock().unwrap().no_sizes = true;
+    let mut envs = envs();
+    let first = sync_now(&sim, &base, &rock(), &mut envs).0;
+    // The fit takes each at its length and bitrate, not at nothing.
+    assert!(first.summary.as_ref().unwrap().fetch_bytes > 1_000_000);
+    let outcome = ran(&first);
+    let done = (outcome.written, outcome.records, outcome.verified.clone(), outcome.missed.len());
+    assert_eq!(done, (4, 4, Ok(()), 0), "{:?}", outcome.report);
+    let mp3 = std::fs::read(scratch.0.join("card/music/Artist A/Album B/01.mp3")).unwrap();
+    assert_eq!(mp3, corpus("v24_full.mp3"));
+    // Its rows say no size, and the next whole read finds them unchanged.
+    let whole = Ask { whole: true, ..Ask::default() };
+    let again = sync_now(&sim, &base, &whole, &mut envs).0;
+    assert_eq!((ran(&again).written, ran(&again).deleted), (0, 0));
 }
 
 #[test]

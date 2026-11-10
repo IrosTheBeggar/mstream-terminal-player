@@ -309,13 +309,14 @@ type Tried = Option<Result<wire::Fetched, wire::Failed>>;
 type Try<'t> = dyn FnMut(&Fetch<'_>, &mut dyn Write, u64) -> Tried + 't;
 
 /// A file's bytes from `/media` into `into`, as the server holds them
-/// (`size` of them): three tries, each after the first taken up where the
+/// (`size` of them, when the listing said; else as many as the answer
+/// says, to FAT32's largest file): three tries, each after the first taken up where the
 /// one before stopped, with Range under the ETag its answer gave
 /// (If-Range). `once` makes a try; `stopped` cuts the waits between them
 /// short.
 fn media(
     path: &str,
-    size: u64,
+    size: Option<u64>,
     into: &mut dyn Write,
     stopped: &dyn Fn() -> bool,
     once: &mut Try<'_>,
@@ -325,7 +326,10 @@ fn media(
         if attempt > 1 {
             pause_while(attempt as u64 - 1, stopped);
         }
-        let fetch = Fetch::file(path).expecting(size);
+        let fetch = match size {
+            Some(size) => Fetch::file(path).expecting(size),
+            None => Fetch::file(path).cap(FAT32_MAX),
+        };
         let fetch = fetch.resuming(validator.as_deref());
         match once(&fetch, into, held) {
             None => return Err(skip("stopped")),
@@ -848,13 +852,13 @@ fn download(s: &Ahead, i: usize, gives_up: &dyn Fn() -> bool) -> Got {
     };
     if want.size <= s.room.in_memory {
         let mut bytes = Vec::with_capacity(want.size as usize);
-        let got = media(&want.path, want.size, &mut bytes, gives_up, &mut once);
+        let got = media(&want.path, Some(want.size), &mut bytes, gives_up, &mut once);
         return ended(got, Held::Memory(bytes));
     }
     let path = s.dir.join(format!("media-{i}.bin"));
     let Ok(file) = File::create(&path) else { return Got::Dropped };
     let mut spool = Spool { file, failed: false };
-    let got = media(&want.path, want.size, &mut spool, gives_up, &mut once);
+    let got = media(&want.path, Some(want.size), &mut spool, gives_up, &mut once);
     let Spool { file, failed } = spool;
     drop(file);
     if failed {
@@ -1057,10 +1061,12 @@ impl Http {
     /// the downloads past the file the engine is on are given up.
     pub(crate) fn prefetch(&mut self, files: &[&WantedFile], stop: Option<Arc<AtomicBool>>) {
         self.prefetch = None;
+        // A file whose listing gave no size isn't downloaded ahead: nothing
+        // says what room it takes. Its fetch comes at its turn.
         let wants: Vec<Want> = files
             .iter()
             .filter(|f| f.origin == self.origin && f.original())
-            .map(|f| Want { path: f.ledger.server_path.clone(), size: f.ledger.server_size })
+            .filter_map(|f| Some(Want { path: f.ledger.server_path.clone(), size: f.server_size()? }))
             .collect();
         if !wants.is_empty() {
             let (dir, room) = (self.scratch.0.clone(), self.room);
@@ -1101,7 +1107,7 @@ impl Http {
         let mut once = |fetch: &Fetch<'_>, into: &mut dyn Write, held: u64| {
             Some(client.stream(fetch, into, held, &mut |_, _| {}))
         };
-        media(&l.server_path, l.server_size, into, &stopped, &mut once)
+        media(&l.server_path, file.server_size(), into, &stopped, &mut once)
     }
 
     fn converted(

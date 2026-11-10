@@ -75,6 +75,9 @@ pub(crate) struct FatSim {
     quiet: Cell<bool>,
     /// A file with a bad sector, and what of it can't be read.
     bad: RefCell<Option<(String, Bad)>>,
+    /// Writes the card refuses, the card still in the reader: each whose
+    /// "op path" starts with this (a folder another program holds open).
+    refuse: RefCell<Option<String>>,
 }
 
 fn pulled() -> io::Error {
@@ -105,7 +108,14 @@ impl FatSim {
             sizes: RefCell::new(Vec::new()),
             quiet: Cell::new(false),
             bad: RefCell::new(None),
+            refuse: RefCell::new(None),
         }
+    }
+
+    /// Each write whose "op path" starts with `what` is refused from now
+    /// on, as a card that is still there refuses one; None: none is.
+    pub(crate) fn refuse(&self, what: Option<&str>) {
+        *self.refuse.borrow_mut() = what.map(str::to_string);
     }
 
     /// The sector of this file that holds byte `at` can't be read: any read
@@ -212,6 +222,10 @@ impl FatSim {
         s.clock += 2;
         if !self.quiet.get() {
             self.log.borrow_mut().push(format!("{what} {path}"));
+        }
+        let op = format!("{what} {path}");
+        if self.refuse.borrow().as_deref().is_some_and(|r| op.starts_with(r)) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the card refused it"));
         }
         match s.cut {
             Some((n, how)) if n == s.ops => {

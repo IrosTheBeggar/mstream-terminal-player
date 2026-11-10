@@ -689,7 +689,7 @@ impl Peer {
         let (mut attempt, mut streams) = (1, 0);
         let client = self.client.clone();
         loop {
-            let fetch = Fetch::file(&l.server_path).expecting(l.server_size);
+            let fetch = expecting(Fetch::file(&l.server_path), file.server_size());
             let fetch = fetch.resuming(validator.as_deref());
             let spend = &mut self.s.spend;
             let mut capped = CapPart { into: &mut *into, spend, spent: false, unkept: None };
@@ -730,7 +730,7 @@ impl Peer {
         let mut validator: Option<String> = None;
         let client = self.client.clone();
         loop {
-            let fetch = Fetch::file(&l.server_path).expecting(l.server_size).cap(FAT32_MAX);
+            let fetch = expecting(Fetch::file(&l.server_path), file.server_size()).cap(FAT32_MAX);
             let fetch = fetch.resuming(validator.as_deref());
             let got = client.download(&fetch, dest, &mut |_, _| {});
             let unkept = self.s.spend.sync().err().map(|e| self.unkept(e));
@@ -772,7 +772,8 @@ impl Peer {
         let codec = codec_of(container).ok_or_else(|| skip("not a conversion a sync makes"))?;
         let bitrate = TransferBitrate::from_kbps(file.kbps as u32)
             .ok_or_else(|| skip(format!("no conversion at {}k", file.kbps)))?;
-        let size = file.ledger.server_size;
+        // A source of no listed size is counted as it comes (the meter).
+        let size = file.server_size().unwrap_or(0);
         if self.cap.is_some_and(|cap| size > cap) {
             return Err(skip("its source is larger than a day's budget for the peer"));
         }
@@ -856,6 +857,15 @@ impl Fetcher for Peer {
             Some(Hold::Stop(_)) => None,
             None => self.later.contains(&file.ledger.server_path).then(|| LATER.to_string()),
         }
+    }
+}
+
+/// A fetch of a file whose length the listing gave, held to it; one it
+/// didn't, to FAT32's largest file.
+fn expecting(fetch: Fetch<'_>, size: Option<u64>) -> Fetch<'_> {
+    match size {
+        Some(size) => fetch.expecting(size),
+        None => fetch.cap(FAT32_MAX),
     }
 }
 

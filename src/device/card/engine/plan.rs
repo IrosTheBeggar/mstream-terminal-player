@@ -37,7 +37,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::super::contract::mptg::{ADOPTED, HASH_SAMPLED, Ledger, VERIFIED};
-use super::super::contract::order::compare_file_paths;
+use super::super::contract::order::{compare_file_paths, valid_rel_path};
 use super::super::contract::prim::{hash_sampled, qfp, qfp_ranges};
 use super::super::contract::server::{NO_INSTANCE, Server, Verdict, srvs_breaks};
 use super::super::names::{Bytes, Layout, Namer, Wanted};
@@ -81,8 +81,11 @@ pub(super) struct Delete {
 }
 
 impl Delete {
-    fn ours(path: &str) -> Delete {
-        Delete { path: path.to_string(), size: 0, fat_time: 0, removal: false, ours: true }
+    /// A cut run's target, as listed: it goes only while it is still that
+    /// file, as any delete does.
+    fn ours(path: &str, item: Option<Item>) -> Delete {
+        let (size, fat_time) = item.map_or((0, 0), |i| (i.size, i.fat_time));
+        Delete { path: path.to_string(), size, fat_time, removal: false, ours: true }
     }
 }
 
@@ -258,15 +261,16 @@ fn card_extension(file: &WantedFile) -> String {
 
 /// A paired row's file is the entry's bytes still (2.10.2): the same audio
 /// hash, size and `modified`, the same file hash when both have one, and
-/// the same conversion.
+/// the same conversion. A size either side doesn't know (0) is no change.
 fn unchanged(row: &Ledger, file: &WantedFile) -> bool {
     let l = &file.ledger;
     let none = [0; 16];
     let file_hash = row.file_hash == l.file_hash || row.file_hash == none || l.file_hash == none;
     let kbps = row.converted_to == 0 || row.convert_kbps == file.kbps;
     let conversion = row.converted_to == file.converted_to() && kbps;
+    let size = row.server_size == l.server_size || row.server_size == 0 || l.server_size == 0;
     row.audio_hash == l.audio_hash
-        && row.server_size == l.server_size
+        && size
         && row.server_modified == l.server_modified
         && file_hash
         && conversion
@@ -320,7 +324,8 @@ fn namer(s: &Session, layout: &Layout, seeds: &Seeds) -> Result<Namer, Stop> {
 
 fn wanted<'a>(files: &'a [WantedFile], at: &[usize], f: usize) -> Wanted<'a> {
     let file = &files[f];
-    let size = if file.original() { file.ledger.server_size } else { file.size };
+    // An original's size is the server's, or the plan's estimate of it.
+    let size = file.server_size().filter(|_| file.original()).unwrap_or(file.size);
     let (id, server_path) = (file.ledger.mstream_id, &file.ledger.server_path);
     Wanted { server: at[file.origin] as u16, id, server_path, size, bytes: file.bytes }
 }
@@ -344,7 +349,7 @@ pub(super) fn plan(
     table.extend(old.entries.iter().copied());
     let rows_of = |i: usize| rows.iter().filter(|r| r.ledger.server as usize == i).count();
     let mut guards = Vec::new();
-    let mut report = Report::default();
+    let mut report = Report { unfollowed: s.survey.unfollowed.clone(), ..Report::default() };
 
     // ── Each origin is one of the card's servers, or a new one (2.11) ──
     let same: Vec<Vec<usize>> = origins.iter().map(|o| old.all_same(&o.talk)).collect();
@@ -512,10 +517,10 @@ pub(super) fn plan(
                     seeds.kept.push((path.clone(), srv as u16, files[f].ledger.server_path.clone()));
                 }
                 Some(f) => {
-                    deletes.push(Delete::ours(path));
+                    deletes.push(Delete::ours(path, item_of(path)));
                     to_name.push((f, Some(r)));
                 }
-                None => deletes.push(Delete::ours(path)),
+                None => deletes.push(Delete::ours(path, item_of(path))),
             },
             Side::Same { path, fat_time } | Side::Moved { path, fat_time } => {
                 let in_place = matches!(row.side, Side::Moved { .. });
@@ -621,7 +626,9 @@ pub(super) fn plan(
         let file = &files[f];
         let Some(path) = natural.get(&f).filter(|_| file.original()) else { continue };
         let Some((listed, size, fat_time)) = unclaimed.get(&key_path(path)) else { continue };
-        if *size != file.ledger.server_size {
+        // A record names it as the card spells it: it must be one a record
+        // may hold (2.6.3).
+        if file.server_size() != Some(*size) || !valid_rel_path(listed.as_bytes()) {
             continue;
         }
         let card = card_qfp(s.card, &s.music.card_path(listed), *size);
@@ -677,8 +684,7 @@ pub(super) fn plan(
     let written: HashSet<Vec<String>> = writes.iter().map(|w| key_path(&w.path)).collect();
     for path in recover_free {
         if !written.contains(&key_path(&path)) {
-            let (size, fat_time) = item_of(&path).map_or((0, 0), |i| (i.size, i.fat_time));
-            deletes.push(Delete { path, size, fat_time, removal: false, ours: true });
+            deletes.push(Delete::ours(&path, item_of(&path)));
         }
     }
 
@@ -774,7 +780,7 @@ fn ext_of(path: &str) -> String {
 /// The server's side of a file's fingerprint: two ranged reads (U6). None
 /// when the source can't say.
 fn server_qfp(fetcher: &mut dyn Fetcher, file: &WantedFile) -> Option<u64> {
-    let size = file.ledger.server_size;
+    let size = file.server_size()?;
     let r = qfp_ranges(size);
     let head = fetcher.read_range(file, 0, r.head as usize).ok()?;
     let tail = fetcher.read_range(file, r.tail_offset, r.tail as usize).ok()?;

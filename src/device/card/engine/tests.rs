@@ -4283,3 +4283,161 @@ fn a_file_its_day_is_too_short_for_waits_alone() {
     assert_eq!(on_card(&card, "Folk/Dana Duo/Album/01 - Big.mp3"), corpus("picture_first.mp3"));
     let _ = finished(&card);
 }
+
+/// A cut run's leftover no write takes again (2.12.3), with the plan that
+/// names it: the card after a first sync, and the plan's ops.
+fn with_leftover(dir: &Path, card: &FatSim) {
+    let root = look(card).root.unwrap().manifest;
+    let ops = vec![
+        Op { op: OP_FOLDER, path: "Gone".into(), expected_size: 0 },
+        Op { op: OP_WRITE, path: "Gone/x.mp3".into(), expected_size: 9 },
+    ];
+    let pending = mspd::write(&PlanIn {
+        generation: root.header.generation + 1,
+        card_id: CARD_ID,
+        minor: 0,
+        run_id: 77,
+        base_generation: root.header.generation,
+        ops,
+    })
+    .unwrap();
+    put(dir, "/.mstream/pending.bin", &pending, LATER);
+    put(dir, "/music/Gone/x.mp3", b"leftovers", LATER);
+}
+
+/// 2.12.3 and 2.11 at step 7: a cut run's leftovers go before this run's
+/// plan replaces the one that names them (a cut among them leaves them its
+/// targets still), and each only while it is the file listed: one written
+/// since is the listener's.
+#[test]
+fn a_cut_runs_leftovers_go_first_and_only_as_listed() {
+    let dir = Scratch::new("leftovers");
+    let (card, wanted, mut server) = first(&dir.0);
+    with_leftover(&dir.0, &card);
+    let start = card.log().len();
+    let outcome = sync(&card, &wanted, &mut server, 8).unwrap();
+    assert_eq!((outcome.verified, outcome.deleted), (Ok(()), 1));
+    let log = card.log()[start..].to_vec();
+    let at = |w: &str| log.iter().position(|l| l.starts_with(w)).unwrap_or_else(|| panic!("{w}: {log:?}"));
+    assert!(at("delete /music/Gone/x.mp3") < at("create /.mstream/pending.tmp"), "{log:?}");
+
+    // Written again between the listing and its turn: spared, not deleted.
+    let dir = Scratch::new("leftovers-changed");
+    let (card, wanted, mut server) = first(&dir.0);
+    with_leftover(&dir.0, &card);
+    let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
+    put(&dir.0, "/music/Gone/x.mp3", b"the listener's own now", LATER + 2);
+    let outcome = session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    assert_eq!((outcome.verified, outcome.deleted), (Ok(()), 0));
+    assert_eq!(outcome.report.spared, ["Gone/x.mp3"]);
+    let kept = card.read("/music/Gone/x.mp3", 1 << 20).unwrap();
+    assert_eq!(kept.as_deref(), Some(b"the listener's own now".as_slice()));
+}
+
+/// 2.12.3 at a collision: the plan on the card is written again at once,
+/// without the write whose name the listener's file has, so a cut before
+/// the next checkpoint never leaves that file named as the run's work.
+#[test]
+fn a_collision_leaves_the_plan_on_the_card_without_its_write() {
+    let dir = Scratch::new("collision-plan");
+    let (card, mut wanted, mut server) = first(&dir.0);
+    let six = corpus("trck_0.mp3");
+    let from = "Lib/Alex Artist/First Album/03 - Six.mp3";
+    server.add(from, six.clone());
+    wanted.files.push(track(from, &six, 401));
+    let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
+    put(&dir.0, "/music/Alex Artist/First Album/03 - SIX.MP3", &corpus("latin1.mp3"), LATER);
+    let start = card.log().len();
+    let outcome = session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    assert_eq!((outcome.verified, outcome.written), (Ok(()), 0));
+    let log = card.log()[start..].to_vec();
+    let plans = log.iter().filter(|l| l.starts_with("rename /.mstream/pending.tmp")).count();
+    assert_eq!(plans, 2, "step 6's, and the one written at the collision: {log:?}");
+}
+
+/// 2.12.1, step 12: the root's rename is flushed to the card before the
+/// tags file it replaced goes.
+#[test]
+fn a_commits_root_is_flushed_before_the_tags_file_before_it_goes() {
+    let dir = Scratch::new("flushed");
+    let (card, mut wanted, mut server) = first(&dir.0);
+    second(&dir.0, &mut wanted, &mut server);
+    let start = card.log().len();
+    sync(&card, &wanted, &mut server, 2).unwrap();
+    let log = card.log()[start..].to_vec();
+    let mut renames = log.iter().enumerate().filter(|(_, l)| l.contains("manifest.tmp -> "));
+    let (at, _) = renames.next().expect("a commit");
+    assert_eq!(log[at + 1], "sync /.mstream/manifest.bin", "{log:?}");
+    let old_tags = log.iter().position(|l| l.starts_with("delete /.mstream/tags-")).unwrap();
+    assert!(old_tags > at + 1, "{log:?}");
+}
+
+/// What the card refuses around the final commit, the card still in the
+/// reader, never stops the run: a folder it won't remove stays OWNED for
+/// the next run, a thumbnail it can't read is made again, and a leftover
+/// it won't delete after the commit is a note.
+#[test]
+fn what_the_card_refuses_around_the_last_commit_is_the_next_runs_to_finish() {
+    // The set-up card's empty OWNED folder, which the first sync prunes.
+    let dir = Scratch::new("refused-prune");
+    set_up(&dir.0);
+    let card = FatSim::new(&dir.0, SERIAL);
+    let mut server = Canned::default();
+    let wanted = library(&mut server);
+    card.refuse(Some("rmdir /music/Owned Empty"));
+    let outcome = sync(&card, &wanted, &mut server, 1).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(outcome.verified, Ok(()));
+    let folders = look(&card).root.unwrap().tags.unwrap().folders;
+    let owned = folders.iter().any(|f| f.path == "Owned Empty" && f.flags & FOLDER_OWNED != 0);
+    assert!(owned, "still the software's: {folders:?}");
+    card.refuse(None);
+    let mut more = wanted.clone();
+    let six = corpus("trck_0.mp3");
+    server.add("Lib/Casey Choir/Hymns/01 - Six.mp3", six.clone());
+    more.files.push(track("Lib/Casey Choir/Hymns/01 - Six.mp3", &six, 401));
+    sync(&card, &more, &mut server, 2).unwrap();
+    assert!(card.stat("/music/Owned Empty").unwrap().is_none(), "the next run takes it");
+
+    // A thumbnail it can't read.
+    let thumb = card.image().into_keys().find(|p| p.starts_with("/.mstream/thumbs/")).expect("one");
+    card.stumbles(&thumb);
+    let mut again = more.clone();
+    let seven = corpus("cbr.mp3");
+    server.add("Lib/Casey Choir/Hymns/02 - Seven.mp3", seven.clone());
+    again.files.push(track("Lib/Casey Choir/Hymns/02 - Seven.mp3", &seven, 402));
+    let outcome = sync(&card, &again, &mut server, 3).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(outcome.verified, Ok(()));
+    card.heal();
+
+    // A leftover it won't delete once the commit is made.
+    card.refuse(Some("delete /.mstream/pending.bin"));
+    let mut last = again.clone();
+    last.files.retain(|f| !f.ledger.server_path.ends_with("02 - Seven.mp3"));
+    let outcome = sync(&card, &last, &mut server, 4).unwrap_or_else(|e| panic!("{e}"));
+    card.refuse(None);
+    assert_eq!(outcome.verified, Ok(()));
+    assert!(outcome.notes.iter().any(|n| n.contains("clean-up")), "{:?}", outcome.notes);
+}
+
+/// 2.6.3's 248 bytes: a file the listener moved, or spelled, at a path no
+/// record may name is never followed there (the commit would refuse it, and
+/// every run after): it is the listener's, named in the report, and the
+/// file is written again where the ledger can have it.
+#[test]
+fn a_file_moved_where_no_record_may_name_it_is_the_listeners_and_the_run_goes_on() {
+    let dir = Scratch::new("long-move");
+    let (card, wanted, mut server) = first(&dir.0);
+    let one = "Alex Artist/First Album/01 - One.mp3";
+    assert!(records(&card).iter().any(|e| e.path == one));
+    let long = format!("Alex Artist/{}/01 - One.mp3", "x".repeat(230));
+    std::fs::create_dir_all(dir.0.join("music/Alex Artist").join("x".repeat(230))).unwrap();
+    std::fs::rename(dir.0.join("music").join(one), dir.0.join("music").join(&long)).unwrap();
+    let outcome = sync(&card, &wanted, &mut server, 2).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(outcome.verified, Ok(()));
+    assert_eq!(outcome.report.unfollowed, [long.clone()]);
+    assert_eq!(outcome.written, 1, "written again where the ledger can have it");
+    assert!(card.stat(&format!("/music/{long}")).unwrap().is_some(), "the listener's, as it was");
+    assert!(records(&card).iter().any(|e| e.path == one));
+    let again = sync(&card, &wanted, &mut server, 3).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!((again.verified, again.written), (Ok(()), 0));
+}

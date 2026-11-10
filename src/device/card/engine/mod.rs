@@ -150,6 +150,13 @@ impl WantedFile {
     pub(crate) fn original(&self) -> bool {
         matches!(self.bytes, Bytes::Original { .. })
     }
+
+    /// The server's `file-size` of it, when its listing gave one: ORIG's
+    /// serverSize 0 is unknown (2.6.6), and a fetch of it then expects no
+    /// length (it trusts the answer's, and what reads back).
+    pub(crate) fn server_size(&self) -> Option<u64> {
+        Some(self.ledger.server_size).filter(|&size| size != 0)
+    }
 }
 
 /// What the card should hold of the servers this run reads. Where each
@@ -381,6 +388,10 @@ pub(crate) struct Report {
     /// Deletes, replacements and moves not made: the file changed between
     /// the listing and its turn, and is the listener's now (2.11).
     pub(crate) spared: Vec<String>,
+    /// Ledger files the card has at a path no record may name (past 2.6.3's
+    /// 248 bytes, as the listener moved or spelled it): the listener's now,
+    /// and the file written again where the ledger can have it (U4).
+    pub(crate) unfollowed: Vec<String>,
 }
 
 /// What a run came to.

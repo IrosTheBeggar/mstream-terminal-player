@@ -198,8 +198,16 @@ pub(crate) fn ogg_is_opus(head: &[u8]) -> bool {
 
 impl Facts {
     /// A manifest entry's, with its full metadata when it was read.
+    /// A file no listing gives a size for is taken at its length × its
+    /// bitrate (the fit's estimate, and FAT32's test of it), else 0.
     pub(crate) fn of(entry: &ManifestEntry, meta: Option<&Metadata>, ogg: Option<bool>) -> Facts {
-        let size = entry.file_size.or(meta.and_then(|m| m.file_size)).unwrap_or(0);
+        let bitrate = meta.and_then(|m| m.bitrate);
+        let duration = meta.and_then(|m| m.duration).or(entry.metadata.duration);
+        let guess = match (bitrate, duration) {
+            (Some(bps), Some(secs)) if secs > 0.0 => (secs * bps as f64 / 8.0).ceil() as u64,
+            _ => 0,
+        };
+        let size = entry.file_size.or(meta.and_then(|m| m.file_size)).unwrap_or(guess);
         Facts {
             ext: extension(&entry.filepath),
             size,
@@ -476,14 +484,16 @@ impl Kept {
     }
 
     /// The entry is the row's file still (2.10.2): its audio hash, size,
-    /// `modified`, and file hash when both have one.
+    /// `modified`, and file hash when both have one. A size either side
+    /// doesn't know (none listed, a row's 0) is no change.
     pub(crate) fn unchanged(&self, entry: &ManifestEntry) -> bool {
         let l = ledger_of(entry);
         let none = [0; 16];
         let (theirs, ours) = (l.file_hash, self.ledger.file_hash);
         let file = theirs == ours || theirs == none || ours == none;
+        let (a, b) = (l.server_size, self.ledger.server_size);
         l.audio_hash == self.ledger.audio_hash
-            && l.server_size == self.ledger.server_size
+            && (a == b || a == 0 || b == 0)
             && l.server_modified == self.ledger.server_modified
             && file
     }
@@ -491,8 +501,10 @@ impl Kept {
     /// The bytes, kbps and size of a wanted file the row stands for: the
     /// row's conversion, or the server's bytes of `server_size`.
     fn reused(&self, server_size: u64) -> (Bytes, u16, u64) {
+        // No size listed: the card's copy of the server's bytes says it.
+        let size = if server_size != 0 { server_size } else { self.size };
         match self.ledger.converted_to {
-            0 => (self.bytes(), 0, server_size),
+            0 => (self.bytes(), 0, size),
             _ => (self.bytes(), self.ledger.convert_kbps, self.size),
         }
     }
@@ -511,7 +523,7 @@ impl Kept {
             ledger,
             bytes: k.bytes(),
             kbps: if original { 0 } else { k.ledger.convert_kbps },
-            size: if original { k.ledger.server_size } else { k.size },
+            size: if original && k.ledger.server_size != 0 { k.ledger.server_size } else { k.size },
             bpm10,
             camelot,
         };
@@ -562,7 +574,11 @@ pub(crate) fn wanted_of(
     for entry in entries {
         let path = &entry.filepath;
         let full = metadata.get(path).and_then(Option::as_ref);
-        let ledger = ledger_of(entry);
+        let mut ledger = ledger_of(entry);
+        // No `file-size` in the listing: the full metadata's, when read.
+        if ledger.server_size == 0 {
+            ledger.server_size = full.and_then(|m| m.file_size).unwrap_or(0);
+        }
         let (bpm10, camelot) = analysed(full.unwrap_or(&entry.metadata));
         let extra = Extra::of(&entry.metadata, full);
         let reuse = kept.get(path).filter(|k| same_plan && k.unchanged(entry));
@@ -571,9 +587,8 @@ pub(crate) fn wanted_of(
             None => {
                 let facts = Facts::of(entry, full, ogg.get(path).copied());
                 match decide(&facts, device, conversion, transcode) {
-                    Decision::Original { ogg_opus } => {
-                        (Bytes::Original { ogg_opus }, 0, ledger.server_size)
-                    }
+                    // A size no listing gave is the facts' estimate (the fit).
+                    Decision::Original { ogg_opus } => (Bytes::Original { ogg_opus }, 0, facts.size),
                     Decision::Convert(codec, bitrate)
                         if names::fits_fat32(estimate(extra.duration_ms, &facts, bitrate.kbps())) =>
                     {
