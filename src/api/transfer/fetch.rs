@@ -389,6 +389,16 @@ fn validator(headers: &HeaderMap) -> Option<String> {
     header(headers, ETAG).or_else(|| header(headers, LAST_MODIFIED))
 }
 
+/// A part answered to an If-Range of `sent` is of the file the bytes held
+/// came from: the answer's validator of the same kind (an ETag for an ETag,
+/// else Last-Modified) is `sent`, or the answer gives none. A server that
+/// ignored If-Range sends a part of the changed file under its new one.
+fn same_file(headers: &HeaderMap, sent: &str) -> bool {
+    let etag = sent.starts_with('"') || sent.starts_with("W/\"");
+    let now = if etag { header(headers, ETAG) } else { header(headers, LAST_MODIFIED) };
+    now.is_none_or(|now| now == sent)
+}
+
 /// `bytes 4-9/10` → (Some((4, 9)), Some(10)); `bytes */10` → (None, Some(10)).
 fn content_range(headers: &HeaderMap) -> Option<(Option<(u64, u64)>, Option<u64>)> {
     let value = header(headers, CONTENT_RANGE)?;
@@ -782,6 +792,26 @@ impl Client {
                     });
                 }
                 // What is here is no part of the file any more.
+                from = 0;
+                kept.validator = None;
+                continue;
+            }
+            // A part of the file as it is now, under another validator than
+            // the bytes here were fetched with (the server ignored
+            // If-Range): never stitched onto them. A partial starts over; a
+            // stream, which holds them already, fails as a changed file.
+            if let Some(sent) = fetch.resume
+                && resp.status() == StatusCode::PARTIAL_CONTENT
+                && from > 0
+                && !same_file(resp.headers(), sent)
+            {
+                if !dest.rewinds() {
+                    let error = FetchError::Range(format!(
+                        "a part of the file as it is now: the file changed since its first {on_disk} \
+                         bytes came"
+                    ));
+                    return Err(failed(error, &kept));
+                }
                 from = 0;
                 kept.validator = None;
                 continue;
@@ -1305,6 +1335,46 @@ mod tests {
         assert!(req.contains("if-range: mon, 21 sep 2026 14:13:20 gmt\r\n"), "{req}");
         assert_eq!(part.starts, [(4, Some(date.to_string()))], "no ETag: the date it was asked by");
         assert_eq!(part.bytes, b"0123456789");
+    }
+
+    /// A server that ignores If-Range answers a part of the file as it is
+    /// now, under its new validator: never stitched onto the bytes held.
+    #[test]
+    fn a_part_under_another_validator_is_of_a_changed_file() {
+        let (etag, date) = ("W/\"a-18f\"", "Mon, 21 Sep 2026 14:13:20 GMT");
+        let changed = [("Content-Range", "bytes 4-9/10"), ("ETag", "W/\"a-190\"")];
+        let (base, seen) = canned(vec![
+            reply("206 Partial Content", &changed, b"efghij"),
+            reply("206 Partial Content", &changed, b"efghij"),
+            // Asked again from the first byte: the new file whole.
+            reply("200 OK", &[("ETag", "W/\"a-190\"")], b"abcdefghij"),
+            // Asked by a date, answered with an ETag and the same date: the
+            // same file.
+            reply(
+                "206 Partial Content",
+                &[("Content-Range", "bytes 4-9/10"), ("ETag", "W/\"a-191\""), ("Last-Modified", date)],
+                b"456789",
+            ),
+        ]);
+        let client = Client::new(&base).unwrap();
+        let fetch = Fetch::file("lib/Album B/01.flac").expecting(10).resuming(Some(etag));
+        let mut into = b"0123".to_vec();
+        let failed = client.stream(&fetch, &mut into, 4, &mut |_, _| {}).unwrap_err();
+        assert!(matches!(&failed.error, FetchError::Range(why) if why.contains("changed")), "{:?}", failed.error);
+        assert_eq!(into, b"0123", "nothing stitched onto the old part");
+        let _ = recv(&seen);
+
+        let mut part = Part { bytes: b"0123".to_vec(), ..Part::default() };
+        let got = client.stream_part(&fetch, &mut part, 4, &mut |_, _| {}).unwrap();
+        assert_eq!(part.bytes, b"abcdefghij", "started over");
+        assert_eq!((got.resumed_from, got.validator.as_deref()), (0, Some("W/\"a-190\"")));
+        assert!(recv(&seen).contains("range: bytes=4-\r\n"));
+        assert!(!recv(&seen).contains("range:"), "the second ask is of the whole file");
+
+        let by_date = Fetch::file("lib/Album B/01.flac").expecting(10).resuming(Some(date));
+        let mut part = Part { bytes: b"0123".to_vec(), ..Part::default() };
+        let got = client.stream_part(&by_date, &mut part, 4, &mut |_, _| {}).unwrap();
+        assert_eq!((part.bytes.as_slice(), got.resumed_from), (b"0123456789".as_slice(), 4));
     }
 
     #[test]
