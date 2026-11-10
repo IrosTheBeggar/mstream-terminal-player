@@ -99,8 +99,15 @@ pub(crate) fn resume_after(now: u64, retry_after: Option<u64>, jitter: u64) -> u
 
 /// A few random minutes: between one and ten.
 pub(crate) fn jitter() -> u64 {
-    fastrand::u64(60..=600)
+    fastrand::u64(JITTER_MIN..=JITTER_MAX)
 }
+
+/// [`jitter`]'s fewest seconds and most.
+const JITTER_MIN: u64 = 60;
+const JITTER_MAX: u64 = 600;
+/// The longest any park sets a peer's wait from now ([`resume_after`]): a
+/// day, and the most jitter.
+const PARK_MAX: u64 = DAY + JITTER_MAX;
 
 /// The UTC days a pull of `bytes` spans, today's the first: `left` is what
 /// today has left, `cap` a whole day's (None: no cap, so one day).
@@ -302,9 +309,16 @@ impl Book {
         self.account(key).resume_at = until;
     }
 
-    /// When the peer may be asked again, if it is waiting at `now`.
-    pub(crate) fn waiting(&self, key: PeerKey, now: u64) -> Option<u64> {
-        self.peers.get(&key).map(|a| a.resume_at).filter(|&at| at > now)
+    /// When the peer may be asked again, if it is waiting at `now`. A wait
+    /// past the longest any park sets ([`PARK_MAX`] from now: this
+    /// computer's clock was behind when it was set, or the file was
+    /// damaged) is none, and goes.
+    pub(crate) fn waiting(&mut self, key: PeerKey, now: u64) -> Option<u64> {
+        let a = self.peers.get_mut(&key)?;
+        if a.resume_at > now.saturating_add(PARK_MAX) {
+            a.resume_at = 0;
+        }
+        Some(a.resume_at).filter(|&at| at > now)
     }
 }
 
@@ -593,6 +607,25 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_past_the_longest_park_is_none_and_goes() {
+        let mut book = Book::default();
+        assert_eq!(book.waiting(KEY, NOW), None, "no account");
+        // The longest a park sets: a day and the most jitter.
+        let longest = resume_after(NOW, Some(DAY), JITTER_MAX);
+        book.park(KEY, longest);
+        assert_eq!(book.waiting(KEY, NOW), Some(longest));
+        // A minute past it (the clock was behind, or the file damaged): none,
+        // and it goes from the book.
+        book.park(KEY, longest + 60);
+        assert_eq!(book.waiting(KEY, NOW), None);
+        assert_eq!(book.peers[&KEY].resume_at, 0);
+        assert!(!book.text().contains("resumeAt"));
+        // One that is over is none, and stays as it was.
+        book.park(KEY, NOW - 1);
+        assert_eq!((book.waiting(KEY, NOW), book.peers[&KEY].resume_at), (None, NOW - 1));
+    }
+
+    #[test]
     fn the_book_reads_back_and_keeps_what_it_doesnt_know() {
         let mut book = Book::default();
         book.spend(KEY, 1234, NOW);
@@ -769,7 +802,7 @@ mod tests {
         let clock: Clock = Arc::new(|| NOW);
         let spend = Spend::new(budget.clone(), KEY, &[alias], meter, None, clock).unwrap();
         assert_eq!((spend.left(), spend.cap()), (Some(MB), Some(3 * MB)));
-        let book = budget.read().unwrap();
+        let mut book = budget.read().unwrap();
         assert_eq!((book.waiting(KEY, NOW), book.peers.len()), (Some(NOW + 90), 1));
     }
 }

@@ -758,7 +758,7 @@ fn a_peers_429s_are_waited_out_or_park_it_until_its_day_is_new() {
     let until = NOW + 30_000 + JITTER;
     assert_eq!((synced.peers[0].status.clone(), synced.peers[0].resume_at), (Status::Waiting, Some(until)));
     assert_eq!(synced.resume_at, Some(until));
-    let book = Budget::at(scratch.0.join("config")).read().unwrap();
+    let mut book = Budget::at(scratch.0.join("config")).read().unwrap();
     assert_eq!(book.waiting(key_of(&base), NOW), Some(until));
     assert!(look(&sim).pending.is_some(), "its file waits in the plan");
     assert_eq!(synced_json(&synced, false)["resumeAt"], until);
@@ -1070,7 +1070,7 @@ fn a_peers_day_holds_its_covers_and_vectors_too() {
     assert!(probes.iter().all(|r| r.as_deref() == Some("bytes=0-0")), "{probes:?}");
     assert_eq!(asked.iter().filter(|a| a.contains("/album-art/")).count(), 1, "{asked:?}");
     assert!(!asked.iter().any(|a| a.contains("embeddings")), "no vectors past its day: {asked:?}");
-    let book = Budget::at(scratch.0.join("config")).read().unwrap();
+    let mut book = Budget::at(scratch.0.join("config")).read().unwrap();
     assert_eq!(book.waiting(key_of(&base), NOW), Some(until));
 
     // The same day: nothing asked.
@@ -1135,7 +1135,7 @@ fn a_peers_day_is_one_at_any_address_of_its_parent() {
     let waits = (said.status.clone(), said.resume_at);
     assert_eq!(waits, (Status::Waiting, Some(until)), "{:?}", synced.notes);
     assert_eq!(asked_of(&peer).len(), before, "nothing asked of it");
-    let book = Budget::at(scratch.0.join("config")).read().unwrap();
+    let mut book = Budget::at(scratch.0.join("config")).read().unwrap();
     let there = PeerKey { parent_key: server_url_key(&other), peer_id: 3 };
     assert_eq!((book.peers.len(), book.waiting(there, NOW)), (1, Some(until)), "one account: {book:?}");
 }
