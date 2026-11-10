@@ -845,7 +845,9 @@ pub(crate) fn wants_paste(gui: &Gui) -> bool {
 
 /// A surface not Add from YouTube's is up over the room or Files — the
 /// sign-in form a lapsed token opens, Add a server, the header's list, the
-/// sheet, a dialog: a paste is its own, typed into its field as before.
+/// sheet, a dialog: a paste is its own, typed into its field as before. So
+/// is the quit's gate during a card sync, which holds every key
+/// (mp3-player-screen contract, clause 57): no link is looked up under it.
 fn covered(gui: &Gui) -> bool {
     super::actions::modal_open(gui)
         || super::dj::modal_open(gui)
@@ -856,6 +858,7 @@ fn covered(gui: &Gui) -> bool {
         || gui.servers.modal_open()
         || gui.servers.drop_open
         || gui.torrent.modal_open()
+        || super::device::quit_gate_open(gui)
 }
 
 /// The wheel is the YouTube windows' own: the list's rows, Choose a
@@ -4821,6 +4824,16 @@ pub(crate) mod tests {
         gui.servers.form = None;
         gui.servers.drop_open = true;
         assert!(!wants_paste(&gui), "the header's server list");
+        // The quit's gate during a card sync holds every key: a paste under
+        // it looks nothing up (mp3-player-screen contract, clause 57).
+        gui.servers.drop_open = false;
+        gui.device.quit_gate = true;
+        assert!(!wants_paste(&gui), "the quit's gate during a card sync");
+        let link = gui.ytdl.draft.link.value().to_string();
+        super::super::input(&mut gui, &mut ctx, TermEvent::Paste("https://www.youtube.com/watch?v=zzz".into()));
+        assert_eq!(gui.ytdl.draft.link.value(), link, "the link stands under the gate");
+        gui.device.quit_gate = false;
+        assert!(wants_paste(&gui), "the gate gone, the field wants one again");
 
         let mut gui = list_gui(vec![history()], None);
         assert!(list_open(&gui));
