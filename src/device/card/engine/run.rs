@@ -170,6 +170,9 @@ struct Runner<'r, 'c> {
     renamed: usize,
     deleted: usize,
     report: Report,
+    /// The files of the selection passed by (Step::Skipped): each origin
+    /// and server path ([`Outcome::missed`]).
+    missed: Vec<(usize, String)>,
 }
 
 impl<'r, 'c> Runner<'r, 'c> {
@@ -239,6 +242,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             renamed: 0,
             deleted: 0,
             report: plan.report.clone(),
+            missed: Vec::new(),
         };
         runner.carried()?;
         Ok(runner)
@@ -344,8 +348,13 @@ impl<'r, 'c> Runner<'r, 'c> {
                     self.done.insert(k);
                     self.since += 1;
                 }
+                // Its op leaves the plan all the same: a target the run
+                // didn't write is no work of its own for a later run to
+                // take up (2.12.3). Its server's revision isn't the card's.
                 Step::Skipped => {
                     self.done.insert(k);
+                    let file = &plan.wanted.files[w.file];
+                    self.missed.push((file.origin, file.ledger.server_path.clone()));
                 }
                 Step::Park(why) => {
                     self.commit(false, hooks, events)?;
@@ -409,6 +418,8 @@ impl<'r, 'c> Runner<'r, 'c> {
             deleted: self.deleted,
             parked,
             report: self.report.clone(),
+            missed: self.missed.clone(),
+            notes: Vec::new(),
             verified,
             stored: Ok(()),
         }
@@ -1271,18 +1282,20 @@ impl<'r, 'c> Runner<'r, 'c> {
             lay(&mut records, &moods);
         }
 
-        // The root's server 0 header: the server read, or as it was; its
-        // revision only with the final commit, so a cut run's next run reads
-        // the server again.
+        // The root's server 0 header: the server read, or as it was. Its
+        // revision only with a final commit that missed none of its files:
+        // a checkpoint, or a final commit with a file of it failed, spared
+        // or named around, says none ("" unknown), so the next run reads the
+        // server whole and finds them again — a 304 would have the ledger
+        // stand for a selection it lacks them from.
         let server0 = table[0];
-        let reads_zero = plan.origin_at.contains(&0);
-        let revision = match (last && reads_zero, root) {
-            (true, _) => {
-                let o = plan.origin_at.iter().position(|&i| i == 0).unwrap_or(0);
-                plan.wanted.origins[o].revision.clone()
-            }
-            (false, Some(r)) => r.manifest.server_revision.clone(),
-            (false, None) => String::new(),
+        let zero = plan.origin_at.iter().position(|&i| i == 0);
+        let missed = |o: usize| self.missed.iter().any(|(m, _)| *m == o);
+        let revision = match (zero, root) {
+            (Some(o), _) if last && !missed(o) => plan.wanted.origins[o].revision.clone(),
+            (Some(_), _) => String::new(),
+            (None, Some(r)) => r.manifest.server_revision.clone(),
+            (None, None) => String::new(),
         };
         let holds = |r: &&String| {
             let inside = |p: &str| p.strip_prefix(r.as_str()).is_some_and(|rest| rest.starts_with('/'));

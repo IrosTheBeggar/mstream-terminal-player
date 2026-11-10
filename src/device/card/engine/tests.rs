@@ -1833,7 +1833,12 @@ fn a_failed_file_is_reported_and_a_stopped_source_parks_the_run() {
     assert_eq!(outcome.verified, Ok(()));
     assert_eq!(outcome.records, 5);
     let two = "Lib/Alex Artist/First Album/02 - Two.mp3".to_string();
-    assert_eq!(outcome.report.failed, [(two, "the server said 500".to_string())]);
+    assert_eq!(outcome.report.failed, [(two.clone(), "the server said 500".to_string())]);
+    // Its server's revision isn't the card's: the next run reads it whole,
+    // not a 304 that would have the ledger, which lacks Two, stand for it.
+    assert_eq!(outcome.missed, [(0, two)]);
+    let revision = |card: &FatSim| look(card).root.unwrap().manifest.server_revision;
+    assert_eq!(revision(&card), "", "a final commit that missed a file names no revision");
 
     // The next run writes it; then one stopped by its source parks after a
     // checkpoint, its plan left on the card for the run after.
@@ -1848,11 +1853,14 @@ fn a_failed_file_is_reported_and_a_stopped_source_parks_the_run() {
     let seen = look(&card);
     assert!(seen.pending.is_some(), "the device says the last transfer didn't finish");
     assert!(!seen.root.as_ref().unwrap().manifest.is_final(), "a checkpoint");
-    assert_eq!(seen.root.unwrap().tags.unwrap().records.len(), 6, "Two is in");
+    assert_eq!(seen.root.as_ref().unwrap().tags.as_ref().unwrap().records.len(), 6, "Two is in");
+    assert_eq!(revision(&card), "", "a checkpoint names no revision: its plan's rest isn't in");
     assert!(card.stat("/.mstream/run.lock").unwrap().is_none(), "let go");
     server.stop_at = None;
     let done = sync(&card, &more, &mut server, 3).unwrap();
     assert_eq!((done.written, done.records, done.verified), (1, 7, Ok(())));
+    assert!(done.missed.is_empty());
+    assert_eq!(revision(&card), "\"r-6-1\"", "every file in: the server's revision");
 }
 
 /// Hooks that give a run's end the card's settings (B1's): a state file

@@ -399,6 +399,15 @@ pub(crate) struct Outcome {
     /// stays on the card for the next run to take up (2.12.8).
     pub(crate) parked: Option<String>,
     pub(crate) report: Report,
+    /// The files of the selection the run passed by (each origin and server
+    /// path): failed, spared, or a name the card had. A final commit that
+    /// reads server 0 and missed one of its files names no revision of it
+    /// (2.5.1: "" unknown), so the next run reads its manifest whole; another
+    /// server's revision is the caller's to withhold.
+    pub(crate) missed: Vec<(usize, String)>,
+    /// What went wrong after the final commit (the plan's or the leftovers'
+    /// clean-up), which the next run finishes: the commit stands.
+    pub(crate) notes: Vec<String>,
     /// The card read back as the device reads it (2.3, step 16).
     pub(crate) verified: Result<(), String>,
     /// The `state.json` [`Hooks::state`] gave, written, or why not; Ok when
@@ -809,6 +818,12 @@ impl<'c> Session<'c> {
     /// it names: the committed ledger a plan is made against.
     pub(crate) fn root(&self) -> Option<&Root> {
         self.settled.root.as_ref()
+    }
+
+    /// A cut or parked run's plan is on the card (2.12.5): its writes still
+    /// to do may be files the root's ledger doesn't name yet.
+    pub(crate) fn pending(&self) -> bool {
+        self.settled.pending.is_some()
     }
 
     /// The identity the run is bound to.
