@@ -1525,12 +1525,20 @@ comes from the cache, or a download, beside them.
       sent at all.
     - *Send the plays* reads no list that says a file is gone, and never
       drops such a play.
+    - A server also turns a play away for its time (`bad-time`: a start
+      ahead of its clock, or older than it keeps). When this computer's
+      clock finds the start recent, no more than 5 minutes ahead, the
+      server's clock is the one that disagrees, and the play waits. A
+      start truly ahead (the player's clock was wrong) is dropped, as the
+      server says.
     - The wait is 30 days from the play's start, by this computer's clock;
       after that the server's answer stands.
     - Details' log and the command line say how many wait and why, in the
       run's own words ("2 plays wait: the server doesn't know their tracks,
-      and no listing says they are gone (a scan may be under way)"). Next
-      sync goes on counting them to send.
+      and no listing says they are gone (a scan may be under way)"; "1 play
+      waits: the server refuses its time, though this computer's clock
+      finds it recent (the server's clock disagrees)"). Next sync goes on
+      counting them to send.
 
     Details counts what can't be sent:
     - plays from before the player's clock was set (kept on this
@@ -2832,3 +2840,10 @@ setting no locale, prints in English.
     under its post table) says a rejection settles a play; this is the
     software reading "rejected" more narrowly, and is still to be written
     there.
+  - **A server whose clock was behind lost recent plays.** It refuses a
+    start more than 5 minutes ahead of its own clock, with the word it
+    has for one older than it keeps (`bad-time`), and that settled the
+    play. Held to this computer's clock instead: a start within the last
+    30 days and no more than those 5 minutes ahead waits for the server's
+    clock to be set right, and the log says the clocks disagree; an older
+    one, or one truly ahead, settles as before.

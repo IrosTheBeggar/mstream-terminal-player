@@ -548,7 +548,8 @@ fn a_crash_between_a_post_and_its_mark_posts_again_as_duplicates() {
 
 /// A post that fails (the server out of reach) keeps every play and the
 /// mark where it was; a later post settles them. The server's 'rejected'
-/// and 'duplicates' settle as 'accepted' does.
+/// and 'duplicates' settle as 'accepted' does: here a start it keeps no
+/// more, which this computer's clock finds old too.
 #[test]
 fn a_post_that_fails_keeps_every_play_and_a_rejected_one_settles() {
     let scratch = Scratch::new("offline");
@@ -564,15 +565,15 @@ fn a_post_that_fails_keeps_every_play_and_a_rejected_one_settles() {
     assert_eq!(history.marks(), []);
     assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 5, "the mapping kept");
 
-    // Back online: one play the server already has, one it rejects (a
-    // start past its retention), the rest new.
+    // Back online, a month on: one play the server already has, one it
+    // rejects (a start past its retention), the rest new.
     let mut m = Mstream::default();
     m.has.insert(id(ONE, EPOCH_1, 2));
     m.reject.insert(id(ONE, EPOCH_1, 3), "bad-time");
     let (client, _fake) = server(m);
     let mut later = History::new(store.clone(), false, none());
     later.look(&sim, Some(&root), 0);
-    later.post(&client, &talk(HOME), true, true, NOW);
+    later.post(&client, &talk(HOME), true, true, NOW + 31 * DAY);
     let t = &later.tally;
     assert_eq!((t.accepted, t.duplicates, t.rejected, t.waiting), (3, 1, 1, 0));
     assert_eq!(later.marks(), [ack(ONE, EPOCH_1, 7)]);
@@ -690,6 +691,72 @@ fn a_play_the_server_doesnt_know_settles_only_on_a_trusted_listing_that_lacks_it
     let (history, sent, _) = run(Some((&without[..], &music[..], false)), NOW + 31 * DAY);
     settles(&history, "past its wait, an untrusted listing");
     assert_eq!(sent, every, "sent all the same");
+}
+
+/// A play whose time the server refuses (`bad-time`: a start ahead of its
+/// clock, or older than it keeps). When this computer's clock finds the
+/// start recent (within 30 days, and no more than the 5 minutes ahead the
+/// server itself allows), the server's clock is the one that disagrees:
+/// the play waits and holds its mark, the tally says so, and it goes again
+/// at the next run. An old start, or one truly ahead, settles as the
+/// server says.
+#[test]
+fn a_time_the_server_refuses_waits_while_this_computers_clock_finds_it_recent() {
+    let scratch = Scratch::new("bad-time");
+    let empty = card(&scratch, Golden::One, &[]);
+    let root = root_of(&empty);
+    let first = play_of(&root, "Artist/Album/01 - Title.mp3", ONE, EPOCH_1, 1);
+    let odd = play_of(&root, "Artist/Album/02 - Other.mp3", ONE, EPOCH_1, 2);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), log_bytes(&[first, odd])).unwrap();
+    let home = talk(HOME);
+    // One run on an outbox of its own, this computer's clock at `now`, to a
+    // server that refuses the second play's time.
+    let run = |now: u64| {
+        let store = Rc::new(MemStore::default());
+        let mut m = Mstream::default();
+        m.reject.insert(odd.id(), "bad-time");
+        let (client, _fake) = server(m);
+        let mut history = History::new(store.clone(), false, none());
+        history.look(&empty, Some(&root), 0);
+        history.post(&client, &home, true, true, now);
+        (history, store)
+    };
+    let line = "1 play waits: the server refuses its time, though this computer's clock finds it recent \
+                (the server's clock disagrees)";
+    let waits = |history: &History, why: &str| {
+        let t = &history.tally;
+        let counts = (t.accepted, t.rejected, t.mistimed, t.unknown, t.due, t.waiting, t.failed);
+        assert_eq!(counts, (1, 0, 1, 0, 1, 1, false), "{why}: {t:?}");
+        assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 1)], "{why}: it holds its mark");
+        assert!(t.notes.iter().any(|n| n == line), "{why}: {:?}", t.notes);
+        assert_eq!((t.held(), t.json()["held"]["badTime"].as_u64()), (vec![line.to_string()], Some(1)));
+    };
+    let settles = |history: &History, why: &str| {
+        let t = &history.tally;
+        let counts = (t.accepted, t.rejected, t.mistimed, t.due, t.waiting, t.failed);
+        assert_eq!(counts, (1, 1, 0, 0, 0, false), "{why}: {t:?}");
+        assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 2)], "{why}");
+        assert!(t.held().is_empty(), "{why}: {:?}", t.held());
+    };
+    let start = odd.started_at / 1000;
+
+    // A few days old by this computer's clock: the server's clock is off.
+    // Set right, it takes the play at the next run.
+    let (history, store) = run(NOW);
+    waits(&history, "a few days old");
+    let (client, fake) = server(Mstream::default());
+    let mut later = History::new(store.clone(), false, none());
+    later.look(&empty, Some(&root), 0);
+    later.post(&client, &home, true, true, NOW);
+    assert_eq!((later.tally.accepted, later.tally.mistimed, later.tally.waiting), (1, 0, 0));
+    assert_eq!((posted_ids(&fake), later.marks()), (vec![vec![odd.id()]], vec![ack(ONE, EPOCH_1, 2)]));
+
+    // The edges: 30 days old, and 5 minutes ahead.
+    waits(&run(start + 29 * DAY).0, "29 days old");
+    settles(&run(start + 31 * DAY).0, "31 days old: the server keeps it no more");
+    waits(&run(start - 240).0, "4 minutes ahead: the server's own allowance");
+    settles(&run(start - 360).0, "6 minutes ahead: the player's clock was wrong");
+    settles(&run(start - 400 * DAY).0, "a year ahead");
 }
 
 /// The plays alone (`device card <drive> plays`, *Send the plays*) never

@@ -42,6 +42,9 @@
 //! when a whole listing this run read, trusted for deletions, lacks its
 //! path ([`History::listing`]); else it waits, 30 days from its start at
 //! most, and while an untrusted listing lacks its path it isn't even sent.
+//! And a server whose clock is off refuses a start its own clock finds
+//! ahead or too old: the play waits while this computer's clock finds the
+//! start recent, and settles when it is old or truly ahead.
 //! A play the server's schema refuses is never sent and settles as one not
 //! sent: it would fail every batch it rode in. Plays of another server, and
 //! those of a post that failed, wait in the outbox for a run that reads
@@ -89,13 +92,19 @@ use crate::api::{ApiError, Client, wait};
 /// Who reports a card's plays: the player, by its card (2.20.6's table).
 pub(crate) const CLIENT: &str = "mstream-core2";
 /// How long a play waits for a server that turned it away for a reason
-/// that may pass (a track it doesn't know while it scans): this long from
-/// the play's start, by this computer's clock. Past it the server's word
-/// settles the play, so those of a file truly gone can't pile up for good.
+/// that may pass (a track it doesn't know while it scans, a time its clock
+/// disagrees with): this long from the play's start, by this computer's
+/// clock. Past it the server's word settles the play, so those of a file
+/// truly gone can't pile up for good.
 pub(crate) const WAIT_MS: u64 = 30 * 86_400_000;
-/// mStream's word for a play whose path names no track it has scanned (its
-/// `REASONS`).
+/// How far ahead of its clock the server takes a start (mStream's
+/// `FUTURE_SKEW_MS`): this computer's clock allows a rejected one as much.
+const AHEAD_MS: u64 = 5 * 60 * 1000;
+/// mStream's words for a play whose path names no track it has scanned,
+/// and for one whose start is ahead of its clock or older than it keeps
+/// (its `REASONS`).
 const UNKNOWN_TRACK: &str = "unknown-track";
+const BAD_TIME: &str = "bad-time";
 
 // ── Where a play goes ───────────────────────────────────────────────────────
 
@@ -593,6 +602,9 @@ pub(crate) struct Tally {
     /// their tracks, and no listing says they are gone (not sent while an
     /// untrusted listing lacks their path, or rejected as `unknown-track`).
     pub(crate) unknown: usize,
+    /// And those whose times it refuses (`bad-time`) though this computer's
+    /// clock finds them recent: the server's clock disagrees.
+    pub(crate) mistimed: usize,
     /// For the server read now and not posted: a dry run's, after a post
     /// that failed, or those that wait though it was read.
     pub(crate) due: usize,
@@ -619,7 +631,7 @@ impl Tally {
             "posted": {"accepted": self.accepted, "duplicates": self.duplicates,
                        "rejected": self.rejected},
             "refused": self.refused,
-            "held": {"unknownTrack": self.unknown},
+            "held": {"unknownTrack": self.unknown, "badTime": self.mistimed},
             "due": self.due,
             "waiting": self.waiting,
             "failed": self.failed,
@@ -637,6 +649,9 @@ impl Tally {
         }
         if self.unknown > 0 {
             lines.push(unknown_line(self.unknown));
+        }
+        if self.mistimed > 0 {
+            lines.push(mistimed_line(self.mistimed));
         }
         lines
     }
@@ -657,6 +672,14 @@ fn unknown_line(n: usize) -> String {
     let (tracks, are) = if n == 1 { ("its track", "it is") } else { ("their tracks", "they are") };
     let why = format!("the server doesn't know {tracks}, and no listing says {are} gone");
     format!("{}: {why} (a scan may be under way)", waits(n))
+}
+
+/// The line of the plays whose times the server refuses, recent as they
+/// are by this computer's clock.
+fn mistimed_line(n: usize) -> String {
+    let (time, finds) = if n == 1 { ("its time", "finds it") } else { ("their times", "finds them") };
+    let why = format!("the server refuses {time}, though this computer's clock {finds} recent");
+    format!("{}: {why} (the server's clock disagrees)", waits(n))
 }
 
 /// The play started more than [`WAIT_MS`] ago, by a clock at `now_ms`.
@@ -1003,7 +1026,7 @@ impl History {
         // listing that can be trusted. One past its wait goes all the same,
         // and its answer settles it.
         let now_ms = now.saturating_mul(1000);
-        let mut unknown: HashSet<String> = HashSet::new();
+        let (mut unknown, mut mistimed) = (HashSet::<String>::new(), HashSet::<String>::new());
         if !self.trusted && let Some(absent) = &self.absent {
             let lacked = |o: &&Owed| absent.contains(&o.id) && !past_wait(o, now_ms);
             let lacked: HashSet<&str> =
@@ -1050,6 +1073,9 @@ impl History {
                     Some(Passing::Unknown) => {
                         unknown.insert(r.id.clone());
                     }
+                    Some(Passing::Clock) => {
+                        mistimed.insert(r.id.clone());
+                    }
                     None => self.tally.rejected += settled.insert(r.id.clone()) as usize,
                 }
             }
@@ -1061,6 +1087,10 @@ impl History {
         if !unknown.is_empty() {
             self.tally.unknown += unknown.len();
             self.tally.notes.push(unknown_line(unknown.len()));
+        }
+        if !mistimed.is_empty() {
+            self.tally.mistimed += mistimed.len();
+            self.tally.notes.push(mistimed_line(mistimed.len()));
         }
     }
 
@@ -1079,6 +1109,11 @@ impl History {
                 let gone = self.trusted && self.absent.as_ref().is_some_and(|a| a.contains(&o.id));
                 (!gone).then_some(Passing::Unknown)
             }
+            // A start within the wait, and no further ahead than the
+            // server itself allows, is one a server whose clock is right
+            // takes: its clock is the one that disagrees. A start truly
+            // ahead (the player's clock was wrong) settles as it says.
+            BAD_TIME => (o.started_at <= now_ms.saturating_add(AHEAD_MS)).then_some(Passing::Clock),
             _ => None,
         }
     }
@@ -1129,6 +1164,9 @@ enum Passing {
     /// `unknown-track`, of a path no trusted listing says is gone: a scan
     /// may not have reached the file yet.
     Unknown,
+    /// `bad-time`, of a start this computer's clock finds recent: the
+    /// server's clock disagrees, and may be set right.
+    Clock,
 }
 
 /// The log's files on the card ([`NAMES`], in any case): each one's name as
