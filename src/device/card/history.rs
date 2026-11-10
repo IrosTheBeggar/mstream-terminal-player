@@ -36,7 +36,12 @@
 //! whole manifest ([`History::remap`]); then the plays whose row's server
 //! is the one read now (2.11's test; a peer's go to its parent, with the
 //! peer's id and a snapshot of the track) go in batches of 200, each answer
-//! saved as it comes: accepted, duplicates and rejected alike are settled.
+//! saved as it comes: accepted, duplicates and rejected alike are settled,
+//! but a rejection that may pass. A server in a scan answers that it
+//! doesn't know a track its scan hasn't reached: such a play settles only
+//! when a whole listing this run read, trusted for deletions, lacks its
+//! path ([`History::listing`]); else it waits, 30 days from its start at
+//! most, and while an untrusted listing lacks its path it isn't even sent.
 //! A play the server's schema refuses is never sent and settles as one not
 //! sent: it would fail every batch it rode in. Plays of another server, and
 //! those of a post that failed, wait in the outbox for a run that reads
@@ -78,10 +83,19 @@ use crate::api::transfer::{
     CardPlay, MANIFEST_PAGE_MAX, Manifest, ManifestEntry, PLAYS_PER_CALL, PlayClient, PlayOutcome,
     PlaySource, PlayTrack, play_fault, play_version,
 };
+use crate::api::types::RejectedPlay;
 use crate::api::{ApiError, Client, wait};
 
 /// Who reports a card's plays: the player, by its card (2.20.6's table).
 pub(crate) const CLIENT: &str = "mstream-core2";
+/// How long a play waits for a server that turned it away for a reason
+/// that may pass (a track it doesn't know while it scans): this long from
+/// the play's start, by this computer's clock. Past it the server's word
+/// settles the play, so those of a file truly gone can't pile up for good.
+pub(crate) const WAIT_MS: u64 = 30 * 86_400_000;
+/// mStream's word for a play whose path names no track it has scanned (its
+/// `REASONS`).
+const UNKNOWN_TRACK: &str = "unknown-track";
 
 // ── Where a play goes ───────────────────────────────────────────────────────
 
@@ -575,8 +589,12 @@ pub(crate) struct Tally {
     /// Plays the server's schema refuses (a path too long, say): never
     /// sent, they settle as the plays not sent do.
     pub(crate) refused: usize,
-    /// For the server read now and not posted: a dry run's, or after a post
-    /// that failed.
+    /// Plays for the server read that wait all the same: it doesn't know
+    /// their tracks, and no listing says they are gone (not sent while an
+    /// untrusted listing lacks their path, or rejected as `unknown-track`).
+    pub(crate) unknown: usize,
+    /// For the server read now and not posted: a dry run's, after a post
+    /// that failed, or those that wait though it was read.
     pub(crate) due: usize,
     /// In the outbox after it all, for any server.
     pub(crate) waiting: usize,
@@ -601,6 +619,7 @@ impl Tally {
             "posted": {"accepted": self.accepted, "duplicates": self.duplicates,
                        "rejected": self.rejected},
             "refused": self.refused,
+            "held": {"unknownTrack": self.unknown},
             "due": self.due,
             "waiting": self.waiting,
             "failed": self.failed,
@@ -616,6 +635,9 @@ impl Tally {
         if self.gift > 0 {
             lines.push(format!("{} not sent: the card is for someone else", plays(self.gift)));
         }
+        if self.unknown > 0 {
+            lines.push(unknown_line(self.unknown));
+        }
         lines
     }
 }
@@ -623,6 +645,23 @@ impl Tally {
 /// `1 play`, `3 plays`.
 fn plays(n: usize) -> String {
     if n == 1 { "1 play".to_string() } else { format!("{n} plays") }
+}
+
+/// `1 play waits`, `3 plays wait`.
+fn waits(n: usize) -> String {
+    if n == 1 { "1 play waits".to_string() } else { format!("{n} plays wait") }
+}
+
+/// The line of the plays whose tracks the server doesn't know yet.
+fn unknown_line(n: usize) -> String {
+    let (tracks, are) = if n == 1 { ("its track", "it is") } else { ("their tracks", "they are") };
+    let why = format!("the server doesn't know {tracks}, and no listing says {are} gone");
+    format!("{}: {why} (a scan may be under way)", waits(n))
+}
+
+/// The play started more than [`WAIT_MS`] ago, by a clock at `now_ms`.
+fn past_wait(o: &Owed, now_ms: u64) -> bool {
+    o.started_at.saturating_add(WAIT_MS) < now_ms
 }
 
 /// One card's plays through a run: looked at once, then remapped and
@@ -653,6 +692,12 @@ pub(crate) struct History {
     unsaved: Option<String>,
     /// The new plays not sent, by id: they settle as they are.
     unsent: HashSet<String>,
+    /// The plays waiting for the server read whose path its listing, read
+    /// whole by this run, covers and doesn't hold ([`History::listing`]);
+    /// None when the run read none. And whether a path that listing lacks
+    /// is gone from the server.
+    absent: Option<HashSet<String>>,
+    trusted: bool,
     pub(crate) tally: Tally,
 }
 
@@ -675,6 +720,8 @@ impl History {
             stored: HashSet::new(),
             unsaved: None,
             unsent: HashSet::new(),
+            absent: None,
+            trusted: false,
             tally: Tally::default(),
         }
     }
@@ -872,6 +919,32 @@ impl History {
         }
     }
 
+    /// What a whole listing of the server `talk` reads says of the plays
+    /// waiting for that server (`entries`; `libraries` the vpaths it
+    /// listed, None for every one), their paths as [`History::remap`] left
+    /// them: which of them it covers and doesn't hold, and whether a path
+    /// it lacks is gone from the server (`trusted`: no scan was running
+    /// and nothing moved while it was read, the listing's
+    /// `deletions_trusted`). The post goes by it. A run that read no
+    /// listing (a 304, the plays alone) says nothing of any path.
+    pub(crate) fn listing(
+        &mut self,
+        talk: &Talk,
+        entries: &[ManifestEntry],
+        libraries: Option<&[String]>,
+        trusted: bool,
+    ) {
+        let listed: HashSet<&str> = entries.iter().map(|e| e.filepath.as_str()).collect();
+        let vpath = |p: &str| p.split('/').next().unwrap_or_default().to_string();
+        let lacked = |o: &&Owed| {
+            let looked = libraries.is_none_or(|l| l.contains(&vpath(&o.file_path)));
+            looked && !listed.contains(o.file_path.as_str())
+        };
+        let ours = |o: &&Owed| o.to.peer.is_none() && o.to.reached(talk);
+        let absent = self.owing.plays.iter().filter(ours).filter(lacked).map(|o| o.id.clone());
+        (self.absent, self.trusted) = (Some(absent.collect()), trusted);
+    }
+
     /// The plays a post to the server `talk` reads would send: those
     /// waiting for it; none on a card for someone else.
     pub(crate) fn due(&self, talk: &Talk) -> usize {
@@ -886,10 +959,15 @@ impl History {
     /// Posts the plays waiting for the server `client` reaches (`talk`), in
     /// batches of [`PLAYS_PER_CALL`], each answer saved as it comes. `stats`:
     /// the server takes plays (its Stats API); `device`: it takes the
-    /// `device` source. A post that fails leaves the rest waiting. A card
-    /// for someone else posts none ([`History::gift()`]): what waited from
-    /// before it was marked waits on.
-    pub(crate) fn post(&mut self, client: &Client, talk: &Talk, stats: bool, device: bool) {
+    /// `device` source; `now`: Unix seconds, by this computer's clock. A
+    /// post that fails leaves the rest waiting. A card for someone else
+    /// posts none ([`History::gift()`]): what waited from before it was
+    /// marked waits on.
+    ///
+    /// The server's answer settles a play, accepted, a duplicate or
+    /// rejected, but a rejection that may pass ([`History::passing`]):
+    /// that play waits for a later run, [`WAIT_MS`] from its start at most.
+    pub(crate) fn post(&mut self, client: &Client, talk: &Talk, stats: bool, device: bool, now: u64) {
         let mut due = self.due_ids(talk);
         self.tally.due = due.len();
         if due.is_empty() || self.dry || !self.loaded {
@@ -917,6 +995,21 @@ impl History {
             self.owing.done.extend(refused);
             self.tally.due = due.len();
             self.save();
+        }
+        // A path the run's listing lacks while it can't be trusted for
+        // deletions (a scan running, the library moving under the read):
+        // the server would answer that it doesn't know the track, of a file
+        // its scan hasn't reached. That play isn't sent: it waits for a
+        // listing that can be trusted. One past its wait goes all the same,
+        // and its answer settles it.
+        let now_ms = now.saturating_mul(1000);
+        let mut unknown: HashSet<String> = HashSet::new();
+        if !self.trusted && let Some(absent) = &self.absent {
+            let lacked = |o: &&Owed| absent.contains(&o.id) && !past_wait(o, now_ms);
+            let lacked: HashSet<&str> =
+                self.owing.plays.iter().filter(lacked).map(|o| o.id.as_str()).collect();
+            unknown = due.iter().filter(|id| lacked.contains(id.as_str())).cloned().collect();
+            due.retain(|id| !unknown.contains(id));
         }
         // A version longer than the server takes is left out, not the plays.
         let block = PlayClient {
@@ -953,12 +1046,40 @@ impl History {
                 self.tally.duplicates += settled.insert(id.clone()) as usize;
             }
             for r in answer.rejected.iter().filter(|r| asked.contains(&r.id)) {
-                self.tally.rejected += settled.insert(r.id.clone()) as usize;
+                match self.passing(r, now_ms) {
+                    Some(Passing::Unknown) => {
+                        unknown.insert(r.id.clone());
+                    }
+                    None => self.tally.rejected += settled.insert(r.id.clone()) as usize,
+                }
             }
             self.owing.plays.retain(|o| !settled.contains(&o.id));
             self.owing.done.extend(settled);
             self.tally.due = self.due(talk);
             self.save();
+        }
+        if !unknown.is_empty() {
+            self.tally.unknown += unknown.len();
+            self.tally.notes.push(unknown_line(unknown.len()));
+        }
+    }
+
+    /// Why the server's rejection `r` may pass, when it may: its play
+    /// waits, where any other rejection settles it. A play past its wait
+    /// ([`WAIT_MS`], by a clock at `now_ms`) settles whatever the reason.
+    fn passing(&self, r: &RejectedPlay, now_ms: u64) -> Option<Passing> {
+        let o = self.owing.plays.iter().find(|o| o.id == r.id)?;
+        if past_wait(o, now_ms) {
+            return None;
+        }
+        match r.reason.as_str() {
+            // Gone from the server only on the word of a trusted listing
+            // that covers the path and lacks it.
+            UNKNOWN_TRACK => {
+                let gone = self.trusted && self.absent.as_ref().is_some_and(|a| a.contains(&o.id));
+                (!gone).then_some(Passing::Unknown)
+            }
+            _ => None,
         }
     }
 
@@ -999,6 +1120,15 @@ impl Hooks for History {
     fn plays(&mut self, card: &dyn CardFs, root: Option<&Root>, skew: i32) {
         self.look(card, root, skew);
     }
+}
+
+/// A rejection that may pass: the server may answer otherwise at a later
+/// run, so the play it turned away waits ([`History::passing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Passing {
+    /// `unknown-track`, of a path no trusted listing says is gone: a scan
+    /// may not have reached the file yet.
+    Unknown,
 }
 
 /// The log's files on the card ([`NAMES`], in any case): each one's name as
@@ -1070,12 +1200,19 @@ pub(crate) fn listed_skew(card: &dyn CardFs, tags: &Tags) -> io::Result<i32> {
 /// read: it writes nothing to it, so no ACKS (they ride on a sync's commit)
 /// and no marks in its state file (the outbox keeps what the server
 /// settled until a sync stores the marks). With `dry_run`, nothing is saved
-/// or posted either. What it came to, and the marks after it.
+/// or posted either. `now`: Unix seconds, by this computer's clock. What it
+/// came to, and the marks after it.
+///
+/// A play the server doesn't know is never settled here: the listing this
+/// reads is for the paths the server moved ([`History::remap`]), and says
+/// nothing of a file being gone, which a sync's does ([`History::listing`]).
+/// The play waits, and the tally says so.
 pub(crate) fn plays_of(
     card: &dyn CardFs,
     client: &Client,
     dry_run: bool,
     store: Rc<dyn Store>,
+    now: u64,
 ) -> (Tally, Vec<Ack>) {
     let mut history = History::new(store, dry_run, (0, Vec::new()));
     let seen = match volume::inspect(card) {
@@ -1142,7 +1279,7 @@ pub(crate) fn plays_of(
             }
         }
     }
-    history.post(client, &talk, info.features.stats.is_some(), info.instance_id.is_some());
+    history.post(client, &talk, info.features.stats.is_some(), info.instance_id.is_some(), now);
     (history.tally.clone(), history.marks())
 }
 
@@ -1170,17 +1307,21 @@ pub(crate) fn command(
         }
     };
     let mut saved = || Client::resolve(None, None).map_err(|e| e.to_string());
-    on(&found, volume, dry_run, &mut saved, Rc::new(ConfigStore), out, err)
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    let now = since.map_or(0, |d| d.as_secs());
+    on(&found, volume, dry_run, &mut saved, Rc::new(ConfigStore), now, out, err)
 }
 
 /// [`command`] on the volumes found; `saved` the saved session's client,
-/// asked for only once the volume is one it may read.
+/// asked for only once the volume is one it may read; `now`: Unix seconds.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn on(
     found: &[volume::Found],
     named: &str,
     dry_run: bool,
     saved: &mut dyn FnMut() -> Result<Client, String>,
     store: Rc<dyn Store>,
+    now: u64,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
@@ -1200,7 +1341,7 @@ pub(crate) fn on(
             return 2;
         }
     };
-    let (tally, marks) = plays_of(&card, &client, dry_run, store);
+    let (tally, marks) = plays_of(&card, &client, dry_run, store, now);
     let mut printed = tally.json();
     printed["dryRun"] = dry_run.into();
     printed["marks"] = marks_value(&marks);

@@ -1486,7 +1486,7 @@ impl Worker {
                 Ok(client) => client,
                 Err(why) => return JobDone::Plays(Err(why)),
             };
-            let (tally, _) = history::plays_of(card, &client, false, home.plays());
+            let (tally, _) = history::plays_of(card, &client, false, home.plays(), home.now());
             if tally.failed {
                 return JobDone::Plays(Err(tally.notes.join("; ")));
             }

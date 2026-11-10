@@ -117,8 +117,15 @@ pub(crate) struct Library {
     /// Each path `metadata/batch` was asked for.
     pub(crate) batched: Vec<String>,
     /// The plays posted to `stats/plays`, as they came, and the ids it has.
+    /// A play of a path it has no track at (or hasn't scanned) is rejected
+    /// as `unknown-track`, as mStream's ingest answers it.
     pub(crate) plays: Vec<Value>,
     pub(crate) has: HashSet<String>,
+    /// A scan is under way: the manifest says so.
+    pub(crate) scanning: bool,
+    /// The tracks the scan hasn't reached, by path: on its disk, in no
+    /// listing yet, and unknown to `stats/plays`.
+    pub(crate) unindexed: HashSet<String>,
     /// `stats/plays` answers 500: a post that fails.
     pub(crate) stats_down: bool,
     /// `/api/`'s transcode block, when not an older server's (no rates
@@ -283,11 +290,12 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
                 .tracks
                 .iter()
                 .filter(|t| !ignore.iter().any(|v| t.path.starts_with(&format!("{v}/"))) && t.id > cursor)
+                .filter(|t| !lib.unindexed.contains(&t.path))
                 .collect();
             tracks.sort_by_key(|t| t.id);
             let page: Vec<&Track> = tracks.iter().take(limit).copied().collect();
             let next = (tracks.len() > limit).then(|| page.last().map(|t| t.id)).flatten();
-            let body = json!({"revision": lib.revision, "scanning": false, "next": next,
+            let body = json!({"revision": lib.revision, "scanning": lib.scanning, "next": next,
                               "entries": page.iter().map(|t| entry_json(t)).collect::<Vec<_>>()});
             let headers = [("Content-Type", "application/json"), ("ETag", quoted.as_str())];
             reply("200 OK", &headers, body.to_string().as_bytes())
@@ -376,13 +384,21 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
         }
         ("POST", "/api/v1/stats/plays") => {
             let plays = asked.json()["plays"].as_array().cloned().unwrap_or_default();
-            let (mut accepted, mut duplicates) = (Vec::new(), Vec::new());
+            let (mut accepted, mut duplicates, mut rejected) = (Vec::new(), Vec::new(), Vec::new());
             for play in plays {
                 let id = play["id"].as_str().unwrap_or_default().to_string();
-                if lib.has.insert(id.clone()) { accepted.push(id) } else { duplicates.push(id) }
+                let path = play["filePath"].as_str().unwrap_or_default();
+                let scanned = lib.tracks.iter().any(|t| t.path == path) && !lib.unindexed.contains(path);
+                if play.get("peerId").is_none() && !scanned {
+                    rejected.push(json!({"id": id, "reason": "unknown-track"}));
+                } else if lib.has.insert(id.clone()) {
+                    accepted.push(id)
+                } else {
+                    duplicates.push(id)
+                }
                 lib.plays.push(play);
             }
-            let body = json!({"accepted": accepted, "duplicates": duplicates, "rejected": []});
+            let body = json!({"accepted": accepted, "duplicates": duplicates, "rejected": rejected});
             json_reply("200 OK", &body.to_string())
         }
         ("GET", p) if p.starts_with("/album-art/") => match lib.art.get(&p["/album-art/".len()..]) {
@@ -930,6 +946,105 @@ fn a_card_for_someone_else_posts_no_play_and_acknowledges_none() {
     assert_eq!(paths, ["Rock/Artist A/Album B/01.mp3", "Rock/Artist C/Album D/02.opus"]);
     let mark = vec![Ack { device_id: DEVICE, epoch: EPOCH, seq: 2 }];
     assert_eq!(State::of(&look(&sim).state).unwrap().plays, mark);
+}
+
+/// A server in a scan (the listing says so, and lacks the tracks the scan
+/// hasn't reached) would answer that it doesn't know those tracks: their
+/// plays aren't sent, and wait. Nothing settles them, the state file's mark
+/// stays below the first, and no ACKS passes it. The scan over, they go. A
+/// track the server dropped for good is another matter: a whole listing,
+/// no scan running, lacks it, and the server's answer settles its play. And
+/// a list that stood (a 304) says nothing of any path: a play the server
+/// doesn't know waits.
+#[test]
+fn plays_of_tracks_a_scan_hasnt_reached_wait_and_a_dropped_tracks_play_settles() {
+    let scratch = Scratch::new("scan-plays");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    let store = Rc::new(MemStore::default());
+    let mut again = |ask: &Ask| sync_plays(&sim, &base, ask, &mut envs, Reached::Elsewhere, store.clone()).0;
+    ran(&again(&rock()));
+    let at = 1_791_850_000_000;
+    let mut log = [
+        logged(&sim, "Album B/01.mp3", 1, at),
+        logged(&sim, "Album B/02.flac", 2, at + 200_000),
+        logged(&sim, "Album D/02.opus", 3, at + 400_000),
+    ]
+    .concat();
+    let plays_file = scratch.0.join("card/.player/plays.jnl");
+    std::fs::write(&plays_file, &log).unwrap();
+    let mark = |seq: u32| vec![Ack { device_id: DEVICE, epoch: EPOCH, seq }];
+    let marks = || {
+        let seen = look(&sim);
+        (State::of(&seen.state).unwrap().plays, seen.root.as_ref().unwrap().manifest.acks.clone())
+    };
+    let posted = |fake: &Fake| -> Vec<String> {
+        let plays = fake.lock().unwrap().plays.clone();
+        plays.iter().map(|p| p["filePath"].as_str().unwrap().to_string()).collect()
+    };
+
+    // The server scans its library again, and has reached one track of it.
+    let (flac, opus) = ("Rock/Artist A/Album B/02.flac", "Rock/Artist C/Album D/02.opus");
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.scanning = true;
+        lib.unindexed = [flac, "Rock/Artist C/Album D/01.wav", opus].map(String::from).into();
+        lib.revision = "1:1:1790000000001:9".into();
+    }
+    let scanning = again(&Ask::default());
+    assert_eq!(ran(&scanning).deleted, 0, "a scan's listing removes nothing: {:?}", scanning.notes);
+    let t = scanning.plays.as_ref().unwrap();
+    let counts = (t.new, t.owed, t.accepted, t.rejected, t.unknown, t.waiting);
+    assert_eq!(counts, (3, 3, 1, 0, 2, 2), "{t:?}");
+    assert_eq!(posted(&fake), ["Rock/Artist A/Album B/01.mp3"], "the two it hasn't scanned are in no request");
+    let said = "2 plays wait: the server doesn't know their tracks, and no listing says they are gone \
+                (a scan may be under way)";
+    assert!(scanning.notes.iter().any(|n| n == said), "{:?}", scanning.notes);
+    let (stored, acks) = marks();
+    assert_eq!(stored, mark(1), "the mark stays below the first that waits");
+    assert!(acks.is_empty() || acks == mark(1), "{acks:?}");
+    assert_eq!(store.outbox().cards.values().map(|o| o.plays.len()).sum::<usize>(), 2);
+
+    // The scan over: they go, and the mark follows.
+    {
+        let mut lib = fake.lock().unwrap();
+        (lib.scanning, lib.revision) = (false, "1:5:1790000000005:9".into());
+        lib.unindexed.clear();
+    }
+    let done = again(&Ask::default());
+    ran(&done);
+    let t = done.plays.as_ref().unwrap();
+    assert_eq!((t.accepted, t.rejected, t.unknown, t.waiting), (2, 0, 0, 0), "{t:?}");
+    assert_eq!(posted(&fake)[1..], [flac, opus]);
+    assert_eq!(marks().0, mark(3));
+
+    // The server drops a track for good: a whole listing with no scan
+    // running lacks it, and its answer settles the play.
+    log.extend(logged(&sim, "Album D/02.opus", 4, at + 600_000));
+    std::fs::write(&plays_file, &log).unwrap();
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.tracks.retain(|t| t.path != opus);
+        lib.revision = "1:4:1790000000005:9".into();
+    }
+    let dropped = again(&Ask::default());
+    assert_eq!(ran(&dropped).deleted, 1, "{:?}", dropped.notes);
+    let t = dropped.plays.as_ref().unwrap();
+    assert_eq!((t.accepted, t.rejected, t.unknown, t.waiting), (0, 1, 0, 0), "{t:?}");
+    assert!(dropped.notes.iter().all(|n| !n.contains("the server doesn't know")), "{:?}", dropped.notes);
+    assert_eq!(marks().0, mark(4));
+
+    // A list that stood says nothing of any path: the play waits.
+    log.extend(logged(&sim, "Album B/02.flac", 5, at + 800_000));
+    std::fs::write(&plays_file, &log).unwrap();
+    fake.lock().unwrap().unindexed.insert(flac.into());
+    let stood = again(&Ask::default());
+    ran(&stood);
+    assert_eq!(stood.summary.as_ref().map(|s| s.listed), Some(Listed::NotModified));
+    let t = stood.plays.as_ref().unwrap();
+    assert_eq!((t.accepted, t.rejected, t.unknown, t.waiting), (0, 0, 1, 1), "{t:?}");
+    assert_eq!(marks().0, mark(4), "held by the play that waits");
 }
 
 /// A run's plays to send that no outbox holds (its saves fail) and the

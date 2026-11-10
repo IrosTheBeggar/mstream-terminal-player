@@ -1514,6 +1514,24 @@ comes from the cache, or a download, beside them.
       listener's own again (*For: me*) sends what its log still holds, and
       what waited.
 
+    **A play the server turns away waits while its answer may change.** A
+    server in a scan answers that it doesn't know a track its scan hasn't
+    reached (`unknown-track`). That answer drops the play only when the
+    sync read the server's list whole, with no scan running, and the track
+    isn't in it: the file is gone from the server.
+    - Otherwise the play waits on this computer and goes again at the next
+      sync: after a list that stood (a 304), one that holds the track, or
+      one of other libraries. While a scan's list lacks its track it isn't
+      sent at all.
+    - *Send the plays* reads no list that says a file is gone, and never
+      drops such a play.
+    - The wait is 30 days from the play's start, by this computer's clock;
+      after that the server's answer stands.
+    - Details' log and the command line say how many wait and why, in the
+      run's own words ("2 plays wait: the server doesn't know their tracks,
+      and no listing says they are gone (a scan may be under way)"). Next
+      sync goes on counting them to send.
+
     Details counts what can't be sent:
     - plays from before the player's clock was set (kept on this
       computer);
@@ -2796,3 +2814,21 @@ setting no locale, prints in English.
     back. The other side of it: a card that was truly someone else's and
     is made the listener's own sends that someone's plays, as far as its
     log still holds them. The clause says so.
+  - **A server in a scan lost the card's plays.** mStream answers
+    `unknown-track` for a file its scan hasn't reached, and every answer
+    settled its play: the marks passed them and the next commit's ACKS let
+    the player trim them, the whole log since the last sync for a card
+    synced during a rescan. An `unknown-track` settles now only on the word
+    of a whole listing, trusted for deletions (no scan running, nothing
+    moved under the read), that covers the path and lacks it; with any
+    other listing, or none, the play waits in the outbox and holds its
+    mark, and a scan's listing that lacks its path keeps it from being
+    sent. The wait is bounded, 30 days from the play's start, so the plays
+    of a file truly gone can't pile up behind a server that never lists
+    whole. *Send the plays* settles none: the listing it reads is for the
+    paths the server moved. The lines that say so are the run's own, in
+    English, as its other notes in Details' log are. The card contract
+    (the firmware repo's docs/METADATA.md 2.20.6, item 10 and the lines
+    under its post table) says a rejection settles a play; this is the
+    software reading "rejected" more narrowly, and is still to be written
+    there.

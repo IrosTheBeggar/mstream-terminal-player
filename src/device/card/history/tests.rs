@@ -189,6 +189,30 @@ fn talk(url: &str) -> Talk {
     Talk { url_key: server_url_key(url), ..Talk::default() }
 }
 
+/// This computer's clock for the posts of these tests, Unix seconds: a few
+/// days after the plays they send (the goldens', [`play_of`]'s).
+const NOW: u64 = 1_792_200_000;
+const DAY: u64 = 86_400;
+
+/// A server's listing of these paths, as a sync reads it whole.
+fn listing_of(paths: &[&str]) -> Vec<ManifestEntry> {
+    let entry = |path: &&str| ManifestEntry {
+        filepath: path.to_string(),
+        id: 1,
+        metadata: Default::default(),
+        file_size: None,
+        modified: None,
+        hash: None,
+        audio_hash: None,
+        hash_v: None,
+        format: None,
+        album_id: None,
+        artist_id: None,
+        created_at: None,
+    };
+    paths.iter().map(entry).collect()
+}
+
 fn ack(device_id: [u8; 6], epoch: u64, seq: u32) -> Ack {
     Ack { device_id, epoch, seq }
 }
@@ -453,7 +477,7 @@ fn the_new_plays_go_to_their_server_and_the_mark_follows_the_answers() {
     assert_eq!(history.marks(), [], "the first play waits");
 
     let (client, fake) = server(Mstream::default());
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     let t = &history.tally;
     assert_eq!((t.accepted, t.duplicates, t.rejected, t.due, t.waiting, t.failed), (5, 0, 0, 0, 0, false));
     assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 7)]);
@@ -503,7 +527,7 @@ fn a_crash_between_a_post_and_its_mark_posts_again_as_duplicates() {
     let (client, fake) = server(Mstream::default());
     let mut history = History::new(store.clone(), false, none());
     history.look(&sim, Some(&root), 0);
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!(history.tally.accepted, 5);
     assert!(history.tally.failed, "the outbox wasn't saved: {:?}", history.tally.notes);
     let on_disk = store.outbox();
@@ -513,7 +537,7 @@ fn a_crash_between_a_post_and_its_mark_posts_again_as_duplicates() {
     let mut after = History::new(store.clone(), false, none());
     after.look(&sim, Some(&root), 0);
     assert_eq!(after.due(&talk(HOME)), 5, "still owed, as the disk says");
-    after.post(&client, &talk(HOME), true, true);
+    after.post(&client, &talk(HOME), true, true, NOW);
     let t = &after.tally;
     assert_eq!((t.accepted, t.duplicates, t.failed), (0, 5, false));
     assert_eq!(after.marks(), [ack(ONE, EPOCH_1, 7)]);
@@ -533,7 +557,7 @@ fn a_post_that_fails_keeps_every_play_and_a_rejected_one_settles() {
     let store = Rc::new(MemStore::default());
     let mut history = History::new(store.clone(), false, none());
     history.look(&sim, Some(&root), 0);
-    history.post(&offline(), &talk(HOME), true, true);
+    history.post(&offline(), &talk(HOME), true, true, NOW);
     let t = &history.tally;
     assert!(t.failed && t.notes.iter().any(|n| n.contains("weren't posted")), "{t:?}");
     assert_eq!((t.due, t.waiting), (5, 5));
@@ -548,10 +572,146 @@ fn a_post_that_fails_keeps_every_play_and_a_rejected_one_settles() {
     let (client, _fake) = server(m);
     let mut later = History::new(store.clone(), false, none());
     later.look(&sim, Some(&root), 0);
-    later.post(&client, &talk(HOME), true, true);
+    later.post(&client, &talk(HOME), true, true, NOW);
     let t = &later.tally;
     assert_eq!((t.accepted, t.duplicates, t.rejected, t.waiting), (3, 1, 1, 0));
     assert_eq!(later.marks(), [ack(ONE, EPOCH_1, 7)]);
+}
+
+/// A play the server answers `unknown-track` for: its track may be one a
+/// scan hasn't reached, so the answer settles it only when a whole listing
+/// this run read, trusted for deletions, covers its path and lacks it. With
+/// no listing (a 304, the plays alone), one that holds the path, or one of
+/// other libraries, the play waits and holds its mark, and goes again at
+/// the next run. While an untrusted listing lacks its path it isn't even
+/// sent. Past 30 days from its start it goes whatever the listing, and the
+/// server's word settles it.
+#[test]
+fn a_play_the_server_doesnt_know_settles_only_on_a_trusted_listing_that_lacks_it() {
+    let scratch = Scratch::new("unknown");
+    let empty = card(&scratch, Golden::One, &[]);
+    let root = root_of(&empty);
+    let first = play_of(&root, "Artist/Album/01 - Title.mp3", ONE, EPOCH_1, 1);
+    let lost = play_of(&root, "Artist/Album/02 - Other.mp3", ONE, EPOCH_1, 2);
+    let last = play_of(&root, "A/x.mp3", ONE, EPOCH_1, 3);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), log_bytes(&[first, lost, last])).unwrap();
+    let home = talk(HOME);
+    let mut mapped = History::new(Rc::new(MemStore::default()), true, none());
+    mapped.look(&empty, Some(&root), 0);
+    let paths: Vec<String> = mapped.owing.plays.iter().map(|o| o.file_path.clone()).collect();
+    let all: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let without = [all[0], all[2]];
+    let (music, jazz) = (["Music".to_string()], ["Jazz".to_string()]);
+
+    // One run on an outbox of its own: the look, what the run read of the
+    // server (None: no listing; else its paths, the libraries it listed,
+    // and whether it is trusted for deletions), then the post to a server
+    // that doesn't know the second play's track.
+    type Read<'a> = Option<(&'a [&'a str], &'a [String], bool)>;
+    let run = |read: Read<'_>, now: u64| {
+        let store = Rc::new(MemStore::default());
+        let mut m = Mstream::default();
+        m.reject.insert(lost.id(), "unknown-track");
+        let (client, fake) = server(m);
+        let mut history = History::new(store.clone(), false, none());
+        history.look(&empty, Some(&root), 0);
+        if let Some((paths, libraries, trusted)) = read {
+            history.listing(&home, &listing_of(paths), Some(libraries), trusted);
+        }
+        history.post(&client, &home, true, true, now);
+        (history, posted_ids(&fake), store)
+    };
+    let line = "1 play waits: the server doesn't know its track, and no listing says it is gone \
+                (a scan may be under way)";
+    let waits = |history: &History, why: &str| {
+        let t = &history.tally;
+        let counts = (t.accepted, t.rejected, t.unknown, t.due, t.waiting, t.failed);
+        assert_eq!(counts, (2, 0, 1, 1, 1, false), "{why}: {t:?}");
+        assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 1)], "{why}: it holds its mark");
+        assert_eq!(history.acks(&[]), [ack(ONE, EPOCH_1, 1)], "{why}: and the ACKS");
+        assert!(t.notes.iter().any(|n| n == line), "{why}: {:?}", t.notes);
+        assert_eq!((t.held(), t.json()["held"]["unknownTrack"].as_u64()), (vec![line.to_string()], Some(1)));
+    };
+    let settles = |history: &History, why: &str| {
+        let t = &history.tally;
+        let counts = (t.accepted, t.rejected, t.unknown, t.due, t.waiting, t.failed);
+        assert_eq!(counts, (2, 1, 0, 0, 0, false), "{why}: {t:?}");
+        assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 3)], "{why}");
+        assert!(t.held().is_empty(), "{why}: {:?}", t.held());
+    };
+    let every = vec![vec![first.id(), lost.id(), last.id()]];
+
+    // No listing: sent, and the answer settles nothing. The next run sends
+    // it again; the server, its scan over, takes it.
+    let (history, sent, store) = run(None, NOW);
+    waits(&history, "no listing");
+    assert_eq!(sent, every);
+    let owing = &store.outbox().cards[&CARD_ID];
+    let waiting: Vec<&str> = owing.plays.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!((waiting, owing.done.len()), (vec![lost.id().as_str()], 2), "in the outbox, for the next run");
+    let (client, fake) = server(Mstream::default());
+    let mut later = History::new(store.clone(), false, none());
+    later.look(&empty, Some(&root), 0);
+    later.post(&client, &home, true, true, NOW);
+    assert_eq!((later.tally.accepted, later.tally.unknown, later.tally.waiting), (1, 0, 0));
+    assert_eq!((posted_ids(&fake), later.marks()), (vec![vec![lost.id()]], vec![ack(ONE, EPOCH_1, 3)]));
+
+    // A trusted listing that lacks its path: the file is gone, and the
+    // server's word settles the play.
+    let (history, sent, _) = run(Some((&without[..], &music[..], true)), NOW);
+    settles(&history, "trusted, the path not in it");
+    assert_eq!(sent, every);
+    // One that holds the path, or lists other libraries alone: nothing says
+    // the file is gone.
+    let (history, sent, _) = run(Some((&all[..], &music[..], true)), NOW);
+    waits(&history, "trusted, the path in it");
+    assert_eq!(sent, every);
+    let (history, _, _) = run(Some((&without[..], &jazz[..], true)), NOW);
+    waits(&history, "a listing of other libraries");
+
+    // A listing that isn't trusted (a scan running): a path it lacks isn't
+    // even sent, one it holds goes as any.
+    let (history, sent, store) = run(Some((&without[..], &music[..], false)), NOW);
+    waits(&history, "untrusted, the path not in it");
+    assert_eq!(sent, [vec![first.id(), last.id()]], "never in a request");
+    assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 1);
+    let (history, sent, _) = run(Some((&all[..], &music[..], false)), NOW);
+    waits(&history, "untrusted, the path in it");
+    assert_eq!(sent, every);
+
+    // The wait is 30 days from the play's start, by this computer's clock:
+    // short of it the play waits on, past it the server's word settles it,
+    // and it is sent whatever the listing lacks.
+    let (history, _, _) = run(None, NOW + 26 * DAY);
+    waits(&history, "29 days on");
+    let (history, sent, _) = run(None, NOW + 31 * DAY);
+    settles(&history, "past its wait");
+    assert_eq!(sent, every);
+    let (history, sent, _) = run(Some((&without[..], &music[..], false)), NOW + 31 * DAY);
+    settles(&history, "past its wait, an untrusted listing");
+    assert_eq!(sent, every, "sent all the same");
+}
+
+/// The plays alone (`device card <drive> plays`, *Send the plays*) never
+/// settle a play the server doesn't know: the listing they read is for the
+/// paths the server moved, and though it lacks the play's path with no scan
+/// running, the play waits for a sync. The tally says so.
+#[test]
+fn the_plays_alone_never_settle_a_play_the_server_doesnt_know() {
+    let scratch = Scratch::new("unknown-alone");
+    let sim = card(&scratch, Golden::One, &golden_log("plays/golden/sync-1"));
+    let mut m = Mstream::default();
+    m.reject.insert(id(ONE, EPOCH_1, 3), "unknown-track");
+    let (client, fake) = server(m);
+    assert!(fake.lock().unwrap().entries.is_empty(), "its manifest lists none of the card's files");
+    let store = Rc::new(MemStore::default());
+    let (tally, marks) = plays_of(&sim, &client, false, store.clone(), NOW);
+    let counts = (tally.accepted, tally.rejected, tally.unknown, tally.waiting, tally.failed);
+    assert_eq!(counts, (4, 0, 1, 1, false), "{tally:?}");
+    assert_eq!(marks, [ack(ONE, EPOCH_1, 2)], "the play waits, and holds its mark");
+    assert!(tally.held()[0].starts_with("1 play waits: the server doesn't know its track"), "{:?}", tally.held());
+    assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 1);
+    assert_eq!(posted_ids(&fake).concat().len(), 5, "sent with the rest");
 }
 
 /// The server read now isn't the one that filled the rows: nothing goes,
@@ -566,7 +726,7 @@ fn plays_of_another_server_wait_for_it() {
     let (client, fake) = server(Mstream::default());
     let mut history = History::new(store.clone(), false, none());
     history.look(&sim, Some(&root), 0);
-    history.post(&client, &talk(OTHER), true, true);
+    history.post(&client, &talk(OTHER), true, true, NOW);
     assert!(fake.lock().unwrap().posts.is_empty());
     assert_eq!((history.tally.due, history.tally.waiting), (0, 5));
     assert_eq!(history.marks(), []);
@@ -574,7 +734,7 @@ fn plays_of_another_server_wait_for_it() {
 
     let mut confirmed = talk("http://192.0.2.10:3000");
     confirmed.confirmed = vec![server_url_key(HOME)];
-    history.post(&client, &confirmed, true, true);
+    history.post(&client, &confirmed, true, true, NOW);
     assert_eq!(history.tally.accepted, 5);
     assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 7)]);
 }
@@ -598,7 +758,7 @@ fn a_card_for_someone_else_sends_no_play_until_it_is_the_listeners_own_again() {
     assert_eq!((t.own, t.changed, t.clock, t.server), (0, 0, 0, 0), "one reason for them all: {t:?}");
     assert_eq!(t.json()["unsent"]["gift"], 7);
     assert_eq!(t.held(), ["7 plays not sent: the card is for someone else"]);
-    gift.post(&client, &talk(HOME), true, true);
+    gift.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!((gift.tally.due, gift.due(&talk(HOME)), gift.tally.waiting), (0, 0, 0));
     assert!(fake.lock().unwrap().posts.is_empty(), "nothing in any request");
     assert_eq!(gift.marks(), [], "no mark passes a play of its log");
@@ -610,11 +770,11 @@ fn a_card_for_someone_else_sends_no_play_until_it_is_the_listeners_own_again() {
     // wait on while it is marked, and none goes.
     let mut before = History::new(store.clone(), false, none());
     before.look(&sim, Some(&root), 0);
-    before.post(&offline(), &talk(HOME), true, true);
+    before.post(&offline(), &talk(HOME), true, true, NOW);
     assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 5);
     let mut marked = History::new(store.clone(), false, none()).gift(true);
     marked.look(&sim, Some(&root), 0);
-    marked.post(&client, &talk(HOME), true, true);
+    marked.post(&client, &talk(HOME), true, true, NOW);
     let t = &marked.tally;
     assert_eq!((t.gift, t.owed, t.due, t.waiting, t.failed), (7, 0, 0, 5, false), "{t:?}");
     assert!(fake.lock().unwrap().posts.is_empty(), "nothing in any request");
@@ -627,7 +787,7 @@ fn a_card_for_someone_else_sends_no_play_until_it_is_the_listeners_own_again() {
         "label": "Gift", "autoDj": {"on": true, "forSomeoneElse": true}});
     let state_file = scratch.0.join("card/.mstream/state.json");
     std::fs::write(&state_file, state.to_string()).unwrap();
-    let (tally, marks) = plays_of(&sim, &offline(), false, store.clone());
+    let (tally, marks) = plays_of(&sim, &offline(), false, store.clone(), NOW);
     assert_eq!((tally.gift, tally.due, tally.waiting, tally.failed), (7, 0, 5, false), "{tally:?}");
     assert_eq!(marks, []);
     std::fs::remove_file(&state_file).unwrap();
@@ -636,7 +796,7 @@ fn a_card_for_someone_else_sends_no_play_until_it_is_the_listeners_own_again() {
     // goes with what waited.
     let mut mine = History::new(store.clone(), false, none());
     mine.look(&sim, Some(&root), 0);
-    mine.post(&client, &talk(HOME), true, true);
+    mine.post(&client, &talk(HOME), true, true, NOW);
     let t = &mine.tally;
     assert_eq!((t.gift, t.owed, t.accepted, t.waiting), (0, 5, 5, 0), "{t:?}");
     assert_eq!(posted_ids(&fake).concat().len(), 5);
@@ -663,7 +823,7 @@ fn a_peers_play_goes_to_its_parent_and_another_servers_waits() {
     let mut history = History::new(store.clone(), false, none());
     history.look(&empty, Some(&root), 0);
     assert_eq!(history.tally.owed, 4);
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     let ids = posted_ids(&fake);
     assert_eq!(ids, [vec![mine.id(), peer.id()]]);
     let body = fake.lock().unwrap().posts[0].clone();
@@ -678,7 +838,7 @@ fn a_peers_play_goes_to_its_parent_and_another_servers_waits() {
 
     // The second server's turn: its play, and the peer of it.
     let (client, fake) = server(Mstream::default());
-    history.post(&client, &talk(OTHER), true, true);
+    history.post(&client, &talk(OTHER), true, true, NOW);
     assert_eq!(posted_ids(&fake), [vec![second.id(), far.id()]]);
     assert_eq!(fake.lock().unwrap().posts[0]["plays"][1]["peerId"], 1);
     assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 3), ack(TWO, EPOCH_1, 1)]);
@@ -699,7 +859,7 @@ fn two_devices_and_a_new_epoch_keep_marks_of_their_own() {
     let mut history = History::new(store.clone(), false, (CARD_ID, vec![ack(ONE, EPOCH_1, 7)]));
     history.look(&sim, Some(&root), 0);
     assert_eq!((history.tally.new, history.tally.owed, history.tally.read.dropped), (5, 5, 4));
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!(history.marks(), [ack(ONE, EPOCH_1, 7), ack(ONE, EPOCH_2, 9)]);
     // The root before acknowledged the first epoch: carried, and the new
     // one's added.
@@ -712,7 +872,7 @@ fn two_devices_and_a_new_epoch_keep_marks_of_their_own() {
     let mut both = History::new(store.clone(), false, (CARD_ID, vec![ack(ONE, EPOCH_1, 7)]));
     both.look(&sim, Some(&root), 0);
     assert_eq!((both.tally.new, both.due(&talk(HOME))), (7, 2), "the first device's settled already");
-    both.post(&client, &talk(HOME), true, true);
+    both.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!(both.tally.accepted, 2, "another device's ids: new to the server");
     assert_eq!(both.marks(), [ack(ONE, EPOCH_1, 7), ack(ONE, EPOCH_2, 9), ack(TWO, EPOCH_2, 6)]);
 }
@@ -737,7 +897,7 @@ fn plays_from_before_the_clock_was_set_are_counted_not_sent() {
     let mut history = History::new(store.clone(), false, none());
     history.look(&empty, Some(&root), 0);
     assert_eq!((history.tally.owed, history.tally.clock), (2, 1));
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!(posted_ids(&fake), [vec![early.id(), dated.id()]]);
     let started = fake.lock().unwrap().posts[0]["plays"][0]["startedAt"].as_u64();
     assert_eq!(started, Some(1_792_100_000_000 - 8_192), "dated across the uptime's wrap");
@@ -755,13 +915,13 @@ fn a_lost_state_posts_again_and_comes_out_the_same() {
     let (client, fake) = server(Mstream::default());
     let mut history = History::new(Rc::new(MemStore::default()), false, none());
     history.look(&sim, Some(&root), 0);
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     let marks = history.marks();
 
     let mut again = History::new(Rc::new(MemStore::default()), false, none());
     again.look(&sim, Some(&root), 0);
     assert_eq!(again.tally.new, 7);
-    again.post(&client, &talk(HOME), true, true);
+    again.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!((again.tally.accepted, again.tally.duplicates), (0, 5));
     assert_eq!(again.marks(), marks);
     assert_eq!(fake.lock().unwrap().has.len(), 5, "each play credited once");
@@ -791,11 +951,11 @@ fn a_card_copied_with_its_id_never_takes_the_others_plays_for_settled() {
     let (client, fake) = server(Mstream::default());
     let mut one = History::new(store.clone(), false, none());
     one.look(&first, Some(&root), 0);
-    one.post(&client, &talk(HOME), true, true);
+    one.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!(one.marks(), [ack(ONE, EPOCH_1, 4)]);
     let mut two = History::new(store.clone(), false, none());
     two.look(&second, Some(&root_of(&second)), 0);
-    two.post(&client, &talk(HOME), true, true);
+    two.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!((two.tally.new, two.tally.accepted), (2, 2));
     assert_eq!(two.marks(), [ack(ONE, EPOCH_1, 2)]);
     assert_eq!(fake.lock().unwrap().has.len(), 4);
@@ -826,7 +986,7 @@ fn a_long_firmware_name_or_a_row_with_no_server_path_holds_nothing_back() {
     let t = &history.tally;
     assert_eq!((t.new, t.owed, t.own, t.changed), (7, 4, 2, 1), "{t:?}");
     assert_eq!(store.outbox().cards[&CARD_ID].firmware, long["firmware=".len()..]);
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     let t = &history.tally;
     assert_eq!((t.accepted, t.refused, t.waiting, t.failed), (4, 0, 0, false), "{t:?}");
     let body = fake.lock().unwrap().posts[0].clone();
@@ -850,7 +1010,7 @@ fn a_play_the_server_would_refuse_settles_unsent_and_the_rest_go() {
     let far = history.owing.plays[1].id.clone();
     history.owing.plays[1].file_path = format!("Music/{}", "é".repeat(2048));
     let (client, fake) = server(Mstream::default());
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     let t = &history.tally;
     assert_eq!((t.accepted, t.refused, t.due, t.waiting, t.failed), (4, 1, 0, 0, false), "{t:?}");
     assert!(t.notes.iter().any(|n| n.contains("would refuse")), "{t:?}");
@@ -875,7 +1035,7 @@ fn plays_mapped_before_go_though_the_card_maps_none_now() {
         let store = Rc::new(MemStore::default());
         let mut first = History::new(store.clone(), false, none());
         first.look(&sim, Some(&root), 0);
-        first.post(&offline(), &talk(HOME), true, true);
+        first.post(&offline(), &talk(HOME), true, true, NOW);
         assert_eq!(store.outbox().cards[&CARD_ID].plays.len(), 5);
         if cleared {
             for (name, _) in &logs {
@@ -890,7 +1050,7 @@ fn plays_mapped_before_go_though_the_card_maps_none_now() {
         later.look(&sim, Some(&root), 0);
         let t = &later.tally;
         assert_eq!((t.new, t.waiting, later.due(&talk(HOME)), later.log.is_none()), (0, 5, 5, true));
-        later.post(&client, &talk(HOME), true, true);
+        later.post(&client, &talk(HOME), true, true, NOW);
         assert_eq!((later.tally.accepted, posted_ids(&fake)[0].len()), (5, 5), "cleared: {cleared}");
         assert_eq!(later.marks(), [], "no log read: the state file's marks");
         assert_eq!(later.acks(&[ack(ONE, EPOCH_1, 3)]), [ack(ONE, EPOCH_1, 3)]);
@@ -913,11 +1073,11 @@ fn plays_no_outbox_holds_are_unstored_until_they_settle_or_a_save_takes_them() {
     let store = Rc::new(MemStore { saves_left: Cell::new(Some(0)), ..MemStore::default() });
     let mut history = History::new(store.clone(), false, none());
     history.look(&sim, Some(&root), 0);
-    history.post(&offline(), &talk(HOME), true, true);
+    history.post(&offline(), &talk(HOME), true, true, NOW);
     let why = history.unstored().expect("held by the run alone");
     assert!(why.starts_with("5 of") && why.contains("the process died"), "{why}");
     let (client, _fake) = server(Mstream::default());
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!((history.tally.accepted, history.unstored()), (5, None), "settled: none at risk");
 
     // Saved by an earlier look, then a save that fails: on disk already,
@@ -948,7 +1108,7 @@ fn plays_no_outbox_holds_are_unstored_until_they_settle_or_a_save_takes_them() {
         assert!(history.unstored().is_some_and(|why| why.starts_with("5 of")), "{text}");
         store.unreadable.set(false);
         let (client, _fake) = server(Mstream::default());
-        history.post(&client, &talk(HOME), true, true);
+        history.post(&client, &talk(HOME), true, true, NOW);
         assert_eq!((history.tally.accepted, history.unstored()), (5, None), "{text}");
         assert_eq!(store.text.borrow().as_deref(), Some(text), "never written over");
         let mut dry = History::new(store.clone(), true, none());
@@ -970,7 +1130,7 @@ fn settled_ids_the_log_holds_no_more_are_forgotten() {
     let (client, _fake) = server(Mstream::default());
     let mut history = History::new(store.clone(), false, none());
     history.look(&sim, Some(&root), 0);
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     let settled = store.outbox().cards[&CARD_ID].done.clone();
     assert_eq!(settled.len(), 5);
 
@@ -1011,14 +1171,14 @@ fn a_source_not_said_is_device_where_the_server_takes_it() {
     let (client, fake) = server(Mstream::default());
     let mut history = History::new(Rc::new(MemStore::default()), false, none());
     history.look(&empty, Some(&root), 0);
-    history.post(&client, &talk(HOME), true, true);
+    history.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!(sources(&fake), [vec!["device", "shuffle"]]);
     assert_eq!(history.tally.accepted, 2);
 
     let (client, fake) = server(Mstream { old: true, ..Mstream::default() });
     let mut older = History::new(Rc::new(MemStore::default()), false, none());
     older.look(&empty, Some(&root), 0);
-    older.post(&client, &talk(HOME), true, true);
+    older.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!(sources(&fake), [vec!["device", "shuffle"], vec!["other", "shuffle"]]);
     assert_eq!((older.tally.accepted, older.tally.failed), (2, false));
 
@@ -1026,7 +1186,7 @@ fn a_source_not_said_is_device_where_the_server_takes_it() {
     let (client, fake) = server(Mstream { no_stats: true, ..Mstream::default() });
     let mut none = History::new(Rc::new(MemStore::default()), false, none());
     none.look(&empty, Some(&root), 0);
-    none.post(&client, &talk(HOME), false, false);
+    none.post(&client, &talk(HOME), false, false, NOW);
     assert!(fake.lock().unwrap().posts.is_empty());
     assert_eq!((none.tally.waiting, none.marks()), (2, vec![]));
 }
@@ -1116,7 +1276,7 @@ fn a_dry_run_saves_nothing_and_a_short_read_maps_nothing() {
     let (client, fake) = server(Mstream::default());
     let mut dry = History::new(store.clone(), true, none());
     dry.look(&sim, Some(&root), 0);
-    dry.post(&client, &talk(HOME), true, true);
+    dry.post(&client, &talk(HOME), true, true, NOW);
     assert_eq!((dry.tally.new, dry.tally.due), (7, 5));
     assert!(store.text.borrow().is_none() && fake.lock().unwrap().posts.is_empty());
 
@@ -1155,19 +1315,19 @@ fn a_cards_plays_go_to_the_server_its_root_names_by_id_at_any_address() {
         "label": "Car", "sources": [{"serverUrlKey": theirs, "confirmed": [home]}]});
     let state_file = scratch.0.join("card/.mstream/state.json");
     std::fs::write(&state_file, state.to_string()).unwrap();
-    let (tally, _) = plays_of(&sim, &other, false, store.clone());
+    let (tally, _) = plays_of(&sim, &other, false, store.clone(), NOW);
     assert_eq!((tally.new, tally.due, tally.failed), (7, 0, false), "{tally:?}");
     assert!(other_fake.lock().unwrap().posts.is_empty(), "not the card's server, by its id");
 
     std::fs::remove_file(&state_file).unwrap();
     let (client, fake) = server(Mstream::default());
     assert_ne!(server_url_key(&client.server()), server_url_key(HOME), "an address the card never saw");
-    let (tally, _) = plays_of(&sim, &client, false, store.clone());
+    let (tally, _) = plays_of(&sim, &client, false, store.clone(), NOW);
     assert_eq!((tally.accepted, tally.due), (5, 0), "{tally:?}");
     assert_eq!(posted_ids(&fake).concat().len(), 5);
 
     // A dry run asks no server: by the key rule alone, none of them is due.
-    let (tally, _) = plays_of(&sim, &client, true, Rc::new(MemStore::default()));
+    let (tally, _) = plays_of(&sim, &client, true, Rc::new(MemStore::default()), NOW);
     assert_eq!((tally.new, tally.due), (7, 0));
 }
 
@@ -1283,7 +1443,7 @@ fn the_hidden_command_reads_only_a_volume_the_rule_accepts_and_never_writes_it()
             asked.set(asked.get() + 1);
             Client::new(&base).map(|c| c.with_token(Some("tok".into()))).map_err(|e| e.to_string())
         };
-        let code = on(&found, named, dry_run, &mut saved, store.clone(), &mut out, &mut err);
+        let code = on(&found, named, dry_run, &mut saved, store.clone(), NOW, &mut out, &mut err);
         (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
     };
     for dry_run in [true, false] {

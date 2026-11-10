@@ -420,6 +420,39 @@ fn plays_on_a_card_for_someone_else_sends_none_and_says_why() {
     assert_eq!(posts(), 1);
 }
 
+/// `plays` and a play the server doesn't know (clause 61): the play waits,
+/// and the lines say so beside a count of none sent; once the server knows
+/// the track, it goes.
+#[test]
+fn plays_says_which_wait_for_a_server_that_doesnt_know_their_tracks() {
+    let scratch = Scratch::new("lines-unknown");
+    let b = bench(&scratch);
+    let key = b.key.clone();
+    let base = b.home.base.clone().expect("the fake server's address");
+    let synced = sync_now(&b.sim, &base, &rock(), &mut envs()).0;
+    assert!(matches!(synced.end, crate::device::card::sync::End::Ran(_)), "{:?}", synced.end);
+    let play = logged(&b.sim, "Album B/01.mp3", 1, 1_791_850_000_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    // The server's scan hasn't reached the track.
+    b.server.lock().unwrap().unindexed.insert("Rock/Artist A/Album B/01.mp3".into());
+    let yes = Flags { yes: true, ..Flags::default() };
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Plays, &yes, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
+    let waits = "  1 play waits: the server doesn't know its track, and no listing says it is gone \
+                 (a scan may be under way)\n";
+    assert!(said.contains(waits), "{said}");
+    assert!(said.contains("0 plays sent to Home."), "{said}");
+
+    b.server.lock().unwrap().unindexed.clear();
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Plays, &yes, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 plays sent to Home.") && !said.contains("waits"), "{said}");
+}
+
 /// The files the server lists and can't serve (a dot part past the vpath)
 /// are left out of the sync: the plan says how many and where, once, before
 /// the question (a look that writes nothing says it too); none says
