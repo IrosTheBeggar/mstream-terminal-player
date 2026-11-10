@@ -211,9 +211,9 @@ pub(crate) fn thumbnail(image: &Image) -> Option<(Pixels, u32)> {
     Some((pixels, u32::try_from(image.bytes.len()).unwrap_or(u32::MAX)))
 }
 
-/// A JPEG's frame: whether it is baseline (SOF0, the one the device's
-/// decoder reads), and its width and height. None: not a JPEG, or no frame
-/// found.
+/// A JPEG's frame: whether the device's decoder reads it — baseline (SOF0)
+/// of one component or three (TJpgDec reads no CMYK) — and its width and
+/// height. None: not a JPEG, or no frame found.
 fn jpeg_frame(bytes: &[u8]) -> Option<(bool, u32, u32)> {
     if !bytes.starts_with(&[0xFF, 0xD8]) {
         return None;
@@ -233,8 +233,10 @@ fn jpeg_frame(bytes: &[u8]) -> Option<(bool, u32, u32)> {
         if frame {
             let h = bytes.get(at + 5..at + 7)?;
             let w = bytes.get(at + 7..at + 9)?;
+            let components = *bytes.get(at + 9)?;
             let (w, h) = (u16::from_be_bytes([w[0], w[1]]), u16::from_be_bytes([h[0], h[1]]));
-            return Some((marker == 0xC0, w as u32, h as u32));
+            let read = marker == 0xC0 && matches!(components, 1 | 3);
+            return Some((read, w as u32, h as u32));
         }
         at += 2 + len;
     }
@@ -332,5 +334,17 @@ pub(crate) mod tests {
         assert_eq!(jpeg_frame(&made), Some((true, 300, 300)));
         let (pixels, n) = thumbnail(&png).unwrap();
         assert_eq!((pixels.small.len(), n as usize), (40 * 40, png.bytes.len()));
+        // A baseline frame of four components (CMYK), which the device's
+        // decoder doesn't read: never passed through as it is.
+        let mut cmyk = small.bytes.clone();
+        let sof = cmyk.windows(2).position(|w| w == [0xFF, 0xC0]).expect("its frame");
+        assert_eq!(cmyk[sof + 9], 3);
+        cmyk[sof + 9] = 4;
+        assert_eq!(jpeg_frame(&cmyk), Some((false, 300, 300)));
+        let cmyk = Image { from: "f".into(), bytes: cmyk };
+        assert_ne!(baseline_jpeg(&cmyk).as_deref(), Some(cmyk.bytes.as_slice()), "made again, or none");
+        let mut grey = small.bytes.clone();
+        grey[sof + 9] = 1;
+        assert_eq!(jpeg_frame(&grey), Some((true, 300, 300)), "one component is read");
     }
 }
