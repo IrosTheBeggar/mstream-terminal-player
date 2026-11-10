@@ -1769,9 +1769,9 @@ impl Client {
             req = req.header("x-access-token", token);
         }
 
-        let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let resp = req.send().await.map_err(unreached)?;
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let bytes = resp.bytes().await.map_err(unreached)?;
 
         match status {
             StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized),
@@ -3881,7 +3881,8 @@ pub(crate) mod tests {
         let client = Client::new(&format!("http://127.0.0.1:{port}"))
             .unwrap()
             .with_local_token(Some("bridge-secret".into()));
-        let words = [client.admin_logs_download().unwrap_err(), client.ping().unwrap_err()];
+        let art = client.album_art("d.png", false).unwrap_err();
+        let words = [client.admin_logs_download().unwrap_err(), client.ping().unwrap_err(), art];
         for e in words {
             let said = e.to_string();
             assert!(matches!(e, ApiError::Network(_)), "{said}");
