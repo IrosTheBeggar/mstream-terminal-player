@@ -1660,6 +1660,14 @@ impl Hooks for SyncHooks {
         self.looked = true;
         let hash = path_hash(album.folder);
         let old = self.old_art.get(&hash).copied();
+        // Stopped: the thumbnails stay as they are, nothing asked (clause
+        // 57's few seconds).
+        if self.stopped() {
+            if let Some(key) = old {
+                self.art.insert(hash, key);
+            }
+            return Cover::Keep;
+        }
         // The album's origin is its first file's; a peer whose day is spent
         // isn't asked, and its album stays as it was.
         let first = album.files.iter().min_by(|a, b| compare_file_paths(a.0, b.0));

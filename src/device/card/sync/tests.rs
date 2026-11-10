@@ -2042,6 +2042,34 @@ fn a_stop_before_the_run_writes_nothing_and_one_under_way_parks_at_a_checkpoint(
     assert!(look(&sim).pending.is_none());
 }
 
+/// A stop under way asks for no album's cover: the thumbnail step keeps
+/// what the card has, and the next run makes them.
+#[test]
+fn a_stop_under_way_asks_for_no_cover() {
+    let scratch = Scratch::new("stopped-covers");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ask = Ask { stop: Some(stop.clone()), ..rock() };
+    let mut said = |e: Event| {
+        if matches!(e, Event::Wrote { .. }) {
+            stop.store(true, Ordering::SeqCst);
+        }
+    };
+    let parked = sync_saying(&sim, &base, &ask, &mut said);
+    assert_eq!(ran(&parked).parked.as_deref(), Some(STOPPED));
+    let asked = fake.lock().unwrap().asked.clone();
+    let covers = asked.iter().filter(|a| a.contains("cover.jpg") || a.contains("/album-art/"));
+    assert_eq!(covers.collect::<Vec<_>>(), Vec::<&String>::new());
+    let state = State::of(&look(&sim).state).unwrap();
+    assert!(state.settings.art.is_empty(), "no thumbnail's art: {:?}", state.settings.art);
+
+    // The next run makes them.
+    let again = sync_saying(&sim, &base, &Ask { stop: None, ..rock() }, &mut |_| {});
+    assert_eq!(ran(&again).verified, Ok(()));
+    assert_eq!(State::of(&look(&sim).state).unwrap().settings.art.len(), 2);
+}
+
 /// A stop while a conversion waits for the server's full queue ends the
 /// wait: the run parks at a checkpoint, the file in its plan, and nothing of
 /// it is remembered as a file that failed.
