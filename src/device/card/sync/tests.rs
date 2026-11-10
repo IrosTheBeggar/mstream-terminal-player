@@ -1029,10 +1029,24 @@ fn vectors_that_dont_come_keep_the_cards_index_while_it_holds_for_the_files() {
     assert_eq!(autodj_named(&sim), index, "named again: {:?}", synced.notes);
     assert!(synced.notes.iter().any(|n| n.contains("stays as it was")), "{:?}", synced.notes);
     assert_eq!(fake.lock().unwrap().embedding_calls, 3);
+    assert!(dj_owed(&sim), "kept for files it wasn't made for: owed");
+
+    // The vectors come again: a run with nothing new (a 304) makes the index
+    // owed, and only that.
+    fake.lock().unwrap().embeddings_say = None;
+    let synced = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(synced.summary.as_ref().unwrap().listed, Listed::NotModified);
+    assert_eq!(ran(&synced).written, 0);
+    let made = autodj_named(&sim);
+    assert!(made.is_some() && made != index, "made again: {:?}", synced.notes);
+    assert!(!dj_owed(&sim));
+    sync_now(&sim, &base, &Ask::default(), &mut envs);
+    assert_eq!(autodj_named(&sim), made, "nothing owed: as it is");
 
     // A file it maps is another recording now: it no longer holds.
     {
         let mut lib = fake.lock().unwrap();
+        lib.embeddings_say = Some("500 Internal Server Error");
         lib.tracks[0].bytes = corpus("cbr.mp3");
         lib.revision = "1:7:1790000000007:6".into();
     }
@@ -1041,6 +1055,27 @@ fn vectors_that_dont_come_keep_the_cards_index_while_it_holds_for_the_files() {
     assert_eq!(autodj_named(&sim), None);
     let said = synced.notes.iter().any(|n| n.starts_with("no Auto DJ index: the server's embeddings didn't come"));
     assert!(said, "{:?}", synced.notes);
+}
+
+/// The card's state says its Auto DJ index is owed.
+fn dj_owed(sim: &FatSim) -> bool {
+    State::of(&look(sim).state).unwrap().autodj_owed
+}
+
+#[test]
+fn an_index_kept_for_the_files_it_was_made_for_is_owed_nothing() {
+    let scratch = Scratch::new("dj-held");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    let index = autodj_named(&sim);
+    // A whole read whose vectors don't come, the files as they were.
+    fake.lock().unwrap().embeddings_say = Some("500 Internal Server Error");
+    let synced = sync_now(&sim, &base, &Ask { whole: true, ..Ask::default() }, &mut envs).0;
+    assert_eq!(synced.summary.as_ref().unwrap().listed, Listed::Whole);
+    assert_eq!(autodj_named(&sim), index);
+    assert!(!dj_owed(&sim), "{:?}", synced.notes);
 }
 
 #[test]
@@ -1064,6 +1099,7 @@ fn a_stop_in_the_auto_dj_step_keeps_the_cards_index() {
     assert_eq!(autodj_named(&sim), index, "{:?}", synced.notes);
     let said = synced.notes.iter().any(|n| n.contains("stays as it was: stopped at the listener's word"));
     assert!(said, "{:?}", synced.notes);
+    assert!(dj_owed(&sim), "a stop that kept it owes it");
 }
 
 /// How many times the fake's `stats/plays` was asked.

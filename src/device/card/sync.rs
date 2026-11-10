@@ -647,7 +647,7 @@ fn prepare(
     };
     let (card_id, generation, commit_id) =
         (root.manifest.header.card_id, root.manifest.header.generation, root.manifest.commit_id);
-    let waves_none = state.waves_none;
+    let (waves_none, dj_owed) = (state.waves_none, state.autodj_owed);
     if state.card_id != card_id {
         let why = "the card's state file is another identity's: run `device card-setup` on it first";
         return Err(refused(why.into()));
@@ -1105,6 +1105,8 @@ fn prepare(
         },
         old_fingerprint,
         old_hashes,
+        dj_owed,
+        dj_owing: None,
         refresh: listed == Listed::Whole || some_peer_read(&summary.peers),
         waves: waves != WaveFit::Off,
         waves_off: match (ask.no_waves, device.writes_mpwf()) {
@@ -1409,6 +1411,14 @@ struct SyncHooks {
     /// Those files' canonical hashes, by card path: what tells the card's
     /// index still holds for a commit's files ([`SyncHooks::index_holds`]).
     old_hashes: HashMap<String, [u8; 16]>,
+    /// The card's state says its index is owed ([`State::autodj_owed`]): a
+    /// fetch or a stop kept the old one for files it wasn't made for, so
+    /// this run makes it again, whatever else changed.
+    dj_owed: bool,
+    /// What the run's end stores of that: Some(true) when the index was
+    /// kept for files it wasn't made for, Some(false) once one was made or
+    /// the server said it has none to give; None leaves it as it was.
+    dj_owing: Option<bool>,
     /// A whole read: the embeddings and the mood scores are read again even
     /// when the files are the same, the server's analysis having moved on.
     refresh: bool,
@@ -1556,11 +1566,15 @@ impl SyncHooks {
     }
 
     /// The card's index named again when it still holds for the commit's
-    /// files, and a note why no new one was made; else none.
-    fn kept_or_none(&mut self, holds: bool, why: String) -> AutoDj {
+    /// files, and a note why no new one was made; else none. `owed`: kept
+    /// all the same, it is owed, and the next run makes it again.
+    fn kept_or_none(&mut self, holds: bool, owed: bool, why: String) -> AutoDj {
         match holds {
             true => {
                 self.notes.push(format!("the card's Auto DJ index stays as it was: {why}"));
+                if owed {
+                    self.dj_owing = Some(true);
+                }
                 AutoDj::Same
             }
             false => {
@@ -1748,9 +1762,12 @@ impl Hooks for SyncHooks {
             return AutoDj::None;
         }
         let files = files_of(commit);
-        if commit.old.is_some() && !self.refresh && self.same_files(&files) {
+        let same = self.same_files(&files);
+        if commit.old.is_some() && !self.refresh && !self.dj_owed && same {
             return AutoDj::Same;
         }
+        // The server has no index to give: nothing is owed.
+        let mut none_to_give = false;
         // What a step that can't finish (a stop, vectors that don't come)
         // leaves: the card's index while it holds for these files, else none.
         let holds = commit.old.is_some_and(|old| self.index_holds(old, &files));
@@ -1782,10 +1799,11 @@ impl Hooks for SyncHooks {
             let mut paths: Vec<String> = hash_of.keys().map(|p| p.to_string()).collect();
             paths.sort();
             let found = match self.embeddings_of(&client, gate.as_ref(), &paths) {
-                None => return self.kept_or_none(holds, "stopped at the listener's word".into()),
+                None => return self.kept_or_none(holds, true, "stopped at the listener's word".into()),
                 Some(Asked::Found(found)) => found,
                 Some(Asked::Off) => {
                     why_none.get_or_insert(format!("{whose}'s discovery is off"));
+                    none_to_give = true;
                     continue;
                 }
                 // Not the index's fault: the card's stays while it holds;
@@ -1793,7 +1811,7 @@ impl Hooks for SyncHooks {
                 Some(Asked::Failed(e)) => {
                     let why = format!("{whose}'s embeddings didn't come: {e}");
                     if holds {
-                        return self.kept_or_none(true, why);
+                        return self.kept_or_none(true, !same, why);
                     }
                     why_none.get_or_insert(why);
                     continue;
@@ -1804,6 +1822,7 @@ impl Hooks for SyncHooks {
             let Some(theirs) = Model::known(id, version) else {
                 let why = format!("the model {id} {version} isn't one the index lists");
                 why_none.get_or_insert(why);
+                none_to_give = true;
                 continue;
             };
             match &model {
@@ -1826,6 +1845,9 @@ impl Hooks for SyncHooks {
             self.notes.push(format!("{n} tracks have no Auto DJ neighbours: their embeddings aren't usable"));
         }
         let Some(model) = model else {
+            if none_to_give {
+                self.dj_owing = Some(false);
+            }
             let why = why_none.unwrap_or_else(|| "no file on the card has an embedding yet".into());
             self.notes.push(format!("no Auto DJ index: {why}"));
             return AutoDj::None;
@@ -1843,7 +1865,11 @@ impl Hooks for SyncHooks {
         // The listener's stop reaches the lists; how far they came says so.
         let done = std::sync::atomic::AtomicUsize::new(0);
         let work = Work { stop: self.stop.as_deref(), done: Some(&done), ..Work::default() };
-        match autodj::index(commit.device, &input, commit.old, &work) {
+        let made = autodj::index(commit.device, &input, commit.old, &work);
+        if matches!(made, Ok(Index::New { .. } | Index::Same)) {
+            self.dj_owing = Some(false);
+        }
+        match made {
             Ok(Index::New { file, .. }) => AutoDj::New(file),
             Ok(Index::Same) => AutoDj::Same,
             Ok(Index::None(why)) => {
@@ -1858,7 +1884,7 @@ impl Hooks for SyncHooks {
             Err(BuildError::Stopped) => {
                 let (done, rows) = (done.into_inner(), autodj::row_count(&input));
                 let why = format!("stopped at the listener's word, {done} of {rows} tracks' lists made");
-                self.kept_or_none(holds, why)
+                self.kept_or_none(holds, true, why)
             }
             Err(e) => {
                 self.notes.push(format!("no Auto DJ index: {e}"));
@@ -1919,6 +1945,11 @@ impl Hooks for SyncHooks {
             };
             let none = lack == Lack::Peaks || state.waves_no_ffmpeg >= NO_FFMPEG_RUNS;
             state.waves_none = none.then_some(outcome.generation);
+        }
+        // The Auto DJ index owed, or made: only a run whose final commit
+        // came to the step says so.
+        if let Some(owed) = self.dj_owing {
+            store.state.autodj_owed = owed;
         }
         let settings = &mut store.state.settings;
         if outcome.parked.is_none() && store.listed != Listed::Unread {

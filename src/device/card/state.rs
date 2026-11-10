@@ -17,6 +17,9 @@
 //!   server for every waveform the card lacked and got none ([`State::waves_none`]);
 //! - `wavesNoFfmpeg`: the runs in a row whose asking came to no more than a
 //!   server with no ffmpeg to make them ([`State::waves_no_ffmpeg`]);
+//! - `autoDjOwed`: true while the Auto DJ index the root names was kept for
+//!   files it wasn't made for, so the next run makes it again
+//!   ([`State::autodj_owed`]); absent: not owed;
 //!
 //! and the sync's settings ([`Settings`]), written once a sync has stored
 //! them: `sources` (each server the card is filled from, by its URL's key
@@ -58,9 +61,9 @@ use crate::api::urls::{TransferBitrate, TransferCodec};
 pub(crate) const FORMAT: &str = "mstream-card-state";
 
 /// The members schema 1 reads and writes; every other member is kept.
-const KNOWN: [&str; 12] = [
+const KNOWN: [&str; 13] = [
     "format", "version", "seq", "cardId", "label", "volumeSerial", "volumeUuid", "created", "plays",
-    "set", "wavesNone", "wavesNoFfmpeg",
+    "set", "wavesNone", "wavesNoFfmpeg", "autoDjOwed",
 ];
 
 /// The settings' members ([`Settings`]).
@@ -104,6 +107,11 @@ pub(crate) struct State {
     /// [`State::waves_none`] of itself: a server bringing its ffmpeg up says the
     /// same, and a look goes on offering the sync. Enough of them, and it is one.
     pub(crate) waves_no_ffmpeg: u32,
+    /// The Auto DJ index the root names was kept (vectors that didn't come,
+    /// the listener's stop) for files it wasn't made for: the next run makes
+    /// it again, even one that reads nothing new. Cleared once one is made,
+    /// or the server says it has none to give.
+    pub(crate) autodj_owed: bool,
     pub(crate) settings: Settings,
     /// Every member this software doesn't know, by name.
     pub(crate) keep: BTreeMap<String, Value>,
@@ -149,6 +157,7 @@ impl State {
                 .and_then(Value::as_u64)
                 .and_then(|n| u32::try_from(n).ok())
                 .unwrap_or(0),
+            autodj_owed: object.get("autoDjOwed").and_then(Value::as_bool).unwrap_or(false),
             settings: Settings::read(object),
             keep: keep.map(|(name, value)| (name.clone(), value.clone())).collect(),
         })
@@ -201,6 +210,9 @@ impl State {
         }
         if self.waves_no_ffmpeg > 0 {
             members.push(("wavesNoFfmpeg", self.waves_no_ffmpeg.into()));
+        }
+        if self.autodj_owed {
+            members.push(("autoDjOwed", true.into()));
         }
         members.extend(self.settings.members());
         members.extend(self.keep.iter().map(|(name, value)| (name.as_str(), value.clone())));
@@ -1056,6 +1068,14 @@ mod tests {
         assert!(back.keep.is_empty(), "a member it knows: {:?}", back.keep);
         let odd = r#"{"format": "mstream-card-state", "version": 1, "seq": 3, "wavesNoFfmpeg": "2"}"#;
         assert_eq!(read(odd.as_bytes()).unwrap().waves_no_ffmpeg, 0);
+
+        // The Auto DJ index owed: absent (an older file's) is not owed.
+        assert!(!text.contains("autoDjOwed") && !back.autodj_owed);
+        state.autodj_owed = true;
+        let text = String::from_utf8(state.text(4)).unwrap();
+        assert!(text.contains("\"autoDjOwed\": true"), "{text}");
+        let back = read(text.as_bytes()).unwrap();
+        assert!(back.autodj_owed && back.keep.is_empty(), "{:?}", back.keep);
     }
 
     #[test]
