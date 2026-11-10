@@ -464,13 +464,24 @@ fn run(
     let expect = Expect { serial, ..Expect::default() };
     let knobs = knobs_of(&state.settings);
     // The card's plays, mapped once the session has listed the card: none
-    // of a card for someone else, as the run's settings leave it.
+    // of a card for someone else, which it is when its settings say so as
+    // the run found them or as it leaves them. What its log holds was
+    // played before this run, and nothing of a card's time as someone
+    // else's may go: the run that marks the card settles those plays
+    // unsent, and so does the run that makes it the listener's own again.
     let posted = (state.card_id, state.plays.clone());
-    let gift = state.settings.for_someone_else;
-    let history = History::new(had.plays.clone(), ask.dry_run, posted).gift(gift);
+    let (was_gift, gift) = (was.settings.for_someone_else, state.settings.for_someone_else);
+    let history = History::new(had.plays.clone(), ask.dry_run, posted).gift(was_gift || gift);
     let history = had.history.insert(history);
     let opened = Session::open(card, &expect, knobs, &ask.answers, envs(), history, events);
     let mut session = opened.map_err(|stop| (None, Halt::Card(stop)))?;
+    // Made the listener's own by this run, and its log unread: nothing
+    // settled the plays it holds, and the next look would send them. The
+    // card stays as it is.
+    if was_gift && !gift && !ask.dry_run && history.blind() {
+        session.close();
+        return Err((None, Halt::Refused(history::LOG_UNREAD.into())));
+    }
     let mut clock = envs();
     let (now, set_id) = ((clock.now)(), (clock.id)());
     let notes = &mut *had.notes;

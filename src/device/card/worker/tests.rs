@@ -9,9 +9,11 @@ use std::sync::mpsc::Receiver;
 
 use super::*;
 use crate::device::card::contract::mppl::{KIND_PLAY, Slot as Play};
+use crate::device::card::contract::msmf::Ack;
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::sync::tests::{
-    Fake, SERIAL, Scratch, card, logged, no_peers, server, sync_now, with_hidden, with_waves,
+    DEVICE, EPOCH, Fake, SERIAL, Scratch, card, logged, no_peers, server, sync_now, with_hidden,
+    with_waves,
 };
 use crate::device::card::volume::{Bus, Clock, Disk, Fs, Serial, Table, Volume};
 
@@ -1140,7 +1142,10 @@ fn a_server_that_doesnt_answer_pauses_the_sync_until_its_retry_or_stop_for_now()
 
 /// *Send the plays* on a card for someone else (clause 61): its look counts
 /// none to send, the note says none is sent, the card's log says how many
-/// and why, and the server is asked for nothing of them.
+/// and why, and the server is asked for nothing of them. The sheet's For
+/// row applied back, the card is the listener's own with the plays its log
+/// holds settled first: the marks are written with the settings, and none
+/// of those plays is ever sent.
 #[test]
 fn the_plays_of_a_card_for_someone_else_are_sent_nowhere() {
     let scratch = Scratch::new("worker-gift");
@@ -1149,7 +1154,8 @@ fn the_plays_of_a_card_for_someone_else_are_sent_nowhere() {
     let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
     assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
     let play = logged(&sim, "Album B/01.mp3", 1, 1_791_950_000_000);
-    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    let second = logged(&sim, "Album D/02.opus", 2, 1_791_950_200_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), &play).unwrap();
     drop(sim);
 
     let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
@@ -1182,8 +1188,33 @@ fn the_plays_of_a_card_for_someone_else_are_sent_nowhere() {
     let why = LogItem::Said("1 play not sent: the card is for someone else".into());
     assert!(rig.fold.logs.iter().any(|(k, item)| *k == key && *item == why), "{:?}", rig.fold.logs);
     assert!(!rig.fold.notes.iter().any(|n| matches!(n, Note::PlaysSent { .. })), "{:?}", rig.fold.notes);
-    let lib = fake.lock().unwrap();
-    assert!(lib.plays.is_empty() && !lib.asked.iter().any(|a| a.ends_with("/stats/plays")), "{:?}", lib.plays);
+    let unasked = |fake: &Fake| {
+        let lib = fake.lock().unwrap();
+        lib.plays.is_empty() && !lib.asked.iter().any(|a| a.ends_with("/stats/plays"))
+    };
+    assert!(unasked(&fake));
+
+    // Played once more by someone else, then the For row set back and
+    // applied: the plays the log holds are settled as the card is made the
+    // listener's own, and nothing is left to send.
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), [play, second].concat()).unwrap();
+    let card = rig.card(&key).clone();
+    let mut want = Want::of(card.facts().expect("its facts"), card.server.link());
+    want.for_someone_else = false;
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(want) });
+    let mark = vec![Ack { device_id: DEVICE, epoch: EPOCH, seq: 2 }];
+    let wanted = key.clone();
+    rig.until("the card the listener's own, its log's plays settled", |f| {
+        let own = |c: &CardView| {
+            let state = c.facts().and_then(|f| f.state.as_ref());
+            state.is_some_and(|s| !s.settings.for_someone_else && s.plays == mark)
+        };
+        let none = |p: &Planned| p.plays == 0 && p.tally.as_ref().is_some_and(|t| t.new == 0);
+        f.cards.iter().any(|c| c.key == wanted && own(c) && planned(c).is_some_and(none))
+    });
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("no play to send", |f| f.notes.iter().any(|n| matches!(n, Note::PlaysSent { n: 0, .. })));
+    assert!(unasked(&fake), "nothing of the time it was someone else's");
 }
 
 /// *Send the plays* settles them on this computer, and the card's marks

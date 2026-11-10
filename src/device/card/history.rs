@@ -22,9 +22,11 @@
 //!   a play from before the clock was ever set, a row whose server the card
 //!   can't tell);
 //! - on a card for someone else (its settings' word, [`History::gift()`]),
-//!   none mapped at all: each is counted ([`Unsent::Gift`]) and its mark
-//!   stays below it, so nothing of that card's log reaches an account, and
-//!   a card made the listener's own again maps what its log still holds;
+//!   none mapped at all, with a ledger or without: each new play that
+//!   wasn't mapped before the card was marked is counted and settled as it
+//!   is, unsent. Its id joins the outbox's settled ones and the mark rises
+//!   over it, so nothing of the time the card was someone else's reaches
+//!   an account, then or once the card is the listener's own again;
 //! - the plays to send saved in the outbox ([`Outbox`], `card-plays.json`
 //!   in the config folder, written whole) before the run writes anything:
 //!   a checkpoint deletes the tags file they map through. A sync whose
@@ -114,6 +116,11 @@ const AHEAD_MS: u64 = 5 * 60 * 1000;
 /// (its `REASONS`).
 const UNKNOWN_TRACK: &str = "unknown-track";
 const BAD_TIME: &str = "bad-time";
+/// Why a card for someone else isn't made the listener's own while its log
+/// can't be read ([`History::blind`]): what the sync and the settings'
+/// store that would have done it refuse with.
+pub(crate) const LOG_UNREAD: &str = "the card's play log can't be read: the card stays one for \
+                                     someone else, so that none of its plays is sent";
 
 // ── Where a play goes ───────────────────────────────────────────────────────
 
@@ -352,8 +359,8 @@ pub(crate) fn key_of_id(id: &str) -> Option<mppl::Key> {
 // ── Resolving (2.20.6) ──────────────────────────────────────────────────────
 
 /// Why a new play isn't sent; it is counted (2.20.6, item 8), and it settles
-/// as it is: the mark passes it. All but a gift card's, which no mark
-/// passes.
+/// as it is: the mark passes it. A card for someone else's plays aren't
+/// judged at all, and settle the same ([`History::gift()`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Unsent {
     /// No ledger row has its path: the listener's own file.
@@ -366,11 +373,6 @@ pub(crate) enum Unsent {
     Clock,
     /// Its row's server can't be told (an SRVS entry that breaks a rule).
     Server,
-    /// The card is for someone else (its settings): whatever the play maps
-    /// to, it is nobody's here. A look's word, never [`resolve`]'s. It
-    /// doesn't settle: the card's log keeps it, unacknowledged, for a card
-    /// made the listener's own again.
-    Gift,
 }
 
 /// The posted mark of a device and epoch among `marks`; 0 for none.
@@ -452,9 +454,10 @@ pub(crate) struct Owing {
     /// The firmware that keeps the card's log, as its `device.txt` says:
     /// the `client` block's version.
     pub(crate) firmware: String,
-    /// The plays the server settled above the card's marks, and those its
-    /// schema refuses (never sent): until a sync stores marks past them on
-    /// the card, or the card's log holds them no more.
+    /// The plays the server settled above the card's marks, those its
+    /// schema refuses and those of a card for someone else (never sent):
+    /// until a sync stores marks past them on the card, or the card's log
+    /// holds them no more.
     pub(crate) done: BTreeSet<String>,
     /// The plays waiting to be posted.
     pub(crate) plays: Vec<Owed>,
@@ -596,7 +599,7 @@ pub(crate) struct Tally {
     pub(crate) clock: usize,
     pub(crate) server: usize,
     /// The new plays of a card for someone else: counted, sent nowhere, and
-    /// no mark passes them.
+    /// settled as they are (the mark passes them).
     pub(crate) gift: usize,
     /// Paths the server moved, found again by their audio hash.
     pub(crate) remapped: usize,
@@ -716,8 +719,11 @@ pub(crate) struct History {
     posted: Vec<Ack>,
     posted_for: u64,
     card_id: u64,
-    /// The log as the look read it; None until a look read one whole.
+    /// The log as the look read it; None until a look read one whole. And
+    /// whether a look failed to read it (`blind`): it settled nothing of
+    /// what the log holds.
     log: Option<Log>,
+    blind: bool,
     /// The card's part of the outbox, taken by a look of a card with a root
     /// (`loaded`); `unread` when the outbox couldn't be read, so this part
     /// is never saved over the one on disk.
@@ -752,6 +758,7 @@ impl History {
             posted_for: posted.0,
             card_id: 0,
             log: None,
+            blind: false,
             owing: Owing::default(),
             loaded: false,
             unread: false,
@@ -764,16 +771,30 @@ impl History {
         }
     }
 
-    /// The card is for someone else (its settings' `forSomeoneElse`, as the
-    /// run leaves them): its plays are sent to nobody's account. Each new
-    /// one is counted ([`Unsent::Gift`]) and none is mapped, so none joins
-    /// the plays to send; nothing is posted, the plays that waited from
-    /// before the card was marked among them; and no mark rises over a play
-    /// of its log, so no ACKS has the player trim one. Once the card is the
-    /// listener's own again, a look maps what its log still holds.
+    /// The card is for someone else (its settings' `forSomeoneElse`): its
+    /// plays are sent to nobody's account, now or ever. Each new one is
+    /// counted and none is mapped, so none joins the plays to send; and
+    /// each is settled as it is, like a play from before the clock was
+    /// set: the mark rises over it (a sync's commit acknowledges it, and
+    /// the player trims it), and the outbox keeps its id until then, so no
+    /// look of this computer maps it once the card is the listener's own
+    /// again. Nothing is posted meanwhile: the plays mapped before the card
+    /// was marked wait in the outbox, hold the mark at the first of them,
+    /// and go once the card is the listener's own.
+    ///
+    /// A run that changes the setting, either way, is one of a card for
+    /// someone else: the plays the log holds at a change can't be told
+    /// apart by when they were made, and none of them may go.
     pub(crate) fn gift(mut self, gift: bool) -> History {
         self.gift = gift;
         self
+    }
+
+    /// The look couldn't read the card's log: nothing it holds was settled
+    /// or mapped. A run that makes a card for someone else the listener's
+    /// own must not go on then: the next look would send those plays.
+    pub(crate) fn blind(&self) -> bool {
+        self.blind
     }
 
     fn note(&mut self, failed: bool, note: String) {
@@ -832,10 +853,16 @@ impl History {
             Ok(files) if files.is_empty() => return,
             Ok(files) => files,
             Err(e) => {
+                self.blind = true;
                 self.note(true, format!("the play log can't be read: {e}"));
                 return;
             }
         };
+        // A card for someone else's plays need no ledger: none is mapped.
+        if self.gift {
+            self.look_gift(&files);
+            return;
+        }
         let tags = root.map(|r| r.tags.as_ref());
         let (Some(root), Some(Ok(tags))) = (root, tags) else {
             self.note(false, "the card has no tags file to map its plays through: they wait".into());
@@ -858,8 +885,6 @@ impl History {
         let servers = root.manifest.server_table();
         for (slot, fate) in resolve(&log, tags, &servers, skew, &self.posted) {
             self.tally.new += 1;
-            // A card for someone else: whatever the play maps to.
-            let fate = if self.gift { Err(Unsent::Gift) } else { fate };
             let owed = match fate {
                 Ok(owed) => owed,
                 Err(why) => {
@@ -868,12 +893,8 @@ impl History {
                         Unsent::Changed => &mut self.tally.changed,
                         Unsent::Clock => &mut self.tally.clock,
                         Unsent::Server => &mut self.tally.server,
-                        Unsent::Gift => &mut self.tally.gift,
                     } += 1;
-                    // A gift card's play settles nothing: its mark waits.
-                    if why != Unsent::Gift {
-                        self.unsent.insert(slot.id());
-                    }
+                    self.unsent.insert(slot.id());
                     continue;
                 }
             };
@@ -882,6 +903,34 @@ impl History {
             // ledger it was played against.
             if !owing.done.contains(&owed.id) && !owing.plays.iter().any(|o| o.id == owed.id) {
                 owing.plays.push(owed);
+            }
+        }
+        (self.log, self.owing) = (Some(log), owing);
+        self.save();
+    }
+
+    /// A look at a card for someone else ([`History::gift()`]), its log's
+    /// `files` read: each new play is counted and settled unsent, its id
+    /// among the outbox's settled ones. All but the plays mapped before the
+    /// card was marked, which wait in the outbox as they did: those are the
+    /// listener's own.
+    fn look_gift(&mut self, files: &[(&'static str, Vec<u8>, u64)]) {
+        let named: Vec<LogFile<'_>> =
+            files.iter().map(|(name, bytes, size)| LogFile { name, bytes, size: *size }).collect();
+        let log = mppl::read_log(&named);
+        let mut owing = std::mem::take(&mut self.owing);
+        let held: HashSet<String> = log.plays.iter().map(Slot::id).collect();
+        owing.done.retain(|id| held.contains(id));
+        self.tally.read = log.counts;
+        let posted = &self.posted;
+        for p in log.plays.iter().filter(|p| p.seq > mark_of(posted, p.device_id, p.epoch)) {
+            self.tally.new += 1;
+            let id = p.id();
+            if owing.plays.iter().any(|o| o.id == id) {
+                self.tally.owed += 1;
+            } else {
+                self.tally.gift += 1;
+                owing.done.insert(id);
             }
         }
         (self.log, self.owing) = (Some(log), owing);

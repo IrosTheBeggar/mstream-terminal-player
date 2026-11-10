@@ -2320,7 +2320,8 @@ fn store(
         }
     };
     let mut envs = home.envs();
-    setup::store(card, &mut change, &mut *envs, &mut |_| {}).map_err(|stop| stop.to_string())?;
+    let stored = setup::store(card, &mut change, home.plays(), &mut *envs, &mut |_| {});
+    stored.map_err(|stop| stop.to_string())?;
     // The peers' daily budget lives on this computer.
     if let (Some(mb), Some(key)) = (want.budget_mb, url_key) {
         let budget = Budget::system()?;

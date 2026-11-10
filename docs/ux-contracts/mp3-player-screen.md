@@ -1509,19 +1509,34 @@ comes from the cache, or a download, beside them.
     to the server that filled that track; a peer's go to its parent with
     the peer's id. Plays never go to another server, nor from a card for
     someone else:
-    - **A card for someone else sends none**, by its settings' *For* as a
-      sync leaves them. Its new plays are counted and mapped to nothing.
-      None is posted, by a sync or by *Send the plays*, nor any that
-      waited on this computer from before the card was marked. Next sync
-      counts no plays to send; Details' *Plays* says "not sent: a card for
-      someone else" (`plays_gift`) in place of its counts, the busy line
-      says the same when `p` is pressed, and the log says how many. `device
-      card <drive> plays` says "E: is a card for someone else: its plays
-      aren't sent." and exits 0, its server asked nothing.
-    - **Its log keeps them.** No sync acknowledges a play of such a card,
-      so the player trims none on the software's word. A card made the
-      listener's own again (*For: me*) sends what its log still holds, and
-      what waited.
+    - **A card for someone else sends none**, by its settings' *For*, as a
+      sync finds them or as it leaves them. Its new plays are counted and
+      mapped to nothing. None is posted, by a sync or by *Send the plays*,
+      nor any that waited on this computer from before the card was
+      marked. Next sync counts no plays to send; Details' *Plays* says
+      "not sent: a card for someone else" (`plays_gift`) in place of its
+      counts, the busy line says the same when `p` is pressed, and the log
+      says how many. `device card <drive> plays` says "E: is a card for
+      someone else: its plays aren't sent." and exits 0, its server asked
+      nothing.
+    - **Nor later.** Such a play is dropped as it is counted, like one
+      from before the clock was set: the sync's commit acknowledges it, so
+      the player trims it, and this computer remembers it until then.
+      *Send the plays* writes nothing to the card, as ever.
+    - **Making the card the listener's own again** (*For: me*: the sheet's
+      Apply, `--for me`, or a sync) first drops the plays its log holds,
+      the same way and in the same write as the setting. Nothing played
+      while the card was someone else's ever reaches an account. A log
+      that can't be read then leaves the card for someone else, and says
+      why.
+    - **What the log holds when the card is marked is a gift's too.** The
+      software can't tell when a play was made: *Send the plays* before
+      marking the card keeps the listener's own.
+    - What waited on this computer from before the card was marked goes at
+      the first sync once the card is the listener's own again. Until
+      then it holds the card's acknowledgements where it stands: the plays
+      logged after it are dropped on this computer, and trimmed from the
+      player once it has gone.
 
     **A play the server turns away waits while its answer may change.** A
     server in a scan answers that it doesn't know a track its scan hasn't
@@ -2857,13 +2872,29 @@ setting no locale, prints in English.
     counts none to send. `plays_gift`, in the set since the picks and
     drawn nowhere, is Details' *Plays* fact on such a card and `p`'s busy
     line; the command line says it in its own words.
-  - **Chosen: the card's log keeps a gift card's plays.** They could have
-    settled as the listener's own files do (counted, the mark passing
-    them, the player free to trim). They are held instead, with no ACKS:
-    a card marked by mistake loses nothing, and *For: me* brings them
-    back. The other side of it: a card that was truly someone else's and
-    is made the listener's own sends that someone's plays, as far as its
-    log still holds them. The clause says so.
+  - **A gift card's plays are dropped, not kept** (decided again the same
+    day, by the owner). They were first held in the card's log with no
+    ACKS, so that *For: me* brought them back: a card marked by mistake
+    lost nothing, but a card that was truly someone else's sent that
+    someone's plays once it was the listener's own. The second outweighs
+    the first. A play of such a card settles now as the listener's own
+    files' do (counted, the mark passing it, the player free to trim), and
+    this computer keeps its id until a sync has stored the mark.
+    - **No change of the setting lets one through.** The look of a sync
+      that marks the card, or makes it the listener's own again, is a gift
+      card's. The sheet's Apply settles what the log holds as it turns the
+      setting off, the marks in the one write with it; with a log it can't
+      read it refuses (and so does such a sync), and the card stays
+      marked.
+    - **What it costs.** The plays a listener's own card holds unsent when
+      it is marked are dropped: they can't be told from a gift's. A card
+      marked and unmarked by mistake loses them too. *Send the plays*
+      first keeps them.
+    - **Not closed.** Plays that waited here from before the card was
+      marked hold its marks, so the gift's plays logged after them are
+      settled on this computer alone until those have gone. Another
+      computer that syncs the card in between, the card the listener's own
+      by then, sends them.
   - **A server in a scan lost the card's plays.** mStream answers
     `unknown-track` for a file its scan hasn't reached, and every answer
     settled its play: the marks passed them and the next commit's ACKS let

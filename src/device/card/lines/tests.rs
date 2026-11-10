@@ -371,7 +371,8 @@ fn setup_names_a_new_card_and_a_set_up_cards_flags_change_its_settings() {
 
 /// `plays` on a card for someone else (clause 61, `--for someone-else`):
 /// none is sent and the line says why, where the same card, the listener's
-/// own, plans one and sends it.
+/// own, plans one. Made the listener's own again (`--for me`), the card has
+/// nothing to send of what its log held: only what is played after goes.
 #[test]
 fn plays_on_a_card_for_someone_else_sends_none_and_says_why() {
     let scratch = Scratch::new("lines-gift");
@@ -381,7 +382,7 @@ fn plays_on_a_card_for_someone_else_sends_none_and_says_why() {
     let synced = sync_now(&b.sim, &base, &rock(), &mut envs()).0;
     assert!(matches!(synced.end, crate::device::card::sync::End::Ran(_)), "{:?}", synced.end);
     let play = logged(&b.sim, "Album B/01.mp3", 1, 1_791_950_000_000);
-    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), &play).unwrap();
     let yes = Flags { yes: true, ..Flags::default() };
     let posts = || b.server.lock().unwrap().plays.len();
 
@@ -409,10 +410,20 @@ fn plays_on_a_card_for_someone_else_sends_none_and_says_why() {
     assert!(said.contains("for         someone else\n") && !said.contains("plays to send"), "{said}");
     assert_eq!(posts(), 0, "nothing posted");
 
-    // The listener's own again: the play its log still holds goes.
+    // The listener's own again: what its log held was settled unsent as
+    // the setting went, and nothing is left to send.
     let mut term = Term::new();
     let mine = Flags { for_someone_else: Some(false), ..yes.clone() };
     assert_eq!(b.run(Some(&key), What::Setup, &mine, None, &mut term), 0, "{}", term.said());
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Plays, &yes, None, &mut term);
+    assert_eq!(code, 0, "{}", term.said());
+    assert!(term.said().contains("No plays to send to Home."), "{}", term.said());
+    assert_eq!(posts(), 0, "nothing of that time, ever");
+
+    // A play of the listener's own, after that, goes.
+    let more = [play, logged(&b.sim, "Album B/01.mp3", 2, 1_791_950_400_000)].concat();
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), more).unwrap();
     let mut term = Term::new();
     let code = b.run(Some(&key), What::Plays, &yes, None, &mut term);
     assert_eq!(code, 0, "{}", term.said());

@@ -31,15 +31,17 @@
 mod tests;
 
 use std::io::Write;
+use std::rc::Rc;
 
 use serde_json::{Value, json};
 
 use super::cards::Cards;
 use super::dry::DryCard;
 use super::engine::{
-    Answers, Env, Event, Expect, Failed, Fetched, Fetcher, Guard, Knobs, NoHooks, Session, Stop,
-    WantedCard, WantedFile,
+    Answers, Env, Event, Expect, Failed, Fetched, Fetcher, Guard, Hooks, Knobs, NoHooks, Session,
+    Stop, WantedCard, WantedFile,
 };
+use super::history::{self, History};
 use super::state::{self, Copied, State, hex};
 use super::volume::{self, CardWrite, Found, Mounted, Refusal, Serial};
 
@@ -226,9 +228,18 @@ pub(crate) fn set_up(
 /// session bound to the card: `state.json` alone, by 2.12.7's rule, and
 /// nothing else on the card. Only a set-up card's: a root, and a state file
 /// of its own. What it wrote.
+///
+/// A card for someone else made the listener's own again (clause 61): the
+/// plays its log holds are of the time it was someone else's, and no look
+/// after this could tell. They are settled unsent before the setting goes,
+/// as a sync of such a card settles them ([`History::gift()`]): the marks
+/// risen over them are written with the settings, and `plays`, this
+/// computer's outbox, keeps their ids. A log that can't be read settles
+/// nothing, and the card stays as it is.
 pub(crate) fn store(
     card: &dyn CardWrite,
     change: &mut dyn FnMut(&mut State),
+    plays: Rc<dyn history::Store>,
     envs: &mut dyn FnMut() -> Env,
     events: &mut dyn FnMut(Event),
 ) -> Result<State, Stop> {
@@ -244,8 +255,23 @@ pub(crate) fn store(
     let serial = card.serial().map_err(|_| Stop::Pulled)?;
     let expect = Expect { serial, card_id: Some(card_id), commit_id: Some(commit_id) };
     let (knobs, answers) = (Knobs::default(), Answers::default());
-    let session = Session::open(card, &expect, knobs, &answers, envs(), &mut NoHooks, events)?;
+    let (was_gift, posted) = (state.settings.for_someone_else, (card_id, state.plays.clone()));
     change(&mut state);
+    let own_again = was_gift && !state.settings.for_someone_else;
+    let mut settled = own_again.then(|| History::new(plays, false, posted).gift(true));
+    let mut none = NoHooks;
+    let hooks: &mut dyn Hooks = match settled.as_mut() {
+        Some(history) => history,
+        None => &mut none,
+    };
+    let session = Session::open(card, &expect, knobs, &answers, envs(), hooks, events)?;
+    if let Some(history) = &settled {
+        if history.blind() {
+            session.close();
+            return Err(Stop::Refused(history::LOG_UNREAD.into()));
+        }
+        state.plays = history.marks();
+    }
     state.card_id = card_id;
     state.settings.stored = true;
     let bytes = state.text(volume::next_seq(session.state().seq));

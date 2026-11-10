@@ -889,14 +889,15 @@ fn play_posts(fake: &Fake) -> usize {
     fake.lock().unwrap().asked.iter().filter(|a| a.ends_with("/stats/plays")).count()
 }
 
-/// A card for someone else (clause 61), by the settings the run leaves: its
-/// plays are counted and sent to nobody. No request carries one, the commit
-/// the run makes acknowledges none and the state file's marks stay where
-/// they were, at the sync that marks the card and at the next, which has no
-/// flag. Made the listener's own again, the card sends what its log still
-/// holds.
+/// A card for someone else (clause 61): its plays are counted, sent to
+/// nobody, and settled as they are. No request carries one; the commit the
+/// run makes acknowledges them and the state file's marks pass them, at
+/// the sync that marks the card and at the next, which has no flag. The
+/// sync that makes the card the listener's own again settles what its log
+/// holds the same way: nothing played while it was someone else's ever
+/// goes. What is played after that is the listener's, and goes.
 #[test]
-fn a_card_for_someone_else_posts_no_play_and_acknowledges_none() {
+fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unposted() {
     let scratch = Scratch::new("gift-plays");
     let sim = card(&scratch);
     let (base, fake) = server();
@@ -905,12 +906,14 @@ fn a_card_for_someone_else_posts_no_play_and_acknowledges_none() {
     let mut again = |ask: &Ask| sync_plays(&sim, &base, ask, &mut envs, Reached::Elsewhere, store.clone()).0;
     ran(&again(&rock()));
     let at = 1_791_950_000_000;
-    let log = [logged(&sim, "Album B/01.mp3", 1, at), logged(&sim, "Album D/02.opus", 2, at + 200_000)];
-    std::fs::write(scratch.0.join("card/.player/plays.jnl"), log.concat()).unwrap();
+    let log = scratch.0.join("card/.player/plays.jnl");
+    let mut plays = vec![logged(&sim, "Album B/01.mp3", 1, at), logged(&sim, "Album D/02.opus", 2, at + 200_000)];
+    std::fs::write(&log, plays.concat()).unwrap();
     let for_whom = |gift: bool| Ask {
         change: Change { for_someone_else: Some(gift), ..Change::default() },
         ..Ask::default()
     };
+    let mark = |seq: u32| vec![Ack { device_id: DEVICE, epoch: EPOCH, seq }];
 
     one_more_track(&fake, 6);
     let marked = again(&for_whom(true));
@@ -921,31 +924,102 @@ fn a_card_for_someone_else_posts_no_play_and_acknowledges_none() {
     assert!(marked.notes.iter().any(|n| n == said), "{:?}", marked.notes);
     assert_eq!(play_posts(&fake), 0, "no request carries a play");
     let seen = look(&sim);
-    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, [], "the commit acknowledges none");
+    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, mark(2), "acknowledged, unposted");
     let state = State::of(&seen.state).unwrap();
-    assert_eq!((state.plays.clone(), state.settings.for_someone_else), (vec![], true));
-    assert!(store.outbox().cards.is_empty(), "none owed");
+    assert_eq!((state.plays.clone(), state.settings.for_someone_else), (mark(2), true));
 
-    // The next sync has no flag: the card's settings say it.
+    // The next sync has no flag: the card's settings say it. One more play
+    // of a server's file: counted, settled, and in no request.
+    plays.push(logged(&sim, "Album B/01.mp3", 3, at + 400_000));
+    std::fs::write(&log, plays.concat()).unwrap();
     one_more_track(&fake, 7);
     let still = again(&Ask::default());
     assert_eq!(ran(&still).written, 1, "{:?}", still.notes);
-    assert_eq!(still.plays.as_ref().map(|t| (t.gift, t.owed, t.due)), Some((2, 0, 0)));
+    assert_eq!(still.plays.as_ref().map(|t| (t.new, t.gift, t.owed, t.due)), Some((1, 1, 0, 0)));
     assert_eq!(play_posts(&fake), 0);
     let seen = look(&sim);
-    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, []);
-    assert_eq!(State::of(&seen.state).unwrap().plays, []);
+    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, mark(3));
+    assert_eq!(State::of(&seen.state).unwrap().plays, mark(3));
 
-    // The listener's own again: the log still holds them, and they go.
+    // Played once more by someone else, then made the listener's own by
+    // the sync itself: what the log holds is of the time before, and that
+    // sync settles it unsent.
+    plays.push(logged(&sim, "Album D/02.opus", 4, at + 600_000));
+    std::fs::write(&log, plays.concat()).unwrap();
     let mine = again(&for_whom(false));
     ran(&mine);
     let t = mine.plays.as_ref().unwrap();
-    assert_eq!((t.gift, t.owed, t.accepted, t.waiting), (0, 2, 2, 0), "{t:?}");
+    assert_eq!((t.new, t.gift, t.owed, t.due, t.accepted), (1, 1, 0, 0, 0), "{t:?}");
+    assert_eq!(play_posts(&fake), 0, "nothing of the time it was someone else's");
+    let state = State::of(&look(&sim).state).unwrap();
+    assert_eq!((state.plays.clone(), state.settings.for_someone_else), (mark(4), false));
+
+    // The listener's own plays, from then on, go.
+    plays.push(logged(&sim, "Album B/01.mp3", 5, at + 800_000));
+    std::fs::write(&log, plays.concat()).unwrap();
+    let own = again(&Ask::default());
+    ran(&own);
+    let t = own.plays.as_ref().unwrap();
+    assert_eq!((t.new, t.gift, t.accepted, t.waiting), (1, 0, 1, 0), "{t:?}");
     let posted: Vec<Value> = fake.lock().unwrap().plays.clone();
-    let paths: Vec<&str> = posted.iter().map(|p| p["filePath"].as_str().unwrap()).collect();
-    assert_eq!(paths, ["Rock/Artist A/Album B/01.mp3", "Rock/Artist C/Album D/02.opus"]);
+    let ids: Vec<&str> = posted.iter().map(|p| p["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["core2-00005e005301-1122334455667788-5"], "that one alone, ever");
+    assert_eq!(State::of(&look(&sim).state).unwrap().plays, mark(5));
+}
+
+/// A card for someone else whose play log can't be read is not made the
+/// listener's own: nothing would settle the plays the log holds, and the
+/// next look would send them. The sync that would have done it is refused
+/// before it writes anything, and so is the settings' store (the sheet's
+/// Apply): the card stays marked. Once the log reads, the store settles
+/// those plays as it makes the card the listener's own. Its marks pass
+/// them, written with the settings, and no sync sends one.
+#[test]
+fn a_card_whose_log_cant_be_read_stays_for_someone_else_and_the_store_settles_its_plays() {
+    let scratch = Scratch::new("gift-blind");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    let store = Rc::new(MemStore::default());
+    let for_whom = |gift: bool| Change { for_someone_else: Some(gift), ..Change::default() };
+    let gift = Ask { change: Change { nickname: Some("Home".into()), ..for_whom(true) }, ..rock() };
+    ran(&sync_plays(&sim, &base, &gift, &mut envs, Reached::Elsewhere, store.clone()).0);
+    // Played by someone else, and no sync since.
+    let at = 1_791_950_000_000;
+    let log = [logged(&sim, "Album B/01.mp3", 1, at), logged(&sim, "Album D/02.opus", 2, at + 200_000)];
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), log.concat()).unwrap();
+
+    sim.bad_sector("/.player/plays.jnl", 0);
+    let mine = Ask { change: for_whom(false), ..Ask::default() };
+    let refused = sync_plays(&sim, &base, &mine, &mut envs, Reached::Elsewhere, store.clone()).0;
+    let unread = |why: &str| why.contains("play log can't be read") && why.contains("for someone else");
+    assert!(matches!(&refused.end, End::Halted(Halt::Refused(why)) if unread(why)), "{:?}", refused.end);
+    let mut own = |state: &mut State| state.settings.for_someone_else = false;
+    let stored = setup::store(&sim, &mut own, store.clone(), &mut envs, &mut |_| {});
+    assert!(matches!(&stored, Err(Stop::Refused(why)) if unread(why)), "{:?}", stored.err());
+    let state = State::of(&look(&sim).state).unwrap();
+    assert_eq!((state.settings.for_someone_else, state.plays.clone()), (true, vec![]), "as it was");
+    // A dry run writes nothing, and is no run to refuse.
+    let dry = Ask { dry_run: true, ..mine.clone() };
+    let planned = sync_plays(&sim, &base, &dry, &mut envs, Reached::Elsewhere, store.clone()).0;
+    assert!(matches!(planned.end, End::Dry), "{:?}", planned.end);
+
+    // The log reads again: the sheet's Apply makes the card the listener's
+    // own, the plays its log holds settled first.
+    sim.heal();
+    let stored = setup::store(&sim, &mut own, store.clone(), &mut envs, &mut |_| {}).expect("stored");
     let mark = vec![Ack { device_id: DEVICE, epoch: EPOCH, seq: 2 }];
-    assert_eq!(State::of(&look(&sim).state).unwrap().plays, mark);
+    assert_eq!((stored.settings.for_someone_else, stored.plays.clone()), (false, mark.clone()));
+    assert_eq!(State::of(&look(&sim).state).unwrap().plays, mark, "written with the settings");
+    let after = sync_plays(&sim, &base, &Ask::default(), &mut envs, Reached::Elsewhere, store.clone()).0;
+    ran(&after);
+    assert_eq!(after.plays.as_ref().map(|t| (t.new, t.due)), Some((0, 0)));
+    assert_eq!(play_posts(&fake), 0, "nothing of the time it was someone else's");
+    // A store that leaves the card whose it is looks at no play.
+    sim.bad_sector("/.player/plays.jnl", 0);
+    let mut renamed = |state: &mut State| state.label = "Gym".into();
+    let stored = setup::store(&sim, &mut renamed, store.clone(), &mut envs, &mut |_| {}).expect("stored");
+    assert_eq!((stored.label.as_str(), stored.plays.clone()), ("Gym", mark));
 }
 
 /// A server in a scan (the listing says so, and lacks the tracks the scan
