@@ -765,9 +765,9 @@ impl Client {
             req = req.header("x-access-token", token);
         }
 
-        let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let resp = req.send().await.map_err(unreached)?;
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let bytes = resp.bytes().await.map_err(unreached)?;
         let refusal = || extract_error(&String::from_utf8_lossy(&bytes));
         match status {
             StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized),
@@ -3101,10 +3101,16 @@ impl Multipart {
 /// Send a built request and read its answer whole: the status and the
 /// body as text.
 async fn read_answer(req: reqwest::RequestBuilder) -> Result<(StatusCode, String), ApiError> {
-    let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+    let resp = req.send().await.map_err(unreached)?;
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| ApiError::Network(e.to_string()))?;
+    let text = resp.text().await.map_err(unreached)?;
     Ok((status, text))
+}
+
+/// A request that got no answer, in words without its URL: a tunnel's
+/// carries its loopback token (`__lt`), and the words reach reports.
+fn unreached(e: reqwest::Error) -> ApiError {
+    ApiError::Network(e.without_url().to_string())
 }
 
 /// An answer mapped: a refusal as [`refused`] words it, else the body read
@@ -3866,6 +3872,21 @@ pub(crate) mod tests {
         assert_eq!(body, serde_json::json!({ "recommendation": { "title": "x" } }));
         let listing = wait(client.discovery_plugins_async()).unwrap();
         assert!(listing.copies(JobScope::Album) && !listing.copies(JobScope::Artist));
+    }
+
+    #[test]
+    fn a_request_that_gets_no_answer_never_says_its_url() {
+        // A port nothing listens on: bound, then let go.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let client = Client::new(&format!("http://127.0.0.1:{port}"))
+            .unwrap()
+            .with_local_token(Some("bridge-secret".into()));
+        let words = [client.admin_logs_download().unwrap_err(), client.ping().unwrap_err()];
+        for e in words {
+            let said = e.to_string();
+            assert!(matches!(e, ApiError::Network(_)), "{said}");
+            assert!(!said.contains("bridge-secret") && !said.contains("__lt"), "{said}");
+        }
     }
 
     #[test]
