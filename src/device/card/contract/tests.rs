@@ -3,23 +3,25 @@
 //! folder's README names the commit): every vector of 2.18, every golden
 //! written byte for byte from its description, every hardening file read as
 //! absent or present for the player's own reason, every golden truncated at
-//! every byte and every bit of it flipped, and round trips of generated
-//! libraries in any input order.
+//! every byte and every bit of it flipped, moods.json's mood tails (2.6.4),
+//! and round trips of generated libraries in any input order.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::container::{self, MPDJ, MPTG, MSMF, MSPD, unknown_major};
+use super::container::{self, MPDJ, MPTG, MPWF, MSMF, MSPD, unknown_major};
 use super::device_txt::{DeviceTxt, Format};
 use super::fat::{fat_from_wall, fat_time, fat_valid, fat_wall, skew, time_matches};
+use super::moods::{self, Scores, Tail};
 use super::mpdj::{self, Table};
 use super::mppl;
 use super::mptg::{self, FolderIn, Ledger, Meta, Record, RecordIn, Tags};
 use super::msmf::{self, Ack, Candidate, Comp, Manifest, ManifestIn, Pick, elect};
 use super::mspd::{self, Op, Plan, PlanIn};
 use super::mpth;
+use super::mpwf;
 use super::numbers;
 use super::order::{album_folder, compare_file_paths, compare_names, thumb_path};
 use super::prim::{self, crc32, crc32_after, fnv1a64, hex, hex16, md5, path_hash, qfp_of};
@@ -144,8 +146,18 @@ fn ledger_of(l: &Value) -> Ledger {
     }
 }
 
+/// A server row as the fixtures give one: 8 numbers or nulls in `heads`
+/// order.
+fn scores_of(v: &Value) -> Scores {
+    let row = v.as_array().expect("a row of scores");
+    assert_eq!(row.len(), moods::HEADS.len());
+    std::array::from_fn(|i| row[i].as_f64())
+}
+
 /// A tags description (raw tag values: the writer's caller applies 2.3.6
-/// and sets TRUNCATED, as the tag reader will).
+/// and sets TRUNCATED, as the tag reader will). A record's `scores` are its
+/// server row, from which the writer's caller makes its mood tail, as the
+/// sync will; null, or none given, is no row.
 fn tags_input(d: &Value) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
     let source = num(&d["source"]) as u8;
     let meta = Meta {
@@ -185,6 +197,7 @@ fn tags_input(d: &Value) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
             pic_type: num(&pic["type"]) as u8,
             pic_mime: num(&pic["mime"]) as u8,
             pic_coding: num(&pic["coding"]) as u8,
+            moods: moods::encode(r.get("scores").filter(|s| !s.is_null()).map(scores_of).as_ref()),
         };
         let ledger = (source != mptg::SOURCE_DEVICE).then(|| ledger_of(&r["ledger"]));
         records.push(RecordIn { path: text(&r["path"]).to_owned(), rec, run, ledger });
@@ -299,12 +312,34 @@ fn device_input(d: &Value) -> DeviceTxt {
         read_msmf: majors("read.msmf"),
         read_mptg: majors("read.mptg"),
         read_mpdj: majors("read.mpdj"),
+        read_mpwf: majors("read.mpwf"),
         read_mpth: majors("read.mpth"),
         codecs: text(&d["codecs"]).to_owned(),
         extensions: text(&d["extensions"]).to_owned(),
         max_rate: num(&d["max_rate"]) as u32,
         max_channels: num(&d["max_channels"]) as u32,
         history: majors("history"),
+    }
+}
+
+/// A track of an MPWF description (WAVEFORM-INDEX.md 13.2), or an `add` of a
+/// `commit` vector: a path or the hash itself, its length, its bars from its
+/// peaks.
+fn waves_row(t: &Value) -> mpwf::Slot {
+    let peaks: Vec<u8> = t["peaks"].as_array().expect("peaks").iter().map(|p| num(p) as u8).collect();
+    mpwf::Slot {
+        path_hash: t.get("hash").map_or_else(|| path_hash(text(&t["path"])), num),
+        length_ms: num(&t["lengthMs"]) as u32,
+        bars: mpwf::bars_from(&peaks),
+    }
+}
+
+fn waves_input(d: &Value) -> mpwf::TableIn {
+    mpwf::TableIn {
+        generation: num(&d["generation"]) as u32,
+        card_id: num(&d["cardId"]),
+        minor: num(&d["minor"]) as u16,
+        rows: d["tracks"].as_array().expect("tracks").iter().map(waves_row).collect(),
     }
 }
 
@@ -319,6 +354,8 @@ fn read_as(format: &str, file: &[u8], device: bool) -> Why {
             let uses = if device { mpdj::Uses::DEVICE } else { mpdj::Uses::ALL };
             Table::open(file).and_then(|t| t.check(uses))
         }
+        // The device opens the frame, and checks each slot as it reads it.
+        "MPWF" => mpwf::Table::open(file).and_then(|t| if device { Ok(()) } else { t.check() }),
         other => panic!("a format: {other}"),
     };
     r.err().unwrap_or(Why::Ok)
@@ -349,6 +386,7 @@ fn format_of(file: &[u8]) -> &'static str {
         Some(MSMF) => "MSMF",
         Some(MSPD) => "MSPD",
         Some(MPDJ) => "MPDJ",
+        Some(MPWF) => "MPWF",
         _ => "?",
     }
 }
@@ -385,6 +423,7 @@ fn every_vector_group_is_placed() {
         "servers",
         "deviceTxt",
         "mpdj",
+        "mpwf",
         "softwareMatching",
         // Of the play log's group: ACKS, device.txt's history key, the
         // slots, the ids and the reader's cases. A play resolved through a
@@ -765,11 +804,13 @@ fn vectors_device_txt() {
     let file = DeviceTxt::read(Some(text(&d["text"]).as_bytes()));
     assert!(file.present);
     assert_eq!(file.to_text(), text(&d["text"]));
-    assert!(file.decodes("OPUS") && file.lists("opus") && file.writes_mpdj());
+    assert!(file.decodes("OPUS") && file.lists("opus") && file.writes_mpdj() && file.writes_mpwf());
     assert!(file.reads(Format::Msmf, 1) && !file.reads(Format::Mpdj, 1) && file.reads(Format::Mpdj, 2));
+    assert!(file.reads(Format::Mpwf, 1) && !file.reads(Format::Mpwf, 2));
     // 0.12.0 keeps a play log: `history` lists major 1 (2.15).
     assert!(file.logs_plays() && file.history == 1);
-    // No file: the defaults, which noFile lists key by key; no play log.
+    // No file: the defaults, which noFile lists key by key; no play log, and
+    // no waveform index.
     let none = DeviceTxt::read(None);
     let text_of = none.to_text();
     let keys: BTreeMap<&str, &str> = text_of.lines().filter_map(|l| l.split_once('=')).collect();
@@ -777,6 +818,7 @@ fn vectors_device_txt() {
         assert_eq!(keys.get(k.as_str()).copied(), Some(text(want)), "{k}");
     }
     assert!(!none.present && !none.writes_mpdj() && !none.decodes("opus") && !none.logs_plays());
+    assert!(!none.writes_mpwf() && !none.reads(Format::Mpwf, 1));
     assert!(!keys.contains_key("history"));
     // A file with no contract line isn't one; a key missing keeps its
     // default; an empty value says none; CRLF is read.
@@ -1179,6 +1221,7 @@ fn goldens_are_written_byte_for_byte() {
             }
             "device.txt" => device_input(&d).to_text().into_bytes(),
             "MPDJ" => relaid_index(&want),
+            "MPWF" => mpwf::write(&waves_input(&d)).expect("an index"),
             other => panic!("a format: {other}"),
         };
         assert!(got == want, "{file}: the writer's bytes differ from the golden's");
@@ -1189,7 +1232,7 @@ fn goldens_are_written_byte_for_byte() {
         .map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(seen, goldens, "a golden with no description, or the other way");
-    assert_eq!(goldens.len(), 18);
+    assert_eq!(goldens.len(), 23);
 }
 
 /// An Auto DJ golden read and checked whole, then laid out again from its
@@ -1264,6 +1307,27 @@ fn goldens_read_back() {
     // A device's tags file: no ledger.
     let device = mptg::read(&golden("tags-device.bin"), mptg::Uses::ALL).expect("a device's records");
     assert!(device.source == mptg::SOURCE_DEVICE && !device.has_ledger && device.records.len() == 4);
+    // A file with no mood tail: minor 0, rows of 72.
+    assert_eq!((tags.header.minor, section_of(&tags_file, mptg::RECS).len()), (0, 72 * tags.records.len()));
+
+    // Mood tails (minor 1, 2.6.4): rows of 80 bytes; MOOD-FILTERS.md 5.7's
+    // worked example; a row of NULLs, analysed; none for no server row, nor
+    // for a file with no track. The device reads the same tails, and
+    // carried forward the file is itself again.
+    let moods_file = golden("tags-moods.bin");
+    let scored = mptg::read(&moods_file, mptg::Uses::ALL).expect("a minor 1 file");
+    assert_eq!(scored.header.minor, 1);
+    assert_eq!(section_of(&moods_file, mptg::RECS).len(), 80 * scored.records.len());
+    let tail = |path: &str| scored.records.iter().find(|e| e.path == path).expect("a record").rec.moods;
+    assert_eq!(spaced_of(&tail("Artist A/song.flac")), "03 3A 46 1D 31 FF 46 00");
+    assert_eq!(spaced_of(&tail("Artist A/all-null.flac")), "01 FF FF FF FF FF FF 00");
+    assert_eq!((tail("Artist A/no-row.flac"), tail("Artist B/Album/cover.jpg")), (moods::NO_ROW, moods::NO_ROW));
+    assert_eq!(scored.records.iter().filter(|e| e.rec.has_moods()).count(), 8);
+    let as_device = mptg::read(&moods_file, mptg::Uses::DEVICE).expect("the device's reading");
+    assert!(as_device.records.iter().zip(&scored.records).all(|(d, e)| d.rec == e.rec));
+    let (meta, records, folders) = scored.to_input();
+    assert_eq!((meta.minor, mptg::minor_of(&records)), (1, 1));
+    assert!(mptg::write(&meta, &records, &folders).expect("carried forward") == moods_file);
 
     // The plan, in 2.12.5's order.
     let plan = Plan::read(&golden("pending.bin")).expect("the plan");
@@ -1292,7 +1356,14 @@ fn goldens_read_back() {
 
     // The device reads the roots and the tags files without the sections it
     // ignores.
-    for name in ["manifest.bin", "manifest-servers.bin", "manifest-min.bin", "manifest-acks.bin"] {
+    let roots = [
+        "manifest.bin",
+        "manifest-servers.bin",
+        "manifest-min.bin",
+        "manifest-acks.bin",
+        "manifest-waves.bin",
+    ];
+    for name in roots {
         let m = Manifest::read(&golden(name), msmf::Uses::DEVICE).expect("a root");
         assert!(m.servers.is_empty() && m.acks.is_empty());
     }
@@ -1300,10 +1371,11 @@ fn goldens_read_back() {
     assert!(!t.has_ledger && t.records.iter().all(|e| e.ledger.is_none()));
 
     // No contract file of the fixtures has an unknown major.
-    for name in ["manifest.bin", "tags-0000002a.bin", "pending.bin", "autodj-00000029.bin"] {
+    for name in ["manifest.bin", "tags-0000002a.bin", "pending.bin", "autodj-00000029.bin", "waves-0000002a.bin"] {
         assert!(!unknown_major(&golden(name)), "{name}");
     }
     assert!(MAX_FILE >= 34 * 1024 * 1024);
+    assert!(mpwf::file_bytes_for(mpwf::MAX_ROWS) as usize <= MAX_FILE);
 }
 
 // ── Hardening (2.17, item 4) ────────────────────────────────────────────────
@@ -1335,12 +1407,35 @@ fn assert_same_index(want: &[u8], got: &[u8], what: &str) {
     assert_eq!(w.strings(), g.strings(), "{what}");
 }
 
+/// Two waveform indexes read the same (the hardening's `same`): every slot's
+/// hash, length and bars, found by its hash.
+fn assert_same_waves(want: &[u8], got: &[u8], what: &str) {
+    let (w, g) = (mpwf::Table::open(want).expect("the golden"), mpwf::Table::open(got).expect(what));
+    assert_eq!(w.rows, g.rows, "{what}");
+    for r in 0..w.rows {
+        let slot = w.slot(r).expect("the golden's slot");
+        let found = g.find(slot.path_hash);
+        assert_eq!(found.slot.as_ref(), Some(&slot), "{what}: row {r}");
+    }
+}
+
+/// A lookup's answer as the fixtures spell it.
+fn lookup_name(l: mpwf::Lookup) -> &'static str {
+    match l {
+        mpwf::Lookup::Hit => "hit",
+        mpwf::Lookup::Miss => "miss",
+        mpwf::Lookup::Damaged => "damaged",
+        mpwf::Lookup::Broken => "broken",
+    }
+}
+
 #[test]
 fn hardening_files_read_as_listed() {
     let index = json("hardening/index.json");
     let entries = index.as_array().expect("the index");
-    assert_eq!(entries.len(), 132);
+    assert_eq!(entries.len(), 198);
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut waves_why, mut waves_lookups) = (BTreeSet::new(), 0);
     for e in entries {
         let file = text(&e["file"]);
         let b = bytes(&format!("hardening/{file}"));
@@ -1350,16 +1445,32 @@ fn hardening_files_read_as_listed() {
         assert_eq!(read_as(format, &b, device).name(), text(&e["why"]), "{what}");
         assert_eq!(text(&e["expect"]) == "present", text(&e["why"]) == "ok", "{what}");
         *counts.entry(format.to_owned()).or_default() += 1;
+        if format == "MPWF" {
+            waves_why.insert(text(&e["why"]).to_owned());
+        }
         if let Some(same) = e.get("same").and_then(Value::as_str) {
             if format == "MPDJ" {
                 assert_same_index(&golden(same), &b, &what);
+            } else if format == "MPWF" {
+                assert_same_waves(&golden(same), &b, &what);
             } else {
                 let want = mptg::read(&golden(same), mptg::Uses::ALL).expect("the golden");
                 let got = mptg::read(&b, mptg::Uses::ALL).expect(&what);
                 assert_same_tags(&want, &got, &what);
             }
         }
-        if let Some(slot) = e.get("slot") {
+        if let Some(slot) = e.get("slot").filter(|_| format == "MPWF") {
+            // One lookup as the device makes it: the frame good, the slots
+            // read as the search asks for them.
+            let t = mpwf::Table::open(&b).expect(&what);
+            let found = t.find(num(&slot["hash"]));
+            assert_eq!(lookup_name(found.lookup), text(&slot["read"]), "{what}");
+            assert_eq!(found.probes.len() as u64, num(&slot["reads"]), "{what}");
+            if text(&e["why"]) != "ok" {
+                assert_eq!(found.lookup.why().name(), text(&e["why"]), "{what}");
+            }
+            waves_lookups += 1;
+        } else if let Some(slot) = e.get("slot") {
             // One slot as the device reads it, the join's sections good:
             // damaged (its CRC) or broken (its list, under a good CRC).
             let t = Table::open(&b).expect(&what);
@@ -1381,10 +1492,35 @@ fn hardening_files_read_as_listed() {
     }
     assert_eq!(counts.into_iter().collect::<Vec<_>>(), [
         ("MPDJ".to_owned(), 50),
-        ("MPTG".to_owned(), 52),
-        ("MSMF".to_owned(), 21),
+        ("MPTG".to_owned(), 55),
+        ("MPWF".to_owned(), 50),
+        ("MSMF".to_owned(), 34),
         ("MSPD".to_owned(), 9),
     ]);
+    // Every reason of WAVEFORM-INDEX.md 13.5's table, and the present ones.
+    assert_eq!(waves_lookups, 12);
+    let reasons: BTreeSet<String> = [
+        "ok",
+        "short",
+        "magic",
+        "major",
+        "headerBytes",
+        "sectionCount",
+        "fileBytes",
+        "headerCrc",
+        "layout",
+        "unknownRequired",
+        "shape",
+        "missing",
+        "enum",
+        "wvLayout",
+        "wvSlotCrc",
+        "wvSlotOrder",
+        "sectionCrc",
+    ]
+    .map(str::to_owned)
+    .into();
+    assert_eq!(waves_why, reasons);
 
     // The files a present verdict says more about.
     let plan = Plan::read(&bytes("hardening/mspd-op-9.bin")).expect("a newer writer's plan");
@@ -1427,6 +1563,32 @@ fn hardening_files_read_as_listed() {
     let m = Manifest::read(&bytes("hardening/msmf-minor-1.bin"), msmf::Uses::ALL).expect("a newer minor");
     let carried = msmf::write(&m.to_input()).expect("carried forward");
     assert!(carried == golden("manifest-servers.bin"));
+
+    // The mood tail's files, read as the firmware reads them (FOLD, RECS and
+    // STRS alone): rows of 88 bytes give their 80-byte prefix's tails, the
+    // golden's every one; a tail a reader refuses gives none, nor does a row
+    // of 76, nor mptg-minor-1's 0xAB.
+    let tails = |file: &[u8]| -> Vec<Tail> {
+        let t = mptg::read(file, mptg::Uses::DEVICE).expect("the records");
+        t.records.iter().map(|e| e.rec.moods).collect()
+    };
+    let want = tails(&golden("tags-moods.bin"));
+    assert_eq!(want.iter().filter(|t| **t != moods::NO_ROW).count(), 8);
+    assert_eq!(tails(&bytes("hardening/mptg-moods-longer.bin")), want);
+    for file in ["mptg-tail-invalid.bin", "mptg-stride-76.bin", "mptg-minor-1.bin"] {
+        assert!(tails(&bytes(&format!("hardening/{file}"))).iter().all(|t| *t == moods::NO_ROW), "{file}");
+    }
+    // Carried forward, what a reader took is kept and what it refused goes:
+    // the golden each was made from, at its own stride.
+    for (file, golden_name) in [
+        ("mptg-moods-longer.bin", "tags-moods.bin"),
+        ("mptg-tail-invalid.bin", "tags-0000002a.bin"),
+        ("mptg-stride-76.bin", "tags-0000002a.bin"),
+    ] {
+        let t = mptg::read(&bytes(&format!("hardening/{file}")), mptg::Uses::ALL).expect("the records");
+        let (meta, records, folders) = t.to_input();
+        assert!(mptg::write(&meta, &records, &folders).expect("carried forward") == golden(golden_name), "{file}");
+    }
 }
 
 /// ORs `bits` into every row of a section, at `at` in the row.
@@ -1488,7 +1650,14 @@ fn newer_flag_bits_are_dropped_when_carried() {
     assert!(msmf::write(&ManifestIn { servers: root.servers.clone(), ..root.to_input() }).is_err());
     assert!(msmf::write(&ManifestIn { flags: root.flags, ..root.to_input() }).is_err());
     // The goldens' roots, carried forward unchanged.
-    for name in ["manifest.bin", "manifest-min.bin", "manifest-servers.bin", "manifest-acks.bin"] {
+    let roots = [
+        "manifest.bin",
+        "manifest-min.bin",
+        "manifest-servers.bin",
+        "manifest-acks.bin",
+        "manifest-waves.bin",
+    ];
+    for name in roots {
         let m = Manifest::read(&golden(name), msmf::Uses::ALL).expect("a root");
         assert!(msmf::write(&m.to_input()).expect("carried forward") == golden(name), "{name}");
     }
@@ -1508,9 +1677,9 @@ fn gaps(file: &[u8]) -> Vec<bool> {
     skip
 }
 
-/// Every golden but the two large indexes, cut at every byte and with every
-/// bit flipped in turn: never a panic, always absent — but where the bit is
-/// in a gap no CRC covers, where the file reads as it did.
+/// Every golden but the large ones, cut at every byte and with every bit
+/// flipped in turn: never a panic, always absent — but where the bit is in a
+/// gap no CRC covers, where the file reads as it did.
 #[test]
 fn goldens_truncated_or_flipped_are_absent() {
     let names = [
@@ -1518,15 +1687,19 @@ fn goldens_truncated_or_flipped_are_absent() {
         "tags-device.bin",
         "tags-00000001.bin",
         "tags-00000007.bin",
+        "tags-moods.bin",
         "manifest.bin",
         "manifest-min.bin",
         "manifest-servers.bin",
+        "manifest-waves.bin",
         "pending.bin",
         "autodj-00000029.bin",
         "autodj-small-top.bin",
         "autodj-small-default.bin",
         "autodj-tiny.bin",
         "autodj-pair.bin",
+        "waves-one.bin",
+        "waves-0000002a.bin",
     ];
     for name in names {
         let file = golden(name);
@@ -1549,6 +1722,25 @@ fn goldens_truncated_or_flipped_are_absent() {
                 b[at] ^= 1 << bit;
             }
         }
+    }
+}
+
+/// An MPWF file's slot CRCs made right again (when WVSL's count and place make
+/// sense), so a mutation of a slot meets the sort rule (W2), not W1. Before
+/// [`reseal`]: the section's own CRC covers the slots.
+fn reseal_slots(b: &mut [u8]) {
+    let (first, stride) = (mpwf::FIRST_SLOT as usize, mpwf::SLOT_BYTES as usize);
+    if format_of(b) != "MPWF" || b.len() < first {
+        return;
+    }
+    let (kind, offset, rows) = (prim::u32_at(b, 224), prim::u32_at(b, 232), prim::u32_at(b, 240));
+    if kind != mpwf::WVSL || offset as u64 + rows as u64 * stride as u64 > b.len() as u64 {
+        return;
+    }
+    for r in 0..rows {
+        let slot = &mut b[offset as usize + r as usize * stride..][..stride];
+        let crc = mpwf::slot_crc(slot, r);
+        slot[stride - 4..].copy_from_slice(&crc.to_le_bytes());
     }
 }
 
@@ -1584,12 +1776,15 @@ fn mutated_files_never_panic() {
         "tags-0000002a.bin",
         "tags-00000007.bin",
         "tags-device.bin",
+        "tags-moods.bin",
         "manifest.bin",
         "manifest-servers.bin",
         "manifest-acks.bin",
+        "manifest-waves.bin",
         "pending.bin",
         "autodj-00000029.bin",
         "autodj-small-default.bin",
+        "waves-0000002a.bin",
     ];
     for name in names {
         let file = golden(name);
@@ -1608,6 +1803,7 @@ fn mutated_files_never_panic() {
             if rng.bool() {
                 b.truncate(rng.usize(..=b.len()));
             }
+            reseal_slots(&mut b);
             reseal(&mut b);
             for device in [false, true] {
                 let _ = read_as(format, &b, device);
@@ -1620,35 +1816,918 @@ fn mutated_files_never_panic() {
                 }
                 let _ = (t.strings(), t.paths(), t.filter(0));
             }
+            if format == "MPWF"
+                && let Ok(t) = mpwf::Table::open(&b)
+            {
+                // Every lookup returns, its answer in the file's rows.
+                for h in [0, u64::MAX, rng.u64(..), path_hash("Artist/x.mp3")] {
+                    let found = t.find(h);
+                    assert!(found.probes.len() <= 24 && found.probes.iter().all(|&r| r < t.rows));
+                }
+                let _ = (t.slot(t.rows), t.slot_raw(t.rows));
+            }
         }
     }
     for _ in 0..2000 {
         let mut b: Vec<u8> = (0..rng.usize(40..600)).map(|_| rng.u8(..)).collect();
-        let magic = [MPTG, MSMF, MSPD, MPDJ][rng.usize(..4)];
+        let magic = [MPTG, MSMF, MSPD, MPDJ, MPWF][rng.usize(..5)];
         b[..4].copy_from_slice(&magic.to_le_bytes());
         b[4..6].copy_from_slice(&(if magic == MPDJ { 2u16 } else { 1 }).to_le_bytes());
-        let hb = [56u32, 72, 96, 104, 128][rng.usize(..5)];
+        let hb = [56u32, 72, 96, 104, 128, 224][rng.usize(..6)];
         b[8..12].copy_from_slice(&hb.to_le_bytes());
         b[12..16].copy_from_slice(&rng.u32(..8).to_le_bytes());
         let len = b.len() as u32;
         b[16..20].copy_from_slice(&len.to_le_bytes());
         reseal(&mut b);
-        for format in ["MPTG", "MSMF", "MSPD", "MPDJ"] {
+        for format in ["MPTG", "MSMF", "MSPD", "MPDJ", "MPWF"] {
             let _ = read_as(format, &b, false);
         }
     }
+}
+
+// ── The waveform index (WAVEFORM-INDEX.md) ──────────────────────────────────
+
+/// Plain hex bytes, `4d5057`.
+fn hex_bytes(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("a hex byte")).collect()
+}
+
+/// A slot of a file: its 256 bytes, with no reader's help.
+fn slot_at(file: &[u8], row: usize) -> &[u8] {
+    &file[256 + 256 * row..256 + 256 * (row + 1)]
+}
+
+/// The `scale` vectors' uniform hashes: the next of SplitMix64.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let z = (*state ^ (*state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A file of these hashes (the bars don't matter: all zero).
+fn table_of(hashes: &[u64]) -> Vec<u8> {
+    let row = |&path_hash: &u64| mpwf::Slot { path_hash, length_ms: 0, bars: [0; mpwf::BAR_COUNT] };
+    let t = mpwf::TableIn { generation: 9, rows: hashes.iter().map(row).collect(), ..mpwf::TableIn::default() };
+    mpwf::write(&t).expect("an index")
+}
+
+/// The /.player/device.txt of a `deviceTxt` or `commit` vector (13.3): its
+/// `text`; None when it has no file; else its readMpwf under a contract line,
+/// with no such key when it says so.
+fn mpwf_device_text(case: &Value) -> Option<String> {
+    if let Some(text) = case["text"].as_str() {
+        return Some(text.to_owned());
+    }
+    if case["noFile"].as_bool() == Some(true) {
+        return None;
+    }
+    let key = match case["keyMissing"].as_bool() {
+        Some(true) => String::new(),
+        _ => format!("read.mpwf={}\n", text(&case["readMpwf"])),
+    };
+    Some(format!("contract=1\n{key}"))
+}
+
+/// The rows of a `commit` vector (13.3): those of the golden file it names,
+/// less `drop`, with `lengthMs` {row: value} applied, then `add`.
+fn commit_rows(case: &Value) -> Vec<mpwf::Slot> {
+    let mut rows = Vec::new();
+    if let Some(name) = case["rows"].as_str() {
+        let file = golden(name);
+        let t = mpwf::Table::open(&file).expect("the golden");
+        let dropped: Vec<u64> = case["drop"].as_array().into_iter().flatten().map(num).collect();
+        for r in (0..t.rows).filter(|&r| !dropped.contains(&(r as u64))) {
+            let mut slot = t.slot(r).expect("the golden's slot");
+            if let Some(ms) = case["lengthMs"].get(r.to_string()) {
+                slot.length_ms = num(ms) as u32;
+            }
+            rows.push(slot);
+        }
+    }
+    rows.extend(case["add"].as_array().into_iter().flatten().map(waves_row));
+    rows
+}
+
+#[test]
+fn vectors_mpwf_names_sizes_and_bars() {
+    let v = vectors();
+    let m = &v["mpwf"];
+    for e in m["names"].as_array().expect("names") {
+        assert_eq!(msmf::companion_name(MPWF, num(&e["generation"]) as u32), text(&e["name"]));
+    }
+    for e in m["sizes"].as_array().expect("sizes") {
+        assert_eq!(mpwf::file_bytes_for(num(&e["rows"]) as u32) as u64, num(&e["fileBytes"]));
+    }
+    for group in m["barRanges"].as_array().expect("barRanges") {
+        for e in group["cases"].as_array().expect("cases") {
+            let got = mpwf::bar_range(num(&e["i"]) as usize, num(&group["m"]) as usize);
+            assert_eq!((got.0 as u64, got.1 as u64), (num(&e["start"]), num(&e["end"])), "{group}");
+        }
+    }
+    // M at least 240: the ranges part M, no gap, no overlap. Below: one peak a
+    // bar.
+    for count in 1..=2400 {
+        let mut next = 0;
+        for i in 0..mpwf::BAR_COUNT {
+            let (start, end) = mpwf::bar_range(i, count);
+            assert!(start < end && end <= count, "{i} of {count}");
+            if count >= mpwf::BAR_COUNT {
+                assert_eq!(start, next, "{i} of {count}");
+                next = end;
+            } else {
+                assert_eq!(end - start, 1, "{i} of {count}");
+            }
+        }
+        assert!(count < mpwf::BAR_COUNT || next == count, "{count}");
+    }
+
+    // The peaks and bars in hex, or a map of the ones not 0.
+    let cases = m["bars"].as_array().expect("bars");
+    assert!(cases.len() >= 10);
+    for e in cases {
+        let note = text(&e["note"]);
+        let sparse = |at: &str, into: &mut [u8]| {
+            for (i, b) in e[at].as_object().into_iter().flatten() {
+                into[i.parse::<usize>().expect("an index")] = num(b) as u8;
+            }
+        };
+        let mut peaks = e["peaks"].as_str().map_or(vec![0; num(&e["m"]) as usize], hex_bytes);
+        sparse("peaksAt", &mut peaks);
+        let mut want = e["bars"].as_str().map_or(vec![0; mpwf::BAR_COUNT], hex_bytes);
+        sparse("barsAt", &mut want);
+        assert_eq!(peaks.len() as u64, num(&e["m"]), "{note}");
+        assert_eq!(mpwf::bars_from(&peaks).as_slice(), want.as_slice(), "{note}");
+    }
+    // The integer reading of the rule agrees, on random peaks of many widths:
+    // a bar is the largest v with w (2v − 1)^2 ≤ 4n, or 0.
+    let mut rng = fastrand::Rng::with_seed(20_261_101);
+    for _ in 0..50 {
+        for m in [1, 2, 3, 7, 239, 240, 241, 480, 800, 1000, 1600] {
+            let top = rng.u16(1..=255);
+            let peaks: Vec<u8> = (0..m).map(|_| rng.u16(0..=top) as u8).collect();
+            let bars = mpwf::bars_from(&peaks);
+            for (i, &bar) in bars.iter().enumerate() {
+                let (start, end) = mpwf::bar_range(i, m);
+                let n: u64 = peaks[start..end].iter().map(|&b| b as u64 * b as u64).sum();
+                let w = (end - start) as u64;
+                let holds = |v: u64| v == 0 || w * (2 * v - 1) * (2 * v - 1) <= 4 * n;
+                let v = (0..=255).rev().find(|&v| holds(v)).expect("0 always holds");
+                assert_eq!(bar as u64, v, "bar {i} of M = {m}");
+            }
+        }
+    }
+    // No peaks: zeros, not a division by 0.
+    assert_eq!(mpwf::bars_from(&[]), [0; mpwf::BAR_COUNT]);
+}
+
+#[test]
+fn vectors_mpwf_slots_and_sections() {
+    let v = vectors();
+    let m = &v["mpwf"];
+    let s = &m["slot"];
+    let raw = hex_bytes(text(&s["bytes"]));
+    let row = num(&s["row"]) as u32;
+    assert_eq!(raw, slot_at(&golden(text(&s["file"])), row as usize));
+    assert_eq!(mpwf::slot_crc(&raw, row) as u64, num(&s["crc"]));
+    assert_eq!(prim::u32_at(&raw, 252) as u64, num(&s["crc"]));
+    assert_eq!(crc32(&raw[..252]) as u64, num(&s["unseeded"]));
+    assert_ne!(mpwf::slot_crc(&raw, row + 1) as u64, num(&s["crc"]), "another row's");
+    let slot = mpwf::Slot::decode(&raw);
+    assert_eq!(slot.path_hash, num(&s["pathHash"]));
+    assert_eq!(slot.path_hash, path_hash(text(&s["path"])));
+    assert_eq!(slot.length_ms as u64, num(&s["lengthMs"]));
+    assert!(slot.bars.iter().all(|&b| b as u64 == num(&s["barsAll"])));
+    assert_eq!(slot.encode(row).as_slice(), raw.as_slice());
+
+    let s = &m["slotCrc"];
+    let file = golden(text(&s["file"]));
+    let row = num(&s["row"]) as usize;
+    let raw = slot_at(&file, row);
+    assert_eq!(mpwf::slot_crc(raw, row as u32) as u64, num(&s["crc"]));
+    assert_eq!(prim::u32_at(raw, 252) as u64, num(&s["crc"]));
+    assert_eq!(crc32(&raw[..252]) as u64, num(&s["unseeded"]));
+
+    // WVSL's CRC depends only on the row count when every slot passes: two
+    // files that share nothing but that have one, and so one header CRC (4.2).
+    let sections = m["sectionCrc"].as_array().expect("sectionCrc");
+    assert_eq!(sections.len(), 2);
+    for e in sections {
+        let file = golden(text(&e["file"]));
+        let t = mpwf::Table::open(&file).expect("the golden");
+        assert_eq!(t.rows as u64, num(&e["rows"]));
+        assert_eq!(prim::u32_at(&file, 224 + 24) as u64, num(&e["crc"]));
+        assert_eq!(crc32(t.wvsl()) as u64, num(&e["crc"]));
+        let hashes: Vec<u64> = (1..=t.rows as u64).map(|r| r * 0x0012_3456_789A_BCDE).collect();
+        let other = table_of(&hashes);
+        assert_eq!(prim::u32_at(&other, 224 + 24) as u64, num(&e["crc"]));
+    }
+}
+
+#[test]
+fn vectors_mpwf_search() {
+    let v = vectors();
+    let m = &v["mpwf"];
+    let picks = m["pick"].as_array().expect("pick");
+    assert!(picks.len() >= 10);
+    for e in picks {
+        let field = |k: &str| num(&e[k]) as u32;
+        let got = mpwf::pick(num(&e["h"]), field("lo"), field("hi"), num(&e["loH"]), num(&e["hiH"]), field("probes"));
+        assert_eq!(got as u64, num(&e["row"]), "{}", e["note"]);
+    }
+    // In 64 bits at the largest product: every answer inside lo..hi, whatever
+    // the hash and the bounds.
+    let mut rng = fastrand::Rng::with_seed(20_261_102);
+    for _ in 0..200_000 {
+        let (a, b) = (rng.u64(..), rng.u64(..));
+        let (a, b) = (a.min(b), a.max(b));
+        let h = rng.u64(a..=b);
+        let lo = rng.u32(..mpwf::MAX_ROWS);
+        let hi = rng.u32(lo..mpwf::MAX_ROWS);
+        let probes = rng.u32(..6);
+        let r = mpwf::pick(h, lo, hi, a, b, probes);
+        assert!((lo..=hi).contains(&r), "{h} {lo} {hi} {a} {b} {probes}");
+        assert!(probes < 4 || r == lo + (hi - lo) / 2);
+    }
+
+    // Each lookup's answer and the rows it reads, in order.
+    let files = m["search"]["files"].as_object().expect("files");
+    assert_eq!(files.len(), 3);
+    let mut lookups = 0;
+    for (name, cases) in files {
+        let file = golden(name);
+        let t = mpwf::Table::open(&file).expect("the golden");
+        for e in cases.as_array().expect("cases") {
+            let what = format!("{name} {}", e["hash"]);
+            let found = t.find(num(&e["hash"]));
+            assert_eq!(lookup_name(found.lookup), text(&e["read"]), "{what}");
+            assert_eq!(found.lookup.why(), Why::Ok, "{what}");
+            let probes: Vec<u64> = e["probes"].as_array().expect("probes").iter().map(num).collect();
+            assert_eq!(found.probes.iter().map(|&r| r as u64).collect::<Vec<_>>(), probes, "{what}");
+            if let Some(row) = e.get("row") {
+                let r = num(row) as u32;
+                assert_eq!(found.row, Some(r), "{what}");
+                let slot = found.slot.as_ref().expect("a hit's slot");
+                assert_eq!(slot.path_hash, num(&e["hash"]), "{what}");
+                assert_eq!(slot.encode(r).as_slice(), slot_at(&file, r as usize), "{what}");
+            }
+            lookups += 1;
+        }
+    }
+    assert!(lookups >= 20);
+
+    // What the search costs: the same reads, summed, on the two sets of hashes
+    // built by rule (13.3).
+    let scale = &m["scale"];
+    let first: Vec<u64> = scale["splitmix64"].as_array().expect("splitmix64").iter().map(num).collect();
+    let mut state = 0;
+    assert_eq!((0..3).map(|_| splitmix64(&mut state)).collect::<Vec<_>>(), first);
+    let reads = |file: &[u8], hashes: &[u64], want: mpwf::Lookup| {
+        let t = mpwf::Table::open(file).expect("the table");
+        let mut out = (0u64, 0usize);
+        for &h in hashes {
+            let found = t.find(h);
+            assert_eq!(found.lookup, want, "{h:#x}");
+            out = (out.0 + found.probes.len() as u64, out.1.max(found.probes.len()));
+        }
+        out
+    };
+    let check = |e: &Value, rows: &[u64], misses: &[u64]| {
+        assert_eq!((rows.len() as u64, misses.len() as u64), (num(&e["rows"]), num(&e["misses"])));
+        let file = table_of(rows);
+        let (hit_reads, hit_max) = reads(&file, rows, mpwf::Lookup::Hit);
+        let (miss_reads, miss_max) = reads(&file, misses, mpwf::Lookup::Miss);
+        assert_eq!((hit_reads, hit_max as u64), (num(&e["hitReads"]), num(&e["hitMax"])));
+        assert_eq!((miss_reads, miss_max as u64), (num(&e["missReads"]), num(&e["missMax"])));
+    };
+    let e = &scale["uniform"];
+    let mut state = 0;
+    let rows: Vec<u64> = (0..num(&e["rows"])).map(|_| splitmix64(&mut state)).collect();
+    let misses: Vec<u64> = (0..num(&e["misses"])).map(|_| splitmix64(&mut state)).collect();
+    check(e, &rows, &misses);
+    assert_eq!(text(&scale["pattern"]), "Generated Artist %03d/Sample Album %d/%d - Sample Title.mp3");
+    assert_eq!(text(&scale["missPattern"]), "Hand Copied/%05d.flac");
+    let mut rows = Vec::new();
+    for artist in 0..400 {
+        for album in 0..5 {
+            for track in 0..10 {
+                let rel = format!("Generated Artist {artist:03}/Sample Album {album}/{track} - Sample Title.mp3");
+                rows.push(path_hash(&rel));
+            }
+        }
+    }
+    let misses: Vec<u64> = (0..5000).map(|i| path_hash(&format!("Hand Copied/{i:05}.flac"))).collect();
+    check(&scale["paths"], &rows, &misses);
+}
+
+/// The row limit (13.3): 250,000 rows open and 250,001 read `enum`, from the
+/// vectors' first 256 bytes and no slot; a writer writes the one and refuses
+/// the other. The most a lookup can take, at the most rows, consecutive
+/// hashes at either end: 22 reads (6).
+#[test]
+fn vectors_mpwf_row_limit() {
+    let v = vectors();
+    let cases = v["mpwf"]["rowLimit"].as_array().expect("rowLimit");
+    assert_eq!(cases.len(), 2);
+    for e in cases {
+        // Zero pages the system gives lazily: no 64 MB touched.
+        let mut file = vec![0u8; num(&e["fileBytes"]) as usize];
+        file[..256].copy_from_slice(&hex_bytes(text(&e["head"])));
+        let t = mpwf::Table::open(&file);
+        assert_eq!(t.as_ref().err().copied().unwrap_or(Why::Ok).name(), text(&e["why"]));
+        assert_eq!(t.map_or(0, |t| t.rows) as u64, if text(&e["why"]) == "ok" { num(&e["rows"]) } else { 0 });
+    }
+
+    let at_most = mpwf::MAX_ROWS as u64;
+    let want = hex_bytes(text(&cases[0]["head"]));
+    let row = |path_hash: u64| mpwf::Slot { path_hash, length_ms: 0, bars: [0; mpwf::BAR_COUNT] };
+    for base in [0, u64::MAX - (at_most - 1)] {
+        let rows: Vec<mpwf::Slot> = (0..at_most).map(|r| row(base + r)).collect();
+        let (generation, card_id) = (prim::u32_at(&want, 20), prim::u64_at(&want, 24));
+        let mut t = mpwf::TableIn { generation, card_id, minor: 0, rows };
+        let file = mpwf::write(&t).expect("the most rows");
+        assert_eq!(file.len() as u64, num(&cases[0]["fileBytes"]));
+        // Its frame is the vector's but for WVSL's CRC (0 there: no reader of
+        // that head reads the slots) and so the header's.
+        assert!(file[..32] == want[..32] && file[36..248] == want[36..248] && file[252..256] == want[252..256]);
+        let table = mpwf::Table::open(&file).expect("the most rows");
+        let mut most = 0;
+        for r in (0..at_most).step_by(251).chain(0..64).chain(at_most - 64..at_most) {
+            let found = table.find(base + r);
+            assert_eq!((found.lookup, found.row), (mpwf::Lookup::Hit, Some(r as u32)));
+            most = most.max(found.probes.len());
+        }
+        assert_eq!(most, 22, "the guard of 24 can't fire on a valid file");
+        t.rows.push(row(base.wrapping_sub(1)));
+        assert!(mpwf::write(&t).is_err(), "250,001 rows");
+    }
+}
+
+/// A file's first bytes and its length say what the whole file does: no check
+/// of 8.1 or 8.2 reads a slot, and a head of 256 bytes opens 250,000 rows.
+#[test]
+fn mpwf_files_read_the_same_from_their_head() {
+    let head = |b: &[u8]| mpwf::open_head(&b[..b.len().min(mpwf::HEAD_BYTES)], b.len() as u64);
+    let whole = |b: &[u8]| mpwf::Table::open(b).map(|t| *t.header());
+    let index = json("hardening/index.json");
+    let files = index.as_array().expect("the index").iter().filter(|e| text(&e["format"]) == "MPWF");
+    assert_eq!(files.clone().count(), 50);
+    for e in files {
+        let b = bytes(&format!("hardening/{}", text(&e["file"])));
+        assert_eq!(head(&b), whole(&b), "{}", text(&e["file"]));
+    }
+    for name in ["waves-one.bin", "waves-0000002a.bin", "waves-skew.bin"] {
+        let b = golden(name);
+        assert_eq!(head(&b), whole(&b), "{name}");
+        assert!(head(&b).is_ok(), "{name}");
+        // Its length is checked, whatever the head says.
+        assert_eq!(mpwf::open_head(&b[..256], b.len() as u64 + 256), Err(Why::FileBytes), "{name}");
+        // A head that stops short of the directory can't vouch for it.
+        assert_eq!(mpwf::open_head(&b[..200], b.len() as u64), Err(Why::Short), "{name}");
+    }
+    let v = vectors();
+    for e in v["mpwf"]["rowLimit"].as_array().expect("rowLimit") {
+        let got = mpwf::open_head(&hex_bytes(text(&e["head"])), num(&e["fileBytes"]));
+        assert_eq!(got.err().unwrap_or(Why::Ok).name(), text(&e["why"]), "{e}");
+    }
+}
+
+#[test]
+fn vectors_mpwf_device_txt_and_commit() {
+    let v = vectors();
+    let m = &v["mpwf"];
+    assert_eq!(m["deviceTxt"]["who"], "software");
+    for e in m["deviceTxt"]["cases"].as_array().expect("deviceTxt") {
+        let txt = mpwf_device_text(e);
+        let t = DeviceTxt::read(txt.as_deref().map(str::as_bytes));
+        assert_eq!(t.writes_mpwf(), e["writes"].as_bool().expect("a bool"), "{e}");
+        assert_eq!(t.reads(Format::Mpwf, 1), t.writes_mpwf(), "{e}");
+    }
+    // The fixture card's, every key in 2.15's place: read.mpwf after read.mpdj,
+    // history last.
+    let file = DeviceTxt::read(Some(&golden("device.txt")));
+    assert_eq!(file.read_mpwf, 1);
+    let txt = file.to_text();
+    let keys: Vec<&str> = txt.lines().filter_map(|l| l.split_once('=')).map(|kv| kv.0).collect();
+    assert_eq!(keys, [
+        "contract",
+        "firmware",
+        "read.msmf",
+        "read.mptg",
+        "read.mpdj",
+        "read.mpwf",
+        "read.mpth",
+        "codecs",
+        "extensions",
+        "max_rate",
+        "max_channels",
+        "history",
+    ]);
+
+    // 7.3's table, the first line that holds.
+    assert_eq!(m["commit"]["who"], "software");
+    let cases = m["commit"]["cases"].as_array().expect("commit");
+    assert!(cases.len() >= 8);
+    for e in cases {
+        let note = text(&e["note"]);
+        let txt = mpwf_device_text(e);
+        let writes = DeviceTxt::read(txt.as_deref().map(str::as_bytes)).writes_mpwf();
+        let old = e["old"].as_str().map(golden);
+        let table = old.as_ref().map(|b| mpwf::Table::open(b).expect("the golden"));
+        let want = match text(&e["outcome"]) {
+            "none" => mpwf::Outcome::None,
+            "same" => mpwf::Outcome::Same,
+            "new" => mpwf::Outcome::New,
+            other => panic!("an outcome: {other}"),
+        };
+        assert_eq!(mpwf::outcome(writes, table.as_ref(), &commit_rows(e)), want, "{note}");
+    }
+}
+
+/// What a reader takes from a root's COMP (7.2, `rootRow`): a bad row costs
+/// only itself, and its name is still a string of the root.
+#[test]
+fn vectors_mpwf_root_row() {
+    let v = vectors();
+    let r = &v["mpwf"]["rootRow"];
+    let mut cases: Vec<(String, &Value)> = vec![(format!("golden/{}", text(&r["golden"]["file"])), &r["golden"])];
+    let rows = r["hardening"].as_array().expect("hardening");
+    cases.extend(rows.iter().map(|e| (format!("hardening/{}", text(&e["file"])), e)));
+    assert_eq!(cases.len(), 12);
+    for (rel, e) in cases {
+        let file = bytes(&rel);
+        // The device takes the row too: it reads this kind.
+        for uses in [msmf::Uses::ALL, msmf::Uses::DEVICE] {
+            let m = Manifest::read(&file, uses).expect(&rel);
+            assert_eq!(m.tags.name(), "tags-0000002a.bin", "{rel}");
+            if !rel.contains("no-mpdj") {
+                assert_eq!(m.autodj.as_ref().map(Comp::name).as_deref(), Some("autodj-00000029.bin"), "{rel}");
+            }
+            let Some(name) = e["waves"].as_str() else {
+                assert_eq!(m.waves, None, "{rel}");
+                continue;
+            };
+            let row = m.waves.as_ref().expect(&rel);
+            assert_eq!((row.kind, row.name().as_str()), (MPWF, name), "{rel}");
+            // The row against the golden file of that name; the signature an
+            // MPDJ row compares isn't looked at.
+            let waves = golden(name);
+            let t = mpwf::Table::open(&waves).expect("the golden");
+            let matches = e["matches"].as_bool().expect("a bool");
+            assert_eq!(msmf::companion_matches(row, t.header(), 0, None), matches, "{rel}");
+            assert_eq!(msmf::companion_matches(row, t.header(), 0, Some(&[1; 16])), matches, "{rel}");
+        }
+    }
+    // The two whose name breaks a string rule fail the root, as for any kind.
+    for (name, why) in [("msmf-waves-name-range.bin", Why::String), ("msmf-waves-name-order.bin", Why::StringOrder)] {
+        assert_eq!(read_as("MSMF", &bytes(&format!("hardening/{name}")), false), why, "{name}");
+    }
+    // An unknown kind stays ignored, and doesn't count as a second row.
+    let root = Manifest::read(&bytes("hardening/msmf-comp-unknown-kind.bin"), msmf::Uses::ALL).expect("a root");
+    assert_eq!(root.waves, None);
+
+    // manifest-waves.bin carries its file from generation 42: the file named
+    // again, older than the root. The fixture card's own root names none.
+    let m = Manifest::read(&golden("manifest-waves.bin"), msmf::Uses::ALL).expect("a root");
+    let row = m.waves.clone().expect("its row");
+    assert_eq!((m.header.generation, row.generation, row.key), (43, 42, [0; 16]));
+    assert_eq!(Comp::of(&golden("waves-0000002a.bin")).as_ref(), Some(&row));
+    assert_eq!(Manifest::read(&golden("manifest.bin"), msmf::Uses::ALL).expect("a root").waves, None);
+    // The row against a header: the file named, and any other not.
+    let t = mpwf::Table::open(&golden("waves-0000002a.bin")).map(|t| *t.header()).expect("the golden");
+    assert!(msmf::companion_matches(&row, &t, 0, None));
+    let others = [
+        container::Header { magic: MPDJ, ..t },
+        container::Header { generation: t.generation ^ 1, ..t },
+        container::Header { file_bytes: t.file_bytes ^ 1, ..t },
+        container::Header { header_crc: t.header_crc ^ 1, ..t },
+    ];
+    assert!(others.iter().all(|h| !msmf::companion_matches(&row, h, 0, None)));
+    let mut keyed = row.clone();
+    keyed.key[15] = 1;
+    assert!(!msmf::companion_matches(&keyed, &t, 0, None));
+
+    // Carried forward, a row reads as this writer writes it: after the MPTG
+    // and the MPDJ, its name after theirs, its key zeros. A row that didn't
+    // count goes.
+    let golden_root = golden("manifest-waves.bin");
+    for name in ["msmf-waves-between.bin", "msmf-waves-first.bin"] {
+        let m = Manifest::read(&bytes(&format!("hardening/{name}")), msmf::Uses::ALL).expect(name);
+        assert!(msmf::write(&m.to_input()).expect("carried forward") == golden_root, "{name}");
+    }
+    let m = Manifest::read(&bytes("hardening/msmf-waves-key.bin"), msmf::Uses::ALL).expect("a root");
+    assert_ne!(m.waves.as_ref().map(|c| c.key), Some([0; 16]));
+    assert!(msmf::write(&m.to_input()).expect("carried forward") == golden_root);
+    let m = Manifest::read(&bytes("hardening/msmf-waves-two.bin"), msmf::Uses::ALL).expect("a root");
+    let again = msmf::write(&m.to_input()).expect("carried forward");
+    assert_eq!(Manifest::read(&again, msmf::Uses::ALL).expect("a root").waves, None);
+}
+
+/// 13.4's facts about the goldens, each spelled out here and not taken from
+/// the reader; and what the device's reader makes of a cut or a flipped bit:
+/// it opens only the first 256 bytes (13.6).
+#[test]
+fn the_waves_goldens_read_back() {
+    let file = golden("waves-0000002a.bin");
+    let t = mpwf::Table::open(&file).expect("the golden");
+    t.check().expect("a whole file");
+    let h = t.header();
+    assert_eq!((h.major, h.minor, h.header_bytes, h.section_count), (1, 0, 224, 1));
+    assert_eq!((h.file_bytes, h.generation, h.card_id), (2048, 42, 0x5EED_C0DE_0A1B_2C3D));
+    assert_eq!(t.rows, 7);
+    let rows = [
+        ("Cafe\u{301}/Album/01 - Title.mp3", 0x5701_7C0C_C011_BB1B, 193_000),
+        ("Artist/Album/CD1/01 - Disc One.flac", 0x6137_B0E2_A671_5752, 183_000),
+        ("A/x.mp3", 0x954A_7DE3_A079_A42E, 186_000),
+        ("Artist/x.mp3", 0xC486_74AC_937F_2ADA, 0),
+        ("Artist/Album/02 - Other.mp3", 0xCADB_3EFD_EF4B_2DD9, 181_000),
+        ("Artist/Album/01 - Title.mp3", 0xDA70_B312_7601_88D8, 180_000),
+        ("Caf\u{e9}/Album/01 - Title.mp3", 0xF1B2_4FC7_5749_4F2B, 192_000),
+    ];
+    let slots: Vec<mpwf::Slot> = (0..7).map(|r| t.slot(r).expect("a good slot")).collect();
+    for (r, (path, hash, ms)) in rows.iter().enumerate() {
+        assert_eq!((path_hash(path), slots[r].path_hash, slots[r].length_ms), (*hash, *hash, *ms), "{path}");
+        assert_eq!(t.find(*hash).row, Some(r as u32), "{path}");
+    }
+    // Their bars: M = 3, 80 of each; silence has a slot; a brick; every third
+    // bar a tie, rounded up; a ramp to 254; M = 2, 120 of each.
+    let of = |k: u8, n: usize| vec![k; n];
+    assert_eq!(slots[0].bars.as_slice(), [of(30, 80), of(40, 80), of(50, 80)].concat());
+    assert!(slots[1].bars.iter().any(|&b| b != 0) && slots[1].bars.iter().all(|&b| b <= 239));
+    assert_eq!(slots[2].bars, [0; mpwf::BAR_COUNT]);
+    assert_eq!(slots[3].bars, [255; mpwf::BAR_COUNT]);
+    for (k, &b) in slots[4].bars.iter().enumerate() {
+        assert_eq!(b as usize, if k % 3 == 2 { k / 3 + 1 } else { 0 }, "bar {k}");
+    }
+    assert!(slots[5].bars.is_sorted() && slots[5].bars[239] == 254);
+    assert_eq!(slots[6].bars.as_slice(), [of(10, 120), of(20, 120)].concat());
+
+    // waves-one.bin, the smallest file: 13.4's dump.
+    let one = golden("waves-one.bin");
+    assert_eq!(one.len(), 512);
+    assert_eq!(spaced_of(&one[..16]), "4D 50 57 46 01 00 00 00 E0 00 00 00 01 00 00 00");
+    assert_eq!(spaced_of(&one[16..32]), "00 02 00 00 01 00 00 00 3D 2C 1B 0A DE C0 ED 5E");
+    assert_eq!(spaced_of(&one[32..48]), "26 AC D6 9D 00 00 00 00 00 01 00 00 F0 00 00 00");
+    assert!(one[48..224].iter().all(|&b| b == 0));
+    assert_eq!(spaced_of(&one[224..240]), "57 56 53 4C 01 00 00 00 00 01 00 00 00 01 00 00");
+    assert_eq!(spaced_of(&one[240..256]), "01 00 00 00 00 01 00 00 5F 2A 7B BD 00 00 00 00");
+    assert_eq!(spaced_of(&one[256..272]), "D8 88 01 76 12 B3 70 DA 20 BF 02 00 40 40 40 40");
+    assert_eq!(spaced_of(&one[508..]), "1C 4F EF B0");
+
+    // waves-skew.bin: 49 rows from hash 0 to 2^64 − 1, and the two tracks of
+    // one hash left out.
+    let skew = golden("waves-skew.bin");
+    let t = mpwf::Table::open(&skew).expect("the golden");
+    t.check().expect("a whole file");
+    let hash = |r: u32| t.slot(r).expect("a good slot").path_hash;
+    assert_eq!((t.rows, hash(0), hash(40), hash(48)), (49, 0, 1 << 62, u64::MAX));
+    assert_eq!(t.find(1 << 63).lookup, mpwf::Lookup::Miss);
+    assert_eq!(t.find(20).probes, [0, 1, 2, 3, 26, 14, 20], "num is 0, so r = lo, four times, then it bisects");
+
+    // The bytes after the first 256 are WVSL's: the device reads them when it
+    // needs a slot, and the frame alone stands or falls on the rest.
+    for name in ["waves-one.bin", "waves-0000002a.bin"] {
+        let file = golden(name);
+        assert!((0..file.len()).all(|n| read_as("MPWF", &file[..n], true) != Why::Ok), "{name} cut");
+        let mut b = file.clone();
+        for at in 0..b.len() {
+            for bit in 0..8 {
+                b[at] ^= 1 << bit;
+                let why = read_as("MPWF", &b, true);
+                if at < 256 {
+                    assert_ne!(why, Why::Ok, "{name}: byte {at} bit {bit}");
+                } else {
+                    assert_eq!(why, Why::Ok, "{name}: byte {at} bit {bit}");
+                }
+                b[at] ^= 1 << bit;
+            }
+        }
+    }
+}
+
+/// The checks of a slot in their place (8.3, 8.4), and the search on tables of
+/// every shape against a walk from row 0: every row found at its row, nothing
+/// else found.
+#[test]
+fn a_damaged_slot_a_broken_writer_and_tables_of_every_shape() {
+    // A damaged slot costs only the lookups that read it: the file stays, and
+    // only a whole-file check reads it as the file's absence.
+    let file = golden("waves-0000002a.bin");
+    let t = mpwf::Table::open(&file).expect("the golden");
+    let hashes: Vec<u64> = (0..7).map(|r| t.slot(r).expect("a good slot").path_hash).collect();
+    for bad in 0..7usize {
+        let mut b = file.clone();
+        b[256 + bad * 256 + 100] ^= 0x10;
+        let t = mpwf::Table::open(&b).expect("its frame is good");
+        assert_eq!(t.check(), Err(Why::WvSlotCrc));
+        assert_eq!(t.slot(bad as u32), Err(Why::WvSlotCrc));
+        let mut damaged = 0;
+        for (r, &h) in hashes.iter().enumerate() {
+            let found = t.find(h);
+            let read_bad = found.probes.contains(&(bad as u32));
+            let want = if read_bad { mpwf::Lookup::Damaged } else { mpwf::Lookup::Hit };
+            assert_eq!(found.lookup, want, "slot {bad} damaged, row {r}");
+            assert_eq!(found.lookup.why(), if read_bad { Why::WvSlotCrc } else { Why::Ok });
+            damaged += read_bad as u32;
+        }
+        assert!(damaged >= 1, "its own row at least");
+    }
+    assert_eq!(t.slot(t.rows), Err(Why::WvSlotCrc), "no such row");
+    assert_eq!(t.slot_raw(t.rows), None);
+
+    // A good CRC over a hash that breaks the sort rule: at the first bound
+    // that meets it, whichever bound it is, a hash equal to a bound too. A
+    // slot a lookup doesn't read can't stop it.
+    let good: Vec<u64> = (0..7).map(|i| 0x1000_0000_0000_0000 + i * 0x2000_0000_0000_0000).collect();
+    let good = table_of(&good);
+    let with_hash = |row: usize, hash: u64| {
+        let mut b = good.clone();
+        let slot = &mut b[256 + row * 256..][..256];
+        slot[..8].copy_from_slice(&hash.to_le_bytes());
+        let crc = mpwf::slot_crc(slot, row as u32);
+        slot[252..].copy_from_slice(&crc.to_le_bytes());
+        b
+    };
+    let cases = [
+        (1, 0x6000_0000_0000_0000, 0x4000_0000_0000_0000, mpwf::Lookup::Broken),
+        (1, 0x5000_0000_0000_0000, 0x4000_0000_0000_0000, mpwf::Lookup::Broken),
+        (4, 0x6000_0000_0000_0000, 0x8000_0000_0000_0000, mpwf::Lookup::Broken),
+        (4, 0x7000_0000_0000_0000, 0x8000_0000_0000_0000, mpwf::Lookup::Broken),
+        (1, 0x6000_0000_0000_0000, 0xB000_0000_0000_0000, mpwf::Lookup::Hit),
+    ];
+    for (row, hash, look_for, want) in cases {
+        let b = with_hash(row, hash);
+        let t = mpwf::Table::open(&b).expect("its frame is good");
+        assert_eq!(t.find(look_for).lookup, want, "{row} {hash:#x} {look_for:#x}");
+        assert_eq!(t.check(), Err(Why::WvSlotOrder), "{row} {hash:#x}");
+    }
+    // What a whole-file check meets first: the CRC before the order, row by
+    // row; WVSL's CRC last.
+    let mut b = table_of(&[1 << 60, 2 << 60, 3 << 60]);
+    b[256 + 256 + 7] = 0x90;
+    assert_eq!(mpwf::Table::open(&b).expect("its frame").check(), Err(Why::WvSlotCrc));
+    reseal_slots(&mut b);
+    assert_eq!(mpwf::Table::open(&b).expect("its frame").check(), Err(Why::WvSlotOrder));
+    b[256 + 256 + 7] = 0x20;
+    reseal_slots(&mut b);
+    assert_eq!(mpwf::Table::open(&b).expect("its frame").check(), Ok(()));
+
+    // Every small count, the extremes in place; skewed: everything low,
+    // everything high, a clump, powers of two, clumps at both ends, spans
+    // around the 2^32 where the interpolation gives way. The search never goes
+    // wrong on them, only slower.
+    let walk = |hashes: &[u64], what: &str| {
+        let mut sorted = hashes.to_vec();
+        sorted.sort_unstable();
+        let file = table_of(hashes);
+        assert_eq!(file.len() as u32, mpwf::file_bytes_for(sorted.len() as u32), "{what}");
+        let t = mpwf::Table::open(&file).expect(what);
+        t.check().expect(what);
+        for (r, &h) in sorted.iter().enumerate() {
+            let found = t.find(h);
+            assert_eq!((found.lookup, found.row), (mpwf::Lookup::Hit, Some(r as u32)), "{what}: {h:#x}");
+            assert!(found.probes.len() <= 22, "{what}: {h:#x}");
+            for near in [h.wrapping_sub(1), h.wrapping_add(1)] {
+                if sorted.binary_search(&near).is_err() {
+                    let found = t.find(near);
+                    assert_eq!(found.lookup, mpwf::Lookup::Miss, "{what}: {near:#x}");
+                    assert!(found.probes.len() <= 22, "{what}: {near:#x}");
+                }
+            }
+        }
+    };
+    let mut rng = fastrand::Rng::with_seed(20_261_103);
+    for n in 1..=70 {
+        let mut hashes: BTreeSet<u64> = BTreeSet::new();
+        while hashes.len() < n {
+            hashes.insert(rng.u64(..));
+        }
+        let mut hashes: Vec<u64> = hashes.into_iter().collect();
+        walk(&hashes, "uniform");
+        hashes[0] = 0;
+        walk(&hashes, "with hash 0");
+        *hashes.last_mut().expect("a row") = u64::MAX;
+        walk(&hashes, "with hash 0 and 2^64 - 1");
+    }
+    let low: Vec<u64> = (0..3000).collect();
+    walk(&low, "consecutive from 0");
+    walk(&low.iter().map(|i| u64::MAX - i).collect::<Vec<_>>(), "consecutive up to 2^64 - 1");
+    walk(&low.iter().map(|i| 0x7000_0000_0000_0000 + i * 3).collect::<Vec<_>>(), "a clump");
+    walk(&low.iter().map(|&i| if i % 2 == 1 { i } else { u64::MAX - i }).collect::<Vec<_>>(), "clumps at both ends");
+    walk(&(0..64).map(|bit| 1u64 << bit).collect::<Vec<_>>(), "powers of two");
+    walk(&(0..2000).map(|i| 0x1_2345_6789 + i * 0x100_0000).collect::<Vec<_>>(), "under and over 2^32");
+}
+
+/// The writer's edges (4, 7.3): no row is no file; a hash two rows share is
+/// left out, both, whichever order they came in; each CRC is made for its
+/// place; the header's padding and the reserved fields are zeros.
+#[test]
+fn the_waves_writer_at_its_edges() {
+    let d = library("waves-0000002a");
+    let mut input = waves_input(&d);
+    let want = golden("waves-0000002a.bin");
+    assert!(mpwf::write(&input).expect("an index") == want);
+    let mut rng = fastrand::Rng::with_seed(13);
+    for _ in 0..8 {
+        rng.shuffle(&mut input.rows);
+        assert!(mpwf::write(&input).expect("in any order") == want);
+    }
+
+    let row = |path_hash, length_ms| mpwf::Slot { path_hash, length_ms, bars: [7; mpwf::BAR_COUNT] };
+    let with = |rows| mpwf::TableIn { generation: 3, card_id: 0x1122_3344_5566_7788, minor: 2, rows };
+    assert!(mpwf::write(&with(Vec::new())).is_err(), "a writer with no row writes no file");
+    assert!(mpwf::write(&with(vec![row(3, 0), row(3, 1), row(3, 2)])).is_err(), "nothing left");
+    let rows = vec![row(3, 300), row(1, 111), row(2, 200), row(9, 900), row(2, 222)];
+    assert_eq!(
+        mpwf::in_row_order(&rows).iter().map(|s| s.path_hash).collect::<Vec<_>>(),
+        [1, 3, 9],
+        "a shared hash left out"
+    );
+    let file = mpwf::write(&with(rows)).expect("an index");
+    let t = mpwf::Table::open(&file).expect("reads");
+    t.check().expect("a whole file");
+    let h = t.header();
+    assert_eq!((t.rows, h.minor, h.generation, h.card_id), (3, 2, 3, 0x1122_3344_5566_7788));
+    assert_eq!(t.find(2).lookup, mpwf::Lookup::Miss);
+    assert_eq!(t.find(1).slot.as_ref().map(|s| s.length_ms), Some(111));
+    assert_eq!((prim::u32_at(&file, 36), prim::u32_at(&file, 40), prim::u32_at(&file, 44)), (0, 256, 240));
+    assert!(file[48..224].iter().all(|&b| b == 0));
+    assert_eq!(prim::u32_at(&file, 224 + 28), 0);
+
+    // The root's writer: COMP's order is a writer's rule (7.2).
+    let tags = Comp::of(&golden("tags-0000002a.bin")).expect("a companion");
+    let dj = Comp::of(&golden("autodj-00000029.bin")).expect("a companion");
+    let waves = Comp::of(&want).expect("a companion");
+    assert_eq!((waves.kind, waves.name().as_str(), waves.file_bytes), (MPWF, "waves-0000002a.bin", 2048));
+    let root = |comps: &[&Comp]| {
+        let comps = comps.iter().map(|c| (*c).clone()).collect();
+        msmf::write(&ManifestIn { generation: 43, comps, ..ManifestIn::default() })
+    };
+    assert!(root(&[&tags]).is_ok() && root(&[&tags, &dj]).is_ok());
+    for comps in [&[&tags, &waves][..], &[&tags, &dj, &waves][..]] {
+        let m = Manifest::read(&root(comps).expect("a root"), msmf::Uses::ALL).expect("reads");
+        assert_eq!(m.waves.as_ref(), Some(&waves));
+    }
+    for comps in [
+        &[&waves][..],
+        &[&waves, &tags][..],
+        &[&tags, &waves, &dj][..],
+        &[&tags, &waves, &waves][..],
+        &[&tags, &dj, &dj][..],
+        &[&tags, &dj, &waves, &waves][..],
+    ] {
+        assert!(root(comps).is_err(), "{:?}", comps.iter().map(|c| c.name()).collect::<Vec<_>>());
+    }
+    // A key is an MPDJ row's alone: a writer writes zeros.
+    let mut keyed = waves.clone();
+    keyed.key[3] = 0xFF;
+    let m = Manifest::read(&root(&[&tags, &keyed]).expect("a root"), msmf::Uses::ALL).expect("reads");
+    assert_eq!(m.waves.as_ref(), Some(&waves));
+}
+
+// ── The mood tail (2.6.4; the player's MOOD-FILTERS.md 5.3) ─────────────────
+
+/// A tail as the fixtures spell one, `03 3A 46 1D 31 FF 46 00`.
+fn tail_of(v: &Value) -> Tail {
+    spaced(text(v)).try_into().expect("a tail of 8 bytes")
+}
+
+/// The player's mood word of a tail (METADATA 3.4.3, `lib/core/
+/// MoodFilter.cpp`'s wordOfTail). The device makes it, never this kit: it
+/// is here to show that the tails this kit writes and takes are those whose
+/// words the fixtures give. 0 for a tail a reader refuses; else analysed, a
+/// scale's field side << 2 | bucket (4 for NULL, its order bit ignored, and
+/// bucket 0 with no side), the voice NULL bit for a NULL instrumental, and
+/// a NULL tag 0.
+fn mood_word(t: &Tail) -> u16 {
+    if moods::read_tail(t).is_none() {
+        return 0;
+    }
+    let bucket = |v: u8| [30, 50, 70].iter().filter(|&&bar| v >= bar).count() as u16;
+    let scale = |v: u8, second: bool| match (v, bucket(v)) {
+        (moods::NULL, _) => 4,
+        (_, b) if b > 0 && second => 4 | b,
+        (_, b) => b,
+    };
+    let tag = |v: u8| if v == moods::NULL { 0 } else { bucket(v) };
+    let valence = scale(t[1], t[0] & moods::SAD_WINS != 0) << 11;
+    let energy = scale(t[2], t[0] & moods::AGGRESSIVE_WINS != 0) << 8;
+    let voice = if t[3] == moods::NULL { 1 << 14 } else { bucket(t[3]) << 6 };
+    1 << 15 | valence | energy | voice | tag(t[4]) << 4 | tag(t[5]) << 2 | tag(t[6])
+}
+
+/// Every row of moods.json: its scores make its tail, which a reader takes
+/// (none for no row), whose word is the row's.
+#[test]
+fn moods_json_rows_make_their_tails_and_words() {
+    let m = json("moods.json");
+    let heads: Vec<&str> = m["heads"].as_array().expect("heads").iter().map(text).collect();
+    assert_eq!(heads, moods::HEADS, "a row's slots");
+    let rows = m["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 40);
+    for r in rows {
+        let what = text(&r["note"]);
+        let scores = (!r["scores"].is_null()).then(|| scores_of(&r["scores"]));
+        let tail = moods::encode(scores.as_ref());
+        assert_eq!(spaced_of(&tail), text(&r["tail"]), "{what}");
+        assert_eq!(moods::read_tail(&tail), scores.map(|_| tail), "{what}: a tail this kit writes reads");
+        assert_eq!(u64::from(mood_word(&tail)), num(&r["word"]), "{what}");
+    }
+}
+
+/// Every tail of moods.json is taken or refused as listed, and a tail taken
+/// is kept as it came, an order bit beside a NULL included.
+#[test]
+fn moods_json_tails_read_as_listed() {
+    let tails = json("moods.json")["tails"].as_array().expect("tails").clone();
+    assert_eq!(tails.len(), 23);
+    for e in &tails {
+        let (t, what) = (tail_of(&e["tail"]), text(&e["note"]));
+        let read = moods::read_tail(&t);
+        assert_eq!(read.is_some(), e["valid"] == true, "{what}");
+        assert!(read.is_none_or(|r| r == t), "{what}");
+        assert_eq!(u64::from(mood_word(&t)), num(&e["word"]), "{what}");
+    }
+    assert_eq!(moods::read_tail(&[1, 0, 0, 0, 0, 0, 0]), None, "seven bytes are no tail");
+}
+
+/// moods.json's values: each score's byte by the slack floor, clamped, 255
+/// for NULL.
+#[test]
+fn moods_json_values_follow_the_value_rule() {
+    for v in json("moods.json")["values"].as_array().expect("values") {
+        assert_eq!(u64::from(moods::value(v["score"].as_f64())), num(&v["value"]), "{v}");
+    }
+    // The products a plain floor gets wrong.
+    let floor = |s: f64| (s * 100.0).floor();
+    assert_eq!([0.29, 0.57, 0.58].map(floor), [28.0, 56.0, 57.0]);
+    assert_eq!([0.29, 0.57, 0.58].map(|s| moods::value(Some(s))), [29, 57, 58]);
+}
+
+/// A tail a reader refuses costs its record the scores and nothing more:
+/// each of moods.json's tails in turn on one record of tags-moods.bin, the
+/// file resealed, reads for the software and the device alike, every record
+/// as it was but that one's tail, taken or not as listed.
+#[test]
+fn a_tail_counts_only_when_it_validates() {
+    let file = golden("tags-moods.bin");
+    let want = mptg::read(&file, mptg::Uses::ALL).expect("the golden");
+    let (off, len) = section_span(&file, mptg::RECS);
+    assert_eq!(len, 80 * want.records.len());
+    let row = want.records.iter().position(|e| e.path == "Artist A/scored.flac").expect("the record");
+    for e in json("moods.json")["tails"].as_array().expect("tails") {
+        let (t, what) = (tail_of(&e["tail"]), text(&e["note"]));
+        let mut b = file.clone();
+        b[off + 80 * row + 72..][..8].copy_from_slice(&t);
+        reseal(&mut b);
+        for uses in [mptg::Uses::ALL, mptg::Uses::DEVICE] {
+            let got = mptg::read(&b, uses).unwrap_or_else(|w| panic!("{what}: {w}"));
+            for (i, (g, w)) in got.records.iter().zip(&want.records).enumerate() {
+                let taken = if e["valid"] == true { t } else { moods::NO_ROW };
+                let moods = if i == row { taken } else { w.rec.moods };
+                assert_eq!(g.rec, Record { moods, ..w.rec }, "{what}: {}", w.path);
+                assert_eq!(g.rec.has_moods(), moods != moods::NO_ROW, "{what}");
+            }
+        }
+    }
+}
+
+/// 72 stays the smallest RECS stride a reader takes (2.4.5): rows of 72,
+/// 76, 80 and 88 all read, the tail only from rows of 80 or more, and a
+/// writer with no tail to write writes 72, as every card before minor 1.
+#[test]
+fn the_stride_constant_stays_72() {
+    assert_eq!((mptg::RECS_STRIDE, mptg::RECS_MOODS_STRIDE), (72, 80));
+    assert_eq!((moods::TAIL_AT, moods::TAIL_AT + moods::TAIL_BYTES), (72, 80));
+    let files = [
+        ("golden/tags-0000002a.bin", 72, false),
+        ("hardening/mptg-stride-76.bin", 76, false),
+        ("golden/tags-moods.bin", 80, true),
+        ("hardening/mptg-moods-longer.bin", 88, true),
+    ];
+    for (name, stride, scored) in files {
+        let b = bytes(name);
+        let t = mptg::read(&b, mptg::Uses::ALL).expect(name);
+        assert_eq!(section_of(&b, mptg::RECS).len(), stride * t.records.len(), "{name}");
+        assert_eq!(t.records.iter().any(|e| e.rec.has_moods()), scored, "{name}");
+    }
+    let meta = Meta { source: mptg::SOURCE_SOFTWARE, read_rules: 1, generation: 2, ..Meta::default() };
+    let file = mptg::write(&meta, &[RecordIn { path: "a.mp3".into(), ..RecordIn::default() }], &[]).expect("a file");
+    assert_eq!(section_of(&file, mptg::RECS).len(), 72);
 }
 
 // ── Round trips and the canonical order ─────────────────────────────────────
 
 /// A made-up library: folders from a small alphabet that holds the order's
 /// traps (`A`, `A B`, `A-`, `a`, `É`, NFC and NFD), records with tag values
-/// that need 2.3.6 (control characters, repeats, long values), ledger rows
-/// and OWNED folders.
+/// that need 2.3.6 (control characters, repeats, long values), ledger rows,
+/// OWNED folders and, in half the software's files, mood tails from server
+/// rows with NULL heads, ties and scores outside 0-1 (the minor theirs).
 fn made_up_library(rng: &mut fastrand::Rng, records: usize) -> (Meta, Vec<RecordIn>, Vec<FolderIn>) {
     const NAMES: [&str; 9] = ["A", "A B", "A-", "B", "a", "\u{c9}", "Caf\u{e9}", "Cafe\u{301}", "Disc 1"];
     let source = [mptg::SOURCE_DEVICE, mptg::SOURCE_SOFTWARE, mptg::SOURCE_SYNC_AGENT][rng.usize(..3)];
-    let meta = Meta {
+    let scored = source != mptg::SOURCE_DEVICE && rng.bool();
+    let mut meta = Meta {
         source,
         parser_version: rng.u16(..),
         read_rules: 1,
@@ -1695,6 +2774,14 @@ fn made_up_library(rng: &mut fastrand::Rng, records: usize) -> (Meta, Vec<Record
             camelot: rng.u8(..),
             pic_offset: rng.u32(..),
             pic_coding: rng.u8(..),
+            moods: match scored && rng.bool() {
+                true => moods::encode(Some(&std::array::from_fn(|_| match rng.u8(..6) {
+                    0 => None,
+                    1 => Some(0.5),
+                    _ => Some(rng.f64() * 1.2 - 0.1),
+                }))),
+                false => moods::NO_ROW,
+            },
             ..Record::default()
         };
         let ledger = (source != mptg::SOURCE_DEVICE && rng.bool()).then(|| Ledger {
@@ -1714,6 +2801,7 @@ fn made_up_library(rng: &mut fastrand::Rng, records: usize) -> (Meta, Vec<Record
             FolderIn { path, flags: mptg::FOLDER_OWNED }
         })
         .collect();
+    meta.minor = mptg::minor_of(&out);
     (meta, out, folders)
 }
 
@@ -1726,6 +2814,10 @@ fn tags_round_trip_in_any_order() {
         let file = mptg::write(&meta, &records, &folders).expect("a tags file");
         let tags = mptg::read(&file, mptg::Uses::ALL).unwrap_or_else(|w| panic!("round {round}: {w}"));
         assert!(mptg::read(&file, mptg::Uses::DEVICE).is_ok());
+        // Rows of 80 bytes and minor 1 with a tail (each record's, 8 zero
+        // bytes where it has none), else 72 and minor 0.
+        let stride = if meta.minor == 1 { 80 } else { 72 };
+        assert_eq!((tags.header.minor, section_of(&file, mptg::RECS).len()), (meta.minor, stride * n));
         // Read back as written: each record by its path, its hash the path's.
         assert_eq!(tags.records.len(), records.len());
         for e in &tags.records {
@@ -1789,6 +2881,27 @@ fn tags_writer_refuses_what_its_reader_would() {
     ] {
         assert!(mptg::write(&meta, &[with(r, origin)], &[]).is_err(), "{r:?} {origin}");
     }
+    // A mood tail (2.6.4): taken in a software file of minor 1, beside a
+    // record with none; refused where a reader would refuse it, in the
+    // device's own file, and under a minor its records don't make.
+    let tail = moods::encode(Some(&[Some(0.5); 8]));
+    let scored = |path: &str, moods: Tail| RecordIn { rec: Record { moods, ..Record::default() }, ..rec(path) };
+    let minor1 = Meta { minor: 1, ..meta.clone() };
+    let file = mptg::write(&minor1, &[scored("a.mp3", tail), rec("b.mp3")], &[]).expect("a tail beside none");
+    let back = mptg::read(&file, mptg::Uses::ALL).expect("read");
+    assert_eq!(back.records.iter().map(|e| e.rec.moods).collect::<Vec<_>>(), [tail, moods::NO_ROW]);
+    for e in json("moods.json")["tails"].as_array().expect("tails") {
+        let t = tail_of(&e["tail"]);
+        if t != moods::NO_ROW {
+            let written = mptg::write(&minor1, &[scored("a.mp3", t)], &[]);
+            assert_eq!(written.is_ok(), e["valid"] == true, "{}", text(&e["note"]));
+        }
+    }
+    assert!(mptg::write(&meta, &[scored("a.mp3", tail)], &[]).is_err(), "under minor 0");
+    assert!(mptg::write(&Meta { minor: 2, ..meta.clone() }, &[scored("a.mp3", tail)], &[]).is_err());
+    assert!(mptg::write(&minor1, &[rec("a.mp3")], &[]).is_err(), "minor 1 with no tail");
+    let device1 = Meta { minor: 1, ..device.clone() };
+    assert!(mptg::write(&device1, &[scored("a.mp3", tail)], &[]).is_err(), "in the device's own file");
     let owned = |flags| FolderIn { path: "Owned".into(), flags };
     assert!(mptg::write(&meta, &[], &[owned(mptg::FOLDER_FLAGS_V1)]).is_ok());
     assert!(mptg::write(&meta, &[], &[owned(mptg::FOLDER_OWNED | 4)]).is_err());

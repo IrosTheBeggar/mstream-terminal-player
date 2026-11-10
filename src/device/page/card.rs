@@ -28,7 +28,7 @@ use crate::device::card::state::Convert;
 use crate::device::card::volume::{Fs, Refusal, Table};
 use crate::device::card::worker::{
     self, Allow, CardView, Ended, Fold, Gate as Asked, Job, Link, LogItem, Next, Note, Pause, Phase,
-    Planned, Read, Server, ServerLink, Want,
+    Planned, Read, Run, Server, ServerLink, Want,
 };
 use crate::api::urls::{TransferBitrate, TransferCodec};
 
@@ -131,7 +131,8 @@ fn plan_of(card: &CardView) -> Option<&Planned> {
 /// What a sync of the card would do: something waits.
 fn waits(card: &CardView) -> bool {
     let pending = card.facts().is_some_and(|f| f.pending);
-    plan_of(card).is_some_and(|p| p.new > 0 || !p.removals.is_empty() || p.plays > 0) || pending
+    let something = |p: &Planned| p.new > 0 || !p.removals.is_empty() || p.plays > 0 || p.waves_missing;
+    plan_of(card).is_some_and(something) || pending
 }
 
 /// The fit's verdict blocks a sync: it doesn't fit, or passes the cap.
@@ -635,9 +636,9 @@ pub(crate) enum Wants {
     SignIn(Option<String>),
 }
 
-/// The plan's words for Next sync (clause 44): `12 new · 2 to remove · 37
-/// plays to send`, or "nothing new on Home". `busy`: the busy line's, its
-/// first piece naming the server.
+/// The plan's words for Next sync (clauses 44, 51a): `12 new · 2 to remove ·
+/// 37 plays to send · waveforms to add`, or "nothing new on Home". `busy`: the
+/// busy line's, its first piece naming the server.
 fn next_words(card: &CardView, plan: &Planned, busy: bool) -> String {
     let server = server_name(card);
     let mut parts = Vec::new();
@@ -654,6 +655,9 @@ fn next_words(card: &CardView, plan: &Planned, busy: bool) -> String {
     }
     if plan.plays > 0 {
         parts.push(t!("dev.card.next_plays", n = fmt_count(plan.plays as u64)).to_string());
+    }
+    if plan.waves_missing {
+        parts.push(t!("dev.card.next_waves").to_string());
     }
     if parts.is_empty() {
         let mut words = t!("dev.card.next_none", server = server).to_string();
@@ -899,6 +903,13 @@ fn converts_rows(card: &CardView, w: u16) -> Vec<Row> {
     rows
 }
 
+/// The scan widget of a sync asking for its waveforms (clause 51a): how far the
+/// server's answers have come.
+fn waves_scan(run: &Run, server: &str) -> Vec<(String, Style)> {
+    let (i, n) = (fmt_count(run.waves.0 as u64), fmt_count(run.waves.1 as u64));
+    scan(Some(run.waves_percent()), &t!("dev.card.sync_waves", server = server, i = i, n = n))
+}
+
 /// The rows of a sync under way, paused, or ended in an error (clauses
 /// 51–53).
 fn run_rows(page: &Page, card: &CardView, w: u16) -> Option<Vec<Row>> {
@@ -918,6 +929,7 @@ fn run_rows(page: &Page, card: &CardView, w: u16) -> Option<Vec<Row>> {
                 let words = t!(key);
                 rows.extend(value_rows(label, &scan(None, &words), w));
             }
+            Phase::Waves if run.files == 0 => rows.extend(value_rows(label, &waves_scan(run, &server), w)),
             _ => {
                 let permille = card.percent().map_or(0, |p| u32::from(p) * 10);
                 rows.push(Row::Bar { label, permille, color: th().accent });
@@ -941,6 +953,9 @@ fn run_rows(page: &Page, card: &CardView, w: u16) -> Option<Vec<Row>> {
                 }
                 if run.phase == Phase::Index {
                     rows.extend(value_rows(None, &scan(None, &t!("dev.card.sync_index")), w));
+                }
+                if run.phase == Phase::Waves {
+                    rows.extend(value_rows(None, &waves_scan(run, &server), w));
                 }
             }
         }

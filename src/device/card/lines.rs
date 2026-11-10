@@ -405,7 +405,8 @@ fn next_words(card: &CardView) -> String {
     }
 }
 
-/// `12 new, 2 to remove, 37 plays to send`, or `nothing new on Home`.
+/// `12 new, 2 to remove, 37 plays to send, waveforms to add`, or `nothing new
+/// on Home`.
 fn plan_words(plan: &Planned, server: &str) -> String {
     let mut parts = Vec::new();
     if plan.new > 0 {
@@ -416,6 +417,9 @@ fn plan_words(plan: &Planned, server: &str) -> String {
     }
     if plan.plays > 0 {
         parts.push(format!("{} plays to send", fmt_count(plan.plays as u64)));
+    }
+    if plan.waves_missing {
+        parts.push("waveforms to add".to_string());
     }
     if parts.is_empty() {
         return format!("nothing new on {server}");
@@ -1104,7 +1108,17 @@ fn run(session: &mut Session, key: &str, mut allow: Allow, flags: &Flags, io: &m
             started = true;
             if phase != Some(run.phase) {
                 phase = Some(run.phase);
+                tenth = 0;
                 io.say(&phase_words(run.phase, run.files, run.bytes, &server_name(&card)));
+            }
+            if run.phase == Phase::Waves {
+                let (done, of) = run.waves;
+                let now = u64::from(run.waves_percent()) / 10;
+                if now > tenth && now < 10 {
+                    tenth = now;
+                    let (done, of) = (fmt_count(done as u64), fmt_count(of as u64));
+                    io.say(&format!("  {done} of {of} waveforms"));
+                }
             }
             if run.phase == Phase::Copying && run.bytes > 0 {
                 let now = run.done_bytes.min(run.bytes) * 10 / run.bytes;
@@ -1164,6 +1178,7 @@ fn phase_words(phase: Phase, files: usize, bytes: u64, server: &str) -> String {
         Phase::Planning => "working out what changes…".to_string(),
         Phase::Copying => format!("copying {} files, {} GB…", fmt_count(files as u64), gb(bytes)),
         Phase::Index => "writing the card's index, covers and Auto DJ…".to_string(),
+        Phase::Waves => format!("asking {server} for waveforms…"),
         Phase::Verifying => "verifying the card…".to_string(),
     }
 }

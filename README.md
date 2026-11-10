@@ -782,8 +782,10 @@ cable. A card in a reader is a subject of the MP3 Player tab beside the boards, 
 own (`E: Car music` on Windows): its **Card view** says what it holds and from which saved
 server, its space, its last sync and what the next one would do (`12 new · 2 to remove · 37
 plays to send`, as that server answered it), and *Sync ▸* fills it — converting what the
-player can't play, writing the covers and the Auto DJ index the firmware reads, and sending
-the player's plays back to the server they came from. A sync saves as it goes: `x` stops it
+player can't play, writing the covers, the Auto DJ index and each track's waveform for the
+progress bar, all of which the firmware reads, laying each track's mood scores for the
+player's mood filters (none on a card for someone else), and sending the player's plays
+back to the server they came from. A sync saves as it goes: `x` stops it
 at the next save, a card taken out goes on from there in any reader, and it runs on while
 you listen, the MP3 Player tab wearing its percentage. **Settings…** (`o`) holds the card's
 choices on two tabs, Music (its server and libraries) and Writing (what is converted and to

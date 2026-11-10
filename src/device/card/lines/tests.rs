@@ -9,7 +9,8 @@ use super::*;
 use crate::device::card::engine::Guard;
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::sync::tests::{
-    Fake, SERIAL, Scratch, card as set_up_card, server, with_hidden,
+    Fake, SERIAL, Scratch, Wave, card as set_up_card, envs, peaks_of, server, sync_now, with_hidden,
+    with_moods,
 };
 use crate::device::card::volume::{Fs, Table};
 use crate::device::card::worker::fixtures as f;
@@ -68,6 +69,17 @@ fn a_cards_line_says_its_drive_name_volume_server_and_next_sync_or_why_not() {
     assert!(line.ends_with("next sync not asked: no server to ask"), "{line}");
     let copied = f::with(f::ready("E:", now()), |c| f::facts(c).copied = true);
     assert!(card_line(&copied).ends_with("a copy of another card: setup --new-identity gives it its own"));
+}
+
+#[test]
+fn a_plan_says_the_waveforms_it_adds_and_the_run_its_phase() {
+    let alone = Planned { waves_missing: true, ..Planned::default() };
+    assert_eq!(plan_words(&alone, "Home"), "waveforms to add");
+    let more = plan_of(&planned(|p| p.waves_missing = true));
+    let all = "12 new (1.9 GB), 2 to remove, 37 plays to send, waveforms to add";
+    assert_eq!(plan_words(&more, "Home"), all);
+    assert_eq!(plan_words(&Planned::default(), "Home"), "nothing new on Home");
+    assert_eq!(phase_words(Phase::Waves, 0, 0, "Home"), "asking Home for waveforms…");
 }
 
 #[test]
@@ -391,6 +403,78 @@ fn a_sync_leaves_the_files_the_server_cant_serve_out_and_says_so_once() {
     for path in hidden {
         assert!(!asked.iter().any(|a| a.contains(path)), "{path}: {asked:?}");
     }
+}
+
+/// A card in step that lacks its waveforms: a line says so, the plan is that
+/// alone, `--yes` adds them with their phase and how far they have come, and
+/// the card is in step after.
+#[test]
+fn a_sync_adds_the_waveforms_a_card_lacks_and_says_how_far_it_has_come() {
+    let scratch = Scratch::new("lines-waves");
+    let b = bench(&scratch);
+    let key = b.key.clone();
+    let base = b.home.base.clone().unwrap();
+    let off = crate::device::card::sync::Ask { no_waves: true, ..Default::default() };
+    // A card of its own, whose run.lock goes with it.
+    let sim = FatSim::new(&scratch.0.join("card"), SERIAL);
+    let synced = sync_now(&sim, &base, &off, &mut envs()).0;
+    assert!(matches!(synced.end, crate::device::card::sync::End::Ran(_)), "{:?}", synced.end);
+    drop(sim);
+    {
+        // Slow enough to be told: a third of a second each, three at once.
+        let mut lib = b.server.lock().unwrap();
+        let paths: Vec<String> = lib.tracks.iter().map(|t| t.path.clone()).collect();
+        for path in paths {
+            let peaks = Box::new(Wave::Peaks(peaks_of(&path)));
+            lib.waves.insert(path, vec![Wave::Slow(Duration::from_millis(350), peaks)]);
+        }
+    }
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Status, &Flags::default(), None, &mut term);
+    assert_eq!(code, 0, "{}", term.said());
+    assert!(term.said().contains("next sync   waveforms to add\n"), "{}", term.said());
+
+    let mut term = Term::new();
+    let yes = Flags { yes: true, ..Flags::default() };
+    let code = b.run(Some(&key), What::Sync, &yes, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(" from Home: waveforms to add.\n"), "{said}");
+    assert!(said.contains("asking Home for waveforms…\n"), "{said}");
+    assert!(said.contains(" of 5 waveforms\n"), "{said}");
+    assert!(said.contains("Car synced in ") && said.contains("verified."), "{said}");
+
+    // In step, once the look the sync's worker left behind has let the card go.
+    let t0 = Instant::now();
+    let said = loop {
+        let mut term = Term::new();
+        let code = b.run(Some(&key), What::Status, &Flags::default(), None, &mut term);
+        assert_eq!(code, 0, "{}", term.said());
+        let busy = term.said().contains("another run holds this card");
+        if !busy || t0.elapsed() > Duration::from_secs(10) {
+            break term.said();
+        }
+    };
+    assert!(said.contains("next sync   nothing new on Home\n"), "{said}");
+}
+
+/// The mood scores (clause 51b): a sync from a server that serves them asks
+/// once and prints the line Details' log has of them, as it prints the
+/// run's other notes.
+#[test]
+fn a_sync_says_the_mood_scores_it_brought() {
+    let scratch = Scratch::new("lines-moods");
+    let b = bench(&scratch);
+    let key = b.key.clone();
+    with_moods(&b.server);
+    let yes = Flags { yes: true, ..Flags::default() };
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Sync, &yes, None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
+    let line = "\n  mood scores for 5 of the card's 5 tracks from the server\n";
+    assert!(said.contains(line), "{said}");
+    assert_eq!(b.server.lock().unwrap().mood_calls.len(), 1, "one call");
 }
 
 #[test]

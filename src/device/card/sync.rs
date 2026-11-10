@@ -34,9 +34,12 @@
 //!    ([`SyncHooks`]): each conversion checked on the card (its type, its
 //!    length within a second of the manifest's), a converted file's cover
 //!    and its own BPM and key put back before the card takes it ([`Retag`]),
-//!    each album's thumbnail ([`covers`](super::covers)), and the Auto DJ
+//!    each album's thumbnail ([`covers`](super::covers)), the Auto DJ
 //!    index from mStream's embeddings when the card's player reads MPDJ v2
-//!    and the card isn't made for someone else.
+//!    and the card isn't made for someone else, the waveform index from
+//!    mStream's peaks when the player reads MPWF v1 ([`waves`]), and each
+//!    record's mood scores from the server's own when it serves them and the
+//!    card isn't made for someone else ([`moods`]).
 //! 6. The settings, stored at the run's end before it lets the card go
 //!    ([`Hooks::state`]): the selection, the conversion, the source's
 //!    nickname and keys, the manifest's schedule, which art each thumbnail
@@ -84,14 +87,15 @@ use super::contract::server::{Server, Talk, Verdict, instance_of, server_url_key
 use super::covers::{self, Covers, folders, most_common};
 use super::dry::DryCard;
 use super::engine::{
-    Album, Answers, AutoDj, Commit, Cover, Env, Event, Expect, Failed, Fetched, Fetcher, Guard,
-    Have, Hooks, Knobs, Origin, Outcome, Plan, Report, Session, Stop, WantedFile,
+    Album, Answers, AutoDj, Commit, Cover, Env, Event, Expect, Failed, Fetched, Fetcher, Footprint,
+    Guard, Have, Hooks, Knobs, Moods, Origin, Outcome, Plan, Report, Session, Stop, WantedFile,
+    Waves,
 };
 use super::history::{self, History, Tally};
 use super::names::{self, Bytes};
 use super::plan::{
-    self, Extra, Fit, Kept, Skip, Wanted, codec_of, needing_metadata, ogg_is_opus, oggs_to_sniff,
-    wanted_of, wanted_of_ledger,
+    self, Extra, Fit, Kept, Skip, WaveFit, Wanted, codec_of, needing_metadata, ogg_is_opus,
+    oggs_to_sniff, wanted_of, wanted_of_ledger,
 };
 use super::source::Sources;
 use super::source::http::{Finish, Http};
@@ -116,11 +120,14 @@ const WHOLE_EVERY_RUNS: u32 = 10;
 /// The first bytes of an `.ogg` that say whether it is Opus.
 const OGG_HEAD: u64 = 512;
 
+mod moods;
 mod peers;
 mod sets;
+mod waves;
 
 pub(crate) use peers::{Federation, PeerSummary, Status as PeerStatus};
 pub(crate) use sets::SetSummary;
+use waves::{Lack, NO_FFMPEG_RUNS};
 
 /// A file of a run, as its hooks find it: its origin and its server path,
 /// since two of a run's servers may hold one path.
@@ -196,6 +203,16 @@ pub(crate) struct Ask {
     /// and the run ends at a checkpoint whose plan the next sync takes up
     /// (2.12.8's parking, [`STOPPED`]).
     pub(crate) stop: Option<Arc<AtomicBool>>,
+    /// No waveform index: none is asked for or named, and the run's clean-up
+    /// takes any the card has. The hidden command's `--waves false`, for the
+    /// real-card checks: a listener's sync always has one, there being no
+    /// setting for it.
+    pub(crate) no_waves: bool,
+    /// No mood scores: none is asked for, and each record's tail stays as the
+    /// card has it. The hidden command's `--moods false`, for the real-card
+    /// checks: a listener's sync always asks a server that serves them, there
+    /// being no setting for it.
+    pub(crate) no_moods: bool,
 }
 
 /// Why a run the listener stopped parked ([`Outcome::parked`]).
@@ -256,6 +273,12 @@ pub(crate) struct Summary {
     pub(crate) report: Report,
     /// None when the volume's space isn't known.
     pub(crate) fit: Option<Fit>,
+    /// The card's player reads a waveform index and the root names none that
+    /// counts, with the selection's tracks to ask the server for: a sync has
+    /// that to do though nothing else waits (WAVEFORM-INDEX.md 12). A file a
+    /// run's fetch left short doesn't count as lacking: a track with no bars is
+    /// a plain line, and the next sync, for whatever else, asks for the rest.
+    pub(crate) waves_missing: bool,
     /// Each federation peer asked for: read, or why not.
     pub(crate) peers: Vec<PeerSummary>,
     /// The card's multi-card set, as the run leaves it.
@@ -577,6 +600,7 @@ fn prepare(
     };
     let (card_id, generation, commit_id) =
         (root.manifest.header.card_id, root.manifest.header.generation, root.manifest.commit_id);
+    let waves_none = state.waves_none;
     if state.card_id != card_id {
         let why = "the card's state file is another identity's: run `device card-setup` on it first";
         return Err(refused(why.into()));
@@ -832,7 +856,8 @@ fn prepare(
         span.take(&mut wanted, &libraries, &held, space).map_err(refused)?;
     }
     let mut plan = sets::plan(session, &wanted, &ask.answers, &mut fetcher, span.as_ref())?;
-    let mut fit = space.map(|s| plan::fit(&s, &plan.footprint(), dj));
+    let need = wave_fit(&device, session.root(), &wanted, ask.no_waves, waves_none);
+    let (mut fit, mut waves) = fit_of(space, &plan.footprint(), dj, need);
     if let (Some(run), Some(selection)) = (span.as_mut(), &whole_selection)
         && short(&fit)
         && run.decide(ask.decide, notes)
@@ -840,7 +865,8 @@ fn prepare(
         wanted = selection.clone();
         run.take(&mut wanted, &libraries, &held, space).map_err(refused)?;
         plan = sets::plan(session, &wanted, &ask.answers, &mut fetcher, Some(&*run))?;
-        fit = space.map(|s| plan::fit(&s, &plan.footprint(), dj));
+        let need = wave_fit(&device, session.root(), &wanted, ask.no_waves, waves_none);
+        (fit, waves) = fit_of(space, &plan.footprint(), dj, need);
     }
     if let Some(span) = span.as_ref() {
         span.unused(ask.decide, notes);
@@ -880,6 +906,7 @@ fn prepare(
         guards: plan.guards.clone(),
         report: plan.report.clone(),
         fit,
+        waves_missing: waves == WaveFit::Missing,
         peers: peer_summaries,
         set: span.as_ref().and_then(sets::SetRun::summary),
         spread,
@@ -981,6 +1008,19 @@ fn prepare(
         },
         old_fingerprint,
         refresh: listed == Listed::Whole || some_peer_read(&summary.peers),
+        waves: waves != WaveFit::Off,
+        waves_off: match (ask.no_waves, device.writes_mpwf()) {
+            (true, _) => None,
+            (false, false) => Some("the card's player doesn't read one"),
+            (false, true) => Some("the card has no room for it"),
+        },
+        waves_lack: None,
+        moods: moods::Rule {
+            someone_else: settings.for_someone_else,
+            left_out: ask.no_moods,
+            served: info.features.mood_scores.is_some_and(|n| n >= 1),
+        },
+        stop: ask.stop.clone(),
         store: None,
         history: None,
         notes: Vec::new(),
@@ -991,6 +1031,45 @@ fn prepare(
     let hooks = Some(hooks);
     let span = span.as_ref().and_then(sets::SetRun::end);
     Ok(Prepared { plan, fetcher, hooks, summary, listed, revision, ours, url_key, plan_key, span })
+}
+
+/// What the fit counts of the waveform index: none when the card's player
+/// doesn't read one or the run leaves it out, and the file itself when the root
+/// names no valid one and the selection has a recording the server's waveform
+/// route can be asked for. A root whose run asked them all and got none
+/// (`none`: [`State::waves_none`]) has nothing to add until its next commit: it
+/// would offer a sync that comes back to the same, every look.
+fn wave_fit(
+    device: &DeviceTxt,
+    root: Option<&volume::Root>,
+    wanted: &Wanted,
+    left_out: bool,
+    none: Option<u32>,
+) -> WaveFit {
+    let named = root.is_some_and(|r| r.waves == Some(Ok(())));
+    let answered = root.is_some_and(|r| none == Some(r.manifest.header.generation));
+    let ask = |f: &WantedFile| {
+        f.origin == 0 && !f.ledger.server_path.is_empty() && f.ledger.canonical_hash().is_some()
+    };
+    match device.writes_mpwf() && !left_out {
+        false => WaveFit::Off,
+        true if !named && !answered && wanted.card.files.iter().any(ask) => WaveFit::Missing,
+        true => WaveFit::Beside,
+    }
+}
+
+/// A plan's fit, and what it counted of the waveform index. A card with nothing
+/// else to do and no room for the file goes without it ([`WaveFit::Off`]): its
+/// music is in step, and a plain line on the player is no reason to say it
+/// doesn't fit.
+fn fit_of(space: Option<Space>, fp: &Footprint, dj: bool, waves: WaveFit) -> (Option<Fit>, WaveFit) {
+    let fit = |waves| space.map(|s| plan::fit(&s, fp, dj, waves));
+    match fit(waves) {
+        Some(f) if !f.fits() && waves == WaveFit::Missing && fp.writes.is_empty() => {
+            (fit(WaveFit::Off), WaveFit::Off)
+        }
+        fitted => (fitted, waves),
+    }
 }
 
 /// The listed files and bytes of each library, by the vpath their server
@@ -1198,11 +1277,26 @@ struct SyncHooks {
     /// not for someone else.
     dj: bool,
     dj_off: Option<&'static str>,
-    /// The key of the files the root's index was built from.
+    /// The key of the files of the root the run began from: those its Auto
+    /// DJ index was built from, and its mood tails asked for.
     old_fingerprint: Option<u64>,
-    /// A whole read: the embeddings are read again even when the files
-    /// are the same, the server's analysis having moved on.
+    /// A whole read: the embeddings and the mood scores are read again even
+    /// when the files are the same, the server's analysis having moved on.
     refresh: bool,
+    /// A waveform index is wanted: the card's player reads MPWF v1 and the
+    /// card has room for it. A card for someone else gets one too: it holds
+    /// shapes, nothing personal.
+    waves: bool,
+    waves_off: Option<&'static str>,
+    /// What the final commit's fetch says the card lacks ([`State::waves_none`],
+    /// [`State::waves_no_ffmpeg`]). None: it didn't get there.
+    waves_lack: Option<Lack>,
+    /// What the final commit's mood step goes by ([`moods`]): a card for
+    /// someone else gets no scores, whatever its Auto DJ setting says.
+    moods: moods::Rule,
+    /// The listener's stop: the waveforms' fetch keeps what came, and the mood
+    /// step asks nothing.
+    stop: Option<Arc<AtomicBool>>,
     /// The settings the run's end stores; set for a run, not for a plan.
     store: Option<Store>,
     /// The card's plays: their marks go into the commits' ACKS and the
@@ -1258,6 +1352,19 @@ impl SyncHooks {
     fn held(&self, origin: usize) -> bool {
         self.lists.get(origin).and_then(|(_, gate)| gate.as_ref()).is_some_and(|g| !g.open())
     }
+
+    /// The commit's files are those of the root the run began from, as
+    /// [`fingerprint`] keys them ([`files_of`]).
+    fn same_files(&self, files: &[FileIn]) -> bool {
+        self.old_fingerprint == Some(fingerprint(files))
+    }
+}
+
+/// A commit's files as the Auto DJ index keys them: its records with a
+/// canonical hash ([`FileIn::of`]).
+fn files_of(commit: &Commit<'_>) -> Vec<FileIn> {
+    let of = |r: &RecordIn| FileIn::of(&r.path, &r.rec, &r.run, r.ledger.as_ref());
+    commit.records.iter().filter_map(of).collect()
 }
 
 impl Hooks for SyncHooks {
@@ -1355,6 +1462,11 @@ impl Hooks for SyncHooks {
         }
     }
 
+    /// Its waveforms' fetch, up to half an hour of a server's decodes ([`waves`]).
+    fn long_index_steps(&self) -> bool {
+        self.waves
+    }
+
     fn autodj(&mut self, commit: &Commit<'_>) -> AutoDj {
         if let Some(cluster) = self.span_cluster {
             self.last = Some(sets::Final::of(commit, cluster));
@@ -1365,10 +1477,8 @@ impl Hooks for SyncHooks {
             }
             return AutoDj::None;
         }
-        let of = |r: &RecordIn| FileIn::of(&r.path, &r.rec, &r.run, r.ledger.as_ref());
-        let files: Vec<FileIn> = commit.records.iter().filter_map(of).collect();
-        let same_files = self.old_fingerprint == Some(fingerprint(&files));
-        if commit.old.is_some() && !self.refresh && same_files {
+        let files = files_of(commit);
+        if commit.old.is_some() && !self.refresh && self.same_files(&files) {
             return AutoDj::Same;
         }
         // Each origin's rows' vectors from its own server (a peer's through
@@ -1468,6 +1578,33 @@ impl Hooks for SyncHooks {
         }
     }
 
+    /// What the server's peaks and the old file's slots come to ([`waves`]):
+    /// whatever came of asking, never a failed run.
+    fn waves(&mut self, commit: &Commit<'_>, events: &mut dyn FnMut(Event)) -> Waves {
+        if !self.waves {
+            if let Some(why) = self.waves_off.take() {
+                self.notes.push(format!("no waveform index: {why}"));
+            }
+            return Waves::None;
+        }
+        let came = waves::index(&self.client, commit, self.stop.as_deref(), events);
+        self.notes.extend(came.note);
+        self.waves_lack = Some(came.lack);
+        came.waves
+    }
+
+    /// The tails the server's own scores come to ([`moods`]): whatever came
+    /// of asking, never a failed run. The files' key is weighed only for a
+    /// commit with a tail to keep.
+    fn moods(&mut self, commit: &Commit<'_>) -> Moods {
+        let stopped = self.stop.as_ref().is_some_and(|stop| stop.load(Ordering::SeqCst));
+        let scored = commit.records.iter().any(|r| r.rec.has_moods());
+        let same = scored && !self.refresh && self.same_files(&files_of(commit));
+        let came = moods::tails(&self.client, commit, self.moods.step(stopped, scored, same));
+        self.notes.extend(came.note);
+        came.moods
+    }
+
     /// The plays the run settled, acknowledged in each commit it makes.
     fn acks(&mut self, carried: &[Ack]) -> Vec<Ack> {
         match &self.history {
@@ -1484,6 +1621,15 @@ impl Hooks for SyncHooks {
         let store = self.store.as_mut()?;
         if let Some(history) = &self.history {
             store.state.plays = history.marks();
+        }
+        if let Some(lack) = self.waves_lack {
+            let state = &mut store.state;
+            state.waves_no_ffmpeg = match lack {
+                Lack::Ffmpeg => state.waves_no_ffmpeg.saturating_add(1),
+                _ => 0,
+            };
+            let none = lack == Lack::Peaks || state.waves_no_ffmpeg >= NO_FFMPEG_RUNS;
+            state.waves_none = none.then_some(outcome.generation);
         }
         let settings = &mut store.state.settings;
         if outcome.parked.is_none() && store.listed != Listed::Unread {
@@ -1619,13 +1765,21 @@ fn on(
     }
 }
 
+/// How many of the waveforms' answers pass between the hidden command's lines.
+const WAVES_EVERY: usize = 500;
+
 /// An engine event as a line on stderr; none for a download's progress.
 fn event_line(e: &Event) -> Option<String> {
     Some(match e {
         Event::TookOver(note) => format!("took over a stale run.lock: {}", note.trim()),
         Event::ForeignPlan(id) => format!("deleted another card's plan ({})", id_hex(*id)),
         Event::Deleted(path) => format!("deleted {path}"),
-        Event::Progress { .. } | Event::Listed => return None,
+        Event::Progress { .. } | Event::Listed | Event::Unchanged => return None,
+        // Its start, its end, and a line now and then between.
+        Event::Waves { done, of } if done == of || done % WAVES_EVERY == 0 => {
+            format!("waveforms: {done} of {of}")
+        }
+        Event::Waves { .. } => return None,
         Event::Planned { files, bytes } => format!("planned: {files} files ({bytes} bytes)"),
         Event::Wrote { path, bytes } => format!("wrote {path} ({bytes} bytes)"),
         Event::Renamed { from, to } => format!("renamed {from} to {to}"),
@@ -1747,6 +1901,7 @@ fn synced_json(s: &Synced, dry_run: bool) -> Value {
             "guards": p.guards.iter().map(guard_json).collect::<Vec<_>>(),
             "report": report_json(&p.report),
             "fit": fit,
+            "wavesMissing": p.waves_missing,
             "peers": p.peers.iter().map(PeerSummary::json).collect::<Vec<_>>(),
             "set": p.set.as_ref().map(SetSummary::json),
             "spread": sets::parts_json(&p.spread),

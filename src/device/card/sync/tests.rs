@@ -1,17 +1,19 @@
 //! A whole sync, end to end: a loopback mStream of made-up libraries
 //! ([`Fake`]: the paged manifest with its ETag and 304, `metadata/batch`,
-//! `/media` with Range and HEAD, `/transcode`, album art and embeddings),
-//! a host folder as the card ([`FatSim`]), set up by B2's set-up, and the
-//! card read back by the kit's reader. The audio is the tag reader's parity
-//! corpus and made-up Ogg Opus streams; the covers are made-up pictures;
-//! the embeddings are made-up vectors (no real index: AUTODJ-INDEX.md 12.5).
-//! The server's federation peers, and their own loopback servers, are
-//! [`peers`]'s; multi-card sets, several cards of one selection, [`span`]'s.
+//! `/media` with Range and HEAD, `/transcode`, album art, embeddings,
+//! waveforms and mood scores), a host folder as the card ([`FatSim`]), set up
+//! by B2's set-up, and the card read back by the kit's reader. The audio is the
+//! tag reader's parity corpus and made-up Ogg Opus streams; the covers are
+//! made-up pictures; the embeddings are made-up vectors (no real index:
+//! AUTODJ-INDEX.md 12.5), the peaks made-up shapes, the mood scores made-up
+//! rows. The server's federation peers, and their own loopback servers, are
+//! [`peers`]'s; multi-card sets, several cards of one selection, [`span`]'s;
+//! the waveforms' fetch, [`waves`]'s; the mood tails, [`moods`]'s.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -20,6 +22,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::api::transfer::stub::{Asked, chunked, json as json_reply, reply, routed};
+use crate::api::transfer::{MOOD_HEADS, MoodRow};
 use crate::device::card::cards::Cards;
 use crate::device::card::contract::mptg::{BPM_ANALYSED, CONTAINER_MP3, CONTAINER_OPUS};
 use crate::device::card::contract::mpth;
@@ -62,6 +65,23 @@ fn corpus(name: &str) -> Vec<u8> {
 }
 
 // ── The server ──────────────────────────────────────────────────────────────
+
+/// What the fake's waveform route says of a track.
+#[derive(Clone, Debug)]
+pub(crate) enum Wave {
+    /// 200, these peaks.
+    Peaks(Vec<u8>),
+    /// These words, at once: `404 Not Found`, `503 Service Unavailable`.
+    Says(&'static str),
+    /// These words, with this Retry-After in seconds.
+    After(&'static str, u64),
+    /// This answer, this long after it was asked for.
+    Slow(Duration, Box<Wave>),
+    /// This answer, once this many asks are in flight (5 s at most).
+    Together(usize, Box<Wave>),
+    /// No answer: the connection closes.
+    Dropped,
+}
 
 /// A track of the fake server.
 #[derive(Clone)]
@@ -116,6 +136,29 @@ pub(crate) struct Library {
     pub(crate) version: Option<&'static str>,
     /// `/api/`'s `features.federationProxy`, when it says one.
     pub(crate) proxy_says: Option<Value>,
+    /// What the waveform route says of each track, by its path: each in turn,
+    /// then the last for as long as it is asked. A track with none: 404.
+    pub(crate) waves: HashMap<String, Vec<Wave>>,
+    /// Each path the waveform route was asked for, as it came.
+    pub(crate) waved: Vec<String>,
+    /// The asks it is answering now, and how many there were as each came.
+    pub(crate) wave_flight: Arc<AtomicUsize>,
+    pub(crate) wave_seen: Vec<usize>,
+    /// `/api/`'s `features.moodScores`, when it says one. The mood route
+    /// answers either way, as a server's never would, so a sync that asks it
+    /// without the flag shows.
+    pub(crate) moods_flag: Option<u32>,
+    /// What the mood route gives each path, as its JSON (a row in
+    /// [`MOOD_HEADS`] order, or null); a path with none is null, as a track
+    /// with no row is.
+    pub(crate) moods: HashMap<String, Value>,
+    /// Paths the mood route leaves out of its answer, as no mStream does.
+    pub(crate) moods_left_out: HashSet<String>,
+    /// What the mood route says in place of an answer: `403 Forbidden`,
+    /// `500 Internal Server Error`.
+    pub(crate) moods_say: Option<&'static str>,
+    /// The paths of each call of the mood route, as they came.
+    pub(crate) mood_calls: Vec<Vec<String>>,
     /// Its federation peers (B9).
     peers: Vec<peers::FedPeer>,
 }
@@ -170,6 +213,27 @@ fn media(asked: &Asked, bytes: &[u8]) -> Vec<u8> {
     }
 }
 
+/// The waveform route's answer: `flight` the asks it is answering now.
+fn wave_reply(wave: &Wave, flight: &AtomicUsize) -> Vec<u8> {
+    match wave {
+        Wave::Peaks(peaks) => json_reply("200 OK", &json!({ "waveform": peaks }).to_string()),
+        Wave::Says(words) => json_reply(words, r#"{"error":"a made-up refusal"}"#),
+        Wave::After(words, secs) => reply(words, &[("Retry-After", &secs.to_string())], b"{}"),
+        Wave::Slow(wait, then) => {
+            std::thread::sleep(*wait);
+            wave_reply(then, flight)
+        }
+        Wave::Together(n, then) => {
+            let t0 = std::time::Instant::now();
+            while flight.load(Ordering::SeqCst) < *n && t0.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            wave_reply(then, flight)
+        }
+        Wave::Dropped => Vec::new(),
+    }
+}
+
 fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
     let mut lib = fake.lock().unwrap();
     let path = asked.path();
@@ -189,6 +253,9 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
             }
             if let Some(proxy) = &lib.proxy_says {
                 body["features"]["federationProxy"] = proxy.clone();
+            }
+            if let Some(flag) = lib.moods_flag {
+                body["features"]["moodScores"] = json!(flag);
             }
             if lib.disk.is_some() {
                 body["user"]["admin"] = json!(true);
@@ -248,6 +315,39 @@ fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
                 .collect();
             let body = json!({"model": {"id": "effnet-discogs", "version": "1"}, "dim": 8, "tracks": tracks});
             json_reply("200 OK", &body.to_string())
+        }
+        ("POST", "/api/v1/db/mood-scores") => {
+            let paths: Vec<String> =
+                serde_json::from_value(asked.json()["filepaths"].clone()).unwrap_or_default();
+            lib.mood_calls.push(paths.clone());
+            if let Some(words) = lib.moods_say {
+                return json_reply(words, r#"{"error":"a made-up refusal"}"#);
+            }
+            let given = paths.iter().filter(|p| !lib.moods_left_out.contains(*p));
+            let tracks: serde_json::Map<String, Value> =
+                given.map(|p| (p.clone(), lib.moods.get(p).cloned().unwrap_or(Value::Null))).collect();
+            let body = json!({"model": {"id": "effnet-discogs", "version": "1"}, "moodVersion": "1",
+                              "heads": MOOD_HEADS, "tracks": tracks});
+            json_reply("200 OK", &body.to_string())
+        }
+        ("GET", "/api/v1/db/waveform") => {
+            let query = asked.target.split_once('?').map_or("", |(_, q)| q);
+            let pairs = url::form_urlencoded::parse(query.as_bytes());
+            let filepath = pairs.into_iter().find(|(key, _)| key == "filepath");
+            let filepath = filepath.map_or_else(String::new, |(_, value)| value.into_owned());
+            lib.waved.push(filepath.clone());
+            let wave = match lib.waves.get_mut(&filepath) {
+                Some(script) if script.len() > 1 => script.remove(0),
+                Some(script) => script[0].clone(),
+                None => Wave::Says("404 Not Found"),
+            };
+            let flight = lib.wave_flight.clone();
+            let now = flight.fetch_add(1, Ordering::SeqCst) + 1;
+            lib.wave_seen.push(now);
+            drop(lib);
+            let out = wave_reply(&wave, &flight);
+            flight.fetch_sub(1, Ordering::SeqCst);
+            out
         }
         ("GET" | "HEAD", p) if p.starts_with("/media/") => {
             let rel = &p["/media/".len()..];
@@ -336,6 +436,46 @@ pub(crate) fn server() -> (String, Fake) {
     (base, fake)
 }
 
+/// A track's 800 made-up peaks, from its path: 0-255, as the route gives them.
+pub(crate) fn peaks_of(path: &str) -> Vec<u8> {
+    let h = crate::device::card::contract::prim::fnv1a64(path.as_bytes());
+    (0..800u64).map(|i| (h.rotate_left((i * 7 % 64) as u32) >> 3) as u8).collect()
+}
+
+/// The waveform route gives every track its peaks.
+pub(crate) fn with_waves(fake: &Fake) {
+    let mut lib = fake.lock().unwrap();
+    let paths: Vec<String> = lib.tracks.iter().map(|t| t.path.clone()).collect();
+    for path in paths {
+        let peaks = peaks_of(&path);
+        lib.waves.insert(path, vec![Wave::Peaks(peaks)]);
+    }
+}
+
+/// A track's made-up mood row, from its path: in [`MOOD_HEADS`] order, each
+/// score on the server's grid of 4 places, and a NULL party for about one
+/// track in three.
+pub(crate) fn mood_row(path: &str) -> MoodRow {
+    let h = crate::device::card::contract::prim::fnv1a64(path.as_bytes());
+    let party = crate::device::card::contract::moods::PARTY;
+    std::array::from_fn(|k| {
+        let score = (h.rotate_left(8 * k as u32) % 10_001) as f64 / 10_000.0;
+        (k != party || h % 3 != 0).then_some(score)
+    })
+}
+
+/// The server says `moodScores`, and its mood route gives every track its
+/// [`mood_row`].
+pub(crate) fn with_moods(fake: &Fake) {
+    let mut lib = fake.lock().unwrap();
+    lib.moods_flag = Some(1);
+    let paths: Vec<String> = lib.tracks.iter().map(|t| t.path.clone()).collect();
+    for path in paths {
+        let row = json!(mood_row(&path));
+        lib.moods.insert(path, row);
+    }
+}
+
 /// What a Mac leaves in a library it copied, which mStream's scanner lists
 /// and its `/media` answers 404 for: an AppleDouble twin beside a file, and
 /// a file in a dot-folder (an Ogg, so a sniff of its first bytes would be a
@@ -403,7 +543,7 @@ pub(crate) fn space(free: u64) -> Option<Space> {
 }
 
 /// One sync of `card` from the server at `base`, as the command makes one.
-fn sync_now(card: &FatSim, base: &str, ask: &Ask, envs: &mut dyn FnMut() -> Env) -> (Synced, Vec<Event>) {
+pub(crate) fn sync_now(card: &FatSim, base: &str, ask: &Ask, envs: &mut dyn FnMut() -> Env) -> (Synced, Vec<Event>) {
     sync_via(card, base, ask, envs, Reached::Elsewhere)
 }
 
@@ -1458,5 +1598,7 @@ fn the_hidden_commands_rate_line_says_where_the_copying_stands() {
 }
 
 mod bench;
+mod moods;
 mod peers;
 mod span;
+mod waves;

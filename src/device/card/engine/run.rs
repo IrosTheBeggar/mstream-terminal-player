@@ -4,9 +4,10 @@
 //! plan), checked, renamed into `/music` over the file it replaces (that one
 //! deleted first: a FAT rename never replaces), and read back as the card
 //! stores it, its record read from those bytes. A checkpoint every 500 files
-//! or 5 minutes commits what is done; at the end the thumbnails, the Auto DJ
-//! index and the final commit, the leftovers collected, and the card read
-//! back as the device will read it.
+//! or 5 minutes commits what is done, and another comes ahead of an index step
+//! that may keep the card waiting long; at the end the thumbnails, the Auto DJ
+//! and waveform indexes, the mood tails and the final commit, the leftovers
+//! collected, and the card read back as the device will read it.
 //!
 //! A file a later run may take up (2.12.8) is fetched into its partial in
 //! `resume/` instead — its own listed one taken up, or a new one — flushed
@@ -26,6 +27,7 @@ use std::io::{self, Seek as _, SeekFrom, Write as _};
 use std::time::Instant;
 
 use super::super::contract::container::MPTG;
+use super::super::contract::moods::NO_ROW;
 use super::super::contract::mpdj::{self, Table};
 use super::super::contract::mptg::{
     self, BPM_ANALYSED, CONTAINER_NOT_AUDIO, FOLDER_OWNED, FOLDER_THUMB, FolderIn, Ledger, Meta,
@@ -36,6 +38,7 @@ use super::super::contract::msmf::{
 };
 use super::super::contract::mspd::{self, OP_DELETE, OP_FOLDER, OP_WRITE, Op, PlanIn};
 use super::super::contract::mpth;
+use super::super::contract::mpwf;
 use super::super::contract::order::{
     album_folder, compare_file_paths, compare_folder_paths, split_last, thumb_path, thumb_path_of,
 };
@@ -45,14 +48,15 @@ use super::super::contract::server::{Server, Servers};
 use super::super::contract::text::Run;
 use super::super::names::match_key;
 use super::super::tags::{self, PARSER_VERSION};
-use super::super::volume::{CardFile, CardFs, Item, next_seq};
+use super::super::volume::{CardFile, CardFs, Item, head_of, next_seq};
+use super::super::waves::Old;
 use super::plan::{Plan, Replaced, Write, origin_flags};
 use super::resume::{Entry, same_server, take_up};
 use super::settle::{card_qfp, companion_generation, entries, ms};
 use super::survey::{Music, join, key_path};
 use super::{
-    Album, AutoDj, Commit, Cover, Event, Fetcher, Have, Hooks, Outcome, Part, Report, Session, Stop,
-    WantedFile,
+    Album, AutoDj, Commit, Cover, Event, Fetcher, Have, Hooks, Moods, Outcome, Part, Report,
+    Session, Stop, WantedFile, Waves,
 };
 
 /// A record of the next commit, by its path.
@@ -134,10 +138,12 @@ struct Runner<'r, 'c> {
     owned: BTreeSet<String>,
     thumbs: BTreeSet<String>,
     /// The root now: its generation (0: none), its tags file, its valid Auto
-    /// DJ index (named again by checkpoints), its acknowledgements.
+    /// DJ and waveform indexes (named again by checkpoints), its
+    /// acknowledgements.
     generation: u32,
     tags_name: Option<String>,
     autodj: Option<Comp>,
+    waves: Option<Comp>,
     acks: Vec<Ack>,
     /// The next commit's generation.
     next: u32,
@@ -184,6 +190,9 @@ impl<'r, 'c> Runner<'r, 'c> {
         // one no commit names the old index again (AUTODJ-INDEX.md 7.3).
         let valid = s.settled.autodj.is_some() && card_id == old_id;
         let autodj = root.and_then(|r| r.manifest.autodj.clone()).filter(|_| valid);
+        // So does a waveform index (2.5.2), whose slots a new file carries.
+        let valid = root.is_some_and(|r| r.waves == Some(Ok(()))) && card_id == old_id;
+        let waves = root.and_then(|r| r.manifest.waves.clone()).filter(|_| valid);
         let acks = root.map(|r| r.manifest.acks.clone()).unwrap_or_default();
         let servers = root.map(|r| r.manifest.server_table()).unwrap_or_default();
         let mut owns: HashSet<Vec<String>> = HashSet::new();
@@ -213,6 +222,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             generation,
             tags_name,
             autodj,
+            waves,
             acks,
             next,
             card_id,
@@ -363,11 +373,18 @@ impl<'r, 'c> Runner<'r, 'c> {
             return Ok(self.outcome(Some(why), Ok(())));
         }
 
-        // Steps 10-12: the thumbnails, the Auto DJ index, the final commit;
-        // then the plan goes. The OWNED folders left empty go just before
-        // the commit, so it lists no folder that is gone.
+        // Steps 10-12: the thumbnails, the indexes, the final commit; then the
+        // plan goes. The OWNED folders left empty go just before the commit, so
+        // it lists no folder that is gone. An index step may ask a server for
+        // half an hour ahead of that commit's first write: what was copied since
+        // the last checkpoint is named by one first, or a card pulled in that
+        // wait would lose it to the next run's fetches. The device reads the
+        // root it finds at its next boot, so that commit costs it nothing.
         self.thumbnails(hooks)?;
         self.prune()?;
+        if self.since > 0 && hooks.long_index_steps() {
+            self.commit(false, hooks, events)?;
+        }
         self.commit(true, hooks, events)?;
         if self.pending || self.s.settled.pending.is_some() {
             let card = self.s.bound.alive()?;
@@ -520,7 +537,10 @@ impl<'r, 'c> Runner<'r, 'c> {
 
     /// A carried record read again from its card file, mStream's analysis
     /// kept where the tags still have neither a BPM nor a key (none for a
-    /// file that reads UNREADABLE now, whose fields are all absent: 2.6.4).
+    /// file that reads UNREADABLE now, whose fields are all absent: 2.6.4),
+    /// and its mood tail kept whatever the file reads as: the scores are
+    /// the server's, never the file's (the final commit's hook may lay new
+    /// ones over it).
     fn read_again(
         &mut self,
         rel: &str,
@@ -533,6 +553,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             (rec.bpm10, rec.camelot) = (old.bpm10, old.camelot);
             rec.flags |= BPM_ANALYSED;
         }
+        rec.moods = old.moods;
         Ok((rec, run))
     }
 
@@ -695,9 +716,16 @@ impl<'r, 'c> Runner<'r, 'c> {
             return self.skip(file, "the card has a file of that name".into(), events).map(Some);
         }
 
-        // 8.4: read back, and the record read from the card's bytes.
+        // 8.4: read back, and the record read from the card's bytes; a row's
+        // file fetched again keeps the row's mood tail, as read_again does:
+        // the scores are the server's, never the bytes' (a run that brings
+        // none keeps what the card had: the final commit's hook may lay new
+        // ones over it).
         let (rel, item) = self.read_back(&w.path)?;
-        let owned = self.owned_of(&rel, &item, file, origin_flags(file, verified, false))?;
+        let mut owned = self.owned_of(&rel, &item, file, origin_flags(file, verified, false))?;
+        if let Some(r) = w.row {
+            owned.rec.moods = self.s.survey.rows[r].rec.moods;
+        }
         self.take(&w.path, rel.clone(), owned);
         self.written += 1;
         events(Event::Wrote { path: rel, bytes: item.size });
@@ -1097,8 +1125,48 @@ impl<'r, 'c> Runner<'r, 'c> {
         flags.into_iter().map(|(path, flags)| FolderIn { path: path.to_string(), flags }).collect()
     }
 
+    /// The waveform index the root the run began from names, read whole for
+    /// the final commit's step (WAVEFORM-INDEX.md 7.3): the one place a run
+    /// reads its slots. None when the card's player doesn't read one, or the
+    /// file isn't what its row says any more: no old slot holds, and the run
+    /// goes on. A read that fails says neither (8.3): it is read again in
+    /// pieces ([`Self::waves_in_pieces`]).
+    fn old_waves_file(&mut self) -> Result<Option<Vec<u8>>, Stop> {
+        let root = self.s.settled.root.as_ref().filter(|r| r.waves == Some(Ok(())));
+        let entry = root.and_then(|r| r.manifest.waves.clone());
+        let Some(entry) = entry.filter(|_| self.s.device.writes_mpwf()) else { return Ok(None) };
+        let path = ms(&entry.name());
+        let bytes = match self.s.card.read(&path, MAX_FILE) {
+            Ok(bytes) => bytes,
+            Err(e) => match self.failed(e) {
+                Stop::Card(_) => Some(self.waves_in_pieces(&path, entry.file_bytes as usize)?),
+                stop => return Err(stop),
+            },
+        };
+        let open = |b: &Vec<u8>| {
+            mpwf::Table::open(b).is_ok_and(|t| msmf::companion_matches(&entry, t.header(), 0, None))
+        };
+        Ok(bytes.filter(open))
+    }
+
+    /// A waveform index the card can't read whole, in pieces: `len` bytes, those
+    /// it can't read left zero ([`read_pieces`]). A slot of zeros fails its CRC
+    /// at any row a file can have, so a bad sector costs the slots in it (7.3)
+    /// and no more. The file's frame is what they all hang on: a read of that
+    /// which fails stops the run, as it does at the settling, for taken as absent
+    /// a file that may be whole would be gone at the clean-up (12).
+    fn waves_in_pieces(&mut self, path: &str, len: usize) -> Result<Vec<u8>, Stop> {
+        let card = self.s.card;
+        let frame = card.read_at(path, 0, mpwf::FIRST_SLOT as usize);
+        let frame = frame.map_err(|e| self.failed(e))?;
+        let bound = &mut self.s.bound;
+        let mut bytes = read_pieces(card, path, len, &mut || bound.check(true).map(|_| ()))?;
+        bytes[..frame.len()].copy_from_slice(&frame);
+        Ok(bytes)
+    }
+
     /// A commit (2.12.1, steps 9 and 12): the tags file under its final
-    /// name, the Auto DJ index of a final commit, then the root through
+    /// name, the indexes of a final commit, then the root through
     /// `manifest.tmp` — `manifest.bin` deleted, then the rename — then the
     /// tags file before deleted, and at a checkpoint the plan's rest.
     fn commit(
@@ -1118,7 +1186,7 @@ impl<'r, 'c> Runner<'r, 'c> {
                 remap[i] = servers.len() as u16;
             }
         }
-        let records: Vec<RecordIn> = self
+        let mut records: Vec<RecordIn> = self
             .ledger
             .iter()
             .map(|(path, o)| RecordIn {
@@ -1131,18 +1199,26 @@ impl<'r, 'c> Runner<'r, 'c> {
         let folders = self.folder_table(&records);
         let generation = self.next;
         let now = self.s.env.now();
+        let old_file = if last { self.old_waves_file()? } else { None };
         let root = self.s.settled.root.as_ref();
 
-        // The Auto DJ index: a checkpoint names the old one again; the final
-        // commit's is the hook's (AUTODJ-INDEX.md 7.3).
+        // The indexes: a checkpoint names the old ones again; the final
+        // commit's are the hooks' (AUTODJ-INDEX.md 7.3, WAVEFORM-INDEX.md 7.3).
+        // So are its mood tails, where a checkpoint carries the records' own.
         let mut autodj = self.autodj.clone();
         let mut new_index: Option<Vec<u8>> = None;
+        let mut waves = self.waves.clone();
+        let mut new_waves: Option<Vec<u8>> = None;
         if last {
             let old = self.s.settled.autodj.as_deref().filter(|_| self.autodj.is_some());
             let origins = plan.origin_at.iter().map(|&i| match i {
                 0 => Some(0),
                 i => used.contains(&i).then_some(remap[i]),
             });
+            let table = old_file.as_deref().and_then(|b| mpwf::Table::open(b).ok());
+            let tags = root.and_then(|r| r.tags.as_ref().ok());
+            let checkpoint = root.is_some_and(|r| !r.manifest.is_final());
+            let old_waves = table.map(|t| Old::new(t, tags, checkpoint));
             let commit = Commit {
                 generation,
                 card_id: self.card_id,
@@ -1150,6 +1226,7 @@ impl<'r, 'c> Runner<'r, 'c> {
                 records: &records,
                 device: &self.s.device,
                 old,
+                old_waves: old_waves.as_ref(),
                 origins: origins.collect(),
             };
             autodj = match hooks.autodj(&commit) {
@@ -1168,6 +1245,30 @@ impl<'r, 'c> Runner<'r, 'c> {
                     comp
                 }
             };
+            // The step before may have taken minutes, and the fetches of the
+            // next two (the mood scores, then the waveforms, which may take
+            // half an hour) have no write of their own to find the card gone.
+            self.s.bound.check(true)?;
+            let moods = hooks.moods(&commit);
+            waves = match hooks.waves(&commit, events) {
+                Waves::None => None,
+                Waves::Same => self.waves.clone(),
+                Waves::New(bytes) => {
+                    let refused = |why| Stop::Refused(format!("a waveform index: {why}"));
+                    let table = mpwf::Table::open(&bytes).map_err(refused)?;
+                    table.check().map_err(refused)?;
+                    let h = table.header();
+                    if h.generation != generation || h.card_id != self.card_id {
+                        return Err(Stop::Refused("a waveform index of another commit".into()));
+                    }
+                    let comp = Comp::of(&bytes);
+                    new_waves = Some(bytes);
+                    comp
+                }
+            };
+            // The tails last, once no step reads the records: the commit is
+            // weighed with them below, so equal scores make none.
+            lay(&mut records, &moods);
         }
 
         // The root's server 0 header: the server read, or as it was; its
@@ -1194,8 +1295,10 @@ impl<'r, 'c> Runner<'r, 'c> {
         // the device build its library again (3.2.2), which acknowledging
         // plays isn't worth (2.5.6): the plays' marks wait for a commit made
         // anyway.
-        let same = self.unchanged(&records, &folders, &autodj, &servers, &roots, &revision, server0);
+        let same =
+            self.unchanged(&records, &folders, &autodj, &waves, &servers, &roots, &revision, server0);
         if last && same {
+            events(Event::Unchanged);
             return Ok(());
         }
 
@@ -1208,7 +1311,7 @@ impl<'r, 'c> Runner<'r, 'c> {
             read_rules: READ_RULES,
             generation,
             card_id: self.card_id,
-            minor: 0,
+            minor: mptg::minor_of(&records),
             producer: self.s.env.producer.clone(),
         };
         let tags = mptg::write(&meta, &records, &folders).map_err(|e| Stop::Refused(e.0.into()))?;
@@ -1217,8 +1320,14 @@ impl<'r, 'c> Runner<'r, 'c> {
         if let (Some(bytes), Some(comp)) = (&new_index, &autodj) {
             self.put(&ms(&comp.name()), bytes)?;
         }
-        let comps: Vec<Comp> = Comp::of(&tags).into_iter().chain(autodj.clone()).collect();
+        if let (Some(bytes), Some(comp)) = (&new_waves, &waves) {
+            self.put(&ms(&comp.name()), bytes)?;
+        }
+        let comps: Vec<Comp> =
+            Comp::of(&tags).into_iter().chain(autodj.clone()).chain(waves.clone()).collect();
         let commit_id = self.s.env.id();
+        // Its own time: the indexes' steps may have taken half an hour.
+        let now = self.s.env.now();
         let manifest = ManifestIn {
             generation,
             card_id: self.card_id,
@@ -1242,7 +1351,7 @@ impl<'r, 'c> Runner<'r, 'c> {
         self.replace(&ms("manifest.tmp"), &ms("manifest.bin"))?;
 
         // The tags file before goes; so, at the end, does an index no longer
-        // named (the collection's).
+        // named (the collection's, of either kind).
         if let Some(old) = self.tags_name.replace(tags_name.clone())
             && old != tags_name
         {
@@ -1254,6 +1363,7 @@ impl<'r, 'c> Runner<'r, 'c> {
         self.generation = generation;
         self.next = generation + 1;
         self.autodj = autodj;
+        self.waves = waves;
         self.acks = acks;
         self.since = 0;
         self.last = Instant::now();
@@ -1265,15 +1375,16 @@ impl<'r, 'c> Runner<'r, 'c> {
     }
 
     /// The final commit would say what the root says already: the same
-    /// records, folders, servers, roots, revision and Auto DJ index, and the
-    /// root a final one. Its acknowledgements aside: they ride on a commit,
-    /// never make one.
+    /// records, folders, servers, roots, revision and indexes, and the root a
+    /// final one. Its acknowledgements aside: they ride on a commit, never make
+    /// one.
     #[allow(clippy::too_many_arguments)]
     fn unchanged(
         &self,
         records: &[RecordIn],
         folders: &[FolderIn],
         autodj: &Option<Comp>,
+        waves: &Option<Comp>,
         servers: &[Server],
         roots: &[String],
         revision: &str,
@@ -1299,6 +1410,7 @@ impl<'r, 'c> Runner<'r, 'c> {
         sorted(records) == sorted(&old_records)
             && folder_set(folders) == folder_set(&old_folders)
             && *autodj == m.autodj
+            && *waves == m.waves
             && servers == m.servers.as_slice()
             && roots == old_roots.as_slice()
             && revision == m.server_revision
@@ -1332,7 +1444,9 @@ impl<'r, 'c> Runner<'r, 'c> {
     fn collect(&mut self) -> Result<(), Stop> {
         self.s.bound.check(true)?;
         let index = self.autodj.as_ref().map(Comp::name);
-        let named: HashSet<String> = self.tags_name.iter().cloned().chain(index).collect();
+        let waves = self.waves.as_ref().map(Comp::name);
+        let named = self.tags_name.iter().cloned().chain(index).chain(waves);
+        let named: HashSet<String> = named.collect();
         let top = entries(self.s.card, "/.mstream").map_err(|e| self.failed(e))?;
         for item in top.iter().filter(|i| !i.dir) {
             let lower = item.name.to_ascii_lowercase();
@@ -1419,8 +1533,9 @@ impl<'r, 'c> Runner<'r, 'c> {
 
     /// The card read back as the device reads it (the transfer plan's 2.3,
     /// step 16; tools/synthtransfer.py's check is the model): the root that
-    /// counts is this run's and final, its tags file and Auto DJ index valid
-    /// and the ones it names, and every record's file there by the exact
+    /// counts is this run's and final, its tags file and indexes valid and the
+    /// ones it names (the waveform index's frame and row: the device checks
+    /// each slot as it reads it), and every record's file there by the exact
     /// bytes of its path, with its size and stamp (and, deep, its
     /// fingerprint).
     fn verify(&mut self) -> Result<(), String> {
@@ -1455,6 +1570,15 @@ impl<'r, 'c> Runner<'r, 'c> {
                 return Err("the Auto DJ index isn't the one the root names".into());
             }
         }
+        if let Some(entry) = &root.waves {
+            let head = head_of(card, &ms(&entry.name())).map_err(|e| e.to_string())?;
+            let (head, size) = head.ok_or("the waveform index is missing")?;
+            let header = mpwf::open_head(&head, size);
+            let header = header.map_err(|why| format!("the waveform index: {why}"))?;
+            if !msmf::companion_matches(entry, &header, 0, None) {
+                return Err("the waveform index isn't the one the root names".into());
+            }
+        }
         let music = Music::list(card).map_err(|e| e.to_string())?;
         for e in &tags.records {
             let (dir, name) = split_last(&e.path);
@@ -1476,6 +1600,21 @@ impl<'r, 'c> Runner<'r, 'c> {
 /// A file as the plan's listing had it: its size and stamp.
 fn listed(item: &Item, r: Replaced) -> bool {
     !item.dir && item.size == r.size && item.fat_time == r.fat_time
+}
+
+/// The final commit's records under the mood hook's answer: each as it
+/// is, each without a tail, or each the overlay names with its tail there.
+fn lay(records: &mut [RecordIn], moods: &Moods) {
+    for r in records {
+        r.rec.moods = match moods {
+            Moods::Keep => return,
+            Moods::Clear => NO_ROW,
+            Moods::Overlay(tails) => match tails.get(&r.path) {
+                Some(tail) => *tail,
+                None => continue,
+            },
+        };
+    }
 }
 
 /// The ops of a plan in `pending.bin`'s order (2.12.5): the deletes, then
@@ -1725,6 +1864,45 @@ impl Part for PartSink<'_, '_, '_> {
         self.etag = etag;
         Ok(())
     }
+}
+
+/// How a file the card can't read whole is read ([`read_pieces`]), and a piece
+/// of it that fails: a file starts on a sector, and no waveform index's slot
+/// crosses one (WAVEFORM-INDEX.md 4.2).
+const PIECE: usize = 1 << 20;
+const SECTOR: usize = 512;
+
+/// `len` bytes of a card file it can't read whole: a piece at a time, and by the
+/// sector in a piece that fails, once `failed` has said what that may be (a
+/// pulled card is no bad sector). What can't be read stays zero.
+pub(super) fn read_pieces(
+    card: &dyn CardFs,
+    path: &str,
+    len: usize,
+    failed: &mut dyn FnMut() -> Result<(), Stop>,
+) -> Result<Vec<u8>, Stop> {
+    let mut bytes = vec![0; len];
+    for (k, piece) in bytes.chunks_mut(PIECE).enumerate() {
+        let at = (k * PIECE) as u64;
+        if read_into(card, path, at, piece).is_err() {
+            failed()?;
+            for (n, sector) in piece.chunks_mut(SECTOR).enumerate() {
+                let _ = read_into(card, path, at + (n * SECTOR) as u64, sector);
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+/// `into`'s length of a card file from `at`, or an error and `into` as it was.
+fn read_into(card: &dyn CardFs, path: &str, at: u64, into: &mut [u8]) -> io::Result<()> {
+    let piece = card.read_at(path, at, into.len())?;
+    if piece.len() != into.len() {
+        let short = "the file is shorter than read";
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, short));
+    }
+    into.copy_from_slice(&piece);
+    Ok(())
 }
 
 /// The MD5 of a card file's first `len` bytes, read back in pieces.

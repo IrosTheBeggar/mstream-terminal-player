@@ -4,9 +4,9 @@
 //! its own that a PC may list skewed (2.3.4), a rename that refuses to
 //! replace another file, and the card's failures on demand: pulled at any
 //! write, a rename cut between its two directory writes (both names left,
-//! one file's bytes under each: 2.12.1, "Cut renames"), or another card
-//! swapped into the reader after any write. run.lock's OS lock is the
-//! host's own, so two runs contend for it for real.
+//! one file's bytes under each: 2.12.1, "Cut renames"), another card
+//! swapped into the reader after any write, or a file with a bad sector.
+//! run.lock's OS lock is the host's own, so two runs contend for it for real.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -22,6 +22,19 @@ use super::super::volume::{CardFile, CardFs, CardWrite, Item, LockFile, Serial};
 
 /// 1980-01-01 in Unix seconds: FAT's epoch.
 const FAT_EPOCH: i64 = 315_532_800;
+
+/// A sector of a file, as a read reaches it.
+const SECTOR: u64 = 512;
+
+/// What of a file can't be read, the card otherwise well.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bad {
+    /// The sector at this byte: any read that reaches it fails.
+    Sector(u64),
+    /// A read of all of it fails, and a read of a piece doesn't: an error that
+    /// passes.
+    Whole,
+}
 
 /// How a cut write fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +73,8 @@ pub(crate) struct FatSim {
     /// Each write of a file's bytes: its card path and how many.
     sizes: RefCell<Vec<(String, usize)>>,
     quiet: Cell<bool>,
+    /// A file with a bad sector, and what of it can't be read.
+    bad: RefCell<Option<(String, Bad)>>,
 }
 
 fn pulled() -> io::Error {
@@ -89,7 +104,38 @@ impl FatSim {
             log: RefCell::new(Vec::new()),
             sizes: RefCell::new(Vec::new()),
             quiet: Cell::new(false),
+            bad: RefCell::new(None),
         }
+    }
+
+    /// The sector of this file that holds byte `at` can't be read: any read
+    /// that reaches it fails, one of the whole file among them.
+    pub(crate) fn bad_sector(&self, path: &str, at: u64) {
+        *self.bad.borrow_mut() = Some((path.to_string(), Bad::Sector(at / SECTOR * SECTOR)));
+    }
+
+    /// A read of the whole of this file fails, and a read of a piece of it
+    /// doesn't.
+    pub(crate) fn stumbles(&self, path: &str) {
+        *self.bad.borrow_mut() = Some((path.to_string(), Bad::Whole));
+    }
+
+    /// Every file reads again.
+    pub(crate) fn heal(&self) {
+        *self.bad.borrow_mut() = None;
+    }
+
+    /// A read of this file, of all of it or of `len` bytes from `at`, reaches
+    /// what of it can't be read.
+    fn reads_bad(&self, path: &str, piece: Option<(u64, u64)>) -> io::Result<()> {
+        let bad = self.bad.borrow();
+        let what = bad.as_ref().filter(|(bad, _)| bad == path).map(|(_, what)| *what);
+        let reached = match (what, piece) {
+            (None, _) | (Some(Bad::Whole), Some(_)) => false,
+            (Some(_), None) => true,
+            (Some(Bad::Sector(s)), Some((at, len))) => at < s + SECTOR && s < at + len,
+        };
+        if reached { Err(io::Error::other("a bad sector")) } else { Ok(()) }
     }
 
     pub(crate) fn root(&self) -> PathBuf {
@@ -101,6 +147,14 @@ impl FatSim {
     pub(crate) fn cut_at(&self, n: u64, how: Cut) {
         let mut s = self.state.borrow_mut();
         s.cut = Some((s.ops + n, how));
+    }
+
+    /// The card pulled now, with no write of its own: handles from before stay
+    /// dead.
+    pub(crate) fn pull(&self) {
+        let mut s = self.state.borrow_mut();
+        s.pulled = true;
+        s.epoch += 1;
     }
 
     /// The card back in the reader, uncut: handles from before stay dead.
@@ -261,6 +315,7 @@ impl CardFs for FatSim {
 
     fn read(&self, path: &str, max: usize) -> io::Result<Option<Vec<u8>>> {
         self.reading()?;
+        self.reads_bad(path, None)?;
         let host = match self.host(path, false) {
             Ok(host) => host,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -275,6 +330,7 @@ impl CardFs for FatSim {
 
     fn read_at(&self, path: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         self.reading()?;
+        self.reads_bad(path, Some((offset, len as u64)))?;
         let mut file = File::open(self.host(path, false)?)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = Vec::with_capacity(len);

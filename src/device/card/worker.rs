@@ -502,6 +502,9 @@ pub(crate) struct Planned {
     pub(crate) plays: usize,
     pub(crate) tally: Option<Tally>,
     pub(crate) fit: Option<Fit>,
+    /// The card has no waveform file its player would read, and the server
+    /// may have the peaks: something waits though the music is in step.
+    pub(crate) waves_missing: bool,
     pub(crate) guards: Vec<Guard>,
     /// The stronger removals guard's paths' libraries, in its order, from
     /// the card's ledger: what that gate counts by (clause 58).
@@ -540,6 +543,16 @@ pub(crate) struct Run {
     pub(crate) skipped: usize,
     /// When it started (Unix seconds).
     pub(crate) started: u64,
+    /// The waveforms the server has answered for, of those asked (clause 51a).
+    pub(crate) waves: (usize, usize),
+}
+
+impl Run {
+    /// How far the server's answers for the waveforms have come.
+    pub(crate) fn waves_percent(&self) -> u8 {
+        let (done, of) = self.waves;
+        (done.min(of) * 100).checked_div(of).unwrap_or(0) as u8
+    }
 }
 
 /// A sync's phase.
@@ -556,6 +569,9 @@ pub(crate) enum Phase {
     Copying,
     /// The card's index, covers and Auto DJ.
     Index,
+    /// Asking the server for the tracks' waveforms, for the card's index of
+    /// them: at the final commit, after the rest of it.
+    Waves,
     Verifying,
 }
 
@@ -689,7 +705,14 @@ impl CardView {
     pub(crate) fn percent(&self) -> Option<u8> {
         let run = self.run.as_ref().filter(|r| r.phase != Phase::Waiting)?;
         if run.bytes == 0 {
-            return Some(if run.phase >= Phase::Index { 100 } else { 0 });
+            // A run that copies nothing: the waveforms it asks for are all
+            // there is to count, and it never says 100 ahead of them.
+            return Some(match run.phase {
+                Phase::Index if run.files == 0 => 0,
+                Phase::Waves if run.files == 0 => run.waves_percent(),
+                phase if phase >= Phase::Index => 100,
+                _ => 0,
+            });
         }
         Some(((run.done_bytes.min(run.bytes) * 100) / run.bytes) as u8)
     }
@@ -1112,9 +1135,18 @@ impl Worker {
         let card = self.slots[at].view.name().unwrap_or_else(|| drive.clone());
         if running {
             // Its run stops on its own at its next write (the card is gone);
-            // the tab stays, marked out, until it is back or given up.
+            // the tab stays, marked out, until it is back or given up. While it
+            // asks for its waveforms that write may be half an hour off: it
+            // stops asking now, or at the first ask if that is still to come
+            // ([`Worker::progress`]). Any earlier, it goes on: back in the reader
+            // before its next write, it never met the gap.
             let slot = &mut self.slots[at];
             slot.view.out = true;
+            if slot.view.run.as_ref().is_some_and(|r| r.phase == Phase::Waves)
+                && let Some(running) = &self.running
+            {
+                running.stop.store(true, Ordering::SeqCst);
+            }
             let (at_n, of) = slot.view.run.as_ref().map_or((0, 0), |r| (r.done_files, r.files));
             self.tell(Event::Note(Note::OutRun { drive, card, at: at_n, of }));
             self.told(key);
@@ -1592,9 +1624,19 @@ impl Worker {
                     run.phase = Phase::Verifying;
                 }
             }
+            RunEvent::Unchanged => run.phase = Phase::Verifying,
+            RunEvent::Waves { done, of } => {
+                run.phase = Phase::Waves;
+                run.now = None;
+                run.waves = (*done, *of);
+            }
             _ => {}
         }
-        let urgent = run.phase != phase_was || !matches!(event, RunEvent::Progress { .. });
+        // Taken out before its first ask (while the Auto DJ index was read, say):
+        // nothing would stop the asking till its next write, half an hour off.
+        let asks_out = slot.view.out && matches!(event, RunEvent::Waves { .. });
+        let counts = matches!(event, RunEvent::Progress { .. } | RunEvent::Waves { .. });
+        let urgent = run.phase != phase_was || !counts;
         let due = slot.told.is_none_or(|t| t.elapsed() >= TELL_EVERY);
         if urgent || due {
             slot.told = Some(Instant::now());
@@ -1603,6 +1645,9 @@ impl Worker {
         }
         if let Some(item) = log {
             self.tell(Event::Log { key: key.to_string(), item });
+        }
+        if asks_out && let Some(running) = self.running.as_ref().filter(|r| r.key == key) {
+            running.stop.store(true, Ordering::SeqCst);
         }
     }
 
@@ -2195,6 +2240,7 @@ fn planned(synced: &sync::Synced, now: u64) -> Next {
                 plays,
                 tally,
                 fit: s.fit,
+                waves_missing: s.waves_missing,
                 guards: s.guards.clone(),
                 // Read off the card by the dry run that asked.
                 removal_libs: Vec::new(),
@@ -2498,6 +2544,7 @@ history=1
             stopping: false,
             skipped: 0,
             started: now - 600,
+            waves: (0, 0),
         });
         view
     }

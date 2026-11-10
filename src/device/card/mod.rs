@@ -14,6 +14,8 @@
 //! card, the way mStream's scanner and the device's own scan read them.
 //! [`autodj`] is the Auto DJ index's writer: the neighbour lists from
 //! mStream's embeddings, and whether a run writes a new index at all.
+//! [`waves`] is the waveform index's: each track's shape from mStream's peaks,
+//! the old file's slots kept where they still hold.
 //! [`volume`] is the cards in this computer's readers: the drive-safety rule
 //! that says which volumes the transfer may write, a card read as the
 //! device reads it, and the write half a run drives. [`engine`] is the run:
@@ -62,4 +64,5 @@ pub(crate) mod state;
 pub(crate) mod sync;
 pub(crate) mod tags;
 pub(crate) mod volume;
+pub(crate) mod waves;
 pub(crate) mod worker;
