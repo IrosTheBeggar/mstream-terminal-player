@@ -23,10 +23,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use reqwest::header::{
-    CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, IF_RANGE, LAST_MODIFIED,
-    RANGE, RETRY_AFTER,
+    ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, IF_RANGE,
+    LAST_MODIFIED, RANGE, RETRY_AFTER,
 };
-use reqwest::{Method, Response, StatusCode};
+use reqwest::{Method, RequestBuilder, Response, StatusCode};
 
 use crate::api::urls::{self, TransferBitrate, TransferCodec};
 use crate::api::{ApiError, Client, extract_error, refused};
@@ -601,6 +601,18 @@ impl Client {
         Ok(urls::with_local_token(url, self.local_token.as_deref()))
     }
 
+    /// The request a file's bytes are asked with: the transfer's own, and
+    /// no encoding offered. The client takes gzip for its JSON (Cargo.toml),
+    /// which a server's compression or a proxy in front of it may then put
+    /// on a file too: it would come with no Content-Length to hold against
+    /// the length expected before a byte is written, under a validator and
+    /// a Range that are the compressed copy's. Said by name, as the engine's
+    /// streams say it (engine::http), so the file comes as the server holds
+    /// it whatever the client learns to decode.
+    fn bytes_request(&self, method: Method, url: &str) -> RequestBuilder {
+        self.transfer_request(method, url).header(ACCEPT_ENCODING, "identity")
+    }
+
     /// A refusal's body, read to [`WORDS_MAX`] and counted, as the client's
     /// error: a 429 sorted into a [`Limited`], a full bulk queue's 503, which
     /// says when to ask again, [`FetchError::Busy`].
@@ -741,7 +753,7 @@ impl Client {
         let (mut resp, ceiling) = loop {
             let left = fetch.expected.map(|e| e.saturating_sub(from));
             let ceiling = fetch.ceiling.unwrap_or_else(|| ceiling_for(left));
-            let mut req = self.transfer_request(Method::GET, &url).timeout(ceiling);
+            let mut req = self.bytes_request(Method::GET, &url).timeout(ceiling);
             if from > 0 {
                 req = req.header(RANGE, format!("bytes={from}-"));
                 if let Some(validator) = fetch.resume {
@@ -900,7 +912,7 @@ impl Client {
         }
         let url = self.bytes_url(&Wanted::File(path)).map_err(FetchError::Api)?;
         let req = self
-            .transfer_request(Method::GET, &url)
+            .bytes_request(Method::GET, &url)
             .timeout(PROBE_CEILING)
             .header(RANGE, format!("bytes={start}-{}", start + len - 1));
         let mut resp = match tokio::time::timeout(STALL, req.send()).await {
@@ -968,7 +980,7 @@ impl Client {
             };
         }
         let url = self.bytes_url(&Wanted::File(path)).map_err(FetchError::Api)?;
-        let req = self.transfer_request(Method::HEAD, &url).timeout(PROBE_CEILING);
+        let req = self.bytes_request(Method::HEAD, &url).timeout(PROBE_CEILING);
         let resp = match tokio::time::timeout(STALL, req.send()).await {
             Err(_) => return Err(FetchError::Stalled(STALL)),
             Ok(Err(e)) => return Err(transport(e, PROBE_CEILING)),
@@ -1392,6 +1404,38 @@ mod tests {
         let failed = client.download(&fetch, &dest, &mut |_, _| {}).unwrap_err();
         assert!(matches!(failed.error, FetchError::TooLong { cap: 5 }), "{:?}", failed.error);
         assert_eq!(failed.partial, Partial { len: 4, validator: None }, "a conversion's part is never resumed");
+    }
+
+    /// The other half of the client's gzip (performance audit #98): its JSON
+    /// may come compressed, a file's bytes are asked for as they are — the
+    /// download, the ranged read and the HEAD alike — so the length the
+    /// server sends is the file's, and a resume's Range counts its bytes.
+    #[test]
+    fn a_files_bytes_are_asked_for_with_no_encoding_offered() {
+        let scratch = Scratch::new("identity");
+        let dest = scratch.file("0001.tmp", None);
+        let (base, seen) = canned(vec![
+            reply("200 OK", &[("ETag", "\"a1\"")], b"0123456789"),
+            reply("206 Partial Content", &[("Content-Range", "bytes 0-3/10")], b"0123"),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n".to_vec(),
+            json("200 OK", r#"{"lib/a.mp3":null}"#),
+        ]);
+        let client = Client::new(&base).unwrap();
+        let got = client.download(&Fetch::file("lib/a.mp3").expecting(10), &dest, &mut |_, _| {}).unwrap();
+        assert_eq!((got.len, std::fs::read(&dest).unwrap()), (10, b"0123456789".to_vec()));
+        assert_eq!(client.read_range("lib/a.mp3", 0, 4).unwrap().bytes, b"0123");
+        assert_eq!(client.probe("lib/a.mp3", ProbeBy::Head).unwrap().and_then(|p| p.len), Some(10));
+        for asked in ["get /media/lib/a.mp3 ", "get /media/lib/a.mp3 ", "head /media/lib/a.mp3 "] {
+            let req = recv(&seen);
+            assert!(req.starts_with(asked), "{req}");
+            assert!(req.contains("accept-encoding: identity\r\n"), "{req}");
+            assert!(!req.contains("gzip"), "{req}");
+        }
+        // The transfer's JSON still offers it: a manifest page is megabytes.
+        client.metadata_batch(&["lib/a.mp3".to_string()]).unwrap();
+        let req = recv(&seen);
+        assert!(req.starts_with("post /api/v1/db/metadata/batch "), "{req}");
+        assert!(req.contains("accept-encoding: gzip\r\n"), "{req}");
     }
 
     #[test]
