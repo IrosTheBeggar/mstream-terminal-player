@@ -1171,3 +1171,30 @@ fn a_peer_whose_budget_cant_be_kept_is_stopped() {
     let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
     assert_eq!((synced.peers[0].status.clone(), ran(&synced).written), (Status::Read, 1));
 }
+
+/// The hidden command's dry run reads a peer only when it is named, and
+/// then stores nothing of the listener's: no daily budget in the book. One
+/// that names none asks the card's peers nothing, their meters untouched.
+#[test]
+fn a_dry_run_reads_a_peer_only_when_named_and_keeps_no_budget() {
+    let scratch = Scratch::new("peer-dry");
+    let sim = card(&scratch);
+    let (base, _fake, peer, dial) = world(true, false, folk());
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let dry = Ask { dry_run: true, budget_mb: Some(1), ..rock_and_folk() };
+    let synced = sync_fed(&sim, &base, &dry, &fed, &mut envs);
+    assert!(matches!(synced.end, End::Dry), "{:?}", synced.end);
+    assert_eq!(synced.peers[0].status, Status::Read);
+    let book = Budget::at(scratch.0.join("config")).read().unwrap();
+    assert_ne!(book.cap(key_of(&base), None), Some(1 << 20), "the 1 MiB asked isn't stored");
+
+    ran(&sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs));
+    let before = asked_of(&peer).len();
+    let dry = Ask { dry_run: true, ..Ask::default() };
+    let synced = sync_fed(&sim, &base, &dry, &fed, &mut envs);
+    assert!(matches!(synced.end, End::Dry), "{:?}", synced.end);
+    assert!(synced.peers.is_empty(), "{:?}", synced.peers);
+    assert_eq!(asked_of(&peer).len(), before, "the peer asked nothing");
+}

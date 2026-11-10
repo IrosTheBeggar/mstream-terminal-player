@@ -277,6 +277,11 @@ fn asked(cx: &Context<'_>, settings: &Settings) -> Vec<PeerAsk> {
     if let Some(asked) = &cx.ask.peers {
         return asked.clone();
     }
+    // A dry run reads a peer only when one is named: a listing goes through
+    // its meter and books bytes of its day.
+    if cx.ask.dry_run {
+        return Vec::new();
+    }
     let keys = parent_keys(cx.talk);
     let of_this = |p: &&PeerSource| keys.contains(&p.parent_key) && !p.libraries.is_empty();
     let ask = |p: &PeerSource| PeerAsk { id: p.peer_id, libraries: None };
@@ -346,7 +351,8 @@ fn side(
     let limit = cx.ask.budget_mb;
     let book = fed.budget.with(|b| {
         b.adopt(key, &keys);
-        if limit.is_some() {
+        // A dry run stores nothing of the listener's: no budget either.
+        if limit.is_some() && !cx.ask.dry_run {
             b.set_limit(key, limit);
         }
         b.waiting(key, now)
@@ -416,7 +422,7 @@ fn side(
     // A day spent (the listener's budget, or the key's quota as the peer
     // says it) asks nothing more of it, not its listing: it waits.
     if spend.left() == Some(0) {
-        return Err(spent(fed, &mut spend, id));
+        return Err(spent(fed, &mut spend, id, cx.ask.dry_run));
     }
 
     // Its files, decided as the user's own server's are.
@@ -455,7 +461,7 @@ fn side(
     // The listing spent what was left: it waits, the card's rows of it as
     // they are.
     if spend.left() == Some(0) {
-        return Err(spent(fed, &mut spend, id));
+        return Err(spent(fed, &mut spend, id, cx.ask.dry_run));
     }
     let scanning = listing.unscanned > 0;
     let audio = |e: &ManifestEntry| e.audio_hash.as_deref().and_then(hex16);
@@ -524,9 +530,10 @@ fn side(
 
 /// A peer whose day is spent before its files are planned: it waits, in the
 /// book, until the next 00:00 UTC and a few minutes.
-fn spent(fed: &Federation, spend: &mut Spend, id: u32) -> PeerSummary {
+/// A dry run says so, and parks nothing.
+fn spent(fed: &Federation, spend: &mut Spend, id: u32, dry_run: bool) -> PeerSummary {
     let until = budget::resume_after((fed.clock)(), None, (fed.jitter)());
-    match spend.park(until) {
+    match if dry_run { Ok(()) } else { spend.park(until) } {
         Ok(()) => {
             let why = Some("its day is spent".to_string());
             PeerSummary { resume_at: Some(until), ..PeerSummary::of(id, Status::Waiting, why) }
