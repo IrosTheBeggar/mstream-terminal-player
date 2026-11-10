@@ -83,9 +83,10 @@ crash still yields a `stopped` play at the next launch.
 9. **The outbox persists** in `stats.json` beside `queue.json` (at most
    500 plays, oldest out) with the open session checkpointed on the way
    — a write soon after a change and every ten seconds while a session is
-   open, a flush on the way out — so a crash, a kill or a closed terminal
-   yields a `stopped` play at the next launch, listened to the last
-   checkpoint. The instance id lives in the file too, so it is one per
+   open and its listening moves (a paused session is written once more,
+   then not again until it plays, seeks or ends), a flush on the way out
+   — so a crash, a kill or a closed terminal yields a `stopped` play at
+   the next launch, listened to the last checkpoint. The instance id lives in the file too, so it is one per
    install.
 10. **A server without the Stats API** (the ping's `stats` absent) gets
     the legacy scrobble instead: once per session, thirty seconds in, for
@@ -133,7 +134,8 @@ a pause is counted; under a second is never posted; a kept batch waits a
 minute and a settled or dropped one clears; a peer row's play goes to the
 parent with `peerId` and a snapshot; a server without the Stats API gets
 one legacy scrobble at thirty seconds and no batch; the outbox and a
-checkpointed session survive a restart, the session as a `stopped` play.
+checkpointed session survive a restart, the session as a `stopped` play;
+a paused session is checkpointed once, then not while it stays paused.
 Worker: the server's answers mapped onto settled / dropped / kept. Rig: a
 track played past thirty seconds and skipped appears in Last played and
 Most played.
@@ -168,3 +170,15 @@ Most played.
   only under that account — held for its return, never posted as another
   user's listening. A play from before the stamp carries none and posts
   as before.
+- **2026-09-28 — A paused session stops being rewritten** (clause 9;
+  performance audit #107). The ten-second checkpoint ran for as long as a
+  session was open, so a player left paused rewrote and flushed
+  `stats.json` 360 times an hour with nothing new but the checkpoint's
+  time. It now writes only when something a recovery reads has moved —
+  the time listened, the pauses, the furthest point, the length — which
+  is every checkpoint while playing and one after a pause (a write that
+  fails is tried again at each checkpoint until one lands). A crash during
+  a long pause recovers the same play, listened to the same second; its
+  end time is the pause's (within ten seconds) rather than the crash's,
+  which is what the record's webapp gives (its checkpoint rides
+  `timeupdate`, silent while paused).

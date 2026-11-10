@@ -79,7 +79,37 @@ pub enum Tier {
 /// fonts draw many glyphs as '?'. Resolved once, from the environment,
 /// unless [`pin_modern_glyphs`] answered first.
 pub(crate) fn legacy_conhost() -> bool {
+    #[cfg(test)]
+    if let Some(legacy) = TEST_GLYPHS.with(std::cell::Cell::get) {
+        return legacy;
+    }
     legacy_conhost_in(&GLYPHS, cfg!(windows), |var| std::env::var(var).ok())
+}
+
+// A frame test's own glyph tier. Per THREAD, not the process-wide cell:
+// pinning the legacy stand-ins there would flip every frame test running
+// beside it, and each test draws on its own thread.
+#[cfg(test)]
+thread_local! {
+    static TEST_GLYPHS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Draw this test thread's frames with the legacy console's stand-ins
+/// until the guard drops — the rooms' glyph fallbacks, pinned by render.
+#[cfg(test)]
+pub(crate) fn legacy_glyphs_here() -> LegacyGlyphs {
+    TEST_GLYPHS.with(|cell| cell.set(Some(true)));
+    LegacyGlyphs
+}
+
+#[cfg(test)]
+pub(crate) struct LegacyGlyphs;
+
+#[cfg(test)]
+impl Drop for LegacyGlyphs {
+    fn drop(&mut self) {
+        TEST_GLYPHS.with(|cell| cell.set(None));
+    }
 }
 
 /// The glyph tier, once resolved: [`UNASKED`], [`LEGACY`] or [`MODERN`]. An
@@ -192,7 +222,7 @@ fn palette(tier: Tier) -> Theme {
         Tier::Truecolor => Theme {
             accent: Color::Rgb(0x7a, 0xab, 0xdf),
             bright: Color::Rgb(0x8f, 0xd6, 0xe8),
-            dim: Color::Rgb(0x69, 0x71, 0x8f),
+            dim: Color::Rgb(0x7a, 0x82, 0xa0),
             gold: Color::Rgb(0xe5, 0xc0, 0x7b),
             ok: Color::Rgb(0x98, 0xc3, 0x79),
             danger: Color::Rgb(0xe0, 0x6c, 0x75),

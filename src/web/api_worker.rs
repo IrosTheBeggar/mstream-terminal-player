@@ -1,11 +1,12 @@
 //! The real api worker for the browser: the native api thread's job, done
 //! with futures instead of a thread.
 //!
-//! Commands arrive from the frame loop, each spawns onto the browser's event
-//! loop (`spawn_local`), and whatever event the reply maps to is queued for
-//! the next frame to fold in. The command→endpoint logic itself is the same
-//! code the native thread runs — worker::load_library and friends — awaited
-//! directly instead of parked on the tokio runtime.
+//! Commands arrive from the shell's loop, each spawns onto the browser's
+//! event loop (`spawn_local`), and whatever event the reply maps to is
+//! queued, with a wake for the loop to fold it in on the next frame. The
+//! command→endpoint logic itself is the same code the native thread runs —
+//! worker::load_library and friends — awaited directly instead of parked on
+//! the tokio runtime.
 //!
 //! What this worker does NOT speak: Quick Connect (the tunnel is iroh and
 //! native), and mDNS discovery (no multicast in a browser) — the shell keeps
@@ -17,6 +18,7 @@ use std::rc::Rc;
 
 use wasm_bindgen_futures::spawn_local;
 
+use super::Waker;
 use crate::api::types::Capabilities;
 use crate::api::{ApiError, Client};
 use crate::tui::art;
@@ -32,11 +34,14 @@ struct Session {
 pub struct WebApi {
     session: Rc<RefCell<Option<Session>>>,
     queue: Rc<RefCell<VecDeque<Event>>>,
+    /// A reply is an answer to something the user asked: it wakes the loop
+    /// rather than waiting out the poll.
+    wake: Waker,
 }
 
 impl WebApi {
-    pub fn new(queue: Rc<RefCell<VecDeque<Event>>>) -> Self {
-        WebApi { session: Rc::new(RefCell::new(None)), queue }
+    pub fn new(queue: Rc<RefCell<VecDeque<Event>>>, wake: Waker) -> Self {
+        WebApi { session: Rc::new(RefCell::new(None)), queue, wake }
     }
 
     pub fn dispatch(&self, cmd: ApiCmd) {
@@ -45,10 +50,12 @@ impl WebApi {
         }
         let session = self.session.clone();
         let queue = self.queue.clone();
+        let wake = self.wake.clone();
         spawn_local(async move {
             let event = handle(&session, cmd).await;
             if let Some(event) = event {
                 queue.borrow_mut().push_back(event);
+                wake();
             }
         });
     }
@@ -197,11 +204,85 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         }
 
         ApiCmd::DiscoveryProbe => {
+            with_session(session, async |s| s.client.ping_async().await.map(|ping| worker::probe_event(&ping)))
+                .await
+        }
+
+        // The Discover room: the native worker's shapers, so both builds
+        // land the same events with the same words.
+        ApiCmd::Taste { seq, generation, part, body } => {
+            with_session(session, async |s| worker::taste(&s.client, seq, generation, part, &body).await).await
+        }
+        // The browser build has one client, the session's: a connected
+        // server's album is not asked of its server here, and the App
+        // queues the rows that matched instead.
+        ApiCmd::TasteAlbum { name, artist, album_artist, generation, peer: Some(peer), play, .. } => {
+            Some(Event::TasteAlbum { generation, tracks: None, name, artist, album_artist, peer: Some(peer), play })
+        }
+        ApiCmd::TasteAlbum { name, artist, album_artist, generation, play, .. } => {
             with_session(session, async |s| {
-                s.client
-                    .ping_async()
-                    .await
-                    .map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+                let ask = worker::TasteAlbumAsk {
+                    name: name.clone(),
+                    artist: artist.clone(),
+                    album_artist: album_artist.clone(),
+                    peer: None,
+                    play,
+                };
+                worker::taste_album(&s.client, ask, generation).await
+            })
+            .await
+        }
+
+        // The room's plug-ins (discovery-page clauses 100–149): the native
+        // worker's shapers, against the page's own server — the session.
+        ApiCmd::KeepGate { generation } => {
+            with_session(session, async |s| worker::keep_gate(&s.client, generation).await).await
+        }
+        ApiCmd::JobsLookup { seq, generation, recs } => {
+            with_session(session, async |s| worker::jobs_lookup(&s.client, seq, generation, &recs).await).await
+        }
+        ApiCmd::Jobs { seq, generation } => {
+            with_session(session, async |s| worker::jobs(&s.client, seq, generation).await).await
+        }
+        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination } => {
+            with_session(session, async |s| {
+                let ask = worker::JobStartAsk {
+                    plugin: &plugin,
+                    rec: &rec,
+                    scope,
+                    destination: destination.as_ref().map(Option::as_ref),
+                };
+                worker::job_start(&s.client, ticket, generation, ask).await
+            })
+            .await
+        }
+        ApiCmd::DestinationRead { seq, generation } => {
+            with_session(session, async |s| worker::destination_read(&s.client, seq, generation).await).await
+        }
+        ApiCmd::DestinationSave { seq, generation, destination } => {
+            with_session(session, async |s| worker::destination_save(&s.client, seq, generation, destination.as_ref()).await)
+                .await
+        }
+        ApiCmd::DestinationFolders { seq, generation, path } => {
+            with_session(session, async |s| worker::destination_folders(&s.client, seq, generation, path.clone()).await)
+                .await
+        }
+        ApiCmd::JobCancel { generation, id } => {
+            with_session(session, async |s| worker::job_cancel(&s.client, generation, id).await).await
+        }
+        ApiCmd::JobsClear { generation } => {
+            with_session(session, async |s| worker::jobs_clear(&s.client, generation).await).await
+        }
+        ApiCmd::PluginLinks { seq, generation, plugin, rec } => {
+            with_session(session, async |s| worker::plugin_links(&s.client, seq, generation, &plugin, &rec).await)
+                .await
+        }
+        // One client, the session's: the connected server's sizes are not
+        // asked from here, the user's own library's are.
+        ApiCmd::KeepFacts { seq, generation, ask, .. } => {
+            with_session(session, async |s| {
+                let facts = worker::keep_facts(None, &s.client, &ask).await;
+                Ok(Event::KeepFacts { seq, generation, facts: Box::new(facts) })
             })
             .await
         }
@@ -260,7 +341,11 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         }
 
         // One server, the page's own: a row's reach is that server anyway.
-        ApiCmd::AlbumArt { file, .. } => {
+        // Every cover the App asks of the browser build is `small` — it
+        // keeps no source bytes, and the 256 px copy decodes on the page's
+        // one thread in a millisecond where an original took tens
+        // (performance audit #92).
+        ApiCmd::AlbumArt { file, small, .. } => {
             // The waveform's rule, exactly as the native worker applies
             // it: a 404 or undecodable bytes settle as "no art"; a
             // transport failure — or no session yet — is not an answer
@@ -269,15 +354,19 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             // raise.
             let client = session.borrow().as_ref().map(|s| s.client.clone());
             let (art, settled) = match client {
-                Some(c) => match c.album_art_async(&file).await {
+                Some(c) => match c.album_art_async(&file, small).await {
                     Ok(bytes) => (art::decode(&bytes), true),
                     Err(ApiError::NotFound(_)) => (None, true),
                     Err(_) => (None, false),
                 },
                 None => (None, false),
             };
-            Some(Event::AlbumArt { file, art, settled })
+            Some(Event::AlbumArt { file, art, settled, small })
         }
+
+        // No art lanes here: the browser already asks a host six at a
+        // time, so there is nothing queued to withdraw.
+        ApiCmd::ArtWithdraw { .. } => None,
 
         ApiCmd::Waveform { filepath, .. } => {
             // Art's rule, for the same reason: a shape nobody could draw is

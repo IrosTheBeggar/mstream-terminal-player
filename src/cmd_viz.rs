@@ -17,6 +17,8 @@
 //! never GL), and lists that instance's adapters. `WGPU_BACKEND=gl` (or
 //! `vulkan`, `metal`, `dx12`) pins the backend, which is how a machine with
 //! two is asked about each.
+//! `WGPU_POWER_PREF=high` (or `low`, `none`) picks the GPU as it would for
+//! the window.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -27,7 +29,7 @@ use crate::runtime::block_on;
 use crate::shader::audio::AudioTexture;
 use crate::shader::library::BUILTIN;
 use crate::shader::preset::Preset;
-use crate::shader::render::{Gpu, Offscreen};
+use crate::shader::render::{self, Gpu, Offscreen};
 
 /// What each preset is drawn at: the shape the presets were composed for,
 /// and small enough that a weak GPU answers in seconds.
@@ -69,8 +71,11 @@ pub fn run(args: VizProbeArgs) -> i32 {
     // Windows DX12 or Vulkan alone, never GL, unless `WGPU_BACKEND` says),
     // so the probe asks the driver the window would get. The last failure
     // is kept to say why, when none would serve.
+    // The GPU the window would draw on, so what this says is what it gets
+    // (performance audit #121: low-power unless WGPU_POWER_PREF says).
+    let power_preference = render::power_preference();
     let options = wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
+        power_preference,
         ..Default::default()
     };
     let mut failed = None;
@@ -104,7 +109,12 @@ pub fn run(args: VizProbeArgs) -> i32 {
         return 1;
     };
     let info = adapter.get_info();
-    println!("\nusing {}; the presets are compiled to {}\n", info.name, language(info.backend));
+    println!(
+        "\nusing {} ({}); the presets are compiled to {}\n",
+        info.name,
+        power(power_preference),
+        language(info.backend)
+    );
     let gpu = match Gpu::new(&adapter) {
         Ok(gpu) => gpu,
         Err(e) => {
@@ -214,7 +224,7 @@ pub fn run(args: VizProbeArgs) -> i32 {
     i32::from(failed != 0)
 }
 
-fn describe(info: &wgpu::AdapterInfo) -> String {
+pub(crate) fn describe(info: &wgpu::AdapterInfo) -> String {
     let kind = match info.device_type {
         wgpu::DeviceType::IntegratedGpu => "integrated GPU",
         wgpu::DeviceType::DiscreteGpu => "discrete GPU",
@@ -230,6 +240,15 @@ fn describe(info: &wgpu::AdapterInfo) -> String {
         .join(" ");
     let driver = if driver.is_empty() { String::new() } else { format!(", {driver}") };
     format!("{} — {}, {kind}{driver}", info.name, info.backend.to_str())
+}
+
+/// The GPU a preference asks for, and how to ask for another.
+pub(crate) fn power(preference: wgpu::PowerPreference) -> &'static str {
+    match preference {
+        wgpu::PowerPreference::LowPower => "asked for the low-power GPU; WGPU_POWER_PREF=high for the other",
+        wgpu::PowerPreference::HighPerformance => "asked for the high-performance GPU, by WGPU_POWER_PREF",
+        wgpu::PowerPreference::None => "the system's choice of GPU; WGPU_POWER_PREF=low or high to choose",
+    }
 }
 
 /// What naga turns the presets into for a backend's driver to finish.

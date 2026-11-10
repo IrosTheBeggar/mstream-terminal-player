@@ -88,12 +88,16 @@ impl TransferHost {
         (TransferHost { link, events, fold: Rc::new(RefCell::new(Fold::default())) }, inbox, tell)
     }
 
-    /// The worker's reports since the last frame, folded.
-    fn pump(&mut self) {
+    /// The worker's reports since the last frame, folded. True when any
+    /// came.
+    fn pump(&mut self) -> bool {
         let mut fold = self.fold.borrow_mut();
+        let mut came = false;
         while let Ok(event) = self.events.try_recv() {
             fold.apply(event);
+            came = true;
         }
+        came
     }
 
     /// What a page borrows.
@@ -153,15 +157,16 @@ fn links(gui: &Gui) -> Vec<ServerLink> {
 }
 
 /// The transfer worker's frame: its reports folded, and the servers told
-/// again when they changed.
-fn pump_transfer(gui: &mut Gui) {
+/// again when they changed. True when a report came.
+fn pump_transfer(gui: &mut Gui) -> bool {
     let links = links(gui);
-    let Some(host) = gui.device.transfer.as_mut() else { return };
-    host.pump();
+    let Some(host) = gui.device.transfer.as_mut() else { return false };
+    let came = host.pump();
     if host.fold.borrow().servers != links {
         host.fold.borrow_mut().servers = links.clone();
         host.link.send(worker::Cmd::Servers(links));
     }
+    came
 }
 
 /// The card whose sync runs, or waits paused, its percentage, and whether
@@ -559,16 +564,25 @@ pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
     true
 }
 
+/// What the screen's per-frame duties found.
+pub(crate) struct Duties {
+    /// The pointer is over one of the page's clickables: the hand.
+    pub over: bool,
+    /// The transfer worker reported: a frame to draw on any screen, since
+    /// the top bar's MP3 Player tab and the mini player wear a sync's
+    /// percentage (clauses 16, 55).
+    pub news: bool,
+}
+
 /// The page's own per-frame duties, after the draw (clause 6): its
 /// worker's reports, a passing note's clock, a held button and the
 /// tooltip clock — the hub's loop, through `HostedRoom::after_frame` —
 /// then whether it has ended. A page left behind is read too, until its
 /// ports are let go; then a visit that waited for it gets its own page.
-/// Returns whether the pointer is over one of the page's clickables, for
-/// the hand. The transfer worker's reports are folded first, whatever the
-/// screen (clause 55).
-pub(crate) fn frame(gui: &mut Gui) -> bool {
-    pump_transfer(gui);
+/// The transfer worker's reports are folded first, whatever the screen
+/// (clause 55).
+pub(crate) fn frame(gui: &mut Gui) -> Duties {
+    let news = pump_transfer(gui);
     take_wants(gui);
     // A page a screen change left behind without passing through `close`
     // goes now; a writing one stays, and the screen change was refused.
@@ -588,10 +602,10 @@ pub(crate) fn frame(gui: &mut Gui) -> bool {
         gui.device.pressed = false;
         gui.device.page = Some(build(gui));
     }
-    let Some(page) = gui.device.page.as_mut() else { return false };
+    let Some(page) = gui.device.page.as_mut() else { return Duties { over: false, news } };
     let over = HostedRoom::after_frame(page);
     end_if_finished(gui);
-    over && gui.screen == Screen::Device && gui.device.at.is_some()
+    Duties { over: over && gui.screen == Screen::Device && gui.device.at.is_some(), news }
 }
 
 /// The page ended itself — Esc, once its worker let every port go (clause

@@ -9,8 +9,8 @@
 //! Contract: docs/ux-contracts/add-torrent.md (clause numbers below cite
 //! it). The record is the mobile app's smart panel; this surface's
 //! answers to the contract's open questions live in its deviations log:
-//! the room is a **Settings doorway** (Manage servers' shape) plus the
-//! `--torrent` command-line seam that stands in for the OS hand-off; a
+//! the room is a **nav room** under TOOLS (the Auto DJ room's shape) plus
+//! the `--torrent` command-line seam that stands in for the OS hand-off; a
 //! second `--torrent` while one runs simply opens a second instance; the
 //! webapp's fuller seed-check wordings are adopted; the hand-off is one
 //! text verb on the file chip; and the OS-defaults row waits for the
@@ -49,7 +49,7 @@ use crate::tui::worker::Event;
 
 use super::opener::{HandOff, open_target};
 use super::torrent_meta::{self as meta, Confidence, TorrentMeta};
-use super::{Act, Gui, SettingsRoom, accent, bright_bold, put, sel, text_button};
+use super::{Act, Gui, Screen, accent, bright_bold, put, sel, text_button};
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -216,8 +216,8 @@ enum Reply {
 }
 
 pub(crate) struct TorrentUi {
-    /// The keyboard cursor: None is stowed (↓ picks it up, Esc stows it,
-    /// Esc again walks back to Settings).
+    /// The keyboard cursor: None is stowed (↓ picks it up, Esc stows it;
+    /// a nav room, it has no back for Esc again).
     pub cursor: Option<Row>,
     pub gate: Gate,
     /// Which session's server the gate answers for — a switch stales it.
@@ -492,19 +492,23 @@ fn note(gui: &mut Gui, text: impl Into<String>, is_err: bool) {
 
 // ── Opening the room, and what arrives in it ────────────────────────────────
 
-/// Open the room from Settings (entry point 1) and ask the gate.
+/// The nav's Add torrent row (entry point 1): the room opens with its
+/// cursor stowed and asks the gate. The hub calls this from `Act::Nav`.
 pub(crate) fn open_room(gui: &mut Gui) {
-    gui.active = super::SETTINGS_NAV;
-    gui.cursor = None;
-    gui.servers.drop_open = false;
-    gui.settings_room = Some(SettingsRoom::Torrent);
     gui.torrent.cursor = None;
     request_gate(gui);
 }
 
-/// Open the room WITH a torrent already in hand (entry point 2).
+/// Whether the room is the Library's active one — a nav room, so the
+/// Now Playing screen over it counts as away (the Auto DJ room's rule).
+fn in_room(gui: &Gui) -> bool {
+    gui.screen == Screen::Library && gui.active == super::TORRENT_NAV
+}
+
+/// Open the room WITH a torrent already in hand (entry point 2): the nav
+/// room, by the nav's own way in, from whatever was up.
 fn open_room_with(gui: &mut Gui, incoming: Incoming) {
-    open_room(gui);
+    gui.act(Act::Nav(super::TORRENT_NAV));
     match incoming {
         Incoming::File(file) => set_file(gui, file),
         Incoming::Magnet(link) => {
@@ -562,7 +566,7 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
         // its answer must not add to this one.
         gui.torrent.busy = None;
         gui.torrent.matches = None;
-        if gui.settings_room == Some(SettingsRoom::Torrent) {
+        if gui.active == super::TORRENT_NAV {
             request_gate(gui);
         }
     }
@@ -1076,11 +1080,15 @@ fn picker_load(gui: &mut Gui, path: String) {
 
 // ── Background replies ──────────────────────────────────────────────────────
 
-/// Drain what the threads sent since the last pass.
-pub(crate) fn poll(gui: &mut Gui) {
+/// Drain what the threads sent since the last pass; true when anything
+/// came — a frame to draw.
+pub(crate) fn poll(gui: &mut Gui) -> bool {
+    let mut folded = false;
     while let Ok(reply) = gui.torrent.rx.try_recv() {
         apply_reply(gui, reply);
+        folded = true;
     }
+    folded
 }
 
 fn apply_reply(gui: &mut Gui, reply: Reply) {
@@ -1295,13 +1303,9 @@ fn draw_text_row(
 /// The room (entry point 1's screen): the gate's banner, then the form
 /// revealed in steps — source, metadata, destination, options, submit.
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    // Title row: the way back, the name, the gate's standing at the right.
-    let back = Rect { x: content.x, y: content.y, width: 1, height: 1 };
-    let bhover = gui.ui.hovers(back);
-    put(frame, back.x, back.y, super::back_glyph(), if bhover { bright_bold() } else { dim() });
-    gui.ui.click(back, Act::TorBack);
-    gui.ui.tip_keyed(back, t!("gui.tor.back_tip").to_string());
-    put(frame, content.x + 2, content.y, &t!("gui.tor.title"), Style::default().add_modifier(Modifier::BOLD));
+    // Title row: the name, the gate's standing at the right. A nav room
+    // has no way back — the nav column is right there.
+    put(frame, content.x, content.y, &t!("gui.tor.title"), Style::default().add_modifier(Modifier::BOLD));
     let standing = match &gui.torrent.gate {
         Gate::Pending => Some((t!("gui.tor.checking").to_string(), accent())),
         Gate::Answered(p) if p.ok() => {
@@ -1744,10 +1748,6 @@ fn move_cursor(gui: &mut Gui, delta: i32) {
 /// Handle the room's actions. Returns true when the act was this room's.
 pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
     match act.clone() {
-        Act::TorBack => {
-            gui.settings_room = None;
-            gui.torrent.cursor = None;
-        }
         Act::TorRow(row) => gui.torrent.cursor = Some(row),
         Act::TorLib(delta) => step_library(gui, delta),
         Act::TorPick => native_pick(gui),
@@ -1885,7 +1885,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         }
         return Some(false);
     }
-    if !(gui.in_settings_room(SettingsRoom::Torrent)) {
+    if !in_room(gui) {
         return None;
     }
 
@@ -1948,7 +1948,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             KeyCode::Up => move_cursor(gui, -1),
             KeyCode::Char('b') => return Some(gui.act(Act::TorPick)),
             KeyCode::Char('t') => return Some(gui.act(Act::TorType)),
-            KeyCode::Esc => return Some(gui.act(Act::TorBack)),
+            // Esc has nothing to leave: a nav room has no back.
             _ => return None,
         },
     }
@@ -1990,6 +1990,15 @@ mod tests {
 
     const MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Vela+-+Cassini+(2020)";
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     /// A minimal single-file torrent, bencoded by hand.
     fn torrent(name: &str) -> Vec<u8> {
         let mut bytes = b"d8:announce18:http://t.example/4:infod6:lengthi1234e4:name".to_vec();
@@ -2020,7 +2029,7 @@ mod tests {
             ..Default::default()
         });
         gui.torrent.gate_for = "http://host:3000".into();
-        open_room(&mut gui);
+        gui.act(Act::Nav(super::super::TORRENT_NAV));
         gui
     }
 
@@ -2052,24 +2061,43 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_doorway_opens_the_room_and_esc_walks_back() {
+    fn the_nav_row_opens_the_room_and_esc_has_nothing_to_leave() {
+        use ratatui::layout::Position;
+        let _en = english();
         let mut gui = gui();
+        // Settings keeps TORRENTS to the ask-me switch alone: the room is
+        // the nav's, the row under TOOLS after Discover — here, with no
+        // sonic path and no Discover, packed under Auto DJ on r16.
         gui.active = super::super::SETTINGS_NAV;
-        let text = draw(&mut gui).join("\n");
-        assert!(text.contains("TORRENTS"), "the settings grew a group:\n{text}");
-        assert!(text.contains("Add a torrent"), "got:\n{text}");
-        assert!(text.contains("[✓] Ask what to do with torrents"), "ask is on by default:\n{text}");
+        let rows = draw(&mut gui);
+        let text = rows.join("\n");
+        assert!(rows[12].contains("TORRENTS"), "the group:\n{text}");
+        assert!(rows[13].contains("[✓] Ask what to do with torrents"), "ask is on by default:\n{text}");
+        assert!(!text.contains("Add a torrent"), "no doorway in Settings:\n{text}");
+        let nav: String = rows[16].chars().take(15).collect();
+        assert_eq!(nav.trim(), "Add torrent", "the nav row:\n{text}");
+        let row = gui.ui.hit(Position { x: 3, y: 16 }).expect("the row is a click target");
+        assert_eq!(row, Act::Nav(super::super::TORRENT_NAV));
 
-        gui.act(Act::Row(super::super::ROW_TORRENT));
-        assert!(gui.settings_room == Some(SettingsRoom::Torrent), "the doorway opens the room");
-        let text = draw(&mut gui).join("\n");
-        assert!(text.contains("Add torrent"), "got:\n{text}");
+        gui.act(row);
+        assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::TORRENT_NAV), "the row opens the room");
+        let rows = draw(&mut gui);
+        let text = rows.join("\n");
+        assert!(rows[2].chars().skip(17).collect::<String>().starts_with("Add torrent"), "no way back:\n{}", rows[2]);
+        assert!(!rows[2].contains('◂'), "{}", rows[2]);
+        assert!(rows[16].starts_with(" ▸ Add torrent"), "the row lit:\n{}", rows[16]);
         assert!(text.contains("Choose a .torrent file"), "the way in for a file:\n{text}");
         assert!(!text.contains("ARTIST"), "nothing below the source yet:\n{text}");
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.torrent.cursor.is_some());
         key(&mut gui, KeyCode::Esc);
-        assert!(gui.settings_room != Some(SettingsRoom::Torrent), "Esc walks back to Settings");
+        assert_eq!(gui.torrent.cursor, None, "Esc stows the cursor");
+        key(&mut gui, KeyCode::Esc);
+        assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::TORRENT_NAV), "and the room stays: a nav room has no back");
+        assert_eq!(tips(&gui), "↓ pick a row · b choose a file · t type a path", "no Esc to name");
 
         // The ask row flips the persisted choice.
+        gui.act(Act::Nav(super::super::SETTINGS_NAV));
         gui.act(Act::Row(super::super::ROW_ASK));
         assert!(!gui.config.torrent.ask);
         let text = draw(&mut gui).join("\n");
@@ -2078,6 +2106,7 @@ mod tests {
 
     #[test]
     fn the_form_stays_hidden_until_a_source_is_real() {
+        let _en = english();
         let mut gui = ready_gui(&["music"]);
         let text = draw(&mut gui).join("\n");
         assert!(text.contains("Transmission · ready"), "the gate's standing:\n{text}");
@@ -2119,6 +2148,7 @@ mod tests {
 
     #[test]
     fn a_loaded_file_names_itself_and_takes_the_magnets_place() {
+        let _en = english();
         let mut gui = ready_gui(&["music"]);
         gui.torrent.magnet = Input::new("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into());
         set_file(&mut gui, LoadedFile { name: "vela.torrent".into(), bytes: torrent("Vela - Cassini (2020)") });
@@ -2156,6 +2186,7 @@ mod tests {
 
     #[test]
     fn submit_reads_the_form_and_refuses_in_words() {
+        let _en = english();
         let mut gui = ready_gui(&[]);
         gui.torrent.magnet = Input::new(MAGNET.into());
         assert_eq!(plan_submit(&gui).unwrap_err(), "Pick a library");
@@ -2201,6 +2232,7 @@ mod tests {
 
     #[test]
     fn the_seed_check_outcomes_are_worded_and_the_partial_match_asks() {
+        let _en = english();
         let mut gui = ready_gui(&["music"]);
         let file = LoadedFile { name: "vela.torrent".into(), bytes: torrent("Vela - Cassini (2020)") };
         set_file(&mut gui, file.clone());
@@ -2254,10 +2286,11 @@ mod tests {
 
     #[test]
     fn the_arrival_chooser_asks_and_the_dont_ask_box_persists() {
+        let _en = english();
         let mut gui = gui();
         arrive(&mut gui, MAGNET);
         assert!(matches!(gui.torrent.chooser, Some(Chooser { incoming: Incoming::Magnet(_), .. })));
-        assert!(gui.settings_room != Some(SettingsRoom::Torrent), "nothing opens until the answer");
+        assert_ne!(gui.active, super::super::TORRENT_NAV, "nothing opens until the answer");
         let text = draw(&mut gui).join("\n");
         for needed in ["Torrent received", "Add to mStream", "Open in another app", "don't ask again", "Vela - Cassini (2020)"] {
             assert!(text.contains(needed), "missing {needed:?}:\n{text}");
@@ -2270,7 +2303,7 @@ mod tests {
         key(&mut gui, KeyCode::Up);
         key(&mut gui, KeyCode::Enter);
         assert!(gui.torrent.chooser.is_none());
-        assert!(gui.in_settings_room(SettingsRoom::Torrent), "Add opens the room");
+        assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::TORRENT_NAV), "Add opens the nav room");
         assert_eq!(gui.torrent.magnet.value(), MAGNET);
         assert_eq!(gui.torrent.artist.value(), "Vela");
         assert!(!gui.config.torrent.ask, "the box flipped the setting (clause 51)");
@@ -2282,14 +2315,19 @@ mod tests {
 
     #[test]
     fn a_torrent_arriving_with_ask_off_goes_straight_to_the_room() {
+        let _en = english();
         let dir = scratch("arrive");
         let path = dir.join("vela.torrent");
         std::fs::write(&path, torrent("Vela - Cassini (2020)")).unwrap();
         let mut gui = gui();
         gui.config.torrent.ask = false;
+        // From the Now Playing screen: the nav room, the Library brought
+        // back for it.
+        gui.act(Act::Screen(Screen::NowPlaying));
         arrive(&mut gui, &path.to_string_lossy());
         assert!(gui.torrent.chooser.is_none());
-        assert!(gui.settings_room == Some(SettingsRoom::Torrent));
+        assert_eq!((gui.screen, gui.active), (Screen::Library, super::super::TORRENT_NAV), "opened with mStream: the nav room");
+        assert!(!gui.app.fullscreen);
         assert_eq!(gui.torrent.file.as_ref().map(|f| f.name.as_str()), Some("vela.torrent"));
         assert_eq!(gui.torrent.album.value(), "Cassini");
 
@@ -2305,13 +2343,14 @@ mod tests {
 
     #[test]
     fn a_bounced_hand_off_is_named_not_looped() {
+        let _en = english();
         // handoff_dir() follows MSTREAM_PLAYER_CONFIG_DIR, which the config
         // tests repoint process-wide under their scratch lock. Unheld, the
         // folder could move between this write and arrive()'s own look (our
         // file taken for a stranger's: a chooser), or the file could land
         // in another test's scratch and vanish with it (nothing read, no
-        // room) — and with no scratch live it landed in the developer's
-        // REAL config. Holding a scratch pins the folder for the whole test,
+        // room) — and with no scratch live it stayed behind in the test run's
+        // own folder. Holding a scratch pins the folder for the whole test,
         // and its drop cleans up.
         let scratch = crate::config::testing::Scratch::new("torrent-bounce");
         let dir = handoff_dir();
@@ -2323,7 +2362,7 @@ mod tests {
         assert!(gui.config.torrent.ask, "asking is on");
         arrive(&mut gui, &path.to_string_lossy());
         assert!(gui.torrent.chooser.is_none(), "no chooser for our own file coming back");
-        assert!(gui.settings_room == Some(SettingsRoom::Torrent), "the torrent is still taken");
+        assert_eq!(gui.active, super::super::TORRENT_NAV, "the torrent is still taken");
         let (words, is_err) = gui.note.clone().unwrap();
         assert!(words.contains("default app"), "{words}");
         assert!(is_err);
@@ -2331,6 +2370,7 @@ mod tests {
 
     #[test]
     fn the_picker_lists_folders_and_torrents_and_completes() {
+        let _en = english();
         let dir = scratch("picker");
         std::fs::create_dir_all(dir.join("Albums")).unwrap();
         std::fs::write(dir.join("vela.torrent"), b"x").unwrap();
@@ -2364,6 +2404,7 @@ mod tests {
 
     #[test]
     fn the_native_dialog_falls_back_to_the_typed_picker_and_t_is_its_own_road() {
+        let _en = english();
         use crate::setup::picker::Pick;
         let mut gui = ready_gui(&["music"]);
         // No dialog could open: the room says so and the typed picker

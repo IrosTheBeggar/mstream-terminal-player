@@ -60,6 +60,14 @@ pub(crate) trait Face {
     /// chord types the clipboard only into such a field (`App::feed_now`).
     fn caret_at(&self) -> Option<Position>;
 
+    /// Whether the paste chord hands the clipboard over whole, as one
+    /// paste, whatever has the keyboard: the GUI's Add from YouTube room
+    /// takes any paste into its link field (`App::feed_now`). A face that
+    /// says no gets a paste typed, and only into a field with the keys.
+    fn takes_paste(&self) -> bool {
+        false
+    }
+
     /// What the input method is composing, not yet committed, for the
     /// field with the keyboard to draw (`App::set_preedit`); empty when
     /// nothing is.

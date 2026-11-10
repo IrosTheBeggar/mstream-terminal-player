@@ -15,12 +15,9 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 
 use super::bar::{TallKind, play_glyphs, tall_compact};
 use super::{Act, Gui, Screen, put};
-use crate::kit::dim;
-use crate::kit::theme::th;
 use crate::tui::app::Action;
 use crate::tui::ui::{NowExtras, now_regions, render_now_view};
 
@@ -107,11 +104,10 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
 
     // The screen's note, where the TUI's key hints would be (clause 9): the
     // GUI names its keys on the footer, and the row's right is the modes.
-    if let Some((text, is_err)) = gui.note_words() {
+    if let Some((text, style)) = gui.note_words() {
         // Up to the modes readout, whatever it is wearing: a fixed forty
         // cells let a long note run into a wide readout.
         let room = layout.modes.x.saturating_sub(regions.keys.x + 1) as usize;
-        let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, regions.keys.x, regions.keys.y, &super::bar::clip(&text, room), style);
     }
 }

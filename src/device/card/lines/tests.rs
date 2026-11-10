@@ -84,6 +84,8 @@ fn a_plan_says_the_waveforms_it_adds_and_the_run_its_phase() {
 
 #[test]
 fn status_prints_the_card_views_facts_as_key_value_rows() {
+    // It reads a German row too, so in a process of its own.
+    let Some(_) = crate::setup::tests::in_own_process(&["en"]) else { return };
     let en = crate::setup::tests::in_locale("en");
     let rows = facts_rows(&f::ready("E:", now()));
     let get = |key: &str| rows.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()).unwrap_or_default();

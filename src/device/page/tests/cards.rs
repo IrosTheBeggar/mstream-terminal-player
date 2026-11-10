@@ -110,13 +110,12 @@ fn details_drive_row_is_in_the_locales_words() {
         ("de", "Laufwerk      E: · FAT32 auf MBR · 63.8 GB · 32-KB-Cluster · 1A2B-3C4D"),
         ("fr", "Volume        E: · FAT32 sur MBR · 63.8 Go · cluster 32 Ko · 1A2B-3C4D"),
     ];
-    for (code, drive) in rows {
-        let _in = crate::setup::tests::in_locale(code);
-        let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
-        press(&mut page, KeyCode::Char('d'));
-        let frame = window(&mut page);
-        assert!(frame.contains(drive), "{code}:\n{frame}");
-    }
+    let Some(code) = crate::setup::tests::in_own_process(&rows.map(|(code, _)| code)) else { return };
+    let drive = rows.iter().find(|(of, _)| *of == code).map(|(_, drive)| *drive).expect("the language's row");
+    let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
+    press(&mut page, KeyCode::Char('d'));
+    let frame = window(&mut page);
+    assert!(frame.contains(drive), "{code}:\n{frame}");
 }
 
 /// The longest names a server realistically goes by here (the config's
@@ -152,23 +151,22 @@ fn every_locales_help_keeps_to_its_two_lines_at_the_floor_and_on_the_console() {
         card::SRow::Budget,
         card::SRow::Buttons,
     ];
-    for (code, _) in crate::setup::LANGS {
-        let _in = crate::setup::tests::in_locale(code);
-        for (area_w, tw) in [(100, 70), (MIN_W, 64)] {
-            assert_eq!(usize::from(card::sheet_widths(area_w).1), tw, "the sheet's text at {area_w} columns");
-            for server in LONG_SERVERS {
-                for row in &rows {
-                    let text = card::row_help(row, &offered, server);
-                    assert!(!text.contains("dev."), "{code}: {row:?} has no words");
-                    let lines: Vec<String> = card::help_lines(&text, tw).iter().map(|l| l.to_string()).collect();
-                    let whole = wrap_spans(&[(text.clone(), dim())], tw).len() <= 2;
-                    assert!(whole, "{code}, {row:?} in {tw} cells runs past its two lines: {lines:?}");
-                    for line in &lines {
-                        assert!(kit::width(line) <= tw, "{code}, {row:?} in {tw} cells: {line:?}");
-                        let first = line.chars().next();
-                        let set_apart = matches!(first, Some(':' | ';' | '!' | '?' | '—' | '–'));
-                        assert!(!set_apart, "{code}, {row:?} in {tw} cells starts a line with a mark: {lines:?}");
-                    }
+    let codes = crate::setup::LANGS.map(|(code, _)| code);
+    let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
+    for (area_w, tw) in [(100, 70), (MIN_W, 64)] {
+        assert_eq!(usize::from(card::sheet_widths(area_w).1), tw, "the sheet's text at {area_w} columns");
+        for server in LONG_SERVERS {
+            for row in &rows {
+                let text = card::row_help(row, &offered, server);
+                assert!(!text.contains("dev."), "{code}: {row:?} has no words");
+                let lines: Vec<String> = card::help_lines(&text, tw).iter().map(|l| l.to_string()).collect();
+                let whole = wrap_spans(&[(text.clone(), dim())], tw).len() <= 2;
+                assert!(whole, "{code}, {row:?} in {tw} cells runs past its two lines: {lines:?}");
+                for line in &lines {
+                    assert!(kit::width(line) <= tw, "{code}, {row:?} in {tw} cells: {line:?}");
+                    let first = line.chars().next();
+                    let set_apart = matches!(first, Some(':' | ';' | '!' | '?' | '—' | '–'));
+                    assert!(!set_apart, "{code}, {row:?} in {tw} cells starts a line with a mark: {lines:?}");
                 }
             }
         }
@@ -214,56 +212,55 @@ fn every_locales_facts_keep_to_their_line_with_the_longest_values() {
     // Linux or macOS), and a name longer than a label holds, for the rule
     // alone: it takes the clusters too.
     let drives = ["E:", "MSTREAM_CAR", "MSTREAM_CAR_MUSIC_BACKUP"];
-    for (code, _) in crate::setup::LANGS {
-        let _in = crate::setup::tests::in_locale(code);
-        // The Drive fact's pieces, the last of them the first to give way.
-        let pieces = |drive: &str| {
-            let fs = t!("dev.card.head_on", fs = "FAT32", table = "MBR").to_string();
-            let size = t!("dev.card_size", size = "1000.2").to_string();
-            let kb = t!("dev.card.fact_drive_kb", kb = 64).to_string();
-            vec![drive.to_string(), fs, size, kb, "1A2B-3C4D".to_string()]
-        };
-        for drive in drives {
-            for server in LONG_SERVERS {
-                let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![longest(drive, server, now)]);
-                press(&mut page, KeyCode::Char('d'));
-                let view = page.open_card().expect("the card in view");
-                let facts: Vec<(String, String)> = card::card_layout(&page, &view, content_w)
-                    .into_iter()
-                    .filter_map(|row| match row {
-                        Row::Fact { label, value, .. } => Some((label, value)),
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(facts.len(), 6, "{code}: Drive, Card, Server, Removes, Plays, Player: {facts:?}");
-                for (label, value) in &facts {
-                    assert!(kit::width(label) < usize::from(LABEL_W), "{code}: the label {label:?}");
-                    let cells = kit::width(value);
-                    assert!(cells <= w, "{code}, {drive}, {server}: {label} is {cells} cells: {value}");
-                }
-                let [drive_f, card_f, server_f, removes, plays, player] = &facts[..] else { unreachable!() };
-                // The Drive fact keeps the most pieces that fit, each whole:
-                // the serial gives way first, then the clusters; the drive,
-                // its file system and its size stay.
-                let pieces = pieces(drive);
-                let joined = |k: usize| pieces[..k].join(" · ");
-                let kept = (3..=5).rev().find(|&k| kit::width(&joined(k)) <= w).unwrap_or(3);
-                assert_eq!(drive_f.1, joined(kept), "{code}: the Drive fact gives way a piece at a time");
-                assert!(!drive_f.1.contains('…'), "{code}: {drive_f:?}");
-                match drive {
-                    "E:" => assert_eq!(kept, 5, "{code}: whole on a drive letter: {drive_f:?}"),
-                    "MSTREAM_CAR" => assert!(kept >= 4, "{code}: a label keeps the clusters: {drive_f:?}"),
-                    _ => assert_eq!(kept, 3, "{code}: the clusters gone too: {drive_f:?}"),
-                }
-                assert!(card_f.1.ends_with(" 0.14.0") && card_f.1.contains("4821"), "{code}: {card_f:?}");
-                let more = t!("dev.card.fact_removes_v", path = "", n = "1,234").to_string();
-                assert!(removes.1.ends_with(&more) && removes.1.starts_with("Velvet Static/"), "{code}: {removes:?}");
-                for whole in [server_f, plays, player] {
-                    assert!(!whole.1.contains('…'), "{code}: {whole:?}");
-                }
-                assert!(server_f.1.starts_with(server), "{code}: {server_f:?}");
-                assert!(player.1.contains("mp3,flac,opus,wav"), "{code}: {player:?}");
+    let codes = crate::setup::LANGS.map(|(code, _)| code);
+    let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
+    // The Drive fact's pieces, the last of them the first to give way.
+    let pieces = |drive: &str| {
+        let fs = t!("dev.card.head_on", fs = "FAT32", table = "MBR").to_string();
+        let size = t!("dev.card_size", size = "1000.2").to_string();
+        let kb = t!("dev.card.fact_drive_kb", kb = 64).to_string();
+        vec![drive.to_string(), fs, size, kb, "1A2B-3C4D".to_string()]
+    };
+    for drive in drives {
+        for server in LONG_SERVERS {
+            let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![longest(drive, server, now)]);
+            press(&mut page, KeyCode::Char('d'));
+            let view = page.open_card().expect("the card in view");
+            let facts: Vec<(String, String)> = card::card_layout(&page, &view, content_w)
+                .into_iter()
+                .filter_map(|row| match row {
+                    Row::Fact { label, value, .. } => Some((label, value)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(facts.len(), 6, "{code}: Drive, Card, Server, Removes, Plays, Player: {facts:?}");
+            for (label, value) in &facts {
+                assert!(kit::width(label) < usize::from(LABEL_W), "{code}: the label {label:?}");
+                let cells = kit::width(value);
+                assert!(cells <= w, "{code}, {drive}, {server}: {label} is {cells} cells: {value}");
             }
+            let [drive_f, card_f, server_f, removes, plays, player] = &facts[..] else { unreachable!() };
+            // The Drive fact keeps the most pieces that fit, each whole:
+            // the serial gives way first, then the clusters; the drive,
+            // its file system and its size stay.
+            let pieces = pieces(drive);
+            let joined = |k: usize| pieces[..k].join(" · ");
+            let kept = (3..=5).rev().find(|&k| kit::width(&joined(k)) <= w).unwrap_or(3);
+            assert_eq!(drive_f.1, joined(kept), "{code}: the Drive fact gives way a piece at a time");
+            assert!(!drive_f.1.contains('…'), "{code}: {drive_f:?}");
+            match drive {
+                "E:" => assert_eq!(kept, 5, "{code}: whole on a drive letter: {drive_f:?}"),
+                "MSTREAM_CAR" => assert!(kept >= 4, "{code}: a label keeps the clusters: {drive_f:?}"),
+                _ => assert_eq!(kept, 3, "{code}: the clusters gone too: {drive_f:?}"),
+            }
+            assert!(card_f.1.ends_with(" 0.14.0") && card_f.1.contains("4821"), "{code}: {card_f:?}");
+            let more = t!("dev.card.fact_removes_v", path = "", n = "1,234").to_string();
+            assert!(removes.1.ends_with(&more) && removes.1.starts_with("Velvet Static/"), "{code}: {removes:?}");
+            for whole in [server_f, plays, player] {
+                assert!(!whole.1.contains('…'), "{code}: {whole:?}");
+            }
+            assert!(server_f.1.starts_with(server), "{code}: {server_f:?}");
+            assert!(player.1.contains("mp3,flac,opus,wav"), "{code}: {player:?}");
         }
     }
 }
@@ -602,35 +599,34 @@ fn a_card_for_someone_else_says_under_converts_what_it_goes_without() {
             cards::facts(c).state.as_mut().expect("its settings").settings.for_someone_else = true;
         })
     };
-    for (code, _) in crate::setup::LANGS {
-        let _in = crate::setup::tests::in_locale(code);
-        let words = t!("dev.card.conv_gift").to_string();
-        assert!(!words.contains("dev."), "{code}: no words");
-        let converts = t!("dev.card.label_converts").to_string();
-        let (page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![gift()]);
-        let view = page.open_card().expect("the card in view");
-        for card_w in [CARD_W, 68] {
-            let content_w = card_w - inset(card_w) * 2;
-            let w = usize::from(content_w - LABEL_W);
-            let rows = card::card_layout(&page, &view, content_w);
-            let label = |r: &Row| matches!(r, Row::Value { label: Some(l), .. } if *l == converts);
-            let at = rows.iter().position(label).expect("the Converts row");
-            let under: Vec<String> = rows[at + 1..]
-                .iter()
-                .map_while(|r| match r {
-                    Row::Value { label: None, left, .. } => Some(left),
-                    _ => None,
-                })
-                .filter(|left| left.spans.iter().any(|s| s.style == dim()))
-                .map(ToString::to_string)
-                .collect();
-            assert!((1..=2).contains(&under.len()), "{code} in {w} cells: {under:?}");
-            for line in &under {
-                assert!(kit::width(line) <= w, "{code} in {w} cells: {line:?}");
-            }
-            let bare = |s: &str| s.replace(' ', "");
-            assert_eq!(bare(&under.concat()), bare(&words), "{code} in {w} cells: whole");
+    let codes = crate::setup::LANGS.map(|(code, _)| code);
+    let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
+    let words = t!("dev.card.conv_gift").to_string();
+    assert!(!words.contains("dev."), "{code}: no words");
+    let converts = t!("dev.card.label_converts").to_string();
+    let (page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![gift()]);
+    let view = page.open_card().expect("the card in view");
+    for card_w in [CARD_W, 68] {
+        let content_w = card_w - inset(card_w) * 2;
+        let w = usize::from(content_w - LABEL_W);
+        let rows = card::card_layout(&page, &view, content_w);
+        let label = |r: &Row| matches!(r, Row::Value { label: Some(l), .. } if *l == converts);
+        let at = rows.iter().position(label).expect("the Converts row");
+        let under: Vec<String> = rows[at + 1..]
+            .iter()
+            .map_while(|r| match r {
+                Row::Value { label: None, left, .. } => Some(left),
+                _ => None,
+            })
+            .filter(|left| left.spans.iter().any(|s| s.style == dim()))
+            .map(ToString::to_string)
+            .collect();
+        assert!((1..=2).contains(&under.len()), "{code} in {w} cells: {under:?}");
+        for line in &under {
+            assert!(kit::width(line) <= w, "{code} in {w} cells: {line:?}");
         }
+        let bare = |s: &str| s.replace(' ', "");
+        assert_eq!(bare(&under.concat()), bare(&words), "{code} in {w} cells: whole");
     }
     let _en = english();
     let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![gift()]);
@@ -952,31 +948,30 @@ fn details_log_says_the_files_left_out_then_their_places_in_every_locale() {
     let twin = "Rock/Artist A/Album B/._01 Song.mp3";
     let many = Hidden { n: 1_312, sample: vec!["Metal/.38 Special/".into(), twin.into()], more: true };
     let one = Hidden { n: 1, sample: vec![twin.into()], more: false };
-    for (code, _) in crate::setup::LANGS {
-        let _in = crate::setup::tests::in_locale(code);
-        let (mut page, _ends, _inbox, fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
-        let key = fold.borrow().cards[0].key.clone();
-        for hidden in [&many, &one] {
-            let item = worker::LogItem::Hidden(hidden.clone());
-            fold.borrow_mut().apply(worker::Event::Log { key: key.clone(), item });
-        }
-        page.pump();
-        let lines: Vec<(String, LogKind)> =
-            page.log_for(&key).iter().map(|l| (l.text.clone(), l.kind)).collect();
-        let count = t!("dev.card.log_hidden", n = "1,312").to_string();
-        let lone = t!("dev.card.log_hidden_one").to_string();
-        assert!(count.contains("1,312") && !count.contains("dev.") && !lone.contains("dev."), "{code}");
-        let place = |text: &str| (format!("  {text}"), LogKind::Quiet);
-        let want = vec![
-            (count, LogKind::Fact),
-            place("Metal/.38 Special/"),
-            place(twin),
-            place("…"),
-            (lone, LogKind::Fact),
-            place(twin),
-        ];
-        assert_eq!(lines[lines.len().saturating_sub(6)..], want[..], "{code}");
+    let codes = crate::setup::LANGS.map(|(code, _)| code);
+    let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
+    let (mut page, _ends, _inbox, fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
+    let key = fold.borrow().cards[0].key.clone();
+    for hidden in [&many, &one] {
+        let item = worker::LogItem::Hidden(hidden.clone());
+        fold.borrow_mut().apply(worker::Event::Log { key: key.clone(), item });
     }
+    page.pump();
+    let lines: Vec<(String, LogKind)> =
+        page.log_for(&key).iter().map(|l| (l.text.clone(), l.kind)).collect();
+    let count = t!("dev.card.log_hidden", n = "1,312").to_string();
+    let lone = t!("dev.card.log_hidden_one").to_string();
+    assert!(count.contains("1,312") && !count.contains("dev.") && !lone.contains("dev."), "{code}");
+    let place = |text: &str| (format!("  {text}"), LogKind::Quiet);
+    let want = vec![
+        (count, LogKind::Fact),
+        place("Metal/.38 Special/"),
+        place(twin),
+        place("…"),
+        (lone, LogKind::Fact),
+        place(twin),
+    ];
+    assert_eq!(lines[lines.len().saturating_sub(6)..], want[..], "{code}");
     // In English, in Details' log, in a window tall enough to show it whole.
     let _en = english();
     let (mut page, _ends, _inbox, fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);

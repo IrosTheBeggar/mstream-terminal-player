@@ -1631,27 +1631,49 @@ impl Screen for Page {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
+    fn absorb(&mut self) -> bool {
+        let mut came = false;
         // A native dialog's answer, from its thread (the sheet's choosers).
         while let Ok(pick) = self.picks.1.try_recv() {
             self.picked(pick);
+            came = true;
         }
         loop {
             match self.events.try_recv() {
-                Ok(event) => self.apply(event),
+                Ok(event) => {
+                    self.apply(event);
+                    came = true;
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if !self.released {
                         self.worker_gone();
+                        came = true;
                     }
                     break;
                 }
             }
         }
         // Then the transfer worker's notes and log lines, the boards known,
-        // and a gate its last sync stopped to ask (clause 58).
+        // and a gate its last sync stopped to ask (clause 58). The cards'
+        // fold is the host's, folded behind this page's back, so a page
+        // that has one never says nothing came: its host draws every pass.
         self.pump_cards(Instant::now());
         self.card_asks();
+        came || self.transfer.is_some()
+    }
+
+    /// The worker takes no queued ops — it reports as it goes — so a pump
+    /// is a read of its reports: the hosts that only pump (a page left
+    /// behind, the quit's wait for its ports) still hear it.
+    fn pump(&mut self) {
+        self.absorb();
+    }
+
+    /// A write reports its progress as it goes; a board merely plugged in
+    /// keeps no pace.
+    fn awaiting(&self) -> bool {
+        self.writing()
     }
 
     /// A passing note goes once its time is up.
@@ -6225,46 +6247,20 @@ mod tests {
         words
     }
 
-    #[test]
-    fn at_the_guis_floor_and_on_the_console_every_state_keeps_its_buttons_whole_in_every_locale() {
-        // The locale is the whole process's: drawn here in another language,
-        // the page would switch it under every test running beside this
-        // one. So each language runs in a process of its own — this test
-        // binary again, running only the test below, its locale named in
-        // the environment.
-        let exe = std::env::current_exe().expect("the test binary");
-        for (code, _) in crate::setup::LANGS {
-            let out = std::process::Command::new(&exe)
-                .args(["--exact", FLOOR_TEST, "--ignored"])
-                .env(FLOOR_LOCALE, code)
-                .output()
-                .expect("the test binary runs again");
-            let (said, err) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            assert!(out.status.success() && said.contains("1 passed"), "{code}:\n{said}{err}");
-        }
-    }
-
     /// The hosted busy line's cells: the page's area less two each side.
     const BUSY_W: usize = 96;
 
-    /// The test below, by its full name, and the environment variable
-    /// naming its locale.
-    const FLOOR_TEST: &str = "device::page::tests::the_floor_in_this_processs_locale";
-    const FLOOR_LOCALE: &str = "MSTREAM_TEST_FLOOR_LOCALE";
-
     #[test]
-    #[ignore = "run by the every-locale floor test, a process per locale"]
-    fn the_floor_in_this_processs_locale() {
+    fn at_the_guis_floor_and_on_the_console_every_state_keeps_its_buttons_whole_in_every_locale() {
         // The GUI's floor is 100×24: with its top bar and its footer the
         // page gets 22 rows from row 1, and 21 from row 2 under a pick's
         // banner (contract clause 4). Every state draws its frames whole
         // and its buttons and the sheet's rows whole there, nothing outside
         // its area, and its hint in 99 cells; the console page does the same
         // at 72×24. Spaces are left out of the comparison: a wide glyph's
-        // second cell is one.
-        let Ok(code) = std::env::var(FLOOR_LOCALE) else { return };
-        rust_i18n::set_locale(&code);
-        crate::kit::theme::pin_modern_terminal();
+        // second cell is one. Each language in a process of its own.
+        let codes = crate::setup::LANGS.map(|(code, _)| code);
+        let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
         // Every end of a format the busy line can say, whole (clause 59).
         let words = |word: &str| word.to_string();
         let ends = [

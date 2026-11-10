@@ -774,9 +774,16 @@ impl App {
     /// 15). The first plays at once only when the queue had run dry.
     fn queue_turn(&mut self, songs: Vec<Track>, sonic: bool, explained: bool) -> Vec<Effect> {
         let Some(origin) = self.dj_origin() else { return Vec::new() };
-        let already: std::collections::HashSet<String> =
-            self.queue.items.iter().map(|t| t.filepath.clone()).collect();
-        let fresh: Vec<Track> = songs.into_iter().filter(|t| !already.contains(&t.filepath)).collect();
+        // Queued already — or queued once and let go at a restore, which
+        // for this rule is the same (multi-server clause 40).
+        let already: std::collections::HashSet<&str> = self
+            .queue
+            .items
+            .iter()
+            .map(|t| t.filepath.as_str())
+            .chain(self.queue.retired.iter().map(String::as_str))
+            .collect();
+        let fresh: Vec<Track> = songs.into_iter().filter(|t| !already.contains(t.filepath.as_str())).collect();
         if fresh.is_empty() {
             self.info(t!("dj.nothing_new"));
             return Vec::new();

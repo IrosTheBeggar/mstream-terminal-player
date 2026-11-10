@@ -482,8 +482,9 @@ opens in its own window instead (see [Two flavours](#two-flavours)).
   it. The keys work too: `←` `→` presets, `t` tuning, `f` fullscreen, Esc
   closes the innermost thing and then the window.
 - **Rooms**: Files, Search, then Albums (a wall of covers), Artists, Genres,
-  Recent, Playlists, Last played and Most played, then the tools — Auto DJ
-  and Sonic path — and Settings. Digits `1`–`9` and `D` reach them; the
+  Recent, Rated, Playlists, Last played and Most played, then the tools —
+  Auto DJ, Sonic path, Discover, Add torrent and Add YouTube — and
+  Settings. Digits `1`–`9`, `D` and `G` reach them; the
   browse bar above a listing filters it and plays, queues or shuffles the
   whole list. A row's hover verbs play it now, add it next, queue it, or
   open its sheet (rating, add to playlist, song info); a right click opens
@@ -498,6 +499,12 @@ opens in its own window instead (see [Two flavours](#two-flavours)).
 - **Play reporting** is on in both shells: what you play is posted to your
   server's play history, so Last played and Most played show your own
   listening.
+- **Add from YouTube**, on your own server where your account can add
+  files: the nav's Add YouTube room takes a pasted link, reads the
+  video's tags (tidied, every change undoable and every tag editable),
+  shows the folder the song goes to and asks the server to add it; on a
+  folder in Files, the browse bar's `add from YouTube` (or `y`) adds it
+  right there. A list follows each add to the end and keeps what came in.
 - **Settings**: crossfade, gapless, resume the queue at launch, torrents,
   and **keyboard hints** (off by default — the footer names the keys when
   it is on). The GUI speaks the ten locales the wizard does, from your
@@ -649,8 +656,9 @@ quarter, half-year and year, the older months and years, all time — and `p` or
 the period drops the list; `o` cycles the origin (all, this server, peers) while peer plays
 exist. Everything loads on entry and on a change, and a change keeps the page as it stands
 until the new numbers land; there is no poll. Times are in the machine's zone, read the way
-`date` reads it (`TZ`, else `/etc/localtime`), and the server is asked for its periods and
-buckets in that zone; a machine without a zone file gets UTC, and the Recent tab says so.
+`date` reads it (`TZ`, else `/etc/localtime`; on Windows, the zone Windows is set to), and the
+server is asked for its periods and buckets in that zone; a machine with no zone at all gets
+UTC, and the Recent tab says so.
 A server older than 6.27 has no Stats API, and the page says that instead. The player
 reports its own plays (see Play reporting below), and the log names them *this player*;
 a total under a minute reads in seconds.
@@ -1175,7 +1183,11 @@ legacy alias for the old spawn contract. Changes from the original engine:
   hard cut, and manual `/next` cuts either way. Needs track durations to find the fade point, so
   sources of unknown length (a live transcode) fall back to the plain cut
 - `--gapless`: with no crossfade set, cross track boundaries sample-tight by feeding the next
-  track into the playing sink ahead of time
+  track into the playing sink ahead of time. The next track is opened ahead too (from 12 s before
+  the end), so the boundary does not wait on its open, and neither do requests arriving then —
+  without it, serve opens the next track at the boundary itself. If that open is still running
+  when the track ends, the boundary opens it itself, as without the flag; like `--crossfade`, it
+  needs track durations, so sources of unknown length (a live transcode) are not opened ahead
 - Soft cuts everywhere, flags or no flags: manual next fades out over 150 ms, stop over 80 ms,
   and seeks dip around the jump — where the original engine cut mid-waveform and clicked
 - With a transition configured **and a next track queued**, `POST /seek` lands forward seeks no

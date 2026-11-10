@@ -49,6 +49,15 @@ impl<N: PartialEq + Clone> Drill<N> {
         self.stack.push(node);
     }
 
+    /// Swap the view on screen for another at the same depth — the same list
+    /// asked for another way. The trail behind it stays as it was.
+    pub fn replace(&mut self, node: N) {
+        match self.stack.last_mut() {
+            Some(here) => *here = node,
+            None => self.stack.push(node),
+        }
+    }
+
     /// Step out, to the view now on screen. `None` is the floor: the first
     /// entry never pops, so Back always ends at the tab's own root menu.
     pub fn back(&mut self) -> Option<N> {

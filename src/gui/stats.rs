@@ -4,8 +4,8 @@
 //! already holds. Its client is built from the App's reach, so a Quick
 //! Connect tunnel or a peer's parent serves it as it serves the queue. The
 //! page keeps its own surface; the screen hands it the keys and the pointer
-//! below the bar, pumps its worker each frame, and puts its hint on the
-//! GUI's footer.
+//! below the bar, folds in and pumps its worker each frame, and puts its
+//! hint on the GUI's footer.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -25,6 +25,11 @@ use crate::tui::app::{App, Origin, Reach};
 pub(crate) struct StatsUi {
     pub page: Option<Page>,
     why: Option<String>,
+    /// Whether the last frame drew the screen. The mini player stands in
+    /// for every screen and draws none of this one, so a page chosen
+    /// under it is not on screen: its clocks, its hover and its clicks
+    /// are not the frame's (see [`on_screen`]).
+    pub drawn: bool,
     /// A press began on the page: its drag and release are the page's.
     pressed: bool,
 }
@@ -89,6 +94,7 @@ pub(crate) fn reopen(gui: &mut Gui) {
 /// `view` is the Now Playing screen's rect, which keeps the top bar's row
 /// for the TUI view's own title; the page wants the rows under the bar.
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
+    gui.stats.drawn = true;
     let view = Rect { y: view.y + 1, height: view.height.saturating_sub(1), ..view };
     match gui.stats.page.as_mut() {
         Some(page) => page::render_hosted(frame, page, view),
@@ -150,7 +156,19 @@ pub(crate) fn tips(gui: &Gui) -> String {
 /// pointer while it is open, and the page lets go of it. True when the
 /// event was the screen's to take, whether or not a page was up to take it.
 pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
-    if gui.screen != Screen::Stats {
+    if !on_screen(gui) {
+        // A button lifted ends a press and a hold the page began — a
+        // scrollbar arrow pressed before the window dropped to the mini
+        // player keeps stepping in `frame` until it hears the release —
+        // whether or not the page is drawn now to take anything else
+        // (performance audit #102 follow-up). The event is still the mini
+        // player's.
+        if matches!(mouse.kind, MouseEventKind::Up(_)) {
+            gui.stats.pressed = false;
+            if let Some(page) = gui.stats.page.as_mut() {
+                page.ui().release();
+            }
+        }
         return false;
     }
     let held = gui.stats.pressed && matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
@@ -171,16 +189,55 @@ pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
     true
 }
 
-/// The page's own per-frame duties, after the draw: its worker's answers,
-/// a held control, the tooltip clock — and whether the pointer is over one
-/// of its clickables, for the hand.
-pub(crate) fn frame(gui: &mut Gui) -> bool {
-    let on_screen = gui.screen == Screen::Stats;
-    let Some(page) = gui.stats.page.as_mut() else { return false };
+/// The page's worker's answers, before the draw — the hub's order, so an
+/// answer is on screen the frame it lands (performance audit #82). True
+/// when anything came: a frame to draw.
+pub(crate) fn absorb(gui: &mut Gui) -> bool {
+    gui.stats.page.as_mut().is_some_and(Hosted::absorb)
+}
+
+/// Whether the screen is chosen AND the last frame drew it — not so under
+/// the mini player, which keeps the page, and its worker, for the window
+/// to grow back to.
+fn on_screen(gui: &Gui) -> bool {
+    gui.screen == Screen::Stats && gui.stats.drawn
+}
+
+/// Whether the page's last frame is out of date on its clocks alone (the
+/// kit's [`crate::kit::Surface::stale`]) — only while it is on screen.
+/// A page the mini player stands in for drew no frame to be out of date:
+/// its surface said stale for as long as it went undrawn, and the loop
+/// redrew the mini player every pass (performance audit #102 follow-up).
+pub(crate) fn stale(gui: &mut Gui) -> bool {
+    on_screen(gui) && gui.stats.page.as_mut().is_some_and(|page| page.ui().stale())
+}
+
+/// Whether the page has a call out with its worker — the GUI's loop waits
+/// briskly for the answer while it does (`kit::pace`).
+pub(crate) fn awaiting(gui: &Gui) -> bool {
+    gui.stats.page.as_ref().is_some_and(Hosted::awaiting)
+}
+
+/// What the page's per-frame duties found.
+#[derive(Default)]
+pub(crate) struct Duties {
+    /// The pointer is over one of the page's clickables: the hand.
+    pub over: bool,
+    /// A held control stepped: a frame to draw.
+    pub stepped: bool,
+}
+
+/// The page's own per-frame duties, after the draw: its worker's next
+/// call, a held control, the tooltip clock.
+pub(crate) fn frame(gui: &mut Gui) -> Duties {
+    let shown = on_screen(gui);
+    let Some(page) = gui.stats.page.as_mut() else { return Duties::default() };
     Hosted::pump(page);
+    let mut stepped = false;
     if let Some(act) = page.ui().hold_action() {
         <Page as Hosted>::act(page, act);
+        stepped = true;
     }
     page.ui().dwell_tick();
-    on_screen && page.ui().hovering_clickable()
+    Duties { over: shown && page.ui().hovering_clickable(), stepped }
 }

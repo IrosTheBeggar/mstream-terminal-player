@@ -106,6 +106,7 @@ impl Client {
             base: self.base.clone(),
             token: self.token.clone(),
             peer: Some(id),
+            compressed_art: false,
             local_token: self.local_token.clone(),
             plain_listings: AtomicBool::new(false),
             no_waveforms: AtomicBool::new(false),
@@ -175,7 +176,7 @@ fn unreached(e: reqwest::Error) -> ApiError {
 
 /// A JSON answer read as `T`, a refusal as the client maps one.
 fn decode<T: DeserializeOwned>(reply: &Reply, path: &str) -> Result<T, ApiError> {
-    if let Some(refusal) = refused(reply.status, &String::from_utf8_lossy(&reply.body), path) {
+    if let Some(refusal) = refused(reply.status, &String::from_utf8_lossy(&reply.body), path, false) {
         return Err(refusal);
     }
     serde_json::from_slice(&reply.body)
@@ -1291,7 +1292,7 @@ impl Client {
             StatusCode::TOO_MANY_REQUESTS => return Ok(Peaks::Limited(after)),
             _ => {}
         }
-        if let Some(refusal) = refused(reply.status, &String::from_utf8_lossy(&reply.body), PATH) {
+        if let Some(refusal) = refused(reply.status, &String::from_utf8_lossy(&reply.body), PATH, false) {
             return Err(refusal);
         }
         // An array of bytes, or nothing to draw: one value out of range is no
@@ -1393,7 +1394,7 @@ impl Client {
         let status = resp.status();
         let bytes = resp.bytes().await.map_err(unreached)?;
         self.count(bytes.len());
-        match refused(status, &String::from_utf8_lossy(&bytes), &format!("album-art/{file}")) {
+        match refused(status, &String::from_utf8_lossy(&bytes), &format!("album-art/{file}"), false) {
             Some(refusal) => Err(refusal),
             None => Ok(bytes.to_vec()),
         }

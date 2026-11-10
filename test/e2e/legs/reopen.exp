@@ -15,7 +15,8 @@ spawn {*}$argv
 exec stty rows 40 columns 100 < $spawn_out(slave,name)
 expect {
     "Add a music folder" {}
-    timeout { exit 2 }
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { puts "SYNC-FAIL: first screen never painted"; exit 2 }
 }
 send "t"
 drain 1
@@ -24,13 +25,15 @@ drain 1
 send "c"
 expect {
     "All optional" {}
-    timeout { exit 4 }
+    eof { puts "DIED-BEFORE-EXTRAS"; exit 6 }
+    timeout { puts "NO-EXTRAS"; exec kill -9 [exp_pid]; expect eof; exit 4 }
 }
 drain 1
 send "c"
 expect {
     "Admin User" {}
-    timeout { exit 5 }
+    eof { puts "DIED-BEFORE-LOGIN"; exit 6 }
+    timeout { puts "NO-LOGIN"; exec kill -9 [exp_pid]; expect eof; exit 5 }
 }
 drain 1
 send "\x03"

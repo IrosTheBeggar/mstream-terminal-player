@@ -1203,46 +1203,51 @@ fn draw_chooser(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
 }
 
-/// The genres the picker shows for the search line.
-fn filtered_genres(all: &[String], query: &str) -> Vec<String> {
+/// The genres the picker shows for the search line — borrowed from the
+/// server's list, which can run to thousands; the picker shows fourteen.
+fn filtered_genres<'a>(all: &'a [String], query: &str) -> Vec<&'a str> {
     let query = query.trim().to_lowercase();
-    all.iter().filter(|g| query.is_empty() || g.to_lowercase().contains(&query)).cloned().collect()
+    all.iter().filter(|g| query.is_empty() || g.to_lowercase().contains(&query)).map(String::as_str).collect()
 }
 
 /// The genre under the picker's cursor.
 fn picked_genre(gui: &Gui) -> Option<String> {
     let picker = gui.app.dj_panel.genres.as_ref()?;
     let names = filtered_genres(&picker.all, gui.dj.filter.value());
-    names.get(gui.dj.pick_row.min(names.len().saturating_sub(1))).cloned()
+    names.get(gui.dj.pick_row.min(names.len().saturating_sub(1))).map(|name| name.to_string())
 }
 
 /// The genre picker (clause 48): a kit modal list with a search line,
 /// "{count} selected" in the title, checkboxes toggling live; Space toggles,
 /// Enter and Esc close.
 fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let Some(picker) = gui.app.dj_panel.genres.clone() else { return };
-    gui.ui.click(area, Act::DjGenresClose);
-    let library = gui.app.dj_library();
+    // Drawn through the Gui's own fields, not from a copy of the picker
+    // made every frame: its list is every genre the server knows
+    // (performance audit #110).
+    let Gui { app, dj, ui, .. } = gui;
+    let Some(picker) = app.dj_panel.genres.as_ref() else { return };
+    ui.click(area, Act::DjGenresClose);
+    let library = app.dj_library();
     let width = 60.min(area.width.saturating_sub(2)).max(30);
     let height = 20.min(area.height.saturating_sub(2)).max(8);
-    let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
+    let inner = modal_frame_on(frame, ui, area, width, height, th().accent);
     let title = format!("{} · {}", t!("gui.dj.pick_genres"), t!("gui.dj.selected_count", count = library.genres.len()));
     put(frame, inner.x + 1, inner.y, &title, accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::DjGenresClose);
+    modal_close(frame, ui, inner, Act::DjGenresClose);
 
-    let query = gui.dj.filter.value().to_string();
+    let query = dj.filter.value().to_string();
     let fy = inner.y + 2;
     let field_w = inner.width.saturating_sub(2);
     // Empty, the filter shows its placeholder and no caret, yet every
     // key the modal does not claim is the filter's: it says it has the
     // keyboard all the same, so the window's input method and paste are
     // on for its first key. A composition draws through the field.
-    if query.is_empty() && gui.ui.composition().is_empty() {
+    if query.is_empty() && ui.composition().is_empty() {
         put(frame, inner.x + 1, fy, &super::bar::clip(&t!("gui.dj.search_genres"), field_w as usize), dim());
-        gui.ui.note_caret(Position { x: inner.x + 1, y: fy });
+        ui.note_caret(Position { x: inner.x + 1, y: fy });
     } else {
-        let cursor = gui.dj.filter.cursor();
-        super::text_field(frame, &mut gui.ui, inner.x + 1, fy, &query, cursor, field_w, Style::default());
+        let cursor = dj.filter.cursor();
+        super::text_field(frame, ui, inner.x + 1, fy, &query, cursor, field_w, Style::default());
     }
 
     let list_y = fy + 2;
@@ -1267,10 +1272,10 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         put(frame, inner.x + 1, list_y, &super::bar::clip(&words, field_w as usize), dim());
         return;
     }
-    let row = gui.dj.pick_row.min(names.len() - 1);
-    gui.dj.pick_row = row;
-    let (scroll, _) = table_view(names.len(), Some(row), gui.dj.genres.scroll, list_h);
-    gui.dj.genres.scroll = scroll;
+    let row = dj.pick_row.min(names.len() - 1);
+    dj.pick_row = row;
+    let (scroll, _) = table_view(names.len(), Some(row), dj.genres.scroll, list_h);
+    dj.genres.scroll = scroll;
     let overflow = names.len() > list_h;
     let row_w = if overflow { inner.width.saturating_sub(1) } else { inner.width };
     for (i, name) in names.iter().enumerate().skip(scroll).take(list_h) {
@@ -1278,7 +1283,7 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let rect = Rect { x: inner.x, y, width: row_w, height: 1 };
         let on = library.genres.iter().any(|g| g == name);
         let is_sel = i == row;
-        let hover = gui.ui.hovers(rect);
+        let hover = ui.hovers(rect);
         if is_sel {
             frame.render_widget(Block::default().style(sel()), rect);
         }
@@ -1296,13 +1301,13 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             (false, false) => Style::default(),
         };
         put(frame, inner.x + 5, y, &super::bar::clip(name, row_w.saturating_sub(6) as usize), style);
-        gui.ui.click(rect, Act::DjGenre(name.clone()));
+        ui.click(rect, Act::DjGenre(name.to_string()));
     }
     if overflow {
         let bar = Rect { x: inner.right().saturating_sub(1), y: list_y, width: 1, height: list_h as u16 };
         scroll_list(
             frame,
-            &mut gui.ui,
+            ui,
             bar,
             names.len(),
             list_h,
@@ -1526,12 +1531,15 @@ fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
 // ── Acts ────────────────────────────────────────────────────────────────────
 
 /// One edit, through the App, then saved: the session-wide settings ride
-/// the player prefs at once, and a per-library rule comes back as its own
-/// effect (clause 51).
+/// the player prefs, written once the edits rest — a held ← on a bar is a
+/// step per key repeat, and each used to be a write of its own (performance
+/// audit #86) — and a per-library rule comes back as its own effect,
+/// written at once (clause 51): the book of servers is rebuilt from the
+/// file on every reload, and a rule still waiting would be undone by one.
 fn edit(gui: &mut Gui, edit: DjEdit) {
     let effects = gui.app.dj_edit(edit);
     gui.pend(effects);
-    gui.save_now();
+    gui.save_soon();
 }
 
 /// The DJ's side of [`Gui::act`]. True when the act was one of ours.
@@ -1728,6 +1736,15 @@ mod tests {
     const HOST: &str = "http://host:3000";
     const ATTIC: &str = "http://attic:3000";
 
+    /// English words under assertion: the locale lock, and English pinned —
+    /// the locale is process-wide, and the tests that switch it hold the
+    /// lock while they draw in another language.
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        guard
+    }
+
     /// A connected session with a server to arm the DJ for.
     fn session_gui() -> Gui {
         let mut gui = Gui::new(Config::default(), false, App::new(Some(HOST.into()), None, None));
@@ -1802,6 +1819,7 @@ mod tests {
 
     #[test]
     fn the_toggle_on_an_empty_queue_draws_the_chooser_and_a_click_answers_it() {
+        let _en = english();
         let mut gui = session_gui();
         gui.act(Act::AutoDj);
         assert!(gui.app.dj_chooser.is_some(), "the opening question");
@@ -1829,6 +1847,7 @@ mod tests {
 
     #[test]
     fn the_keyboard_belongs_to_a_field_in_the_top_layer_only() {
+        let _en = english();
         // The search box has it while it takes text...
         let mut gui = session_gui();
         gui.act(Act::Nav(super::super::SEARCH_NAV));
@@ -1848,6 +1867,7 @@ mod tests {
 
     #[test]
     fn the_empty_genre_filter_has_the_keyboard_behind_its_placeholder() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
@@ -1894,6 +1914,7 @@ mod tests {
 
     #[test]
     fn the_empty_queue_offers_the_openers_only_while_the_dj_is_armed() {
+        let _en = english();
         let mut gui = session_gui();
         let all = draw(&mut gui).join("\n");
         assert!(!all.contains("Pick a random song"), "off: just the label");
@@ -1910,6 +1931,7 @@ mod tests {
 
     #[test]
     fn dj_picked_rows_wear_the_badge_and_the_road_wears_its_banner() {
+        let _en = english();
         let mut gui = session_gui();
         gui.app.queue.items = vec![
             queued("mine.mp3", None),
@@ -1931,9 +1953,11 @@ mod tests {
 
     #[test]
     fn the_nav_row_opens_the_room_and_esc_only_stows_the_cursor() {
+        let _en = english();
         let mut gui = session_gui();
         let rows = draw(&mut gui);
-        // The TOOLS group under Search: Auto DJ, then the sonic room's slot.
+        // The TOOLS group under the play lists (row 14 since the Rated
+        // room joined LIBRARY): Auto DJ, then the sonic room's slot.
         assert!(rows[14].contains("TOOLS"), "the group:\n{}", rows[14]);
         assert_eq!(hit_text(&gui, &rows, "Auto DJ"), Some(Act::Nav(DJ_NAV)));
         let nav = |r: &String| r.chars().take(15).collect::<String>();
@@ -1958,6 +1982,7 @@ mod tests {
 
     #[test]
     fn d_opens_the_room_from_anywhere_and_the_nav_row_wears_the_armed_dot() {
+        let _en = english();
         let mut gui = session_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.act(Act::Screen(Screen::NowPlaying));
@@ -1980,6 +2005,7 @@ mod tests {
 
     #[test]
     fn the_button_starts_and_stops_through_the_shared_toggle() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
@@ -2003,6 +2029,7 @@ mod tests {
 
     #[test]
     fn switches_bars_and_radios_edit_the_running_settings() {
+        let _en = english();
         let mut gui = room_gui();
         let rows = draw_tall(&mut gui);
         // The strictness bar: a click on a cell sets, ←→ step by .05.
@@ -2040,8 +2067,33 @@ mod tests {
         assert!(all.contains("Include tracks of unknown length"), "a real bound reveals the checkbox");
     }
 
+    /// A held key on a bar is a step per repeat: each lands in the App at
+    /// once, and the file is written once the steps rest (performance audit
+    /// #86).
+    #[test]
+    fn a_held_bar_is_written_once_its_steps_rest() {
+        let scratch = crate::config::testing::Scratch::new("dj-steps-rest");
+        let mut gui = room_gui();
+        gui.config_ok = true;
+        config::save(&gui.config).unwrap();
+        let file = scratch.dir.join("config.toml");
+        let before = std::fs::read_to_string(&file).unwrap();
+        gui.act(Act::DjStep(DjRow::Length, 1));
+        for _ in 0..12 {
+            gui.act(Act::DjStep(DjRow::Shortest, 1));
+        }
+        let shortest = gui.app.dj.min_seconds;
+        assert!(shortest > 0, "the steps landed: {shortest}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "not one write while the key is held");
+        gui.prefs_unsaved = gui.prefs_unsaved.map(|since| since - super::super::PREFS_REST);
+        gui.save_rested();
+        assert_ne!(std::fs::read_to_string(&file).unwrap(), before, "written once they rest");
+        assert_eq!(config::load().unwrap().player.dj.min_seconds, shortest);
+    }
+
     #[test]
     fn the_rows_line_up_at_the_value_column_and_the_help_line_explains_the_row_in_hand() {
+        let _en = english();
         let mut gui = room_gui();
         let rows = draw_tall(&mut gui);
         let cells = |r: &String| r.chars().collect::<Vec<char>>();
@@ -2084,6 +2136,7 @@ mod tests {
 
     #[test]
     fn keywords_are_added_by_typing_and_removed_by_their_chip() {
+        let _en = english();
         let mut gui = room_gui();
         gui.act(Act::DjStep(DjRow::Keywords, 1));
         assert!(gui.app.dj.keyword_filter);
@@ -2104,6 +2157,7 @@ mod tests {
 
     #[test]
     fn genres_are_picked_in_the_modal_and_written_to_the_dj_servers_entry() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
@@ -2139,6 +2193,7 @@ mod tests {
 
     #[test]
     fn the_genre_switch_and_the_mode_are_two_controls() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         let rows = draw_tall(&mut gui);
@@ -2165,6 +2220,9 @@ mod tests {
 
     #[test]
     fn a_failed_genres_load_says_so_in_the_picker_instead_of_loading_forever() {
+        // It reads English: hold the locale against the tests that switch it.
+        let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
         let mut gui = room_gui();
         gui.act(Act::DjPickGenres);
         let all = draw_tall(&mut gui).join("\n");
@@ -2183,6 +2241,7 @@ mod tests {
 
     #[test]
     fn the_server_picker_moves_the_dj_and_reselecting_is_a_no_op() {
+        let _en = english();
         let mut gui = room_gui();
         gui.config.servers.push(config::ServerEntry { url: HOST.into(), ..Default::default() });
         gui.config.servers.push(config::ServerEntry { url: ATTIC.into(), ..Default::default() });
@@ -2209,6 +2268,7 @@ mod tests {
 
     #[test]
     fn a_server_known_to_predate_the_filters_hides_them_and_says_why() {
+        let _en = english();
         let mut gui = room_gui();
         gui.app.servers.push(known(HOST, "host"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
@@ -2243,6 +2303,7 @@ mod tests {
 
     #[test]
     fn preview_asks_three_picks_without_queueing() {
+        let _en = english();
         let mut gui = room_gui();
         gui.pending.clear();
         gui.act(Act::DjPreview);
@@ -2254,5 +2315,53 @@ mod tests {
         let all = draw_tall(&mut gui).join("\n");
         assert!(all.contains("picking…"), "{all}");
         assert!(gui.app.queue.items.is_empty());
+    }
+
+    #[test]
+    fn a_long_genre_list_draws_its_window_and_picks_from_it() {
+        // The picker draws from the server's list where it lives, not from
+        // a copy made every frame (performance audit #110): deep in two
+        // thousand genres, the rows on screen and the pick are the cursor's.
+        let mut gui = room_gui();
+        gui.app.servers.push(known(HOST, "host"));
+        gui.app.queue.items = vec![queued("a.mp3", None)];
+        gui.act(Act::AutoDj);
+        gui.pending.clear();
+        gui.act(Act::DjPickGenres);
+        let effects = gui.app.apply_event(Event::Genres(
+            (0..2_000).map(|i| Genre { name: format!("Genre {i:04}"), track_count: Some(1) }).collect(),
+        ));
+        gui.pend(effects);
+        for _ in 0..1_500 {
+            key(&mut gui, KeyCode::Down);
+        }
+        let rows = draw_tall(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("Genre 1500") && !all.contains("Genre 0000"), "{all}");
+        assert_eq!(hit_text(&gui, &rows, "Genre 1500"), Some(Act::DjGenre("Genre 1500".into())));
+        assert_eq!(gui.app.dj_panel.genres.as_ref().map(|p| p.all.len()), Some(2_000));
+        key(&mut gui, KeyCode::Char(' '));
+        assert_eq!(gui.app.servers[0].dj.genres.as_deref(), Some(&["Genre 1500".to_string()][..]));
+    }
+
+    /// `cargo test --release genre_picker_frame_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check; run --release with --nocapture"]
+    fn genre_picker_frame_cost() {
+        let mut gui = room_gui();
+        gui.app.servers.push(known(HOST, "host"));
+        gui.act(Act::DjPickGenres);
+        let effects = gui.app.apply_event(Event::Genres(
+            (0..2_000).map(|i| Genre { name: format!("Genre {i:04}"), track_count: Some(1) }).collect(),
+        ));
+        gui.pend(effects);
+        let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
+        let frames = 200;
+        let started = std::time::Instant::now();
+        for _ in 0..frames {
+            terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        }
+        let per = started.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+        println!("dj genre picker, 2,000 genres: {per:.3} ms a frame");
     }
 }

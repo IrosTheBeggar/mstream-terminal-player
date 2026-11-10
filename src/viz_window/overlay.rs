@@ -283,7 +283,7 @@ mod tests {
             .unwrap_or_else(|| std::env::temp_dir().join("viz-overlay"));
         std::fs::create_dir_all(&dir).unwrap();
         let options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: crate::shader::render::power_preference(),
             ..Default::default()
         };
         // The adapter the window would draw with (`gpu_pick`).

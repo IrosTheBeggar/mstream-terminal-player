@@ -626,7 +626,7 @@ impl Client {
         {
             return FetchError::Busy(wait);
         }
-        FetchError::Api(refused(status, &text, path).unwrap_or_else(|| ApiError::Server {
+        FetchError::Api(refused(status, &text, path, false).unwrap_or_else(|| ApiError::Server {
             status: status.as_u16(),
             message: extract_error(&text),
         }))

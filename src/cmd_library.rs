@@ -630,7 +630,7 @@ pub fn browse(args: BrowseArgs) -> i32 {
     }
 
     if let Some(genre) = &args.genre {
-        return match client.genre_songs(genre) {
+        return match client.genre_songs(genre, crate::api::types::GenreSource::Both) {
             Ok(tracks) => print_tracks(&tracks),
             Err(e) => fail(e),
         };

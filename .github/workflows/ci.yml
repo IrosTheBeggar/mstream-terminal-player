@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to a PR cancels that PR's run still going. A push to main
+# gets a group of its own (the run id), so no merge waits behind another
+# or is dropped untested (performance audit #130).
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   # Both products from one tree (Cargo.toml's [features]): the terminal
   # flavour (no features; every release but the desktop one) and the
@@ -29,7 +36,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
+      # Only main writes the cache; a PR restores main's (performance
+      # audit #130). One set for these jobs is ~6 GB of the repo's 10, so
+      # every PR that saved its own evicted main's, and a quarter of the
+      # jobs started cold. The price: a PR that changes Cargo.lock builds
+      # its new crates on each push until it lands.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The terminal flavour ships no GUI window: the window's crates must
       # not be in its tree at all, on any target.
@@ -68,16 +82,21 @@ jobs:
       # GUI's window on the same one; both must open their drivers at run
       # time, never link them, or the binary stops starting on headless
       # boxes. See the script. Each flavour is checked on Linux, since each
-      # ships there; Windows keeps its one release build, of the terminal
-      # flavour, as before (the desktop one's test build above compiles the
-      # same code).
+      # ships there; Windows keeps its one build of the terminal flavour, as
+      # before (the desktop one's test build above compiles the same code).
+      # The dev profile, not --release (performance audit #128): nothing
+      # checked here differs by profile — the same crates, features and -l
+      # flags decide NEEDED, and without LTO the debug link keeps every
+      # reference the release one does — and thin LTO over one codegen unit
+      # made each release build minutes of the crate alone on every push.
+      # The release workflow builds that profile, and guards it, per target.
       - name: Build (terminal)
         if: runner.os != 'macOS'
-        run: cargo build --release
+        run: cargo build
 
       - name: Linkage guard (Linux, terminal)
         if: runner.os == 'Linux'
-        run: sh test/linkage.sh target/release/mstream-player
+        run: sh test/linkage.sh target/debug/mstream-player
 
       # The terminal releases have no page windows: `qr --window` is clap's
       # usage error there (2), as `gui --window` is. Checked on this build,
@@ -87,7 +106,7 @@ jobs:
         shell: bash
         run: |
           code=0
-          target/release/mstream-player qr --window --server http://127.0.0.1:9 || code=$?
+          target/debug/mstream-player qr --window --server http://127.0.0.1:9 || code=$?
           echo "qr --window: exit $code"
           test "$code" -eq 2
 
@@ -97,16 +116,16 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          target/release/mstream-player --version
-          test "$(target/release/mstream-player --version | wc -l)" -eq 1
+          target/debug/mstream-player --version
+          test "$(target/debug/mstream-player --version | wc -l)" -eq 1
 
       - name: Build (desktop)
         if: runner.os == 'Linux'
-        run: cargo build --release --features desktop
+        run: cargo build --features desktop
 
       - name: Linkage guard (Linux, desktop)
         if: runner.os == 'Linux'
-        run: sh test/linkage.sh target/release/mstream-player
+        run: sh test/linkage.sh target/debug/mstream-player
 
       # The pages' windows with no display to open one on: `setup --window`
       # and `qr --window` exit 3 (window/mod.rs's NO_WINDOW) before any
@@ -119,7 +138,7 @@ jobs:
           for page in setup qr; do
             code=0
             env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
-              target/release/mstream-player "$page" --window --server http://127.0.0.1:9 \
+              target/debug/mstream-player "$page" --window --server http://127.0.0.1:9 \
               || code=$?
             echo "$page --window: exit $code"
             test "$code" -eq 3
@@ -134,8 +153,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          target/release/mstream-player --version
-          test "$(target/release/mstream-player --version | sed -n 2p)" = 'features: window window-pages'
+          target/debug/mstream-player --version
+          test "$(target/debug/mstream-player --version | sed -n 2p)" = 'features: window window-pages'
 
   # The browser build has no test runner, but it has a type system: a plain
   # check catches the native-only import or the unhandled worker command that
@@ -151,9 +170,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # Main's cache only, as in the test job.
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm32
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check
         run: cargo check --target wasm32-unknown-unknown
@@ -176,7 +197,10 @@ jobs:
       - name: Install ALSA dev headers + expect (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev expect
+      # Main's cache only, as in the test job.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The wizard's expect battery against the stateful fake server —
       # fully self-contained (test/e2e/README.md). macOS runners ship
       # expect; run.sh skips gracefully anywhere it is missing.

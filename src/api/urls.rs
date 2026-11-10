@@ -253,12 +253,37 @@ pub fn peer_media_url(
     Ok(url.to_string())
 }
 
-/// `{server}/api/v1/federation/peers/{peer}/art/{file}` — a peer's cover
-/// through the parent's art proxy; the token travels in the header, as for
-/// [`album_art_url`].
+/// `{server}/api/v1/federation/peers/{peer}/art/{file}?compress=l` — a
+/// peer's cover through the parent's art proxy; the token travels in the
+/// header, as for [`album_art_url`].
+///
+/// [`PEER_ART_COMPRESS`] asks for the peer's own `zl-` rendition (at most
+/// 256 px a side), the one the webapp's album cards ask for: the proxy
+/// forwards exactly the `compress` query, and the original — which can be
+/// megabytes — would cross the parent for every cover. A peer with no
+/// `zl-` file for it serves the original instead.
 pub fn peer_art_url(server: &str, peer: i64, file: &str) -> Result<String, String> {
-    build(server, &format!("api/v1/federation/peers/{peer}/art"), file).map(|url| url.to_string())
+    let mut url = build(server, &format!("api/v1/federation/peers/{peer}/art"), file)?;
+    url.query_pairs_mut().append_pair("compress", PEER_ART_COMPRESS);
+    Ok(url.to_string())
 }
+
+/// `{server}/album-art/{file}?compress=l` — a peer's cover asked of the
+/// peer itself, over its own tunnel (multi-server contract, clause 27):
+/// the [`PEER_ART_COMPRESS`] rendition [`peer_art_url`] asks through the
+/// parent, so a connected server's covers do not change size with the way
+/// it is reached. The guest token travels in the header, as for
+/// [`album_art_url`].
+pub fn direct_peer_art_url(server: &str, file: &str) -> Result<String, String> {
+    let mut url = build(server, "album-art", file)?;
+    url.query_pairs_mut().append_pair("compress", PEER_ART_COMPRESS);
+    Ok(url.to_string())
+}
+
+/// The rendition a federated peer's covers are asked as ([`peer_art_url`],
+/// [`direct_peer_art_url`]): mStream caches two, `s` (92 px, the webapp's
+/// song rows) and `l` (256 px, its album cards).
+pub const PEER_ART_COMPRESS: &str = "l";
 
 /// `{server}/album-art/{file}` — the cover the server extracted and cached,
 /// named by the `album-art` field in track metadata.
@@ -266,8 +291,24 @@ pub fn peer_art_url(server: &str, peer: i64, file: &str) -> Result<String, Strin
 /// No `?token=`: unlike the stream URLs this one is fetched by the client
 /// itself, so the token can travel in the header where it stays out of
 /// server logs.
-pub fn album_art_url(server: &str, file: &str) -> Result<String, String> {
-    build(server, "album-art", file).map(|url| url.to_string())
+///
+/// `small` asks for the server's own 256 px copy (`?compress=l`), which
+/// mStream writes beside every cover it scans and serves in place of the
+/// original — falling back to the original when it has none. A wall cell
+/// or a queue row never draws more than that, and the originals are
+/// commonly 1000 px and hundreds of kilobytes apiece (performance audit
+/// #92). Not `s`: its 92 px is below the 128 px thumbnail kept here.
+pub fn album_art_url(server: &str, file: &str, small: bool) -> Result<String, String> {
+    build(server, "album-art", file).map(|url| sized(url, small))
+}
+
+/// The `compress=l` pair on a small ask — its own pair, ahead of the
+/// loopback token [`with_local_token`] appends.
+fn sized(mut url: Url, small: bool) -> String {
+    if small {
+        url.query_pairs_mut().append_pair("compress", "l");
+    }
+    url.to_string()
 }
 
 /// `{server}/transcode/{vpath}?codec=...&bitrate=...&token=...`
@@ -324,8 +365,11 @@ pub fn transfer_transcode_url(
     Ok(url.to_string())
 }
 
-/// [`album_art_url`] or [`peer_art_url`] for one [`ArtSize`]. The parent's
-/// art proxy forwards `compress` to the peer, and nothing else.
+/// [`album_art_url`]'s or [`peer_art_url`]'s place for one [`ArtSize`]: a
+/// card's covers name the copy they want, a peer's full image included,
+/// where the player's own ask the 256 px one (`small`; a peer's always).
+/// The parent's art proxy forwards `compress` to the peer, and nothing
+/// else.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn album_art_sized_url(
     server: &str,
@@ -376,8 +420,10 @@ mod tests {
             with_local_token(media, Some("lt9")),
             "http://127.0.0.1:4242/media/lib/a.mp3?token=t&__lt=lt9"
         );
-        let art = album_art_url("http://127.0.0.1:4242", "x.jpg").unwrap();
+        let art = album_art_url("http://127.0.0.1:4242", "x.jpg", false).unwrap();
         assert_eq!(with_local_token(art, Some("lt9")), "http://127.0.0.1:4242/album-art/x.jpg?__lt=lt9");
+        let art = album_art_url("http://127.0.0.1:4242", "x.jpg", true).unwrap();
+        assert_eq!(with_local_token(art, Some("lt9")), "http://127.0.0.1:4242/album-art/x.jpg?compress=l&__lt=lt9");
         // A direct server has no gate, so nothing is appended.
         let plain = media_url("http://host:3000", "lib/a.mp3", None).unwrap();
         assert_eq!(with_local_token(plain.clone(), None), plain);
@@ -392,7 +438,19 @@ mod tests {
 
     #[test]
     fn album_art_url_carries_no_token() {
-        let u = album_art_url("http://host/mstream", "b0445bafc2e9a817.jpeg").unwrap();
+        let u = album_art_url("http://host/mstream", "b0445bafc2e9a817.jpeg", false).unwrap();
+        assert_eq!(u, "http://host/mstream/album-art/b0445bafc2e9a817.jpeg");
+    }
+
+    #[test]
+    fn a_small_cover_asks_for_the_servers_own_256px_copy() {
+        // Performance audit #92: mStream serves `zl-<file>` for
+        // `?compress=l` and the original when it has none.
+        let u = album_art_url("http://host/mstream", "b0445bafc2e9a817.jpeg", true).unwrap();
+        assert_eq!(u, "http://host/mstream/album-art/b0445bafc2e9a817.jpeg?compress=l");
+        // The big box asks for the original; a peer's cover is always the
+        // small copy (peer_art_url's own test).
+        let u = album_art_url("http://host/mstream", "b0445bafc2e9a817.jpeg", false).unwrap();
         assert_eq!(u, "http://host/mstream/album-art/b0445bafc2e9a817.jpeg");
     }
 
@@ -468,7 +526,7 @@ mod tests {
     #[test]
     fn art_comes_in_three_sizes_from_the_server_or_a_peers_proxy() {
         let full = album_art_sized_url("http://host", None, "ab12.jpeg", ArtSize::Full).unwrap();
-        assert_eq!(full, album_art_url("http://host", "ab12.jpeg").unwrap(), "the full image is the plain URL");
+        assert_eq!(full, album_art_url("http://host", "ab12.jpeg", false).unwrap(), "the full image is the plain URL");
         let large = album_art_sized_url("http://host/m/", None, "ab12.jpeg", ArtSize::Large).unwrap();
         assert_eq!(large, "http://host/m/album-art/ab12.jpeg?compress=l");
         let small = album_art_sized_url("http://parent:3000", Some(3), "ab12.png", ArtSize::Small).unwrap();
@@ -480,6 +538,17 @@ mod tests {
         let u = peer_media_url("http://parent:3000/", 3, "music/Söng.flac", Some("pt")).unwrap();
         assert_eq!(u, "http://parent:3000/api/v1/federation/peers/3/stream/music/S%C3%B6ng.flac?token=pt");
         let u = peer_art_url("http://parent:3000", 3, "cover.jpeg").unwrap();
-        assert_eq!(u, "http://parent:3000/api/v1/federation/peers/3/art/cover.jpeg");
+        assert_eq!(u, "http://parent:3000/api/v1/federation/peers/3/art/cover.jpeg?compress=l");
+        // Through a tunnel bridge the loopback token joins the query; it
+        // does not replace it.
+        assert_eq!(
+            with_local_token(u, Some("lt9")),
+            "http://parent:3000/api/v1/federation/peers/3/art/cover.jpeg?compress=l&__lt=lt9"
+        );
+        // Over the peer's own tunnel: its plain `/album-art`, the same
+        // rendition, the bridge's token after it.
+        let u = direct_peer_art_url("http://127.0.0.1:5000", "cover.jpeg").unwrap();
+        assert_eq!(u, "http://127.0.0.1:5000/album-art/cover.jpeg?compress=l");
+        assert_eq!(with_local_token(u, Some("lt9")), "http://127.0.0.1:5000/album-art/cover.jpeg?compress=l&__lt=lt9");
     }
 }

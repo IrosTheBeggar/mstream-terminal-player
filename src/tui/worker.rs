@@ -19,10 +19,11 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults, SimilarArtist,
-    Track,
+    Album, ArtistAlbumRow, CancelAnswer, CollectionDestination, CollectionDestinationView, DirListing,
+    DiscoveryPluginsResponse, Genre, GenreList, GenreSource, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, MoodFilter, MoodSong, Ping, PluginJobList,
+    PluginLink, PlaylistSummary, SearchResults, SimilarArtist, TasteRequest, TasteResponse, Track,
 };
-use crate::api::{ApiError, Client};
+use crate::api::{ApiError, Client, PluginFailure};
 use crate::discovery::DiscoveredServer;
 use crate::dj;
 #[cfg(not(target_arch = "wasm32"))]
@@ -35,10 +36,23 @@ use crate::player::PlayerStatus;
 use crate::tui::app::Tab;
 use crate::tui::art;
 
-/// How often the audio thread ticks the engine and publishes status. Also the
-/// upper bound on command latency, so keep it small enough to feel instant.
+/// How often the audio thread ticks the engine and publishes status while
+/// anything is moving: the end of a track, a blend's steps, the position
+/// the progress bar follows. A command never waits for it — the channel
+/// wakes the thread the moment one arrives.
 #[cfg(not(target_arch = "wasm32"))]
 const TICK: Duration = Duration::from_millis(120);
+
+/// The wait between ticks while the player is settled — stopped, or a
+/// landed pause, with nothing draining or opening. Nothing can change then
+/// without a command, and the tick's one standing job, the device watch,
+/// only polls once a second anyway. It was 120 ms regardless: ~8 wakeups a
+/// second for hours of a paused player, each publishing the same status
+/// (performance audit #81). A status still goes out every wake, so the UI
+/// keeps a once-a-second heartbeat, and every command batch still gets its
+/// own status straight after.
+#[cfg(not(target_arch = "wasm32"))]
+const SETTLED_TICK: Duration = crate::engine::DEVICE_POLL;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioCmd {
@@ -194,6 +208,80 @@ pub enum ApiCmd {
     DiscoveryProbe,
     /// Fill a Discover view. `seed` is the track it all hangs off.
     Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
+    /// Ask the GUI's Discover room for one part of its answer
+    /// (discovery-page contract, clause 30) — a destination on the command,
+    /// not a second command (the D7 habit). `seq` and `generation` come
+    /// back on [`Event::Taste`]: last ask wins, and a reply from a server
+    /// the session has left fills nothing (clause 31). The session's own
+    /// server always: the room is hidden in a peer session (clause 1).
+    Taste { seq: u64, generation: u64, part: TastePart, body: Box<TasteRequest> },
+    /// An album row's `[+]` (clause 61): the album's songs by its name — the
+    /// Albums room's ask — for the App to append to the queue. A connected
+    /// server's album on the strip (the 2026-10-11 strip log) names its
+    /// `peer`, its track `artist`, and the `reach` through the parent's
+    /// federation proxy; `play` replaces the queue and plays instead of
+    /// appending.
+    TasteAlbum {
+        name: String,
+        artist: Option<String>,
+        /// A compilation's album artist (the rows' `albumArtist`): its songs
+        /// are asked by it rather than by a track artist (the 2026-10-19
+        /// log).
+        album_artist: Option<String>,
+        generation: u64,
+        peer: Option<i64>,
+        reach: Option<crate::tui::app::Reach>,
+        play: bool,
+    },
+    // The Discover room's plug-ins — Keep a copy, the Copies modal, Open
+    // elsewhere (discovery-page clauses 100–149). Every one asks the
+    // session's OWN server (the room is hidden in a peer session, and a
+    // copy lands on the user's server), each stamped with the session
+    // generation: a reply from a server the session left fills nothing.
+    /// The gate's two reads: the plug-in listing, then — only when the copy
+    /// plug-in is listed and jobs are allowed — the collection destination
+    /// (clause 101).
+    KeepGate { generation: u64 },
+    /// The jobs a set of connected-server rows already have, for their
+    /// marks: each row's raw taste JSON, unchanged, chunked at 100 by the
+    /// client (clause 111). `seq` comes back: the last lookup wins.
+    JobsLookup { seq: u64, generation: u64, recs: Vec<serde_json::Value> },
+    /// The caller's jobs — the poll and the Copies modal (clause 112).
+    Jobs { seq: u64, generation: u64 },
+    /// Start a copy of `rec`, sent unchanged, with `scope` (clause 103)
+    /// and the place LANDS IN showed (clause 145: `None` sends none,
+    /// `Some(None)` null). `ticket` comes back on the reply, so the Keep
+    /// modal knows its own.
+    JobStart {
+        ticket: u64,
+        generation: u64,
+        plugin: String,
+        rec: Box<serde_json::Value>,
+        scope: JobScope,
+        destination: Option<Option<CollectionDestination>>,
+    },
+    /// The destination read again — each Keep a copy modal that opens
+    /// asks (clause 105); `seq` comes back: the last read wins.
+    DestinationRead { seq: u64, generation: u64 },
+    /// Save where this account's copies land — the picker's Save (clause
+    /// 144): `None` goes back to the library default.
+    DestinationSave { seq: u64, generation: u64, destination: Option<CollectionDestination> },
+    /// The folders in `path` (`/{library}/{folder}`), for the picker's
+    /// completion (clause 143): the session's own server's listing.
+    DestinationFolders { seq: u64, generation: u64, path: String },
+    /// Cancel job `id` (a 409 means it had already finished, clause 133).
+    JobCancel { generation: u64, id: i64 },
+    /// Drop the caller's finished jobs — the Copies modal's Clear finished.
+    JobsClear { generation: u64 },
+    /// Open elsewhere: the `links` plug-in `plugin`'s links for `rec`,
+    /// asked only when the list opens (clause 140).
+    PluginLinks { seq: u64, generation: u64, plugin: String, rec: Box<serde_json::Value> },
+    /// The Keep modal's sizes (clause 106): the album's songs and the
+    /// artist's albums on the connected server — through `reach`, its peer
+    /// reach — and the artist's albums in the user's own library, through
+    /// the session. Every read optional: a missing answer leaves its size
+    /// unknown.
+    KeepFacts { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach>, ask: Box<KeepFactsAsk> },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
@@ -209,8 +297,17 @@ pub enum ApiCmd {
     /// Fetch and decode one cover, named by the art file a track's metadata
     /// carries. The app caches the answer under that name. `reach` names
     /// the row's own server when it is not the session's (contract clause
-    /// 30); `None` asks the session.
-    AlbumArt { file: String, reach: Option<crate::tui::app::Reach> },
+    /// 30); `None` asks the session. `small`: a cover for a small surface —
+    /// a wall cell, a queue row — rather than the playing track's. Those
+    /// come a page at a time, so they wait their turn in their server's
+    /// art lane (performance audit #88); the playing cover never does. And
+    /// they ask for the server's 256 px copy, where the playing cover's
+    /// big box may want the original's pixels (performance audit #92).
+    AlbumArt { file: String, reach: Option<crate::tui::app::Reach>, small: bool },
+    /// The App let go of its claim on this cover before an answer came: a
+    /// lane still holding the ask drops it unasked (performance audit #88).
+    /// One already on the wire lands as any late answer does.
+    ArtWithdraw { file: String },
     /// Fetch a track's shape for the progress bar. Keyed by filepath rather
     /// than by an art file: a waveform belongs to one recording, not to an
     /// album. `reach` as for [`ApiCmd::AlbumArt`].
@@ -243,13 +340,18 @@ impl ApiCmd {
             | ApiCmd::AddToPlaylist { reach, .. }
             | ApiCmd::TrackInfo { reach, .. }
             | ApiCmd::Genres { reach }
-            | ApiCmd::PlaylistNames { reach } => reach.as_ref(),
+            | ApiCmd::PlaylistNames { reach }
+            // A connected server's album asks THAT server, through the proxy.
+            | ApiCmd::TasteAlbum { reach, .. } => reach.as_ref(),
             // The DJ's turns go to ITS server (auto-dj contract, clause 19).
             ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => request.reach.as_ref(),
             // A play goes to its row's server, a peer's to the parent.
             ApiCmd::ReportPlays { reach, .. } | ApiCmd::Scrobble { reach, .. } => Some(reach),
             // Its reach is the parent's and its arm builds the client itself.
+            // The Keep modal's facts read the connected server AND the
+            // session: its arm builds the peer's client from its reach.
             ApiCmd::DirectAccess { .. }
+            | ApiCmd::KeepFacts { .. }
             | ApiCmd::Connect { .. }
             | ApiCmd::Login { .. }
             | ApiCmd::TunnelOpen { .. }
@@ -264,11 +366,24 @@ impl ApiCmd {
             | ApiCmd::SonicRandom { .. }
             | ApiCmd::DiscoveryProbe
             | ApiCmd::Discover { .. }
+            | ApiCmd::Taste { .. }
+            // The plug-in routes are the user's own server's (clause 100).
+            | ApiCmd::KeepGate { .. }
+            | ApiCmd::JobsLookup { .. }
+            | ApiCmd::Jobs { .. }
+            | ApiCmd::JobStart { .. }
+            | ApiCmd::DestinationRead { .. }
+            | ApiCmd::DestinationSave { .. }
+            | ApiCmd::DestinationFolders { .. }
+            | ApiCmd::JobCancel { .. }
+            | ApiCmd::JobsClear { .. }
+            | ApiCmd::PluginLinks { .. }
             | ApiCmd::SavePlaylist { .. }
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
             | ApiCmd::DeletePlaylist { .. }
             | ApiCmd::Search { .. }
+            | ApiCmd::ArtWithdraw { .. }
             | ApiCmd::Shutdown => None,
         }
     }
@@ -378,6 +493,92 @@ pub enum DiscoverDest {
     NowPlaying,
 }
 
+/// Which part of the Discover room's answer an ask fills (discovery-page
+/// contract, clauses 30 and 65). The App keeps a seq per slot, so a part
+/// says which slots its reply may fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TastePart {
+    /// Ask A: `library` — the seeds, the header facts and the library's
+    /// lists. Never `network`: the play-now room shows only what plays.
+    Main,
+    /// Ask B: the connected (federated) servers, only while
+    /// `federationDiscovery` is advertised.
+    Peers,
+}
+
+/// Why a taste ask has no answer. A 401 is not here: it is the session's
+/// problem and goes out as [`Event::Unauthorized`] like any read's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TasteFailure {
+    /// 403: switched off, or the index is not there yet — the route says
+    /// both the same way, so the App re-pings before naming one (clause
+    /// 82).
+    Forbidden,
+    /// Transport or server failure, in the server's words (clause 83).
+    Failed(String),
+}
+
+/// What the Keep modal's sizes are asked about (clause 106): the row's or
+/// the tile's album, its track artist, its album artist and its year — the
+/// album copy's own selectors, so the count matches what it takes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeepFactsAsk {
+    pub album: Option<String>,
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub year: Option<i32>,
+}
+
+/// The Keep modal's sizes; `None` where a read was not asked or did not
+/// answer (DIM "…" until then; clause 106).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeepFacts {
+    /// The album's songs on the connected server — how many, and the tags
+    /// each files under (clause 105).
+    pub album_songs: Option<Vec<KeepSong>>,
+    /// The artist's albums on the connected server.
+    pub peer_albums: Option<Vec<ArtistAlbumRow>>,
+    /// The artist's albums in the user's own library.
+    pub local_albums: Option<Vec<ArtistAlbumRow>>,
+}
+
+/// One song of the album's listing, with the tags a copy files it under
+/// that may differ from song to song (destination.js `tagsForLayout`):
+/// its artist, its year and its genre — what LANDS IN needs to know
+/// whether an album copy keeps to one folder (clause 105).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeepSong {
+    /// Its path on the connected server: the row's own song is found by it.
+    pub filepath: String,
+    /// The ARTIST tag as written ("A feat. B" — the copy files by it, not
+    /// by the primary artist the listing's `artist` names), else that name.
+    pub artist: Option<String>,
+    pub year: Option<i32>,
+    /// Its genre where the listing names exactly one: the library splits a
+    /// genre tag on `,` `;` `/` (the peer's scanner), the copy files by the
+    /// tag as the file has it — a "Hip-Hop/Rap" lists as two and lands in
+    /// "Hip-Hop-Rap" — so a song that lists two or more is unknown (the
+    /// webapp's `songGenre`).
+    pub genre: Option<String>,
+}
+
+impl KeepSong {
+    pub fn of(track: &Track) -> KeepSong {
+        let named = |v: &Option<String>| v.clone().filter(|s| !s.trim().is_empty());
+        let md = &track.metadata;
+        let genres: Vec<&String> = md.genres.iter().filter(|g| !g.trim().is_empty()).collect();
+        KeepSong {
+            filepath: track.filepath.clone(),
+            artist: named(&md.artist_display).or_else(|| named(&md.artist)),
+            year: md.year.filter(|y| *y > 0),
+            genre: match genres[..] {
+                [one] => Some(one.clone()),
+                _ => None,
+            },
+        }
+    }
+}
+
 /// A position in the tag-based library hierarchy. Doubles as the request (what
 /// to fetch) and the identity of a view (what a response belongs to), so a
 /// slow reply for a screen the user already left can be discarded.
@@ -385,13 +586,30 @@ pub enum DiscoverDest {
 pub enum LibraryNode {
     /// The mode menu — static, needs no request.
     Root,
-    Artists,
+    /// Every artist, or those a mood filter keeps (mStream #1092) — the
+    /// filter is part of the view's identity, as the genre kind is, so a
+    /// list asked for before the filter moved is dropped when it lands.
+    /// [`MoodFilter::NONE`] everywhere but the GUI's Filters.
+    Artists(MoodFilter),
     Artist(String),
-    Albums,
+    /// Every album, or those a mood filter keeps — as [`Self::Artists`].
+    Albums(MoodFilter),
     Album { name: String, artist: Option<String> },
-    Genres,
-    Genre(String),
-    Recent,
+    /// The Genres list of one kind (mStream #716) — part of the view's
+    /// identity, so a list asked for before the switch moved is dropped
+    /// when it lands.
+    Genres(GenreSource),
+    /// A genre's songs, asked for with its list's kind
+    /// ([`GenreList::songs_source`]).
+    Genre(String, GenreSource),
+    /// The newest songs, or the newest a mood filter keeps (mStream #1095)
+    /// — as [`Self::Artists`], the filter part of the view's identity.
+    /// [`MoodFilter::NONE`] everywhere but the GUI's Filters.
+    Recent(MoodFilter),
+    /// The songs the user rated, highest first, or those a mood filter
+    /// keeps — as [`Self::Recent`]. The GUI's room alone: the TUI's menu
+    /// has no row for it, and a peer's session no such list.
+    Rated(MoodFilter),
     /// The play lists (library-rooms contract, clauses 21–24): the user's
     /// last hundred plays newest first, and the hundred played most.
     RecentlyPlayed,
@@ -407,9 +625,12 @@ pub enum LibraryNode {
 pub enum LibraryData {
     Artists(Vec<String>),
     Albums(Vec<Album>),
-    Genres(Vec<Genre>),
+    Genres(GenreList),
     Playlists(Vec<PlaylistSummary>),
     Tracks(Vec<Track>),
+    /// A song list asked under a mood filter: each song with its match, in
+    /// the list's own order.
+    Songs(Vec<MoodSong>),
 }
 
 /// How Auto-DJ chooses what comes next.
@@ -428,6 +649,13 @@ pub enum Event {
     /// moves its cursor without starting anything — the audio has already
     /// moved.
     HandedOver { from: String, to: String },
+    /// The engine is done with a seek — landed, clamped short of the end,
+    /// or refused — named by the target it was asked for; the status after
+    /// it says where playback stands. A seek holds this thread for as long
+    /// as its bytes take to arrive, seconds on a slow link, and the name is
+    /// what lets the UI tell its newest seek from an older one the thread
+    /// was still busy with.
+    Seeked { target: f64 },
     /// The audio device could not be opened; playback is unavailable.
     AudioFailed(String),
     /// News about the output device itself: playback moved to a new
@@ -523,8 +751,10 @@ pub enum Event {
     /// The random pick for one Sonic Path end — `None` when the library
     /// answered empty.
     SonicRandom { side: crate::tui::app::SonicSide, track: Option<Box<Track>> },
-    /// The ping's discovery-path flag, fetched to explain a 403.
-    DiscoveryProbe { available: bool },
+    /// The ping's discovery flags, fetched to explain a 403: `available`
+    /// is the sonic path's (`discoveryPath`), `taste` the Discover room's
+    /// gate (`discovery && discoveryTaste >= 1`, discovery-page clause 82).
+    DiscoveryProbe { available: bool, taste: bool },
     /// A Discover view's contents, tagged with the node they belong to.
     /// `seed` is the filepath it was asked about. The browser tab tells a
     /// stale reply by its node; the now-playing panel follows the speakers,
@@ -536,6 +766,48 @@ pub enum Event {
         dest: DiscoverDest,
         seed: String,
     },
+    /// One part of the Discover room's answer, or why there is none —
+    /// never an [`Event::Error`], which would clear every other wait: the
+    /// failed half says so in its own panes and the other stands (clause
+    /// 83).
+    Taste { seq: u64, generation: u64, part: TastePart, answer: Result<Box<TasteResponse>, TasteFailure> },
+    /// An album row's songs to queue: `None` when the ask failed.
+    /// `name`, `artist`, `peer` and `play` as the ask carried them.
+    TasteAlbum {
+        generation: u64,
+        tracks: Option<Vec<Track>>,
+        name: String,
+        artist: Option<String>,
+        album_artist: Option<String>,
+        peer: Option<i64>,
+        play: bool,
+    },
+    // The Discover room's plug-ins (clauses 100–149): every reply carries
+    // its session generation and, where several may be out, its seq, and
+    // never turns into an [`Event::Error`] — the room says each failure in
+    // its own place, with the server's words.
+    /// The gate's listing and — asked only behind the copy plug-in —
+    /// its destination.
+    KeepGate {
+        generation: u64,
+        plugins: Result<Box<DiscoveryPluginsResponse>, PluginFailure>,
+        destination: Option<Result<Box<CollectionDestinationView>, PluginFailure>>,
+    },
+    /// One lookup per row asked, in the order asked.
+    JobsLookup { seq: u64, generation: u64, answer: Result<Vec<JobLookup>, PluginFailure> },
+    Jobs { seq: u64, generation: u64, answer: Result<Box<PluginJobList>, PluginFailure> },
+    JobStarted { ticket: u64, generation: u64, answer: Result<Box<JobStarted>, PluginFailure> },
+    /// The destination as read again, or as a save left it — the view,
+    /// or why there is none (a failed read keeps what is drawn).
+    DestinationRead { seq: u64, generation: u64, answer: Result<Box<CollectionDestinationView>, PluginFailure> },
+    DestinationSaved { seq: u64, generation: u64, answer: Result<Box<CollectionDestinationView>, PluginFailure> },
+    /// The folder names in `path`, as asked.
+    DestinationFolders { seq: u64, generation: u64, path: String, answer: Result<Vec<String>, PluginFailure> },
+    JobCancelled { generation: u64, id: i64, answer: Result<CancelAnswer, PluginFailure> },
+    /// How many finished jobs went.
+    JobsCleared { generation: u64, answer: Result<u64, PluginFailure> },
+    PluginLinks { seq: u64, generation: u64, answer: Result<Vec<PluginLink>, PluginFailure> },
+    KeepFacts { seq: u64, generation: u64, facts: Box<KeepFacts> },
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
@@ -561,8 +833,9 @@ pub enum Event {
     /// `settled` saying which kind of `None` it is: the server's word that
     /// there is no art (remembered), or a failure to ask (forgotten, so
     /// the next track off that album asks again). Art is a nicety: nothing
-    /// about it is ever worth a message the user has to read.
-    AlbumArt { file: String, art: Option<art::Art>, settled: bool },
+    /// about it is ever worth a message the user has to read. `small`
+    /// echoes the ask's: which copy of the cover this is.
+    AlbumArt { file: String, art: Option<art::Art>, settled: bool, small: bool },
     /// A track's shape, or `None` for every flavour of "there isn't one".
     /// Like art, never worth a message: the bar it decorates draws perfectly
     /// well without it.
@@ -660,7 +933,9 @@ fn panic_note(panic: &(dyn std::any::Any + Send)) -> &str {
 /// A Play holds this thread through a whole open and format probe, so a run
 /// of them — someone leaning on `n` through remote tracks — used to be paid
 /// for one doomed fetch at a time, with every later command waiting in line
-/// behind opens for tracks nobody wanted any more (audit #50).
+/// behind opens for tracks nobody wanted any more (audit #50). A newer Play
+/// or a Stop now also cuts short the open it arrives during (audit #79,
+/// see [`listen`]); whatever came with it is boiled down here.
 ///
 /// What survives: the last Play or Stop decides the transport, and anything
 /// transport-shaped before it was about a source that is gone by the end of
@@ -747,22 +1022,35 @@ fn listen_guarded(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Send
 #[cfg(not(target_arch = "wasm32"))]
 fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
     let mut watch = EndWatch::default();
+    // What arrived while a Play was opening. It is the next batch, taken
+    // without waiting — straight away when it overtook the Play.
+    let mut backlog: Vec<AudioCmd> = Vec::new();
 
     'listening: loop {
-        let batch = match rx.recv_timeout(TICK) {
-            Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => Vec::new(),
-            Ok(first) => {
-                // Whatever else has queued up is taken now and boiled down,
-                // rather than paid for one blocking open at a time.
-                let mut batch = vec![first];
-                while let Ok(more) = rx.try_recv() {
-                    batch.push(more);
+        let batch = if backlog.is_empty() {
+            let wait = if player.settled() { SETTLED_TICK } else { TICK };
+            match rx.recv_timeout(wait) {
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => Vec::new(),
+                Ok(first) => {
+                    // Whatever else has queued up is taken now and boiled
+                    // down, rather than paid for one blocking open at a time.
+                    let mut batch = vec![first];
+                    while let Ok(more) = rx.try_recv() {
+                        batch.push(more);
+                    }
+                    collapse(batch)
                 }
-                collapse(batch)
             }
+        } else {
+            let mut batch = std::mem::take(&mut backlog);
+            while let Ok(more) = rx.try_recv() {
+                batch.push(more);
+            }
+            collapse(batch)
         };
-        for cmd in batch {
+        let mut batch = batch.into_iter();
+        while let Some(cmd) = batch.next() {
             if cmd == AudioCmd::Shutdown {
                 break 'listening;
             }
@@ -777,7 +1065,23 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
                 AudioCmd::Play { url, .. } => Some(url.clone()),
                 _ => None,
             };
-            if let Some(err) = apply_audio_cmd(player, cmd) {
+            let seeking = match &cmd {
+                AudioCmd::Seek(target) => Some(*target),
+                _ => None,
+            };
+            // Asked while a Play's open waits: take in whatever has arrived
+            // since, and say whether a newer Play or a Stop is among it.
+            // One is, and the open is given up — it used to run to its end
+            // (seconds over a tunnel, twenty against a stall) and then sound
+            // the unwanted track until the next command could land
+            // (performance audit #79).
+            let mut overtaken = || {
+                while let Ok(more) = rx.try_recv() {
+                    backlog.push(more);
+                }
+                backlog.iter().any(decides)
+            };
+            if let Some(err) = apply_audio_cmd(player, cmd, &mut overtaken) {
                 let event = match starting {
                     Some(source) => {
                         watch.play_failed(&source);
@@ -786,6 +1090,18 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
                     None => Event::Error(err),
                 };
                 let _ = events.send(event);
+            }
+            // Refused or not, the thread is done with the seek, and the
+            // status this batch ends on reports where it left playback.
+            if let Some(target) = seeking {
+                let _ = events.send(Event::Seeked { target });
+            }
+            // Overtaken: what is left of this batch was aimed at a track
+            // the newcomers have already moved past, so it goes in ahead
+            // of them and the lot is boiled down again, at once.
+            if backlog.iter().any(decides) {
+                backlog.splice(0..0, batch);
+                continue 'listening;
             }
         }
 
@@ -815,10 +1131,23 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
     player.stop();
 }
 
+/// Whether a command settles what the transport does next — and so makes
+/// an open still in flight moot.
 #[cfg(not(target_arch = "wasm32"))]
-fn apply_audio_cmd(player: &dyn PlayerCtl, cmd: AudioCmd) -> Option<String> {
+fn decides(cmd: &AudioCmd) -> bool {
+    matches!(cmd, AudioCmd::Play { .. } | AudioCmd::Stop | AudioCmd::Shutdown)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_audio_cmd(
+    player: &dyn PlayerCtl,
+    cmd: AudioCmd,
+    superseded: &mut dyn FnMut() -> bool,
+) -> Option<String> {
     match cmd {
-        AudioCmd::Play { url, duration_hint } => return player.play(&url, duration_hint).err(),
+        AudioCmd::Play { url, duration_hint } => {
+            return player.play_unless(&url, duration_hint, superseded).err();
+        }
         AudioCmd::Pause => player.pause(),
         AudioCmd::Resume => player.resume(),
         AudioCmd::Stop => player.stop(),
@@ -977,29 +1306,28 @@ fn lock(table: &TunnelTable) -> std::sync::MutexGuard<'_, Tunnels> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
-    let mut client: Option<Arc<Client>> = None;
+    let session: Session = Arc::default();
     // The dial threads and the sampler hold the table too; the sampler only
     // weakly, so it ends with this thread.
     let tunnels: Arc<TunnelTable> = Arc::new(std::sync::Mutex::new(Tunnels::default()));
     spawn_tunnel_sampler(Arc::downgrade(&tunnels), events.clone());
+    let lanes: Lanes = Arc::default();
     while let Ok(cmd) = rx.recv() {
-        // Connection commands change who `client` *is*, so they stay
-        // serialized here — reaching a different server mid-dial is a
-        // contradiction, not a feature. Everything else is a read against
-        // the current client and answers on its own thread (audit #63):
-        // one stalled search used to block every pane behind a 20-second
-        // timeout. A tunnel dial takes up to a minute cold, so it runs on
-        // its own thread as well and reports back through the events.
+        // Connection commands change who the session's client *is*, so they
+        // stay serialized — reaching a different server mid-dial is a
+        // contradiction, not a feature — and a read that rides the session
+        // runs on the client the change before it left. But they run on a
+        // thread of their own, and only the reads that depend on them wait
+        // behind them: a row's cover from another server, a play report
+        // or a tunnel dial no longer sits out a ping that hangs for twenty
+        // seconds (performance audit #84). Every read answers on its own
+        // thread (audit #63) — except the small covers, which a page
+        // claims by the hundred and so wait their turn in their server's
+        // art lane (performance audit #88). A tunnel dial takes up to a
+        // minute cold, so it runs on its own thread as well and reports
+        // back through the events.
         let result = match cmd {
             ApiCmd::Shutdown => break,
-
-            ApiCmd::Connect { server, identity, token, self_signed, peer, local_token } => {
-                connect(&mut client, &server, &identity, token, self_signed, peer, local_token)
-            }
-
-            ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer } => {
-                login(&mut client, &server, &identity, &username, &password, self_signed, local_token, peer)
-            }
 
             ApiCmd::TunnelOpen { id, credential } => {
                 tracing::info!("tunnel {}: dialling", tunnel_log_name(&id));
@@ -1011,12 +1339,30 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 Some(close_tunnel(&tunnels, id))
             }
             ApiCmd::TunnelCredential { id, credential } => swap_credential(&tunnels, id, &credential),
-            ApiCmd::Retarget { identity, server, token, self_signed, peer, local_token } => {
-                Some(retarget(&mut client, &server, &identity, token, self_signed, peer, local_token))
+            ApiCmd::ArtWithdraw { file } => {
+                // The session first, then the lanes: the order the change
+                // thread holds them in as it hands a held cover on, so the
+                // ask is found held or queued, never between the two.
+                let mut slot = lock_session(&session);
+                slot.held.retain(|cmd| !matches!(cmd, ApiCmd::AlbumArt { file: asked, .. } if *asked == file));
+                lock_lanes(&lanes).withdraw(&file);
+                None
             }
 
-            read => {
-                spawn_read(client.clone(), events.clone(), read);
+            cmd => {
+                let mut slot = lock_session(&session);
+                if rides_session(&cmd) && slot.changing {
+                    slot.held.push_back(cmd);
+                } else if is_connection_change(&cmd) {
+                    slot.changing = true;
+                    slot.held.push_back(cmd);
+                    drop(slot);
+                    spawn_changes(&session, &lanes, events);
+                } else {
+                    let client = slot.client.clone();
+                    drop(slot);
+                    dispatch_read(client, &lanes, events, cmd);
+                }
                 None
             }
         };
@@ -1102,6 +1448,143 @@ pub(crate) fn playlist_verb_event(verb: PlaylistVerb<'_>, result: Result<(), Api
     }
 }
 
+/// The session's client, and what waits on a change to it. A connection
+/// change runs on its own thread with `changing` up; the session-bound
+/// commands that arrive meanwhile — reads and further changes alike — are
+/// `held`, in order, and the change thread works through them: each read
+/// on the client the change before it left, each change in its turn.
+/// Everything that does not ride the session goes straight on (performance
+/// audit #84).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct SessionSlot {
+    client: Option<Arc<Client>>,
+    changing: bool,
+    held: std::collections::VecDeque<ApiCmd>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type Session = Arc<std::sync::Mutex<SessionSlot>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Lanes = Arc<std::sync::Mutex<ArtLanes>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_session(session: &Session) -> std::sync::MutexGuard<'_, SessionSlot> {
+    session.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_lanes(lanes: &Lanes) -> std::sync::MutexGuard<'_, ArtLanes> {
+    lanes.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The commands that change who the session's client is.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_connection_change(cmd: &ApiCmd) -> bool {
+    matches!(cmd, ApiCmd::Connect { .. } | ApiCmd::Login { .. } | ApiCmd::Retarget { .. })
+}
+
+/// Whether a command waits on a connection change in flight: the changes
+/// themselves, and every read the session's client answers. A read aimed
+/// at a row's own server, the parent's direct-access ask and the failure
+/// walk's probe build their own clients, and the tunnel commands touch
+/// none (those four are handled before this is asked).
+#[cfg(not(target_arch = "wasm32"))]
+fn rides_session(cmd: &ApiCmd) -> bool {
+    is_connection_change(cmd) || (cmd.reach().is_none() && !matches!(cmd, ApiCmd::DirectAccess { .. } | ApiCmd::Probe { .. }))
+}
+
+/// A read on its way: a small cover to its server's lane, anything else to
+/// a thread of its own.
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_read(client: Option<Arc<Client>>, lanes: &Lanes, events: &Sender<Event>, cmd: ApiCmd) {
+    if matches!(cmd, ApiCmd::AlbumArt { small: true, .. }) {
+        lock_lanes(lanes).ask(client, events, cmd);
+    } else {
+        spawn_read(client, events.clone(), cmd);
+    }
+}
+
+/// Work through what is held — the connection change at its front, then
+/// whatever came in behind it — on a thread of its own. Each change's event
+/// goes out before any read issued after it is even asked, so its answers
+/// land on the session the change made: the order the serial loop gave
+/// for free.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_changes(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
+    let (runner, runner_lanes, runner_events) = (session.clone(), lanes.clone(), events.clone());
+    let spawned = thread::Builder::new()
+        .name("mstream-api-connect".into())
+        .spawn(move || work_through(&runner, &runner_lanes, &runner_events));
+    // No thread to be had: the loop does the work itself, as it always
+    // used to.
+    if spawned.is_err() {
+        work_through(session, lanes, events);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn work_through(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
+    loop {
+        let mut slot = lock_session(session);
+        let Some(cmd) = slot.held.pop_front() else {
+            slot.changing = false;
+            return;
+        };
+        let mut client = slot.client.clone();
+        if !is_connection_change(&cmd) {
+            // Handed on before the session is let go, so a withdrawal
+            // meanwhile finds the cover in one place or the other.
+            dispatch_read(client, lanes, events, cmd);
+            continue;
+        }
+        drop(slot);
+        let retarget = matches!(cmd, ApiCmd::Retarget { .. });
+        let before = client.clone();
+        let event = run_change(&mut client, cmd);
+        let mut slot = lock_session(session);
+        if replaced(before.as_ref(), client.as_ref()) {
+            lock_lanes(lanes).session_moved(client.clone(), retarget, events);
+        }
+        slot.client = client;
+        drop(slot);
+        if let Some(event) = event
+            && events.send(event).is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Whether a change left the session on another client than the one it
+/// had: a failed change keeps the very one.
+#[cfg(not(target_arch = "wasm32"))]
+fn replaced(before: Option<&Arc<Client>>, after: Option<&Arc<Client>>) -> bool {
+    match (before, after) {
+        (Some(was), Some(now)) => !Arc::ptr_eq(was, now),
+        (was, now) => was.is_none() && now.is_some(),
+    }
+}
+
+/// One connection change, against the client in hand: replaced only when
+/// the new server answered, as ever.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_change(client: &mut Option<Arc<Client>>, cmd: ApiCmd) -> Option<Event> {
+    match cmd {
+        ApiCmd::Connect { server, identity, token, self_signed, peer, local_token } => {
+            connect(client, &server, &identity, token, self_signed, peer, local_token)
+        }
+        ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer } => {
+            login(client, &server, &identity, &username, &password, self_signed, local_token, peer)
+        }
+        ApiCmd::Retarget { identity, server, token, self_signed, peer, local_token } => {
+            Some(retarget(client, &server, &identity, token, self_signed, peer, local_token))
+        }
+        _ => None,
+    }
+}
+
 /// The client for a read aimed at a row's own server. `None` when the base
 /// will not parse — the read then falls back to the session, whose answer
 /// the App's stale-reply guards judge as they would any other.
@@ -1118,10 +1601,7 @@ fn client_for(reach: &crate::tui::app::Reach) -> Option<Arc<Client>> {
     if let Some((_, client)) = kept.iter().find(|(known, _)| known == reach) {
         return Some(client.clone());
     }
-    let client = Client::new_with(&reach.base, reach.self_signed)
-        .ok()
-        .map(|c| c.with_token(reach.token.clone()).with_peer(reach.peer).with_local_token(reach.local_token.clone()))
-        .map(Arc::new)?;
+    let client = reach.client().ok().map(Arc::new)?;
     if kept.len() >= SHELF {
         kept.remove(0);
     }
@@ -1142,6 +1622,157 @@ fn spawn_read(client: Option<Arc<Client>>, events: Sender<Event>, cmd: ApiCmd) {
             let _ = events.send(event);
         })
         .ok();
+}
+
+/// How many small covers one server is asked for at once. The wall claims
+/// every cover of a page in one frame — 150-odd at 300x90 — and a thread
+/// per read put the whole page in flight together: a thread and a
+/// connection per cover, all sharing the link, so each landed only near
+/// the end of the batch and a slow Quick Connect relay ran the lot into
+/// the 20-second deadline, with the playing track's stream starved beside
+/// them (performance audit #88). Six is a browser's figure per host.
+#[cfg(not(target_arch = "wasm32"))]
+const ART_LANE_WIDTH: usize = 6;
+/// Servers a lane is kept for; an idle one goes when the shelf is full.
+#[cfg(not(target_arch = "wasm32"))]
+const ART_LANE_SHELF: usize = 16;
+
+/// One server's small covers: the asks waiting their turn, and how many of
+/// the lane's threads are out. Per server, not one for all: a dead peer
+/// holding every slot would starve the session's covers behind it — #63's
+/// head-of-line block, back inside the lane.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct ArtLane {
+    /// Oldest first, served from the back: the page on screen was claimed
+    /// last, so it is drawn first, and a page flipped past waits behind it
+    /// rather than in front.
+    waiting: Vec<(Option<Arc<Client>>, ApiCmd)>,
+    running: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ArtLane {
+    /// Queue an ask; true when a runner should start for it.
+    fn push(&mut self, client: Option<Arc<Client>>, cmd: ApiCmd) -> bool {
+        self.waiting.push((client, cmd));
+        let start = self.running < ART_LANE_WIDTH;
+        if start {
+            self.running += 1;
+        }
+        start
+    }
+
+    /// The newest waiting ask — or, with none left, the runner asking is
+    /// done and goes.
+    fn next(&mut self) -> Option<(Option<Arc<Client>>, ApiCmd)> {
+        let job = self.waiting.pop();
+        if job.is_none() {
+            self.running -= 1;
+        }
+        job
+    }
+
+    /// Drop the waiting asks for `file`.
+    fn withdraw(&mut self, file: &str) {
+        self.waiting.retain(|(_, cmd)| !matches!(cmd, ApiCmd::AlbumArt { file: asked, .. } if asked == file));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type Lane = Arc<std::sync::Mutex<ArtLane>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_lane(lane: &Lane) -> std::sync::MutexGuard<'_, ArtLane> {
+    lane.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The lanes, one per reach the covers are asked of (`None`: the session,
+/// a fresh lane each time its client is replaced).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct ArtLanes {
+    shelf: Vec<(Option<crate::tui::app::Reach>, Lane)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ArtLanes {
+    /// Queue a small cover in its server's lane, and start a runner when
+    /// the lane has one to spare.
+    fn ask(&mut self, client: Option<Arc<Client>>, events: &Sender<Event>, cmd: ApiCmd) {
+        let reach = cmd.reach().cloned();
+        let lane = match self.shelf.iter().find(|(known, _)| *known == reach) {
+            Some((_, lane)) => lane.clone(),
+            None => {
+                if self.shelf.len() >= ART_LANE_SHELF
+                    && let Some(at) = self.shelf.iter().position(|(_, lane)| {
+                        let lane = lock_lane(lane);
+                        lane.waiting.is_empty() && lane.running == 0
+                    })
+                {
+                    self.shelf.remove(at);
+                }
+                let lane = Lane::default();
+                self.shelf.push((reach, lane.clone()));
+                lane
+            }
+        };
+        let start = lock_lane(&lane).push(client, cmd);
+        if start {
+            spawn_art_runner(lane, events.clone());
+        }
+    }
+
+    /// The session's client was replaced. Its covers start a lane of their
+    /// own: kept, the lane made the new session's covers wait on the old
+    /// one's asks still on the wire — six runners held twenty seconds an
+    /// ask by a server that hangs, a page taking minutes — and each waiting
+    /// ask kept the client it was queued with, so the server the user had
+    /// left went on being asked. The old lane's runners finish what they
+    /// carry and go. What it had waiting: a retarget is the same server by
+    /// another path, whose claims the App keeps, so those asks move across
+    /// onto the new client; a connect or a sign-in may be another server,
+    /// and the App lets every claim go when its Connected lands, so they
+    /// are dropped (the review of performance audit #88).
+    fn session_moved(&mut self, client: Option<Arc<Client>>, same_server: bool, events: &Sender<Event>) {
+        let Some(at) = self.shelf.iter().position(|(reach, _)| reach.is_none()) else { return };
+        let (_, old) = self.shelf.remove(at);
+        let waiting = std::mem::take(&mut lock_lane(&old).waiting);
+        if same_server {
+            for (_, cmd) in waiting {
+                self.ask(client.clone(), events, cmd);
+            }
+        }
+    }
+
+    /// The App no longer wants this cover: an ask still waiting in any
+    /// lane goes unasked. Nothing answers for it — the claim it would have
+    /// filled is already gone.
+    fn withdraw(&self, file: &str) {
+        for (_, lane) in &self.shelf {
+            lock_lane(lane).withdraw(file);
+        }
+    }
+}
+
+/// One of a lane's threads: answers the newest waiting ask until none is
+/// left, then goes.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_art_runner(lane: Lane, events: Sender<Event>) {
+    let runner = lane.clone();
+    let spawned = thread::Builder::new().name("mstream-api-art".into()).spawn(move || {
+        loop {
+            let Some((client, cmd)) = lock_lane(&runner).next() else { return };
+            if events.send(answer(client.as_deref(), cmd)).is_err() {
+                lock_lane(&runner).running -= 1;
+                return;
+            }
+        }
+    });
+    // No thread to be had: the ask waits for the next one the lane starts.
+    if spawned.is_err() {
+        lock_lane(&lane).running -= 1;
+    }
 }
 
 /// One read, answered. Failures map onto events here: only 401 means the
@@ -1166,6 +1797,17 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             .and_then(|c| c.server_info())
             .is_ok();
         return Event::Reachable { server, reachable };
+    }
+    // The Keep modal's facts ask the connected server through its reach
+    // and the user's own library through the session (clause 106).
+    if let ApiCmd::KeepFacts { seq, generation, reach, ask } = cmd {
+        let peer = reach.as_ref().and_then(client_for);
+        let facts = match client {
+            Some(session) => crate::api::wait(async { Ok(keep_facts(peer.as_deref(), session, &ask).await) })
+                .unwrap_or_default(),
+            None => KeepFacts::default(),
+        };
+        return Event::KeepFacts { seq, generation, facts: Box::new(facts) };
     }
     // A row's own server when it is not the session's (contract clause 30):
     // its cover and its shape come from a client built for the reach the
@@ -1225,8 +1867,32 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::SonicRandom { side } => c
             .random_song(&crate::api::types::RandomSongRequest::default())
             .map(|r| Event::SonicRandom { side, track: r.songs.into_iter().next().map(Box::new) }),
-        ApiCmd::DiscoveryProbe => {
-            c.ping().map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+        ApiCmd::DiscoveryProbe => c.ping().map(|ping| probe_event(&ping)),
+        ApiCmd::Taste { seq, generation, part, body } => {
+            crate::api::wait(taste(c, seq, generation, part, &body))
+        }
+        ApiCmd::TasteAlbum { name, artist, album_artist, generation, peer, play, .. } => {
+            crate::api::wait(taste_album(c, TasteAlbumAsk { name, artist, album_artist, peer, play }, generation))
+        }
+        // The plug-ins answer through the shapers both workers share.
+        ApiCmd::KeepGate { generation } => crate::api::wait(keep_gate(c, generation)),
+        ApiCmd::JobsLookup { seq, generation, recs } => crate::api::wait(jobs_lookup(c, seq, generation, &recs)),
+        ApiCmd::Jobs { seq, generation } => crate::api::wait(jobs(c, seq, generation)),
+        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination } => {
+            let ask = JobStartAsk { plugin: &plugin, rec: &rec, scope, destination: destination.as_ref().map(Option::as_ref) };
+            crate::api::wait(job_start(c, ticket, generation, ask))
+        }
+        ApiCmd::DestinationRead { seq, generation } => crate::api::wait(destination_read(c, seq, generation)),
+        ApiCmd::DestinationSave { seq, generation, destination } => {
+            crate::api::wait(destination_save(c, seq, generation, destination.as_ref()))
+        }
+        ApiCmd::DestinationFolders { seq, generation, path } => {
+            crate::api::wait(destination_folders(c, seq, generation, path))
+        }
+        ApiCmd::JobCancel { generation, id } => crate::api::wait(job_cancel(c, generation, id)),
+        ApiCmd::JobsClear { generation } => crate::api::wait(jobs_clear(c, generation)),
+        ApiCmd::PluginLinks { seq, generation, plugin, rec } => {
+            crate::api::wait(plugin_links(c, seq, generation, &plugin, &rec))
         }
         // A failed ask is `None`: nothing about the saved peers changes.
         ApiCmd::FederationPeers { parent } => {
@@ -1251,7 +1917,7 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::Search { query, generation } => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r), generation })
         }
-        ApiCmd::AlbumArt { file, .. } => {
+        ApiCmd::AlbumArt { file, small, .. } => {
             // The waveform's rule, because this cache burned without it: a
             // 404 and bytes that won't decode are the server's own word
             // that there is no art — settled, remembered, never asked
@@ -1260,10 +1926,10 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             // album coverless for the rest of the session. Decoded here so
             // the render loop only ever meets covers already at terminal
             // scale.
-            let answer = c.album_art(&file);
+            let answer = c.album_art(&file, small);
             let settled = matches!(&answer, Ok(_) | Err(ApiError::NotFound(_)));
             let art = answer.ok().and_then(|bytes| art::decode(&bytes));
-            Ok(Event::AlbumArt { file, art, settled })
+            Ok(Event::AlbumArt { file, art, settled, small })
         }
         ApiCmd::Waveform { filepath, .. } => {
             // Same rule as art: a shape nobody could draw is not news. The
@@ -1283,8 +1949,10 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         | ApiCmd::TunnelClose { .. }
         | ApiCmd::TunnelCredential { .. }
         | ApiCmd::DirectAccess { .. }
+        | ApiCmd::KeepFacts { .. }
         | ApiCmd::Retarget { .. }
         | ApiCmd::Probe { .. }
+        | ApiCmd::ArtWithdraw { .. }
         | ApiCmd::Shutdown => return Event::Error("connection change routed as a read".into()),
     };
     match answered {
@@ -1463,6 +2131,16 @@ fn establish(
     Ok(Event::Connected { server, id: id.to_string(), username, token, ping: Box::new(ping) })
 }
 
+/// The session's client aimed at what `identity` names: through the
+/// parent's proxies for `peer`, and — for a peer session, the one over the
+/// peer's own tunnel included, whose Connect carries no `peer` — asking the
+/// peer's compressed covers, as [`client_for`] does for a peer's row.
+#[cfg(not(target_arch = "wasm32"))]
+fn aim_session(c: Client, identity: &str, peer: Option<i64>) -> Client {
+    let is_peer = peer.is_some() || crate::config::peer_identity_parts(identity).is_some();
+    c.with_peer(peer).with_compressed_art(is_peer)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn connect(
     client: &mut Option<Arc<Client>>,
@@ -1474,7 +2152,7 @@ fn connect(
     local_token: Option<String>,
 ) -> Option<Event> {
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Ok(c) => aim_session(c.with_token(token.clone()), id, peer).with_local_token(local_token),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
     // Taken before the client moves; it is the address that was reached,
@@ -1515,7 +2193,7 @@ fn login(
     // the peer through the parent's proxies, exactly as before the token
     // expired — a plain client here listed the parent's library under the
     // peer's name (the review's finding).
-    let c = c.with_peer(peer);
+    let c = aim_session(c, id, peer);
     match establish(client, c, id, Some(username.to_string()), Some(token)) {
         Ok(event) => Some(event),
         Err(e) => Some(Event::Error(e.to_string())),
@@ -1537,7 +2215,7 @@ fn retarget(
 ) -> Event {
     let failed = |why: String| Event::RetargetFailed { identity: identity.to_string(), why };
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Ok(c) => aim_session(c.with_token(token.clone()), identity, peer).with_local_token(local_token),
         Err(e) => return failed(e.to_string()),
     };
     if let Err(e) = c.ping_via_info() {
@@ -1612,21 +2290,20 @@ pub(crate) async fn load_library(
     Ok(match node {
         // The mode menu is static; the UI fills it in without asking.
         LibraryNode::Root => LibraryData::Artists(Vec::new()),
-        LibraryNode::Artists => LibraryData::Artists(client.artists_async().await?),
+        LibraryNode::Artists(moods) => LibraryData::Artists(client.artists_async(*moods).await?),
         LibraryNode::Artist(artist) => {
             LibraryData::Albums(client.artist_albums_async(artist).await?)
         }
-        LibraryNode::Albums => LibraryData::Albums(client.albums_async().await?),
+        LibraryNode::Albums(moods) => LibraryData::Albums(client.albums_async(*moods).await?),
         LibraryNode::Album { name, artist } => {
             LibraryData::Tracks(client.album_songs_async(name, artist.as_deref()).await?)
         }
-        LibraryNode::Genres => LibraryData::Genres(client.genres_async().await?),
-        LibraryNode::Genre(genre) => {
-            LibraryData::Tracks(client.genre_songs_async(genre).await?)
+        LibraryNode::Genres(source) => LibraryData::Genres(load_genres(client, *source).await?),
+        LibraryNode::Genre(genre, source) => {
+            LibraryData::Tracks(client.genre_songs_async(genre, *source).await?)
         }
-        LibraryNode::Recent => {
-            LibraryData::Tracks(client.recently_added_async(RECENT_LIMIT).await?)
-        }
+        LibraryNode::Recent(moods) => songs(*moods, client.recently_added_async(RECENT_LIMIT, *moods).await?),
+        LibraryNode::Rated(moods) => songs(*moods, client.rated_async(*moods).await?),
         LibraryNode::RecentlyPlayed => {
             LibraryData::Tracks(client.recently_played_async(RECENT_LIMIT).await?)
         }
@@ -1636,6 +2313,33 @@ pub(crate) async fn load_library(
             LibraryData::Tracks(client.playlist_load_async(name).await?)
         }
     })
+}
+
+/// A song list's answer: the tracks alone where nothing filtered — every
+/// list's shape — and each song with its match where `moods` did.
+fn songs(moods: MoodFilter, songs: Vec<MoodSong>) -> LibraryData {
+    if moods.is_empty() {
+        LibraryData::Tracks(songs.into_iter().map(|song| song.track).collect())
+    } else {
+        LibraryData::Songs(songs)
+    }
+}
+
+/// A Genres list of `source`'s kind — or of the other kind, asked for at
+/// once, when the server says this one has none and the other has some: an
+/// untagged library still lists its generated genres, and one the model
+/// never ran on its tags. A server that predates the filter answered every
+/// genre whatever was asked, and the list says so.
+async fn load_genres(client: &Client, source: GenreSource) -> Result<GenreList, ApiError> {
+    let answer = client.genre_list_async(source).await?;
+    let Some(sources) = answer.sources else {
+        return Ok(GenreList { genres: answer.genres, sources: None, shown: GenreSource::Both });
+    };
+    if let Some(other) = sources.fallback(source) {
+        let answer = client.genre_list_async(other).await?;
+        return Ok(GenreList { genres: answer.genres, sources: answer.sources.or(Some(sources)), shown: other });
+    }
+    Ok(GenreList { genres: answer.genres, sources: Some(sources), shown: source })
 }
 
 // ── Auto DJ ─────────────────────────────────────────────────────────────────
@@ -2071,6 +2775,204 @@ pub(crate) async fn dj_probe(client: &Client) -> Option<DjServerInfo> {
     }
 }
 
+// ── The Discover room (discovery-page contract) ─────────────────────────────
+
+/// The probe's reading of a ping: the sonic path's flag and the Discover
+/// room's gate, both from one GET.
+pub(crate) fn probe_event(ping: &Ping) -> Event {
+    let caps = crate::api::types::Capabilities::from(ping);
+    Event::DiscoveryProbe { available: ping.discovery_path, taste: caps.taste() }
+}
+
+/// One part of the room's answer. Only a 401 fails as an error (the
+/// session is no good); a 403 and every other failure are the answer's.
+pub(crate) async fn taste(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    part: TastePart,
+    body: &TasteRequest,
+) -> Result<Event, ApiError> {
+    let answer = match client.taste_async(body).await {
+        Ok(response) => Ok(Box::new(response)),
+        Err(ApiError::Unauthorized) => return Err(ApiError::Unauthorized),
+        Err(ApiError::Forbidden(_)) => Err(TasteFailure::Forbidden),
+        Err(e) => Err(TasteFailure::Failed(e.to_string())),
+    };
+    Ok(Event::Taste { seq, generation, part, answer })
+}
+
+/// What a [`ApiCmd::TasteAlbum`] asks, carried back on its event.
+pub(crate) struct TasteAlbumAsk {
+    pub name: String,
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub peer: Option<i64>,
+    pub play: bool,
+}
+
+/// An album row's `[+]` (clause 61): its songs, asked by name alone as the
+/// Albums room asks (the 2026-10-05 log). A connected server's album asks
+/// by name and its track artist through a client aimed at that server, and
+/// any failure there — a 401 among them, which is the peer's word and not
+/// the session's — is `None`: the App queues the rows that matched.
+pub(crate) async fn taste_album(client: &Client, ask: TasteAlbumAsk, generation: u64) -> Result<Event, ApiError> {
+    let TasteAlbumAsk { name, artist, album_artist, peer, play } = ask;
+    let answer = match (&peer, &album_artist) {
+        // A connected server's compilation: by its album artist alone, so
+        // every song of it comes back whoever sings it (the 2026-10-19 log).
+        (Some(_), Some(credit)) => client.album_songs_by_async(&name, None, Some(credit), None).await,
+        _ => {
+            let asked = if peer.is_some() { artist.clone() } else { None };
+            let node = LibraryNode::Album { name: name.clone(), artist: asked };
+            match load_library(client, &node).await {
+                Ok(LibraryData::Tracks(tracks)) => Ok(tracks),
+                Ok(_) => Err(ApiError::Config("not an album listing".into())),
+                Err(e) => Err(e),
+            }
+        }
+    };
+    let tracks = match answer {
+        Ok(tracks) => Some(tracks),
+        Err(ApiError::Unauthorized) if peer.is_none() => return Err(ApiError::Unauthorized),
+        Err(_) => None,
+    };
+    Ok(Event::TasteAlbum { generation, tracks, name, artist, album_artist, peer, play })
+}
+
+// ── The Discover room's plug-ins (discovery-page clauses 100–149) ──────────
+//
+// The shapers both workers share: a 401 is the session's (it goes out as
+// `Event::Unauthorized` like any read's); every other failure is the
+// room's, in the server's words (`PluginFailure`).
+
+fn plugin_result<T>(result: Result<T, ApiError>) -> Result<Result<T, PluginFailure>, ApiError> {
+    match result {
+        Ok(value) => Ok(Ok(value)),
+        Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+        Err(e) => Ok(Err(PluginFailure::of(&e))),
+    }
+}
+
+/// The gate's two reads (clause 101): the listing, then the destination —
+/// asked only when the copy plug-in is listed and jobs are allowed, since
+/// nothing else reads it.
+pub(crate) async fn keep_gate(client: &Client, generation: u64) -> Result<Event, ApiError> {
+    let plugins = plugin_result(client.discovery_plugins_async().await)?;
+    let destination = match &plugins {
+        Ok(listing) if listing.copies(JobScope::Song) => {
+            Some(plugin_result(client.collection_destination_async().await)?.map(Box::new))
+        }
+        _ => None,
+    };
+    Ok(Event::KeepGate { generation, plugins: plugins.map(Box::new), destination })
+}
+
+pub(crate) async fn jobs_lookup(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    recs: &[serde_json::Value],
+) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_jobs_lookup_batch_async(recs).await)?;
+    Ok(Event::JobsLookup { seq, generation, answer })
+}
+
+pub(crate) async fn jobs(client: &Client, seq: u64, generation: u64) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_jobs_async(None, None).await)?;
+    Ok(Event::Jobs { seq, generation, answer: answer.map(Box::new) })
+}
+
+/// What one start sends: the plug-in, the row unchanged, the scope and
+/// the place shown ([`ApiCmd::JobStart`]).
+pub(crate) struct JobStartAsk<'a> {
+    pub plugin: &'a str,
+    pub rec: &'a serde_json::Value,
+    pub scope: JobScope,
+    pub destination: Option<Option<&'a CollectionDestination>>,
+}
+
+/// A start; the server's 409 `destination_changed` is the room's failure
+/// to word (clause 146), the place in force now with it.
+pub(crate) async fn job_start(client: &Client, ticket: u64, generation: u64, ask: JobStartAsk<'_>) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_job_start_async(ask.plugin, ask.rec, Some(ask.scope), ask.destination).await)?;
+    let answer = answer.and_then(|started| match started {
+        JobStartAnswer::Started(started) => Ok(started),
+        JobStartAnswer::DestinationChanged(now) => Err(PluginFailure::DestinationChanged(now)),
+    });
+    Ok(Event::JobStarted { ticket, generation, answer })
+}
+
+pub(crate) async fn destination_read(client: &Client, seq: u64, generation: u64) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.collection_destination_async().await)?;
+    Ok(Event::DestinationRead { seq, generation, answer: answer.map(Box::new) })
+}
+
+pub(crate) async fn destination_save(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    destination: Option<&CollectionDestination>,
+) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.collection_destination_save_async(destination).await)?;
+    Ok(Event::DestinationSaved { seq, generation, answer: answer.map(Box::new) })
+}
+
+/// A folder's own folders, by name in the server's order — a file is no
+/// place to land in.
+pub(crate) async fn destination_folders(client: &Client, seq: u64, generation: u64, path: String) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.file_explorer_async(&path).await)?;
+    let answer = answer.map(|listing| listing.directories.into_iter().map(|d| d.name).filter(|n| !n.is_empty()).collect());
+    Ok(Event::DestinationFolders { seq, generation, path, answer })
+}
+
+pub(crate) async fn job_cancel(client: &Client, generation: u64, id: i64) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_job_cancel_async(id).await)?;
+    Ok(Event::JobCancelled { generation, id, answer })
+}
+
+pub(crate) async fn jobs_clear(client: &Client, generation: u64) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_jobs_clear_async().await)?;
+    Ok(Event::JobsCleared { generation, answer: answer.map(|cleared| cleared.removed) })
+}
+
+pub(crate) async fn plugin_links(
+    client: &Client,
+    seq: u64,
+    generation: u64,
+    plugin: &str,
+    rec: &serde_json::Value,
+) -> Result<Event, ApiError> {
+    let answer = plugin_result(client.plugin_links_async(plugin, rec).await)?;
+    Ok(Event::PluginLinks { seq, generation, answer })
+}
+
+/// The Keep modal's sizes (clause 106), each read optional: the album's
+/// songs on the connected server asked with the copy's own selectors (a
+/// compilation by its album artist, else by its track artist and year),
+/// the artist's albums there, and the artist's albums in the user's own
+/// library. `peer` is `None` where the connected server cannot be reached
+/// from here (the browser build): its sizes stay unknown.
+pub(crate) async fn keep_facts(peer: Option<&Client>, local: &Client, ask: &KeepFactsAsk) -> KeepFacts {
+    let artist = ask.artist.as_deref().filter(|a| !a.trim().is_empty());
+    let album = ask.album.as_deref().filter(|a| !a.trim().is_empty());
+    let mut facts = KeepFacts::default();
+    if let (Some(peer), Some(album)) = (peer, album) {
+        let songs = match ask.album_artist.as_deref() {
+            Some(credit) => peer.album_songs_by_async(album, None, Some(credit), ask.year).await,
+            None => peer.album_songs_by_async(album, artist, None, ask.year).await,
+        };
+        facts.album_songs = songs.ok().map(|tracks| tracks.iter().map(KeepSong::of).collect());
+    }
+    if let Some(artist) = artist {
+        if let Some(peer) = peer {
+            facts.peer_albums = peer.artist_album_rows_async(artist).await.ok();
+        }
+        facts.local_albums = local.artist_album_rows_async(artist).await.ok();
+    }
+    facts
+}
+
 /// How many neighbours a Discover view asks for. Deep enough to browse,
 /// short enough that the tail is still relevant rather than noise.
 const DISCOVER_LIMIT: u32 = 40;
@@ -2230,6 +3132,214 @@ pub(crate) fn journey_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The Discover room's plug-ins (discovery-page clauses 100–149) ──────
+
+    mod keep {
+        use super::*;
+        use crate::api::tests::{canned_server_bodies, json_reply, seen_json};
+        use crate::api::types::JobScope;
+
+        fn client(port: u16) -> Client {
+            Client::new(&format!("http://127.0.0.1:{port}")).unwrap()
+        }
+
+        #[test]
+        fn the_gate_asks_the_destination_only_behind_the_copy_plugin() {
+            let listing = |allowed: bool| {
+                json_reply("200 OK", serde_json::json!({ "plugins": [{ "name": "federation-copy", "capabilities": ["acquire"] }], "jobs": { "allowed": allowed } }))
+            };
+            let (port, seen) = canned_server_bodies(vec![
+                listing(true),
+                json_reply("200 OK", serde_json::json!({ "destination": null, "libraries": [] })),
+                listing(false),
+            ]);
+            let c = client(port);
+            match crate::api::wait(keep_gate(&c, 4)).unwrap() {
+                Event::KeepGate { generation: 4, plugins: Ok(p), destination: Some(Ok(d)) } => {
+                    assert!(p.copies(JobScope::Song));
+                    assert!(d.destination.is_none(), "the server's word: nowhere to copy to");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(seen_json(&seen).0.starts_with("GET /api/v1/discovery/plugins "));
+            assert!(seen_json(&seen).0.starts_with("GET /api/v1/discovery/collection/destination "));
+            match crate::api::wait(keep_gate(&c, 4)).unwrap() {
+                Event::KeepGate { plugins: Ok(_), destination: None, .. } => {}
+                other => panic!("jobs refused: no destination asked: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_changed_destination_is_the_rooms_failure_and_the_folders_keep_their_names() {
+            let changed = json_reply("409 Conflict", serde_json::json!({ "error": "destination_changed", "message": "moved",
+                "destination": { "vpath": "music", "base": "", "layout": "{{ARTIST}}/{{ALBUM}}", "source": "default" } }));
+            let (port, seen) = canned_server_bodies(vec![
+                changed,
+                json_reply("200 OK", serde_json::json!({ "path": "/copies/", "directories": [{ "name": "from-peers" }, { "name": "" }], "files": [{ "name": "x.mp3" }] })),
+                json_reply("200 OK", serde_json::json!({ "destination": null, "libraries": [] })),
+            ]);
+            let c = client(port);
+            let shown = CollectionDestination { vpath: "copies".into(), ..CollectionDestination::default() };
+            let ask = JobStartAsk { plugin: "federation-copy", rec: &serde_json::json!({ "title": "x" }), scope: JobScope::Song, destination: Some(Some(&shown)) };
+            match crate::api::wait(job_start(&c, 3, 4, ask)).unwrap() {
+                Event::JobStarted { ticket: 3, generation: 4, answer: Err(PluginFailure::DestinationChanged(Some(Some(now)))) } => assert_eq!(now.vpath, "music"),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(seen_json(&seen).1["destination"], serde_json::json!({ "vpath": "copies", "base": "", "layout": "" }));
+            match crate::api::wait(destination_folders(&c, 5, 4, "/copies".into())).unwrap() {
+                Event::DestinationFolders { seq: 5, path, answer: Ok(names), .. } => {
+                    assert_eq!((path.as_str(), names), ("/copies", vec!["from-peers".to_string()]), "folders only, named");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(seen_json(&seen).1["directory"], "/copies");
+            match crate::api::wait(destination_save(&c, 6, 4, None)).unwrap() {
+                Event::DestinationSaved { seq: 6, answer: Ok(view), .. } => assert!(view.destination.is_none()),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_401_is_the_sessions_and_every_other_failure_the_rooms() {
+            let (port, _seen) = canned_server_bodies(vec![
+                json_reply("401 Unauthorized", serde_json::json!({ "error": "Authentication Error" })),
+                json_reply("500 Internal Server Error", serde_json::json!({ "error": "boom" })),
+            ]);
+            let c = client(port);
+            assert!(matches!(crate::api::wait(jobs(&c, 1, 2)), Err(ApiError::Unauthorized)));
+            match crate::api::wait(jobs(&c, 1, 2)).unwrap() {
+                Event::Jobs { seq: 1, generation: 2, answer: Err(PluginFailure::Refused { status: 500, words }) } => assert_eq!(words, "boom"),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn the_sizes_are_asked_with_the_copys_own_selectors() {
+            // A compilation: its songs by the album artist; the artist's
+            // albums there and here.
+            let (peer_port, peer_seen) = canned_server_bodies(vec![
+                json_reply("200 OK", serde_json::json!([
+                    { "filepath": "a.mp3", "metadata": { "artist": "Peer Kim", "artist-display": "Peer Kim feat. Lou", "year": 2020, "genres": ["Hip-Hop"] } },
+                    { "filepath": "b.mp3", "metadata": { "artist": " ", "year": 0, "genres": [] } },
+                    { "filepath": "c.mp3", "metadata": { "artist": "Peer Kim", "artist-display": " ", "genres": ["Hip-Hop", "Rap"] } },
+                    { "filepath": "d.mp3", "metadata": { "artist-display": "Peer Lou", "genres": ["Rock", " "] } }
+                ])),
+                json_reply("200 OK", serde_json::json!({ "albums": [{ "name": "Mixtape Vol 1", "album_artist": "Various Artists", "artists": ["Peer Kim"], "compilation": 1 }] })),
+            ]);
+            let (own_port, own_seen) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!({ "albums": [] }))]);
+            let ask = KeepFactsAsk {
+                album: Some("Mixtape Vol 1".into()),
+                artist: Some("Peer Kim".into()),
+                album_artist: Some("Various Artists".into()),
+                year: Some(2020),
+            };
+            let facts = crate::api::wait(async { Ok::<_, ApiError>(keep_facts(Some(&client(peer_port)), &client(own_port), &ask).await) }).unwrap();
+            // Each song's own tags, as a copy files it: the ARTIST tag as
+            // written ("feat." and all), else the primary artist; a genre only
+            // where the listing names one — a tag the library split in two
+            // ("Hip-Hop/Rap") lands under neither; a blank artist, a zero year
+            // and no genre are none.
+            let song = |filepath: &str, artist: Option<&str>, year: Option<i32>, genre: Option<&str>| KeepSong {
+                filepath: filepath.into(),
+                artist: artist.map(str::to_string),
+                year,
+                genre: genre.map(str::to_string),
+            };
+            assert_eq!(
+                facts.album_songs,
+                Some(vec![
+                    song("a.mp3", Some("Peer Kim feat. Lou"), Some(2020), Some("Hip-Hop")),
+                    song("b.mp3", None, None, None),
+                    song("c.mp3", Some("Peer Kim"), None, None),
+                    song("d.mp3", Some("Peer Lou"), None, Some("Rock")),
+                ])
+            );
+            assert!(facts.peer_albums.as_ref().is_some_and(|a| a[0].compilation));
+            assert_eq!(facts.local_albums.map(|a| a.len()), Some(0));
+            let (line, body) = seen_json(&peer_seen);
+            assert!(line.starts_with("POST /api/v1/db/album-songs "), "{line}");
+            assert_eq!(body, serde_json::json!({ "album": "Mixtape Vol 1", "album_artist": "Various Artists", "year": 2020 }));
+            assert_eq!(seen_json(&peer_seen).1, serde_json::json!({ "artist": "Peer Kim" }));
+            assert_eq!(seen_json(&own_seen).1, serde_json::json!({ "artist": "Peer Kim" }));
+            // No connected server to ask (the browser build): its sizes stay unknown.
+            let (own_port, _) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!({ "albums": [{ "name": "One" }] }))]);
+            let facts = crate::api::wait(async { Ok::<_, ApiError>(keep_facts(None, &client(own_port), &ask).await) }).unwrap();
+            assert_eq!((facts.album_songs, facts.peer_albums.is_none(), facts.local_albums.map(|a| a.len())), (None, true, Some(1)));
+        }
+
+        #[test]
+        fn a_compilations_album_is_queued_by_its_album_artist() {
+            let (port, seen) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!([{ "filepath": "a.mp3" }]))]);
+            let ask = TasteAlbumAsk { name: "Mixtape Vol 1".into(), artist: None, album_artist: Some("Various Artists".into()), peer: Some(3), play: true };
+            match crate::api::wait(taste_album(&client(port), ask, 9)).unwrap() {
+                Event::TasteAlbum { tracks: Some(tracks), album_artist: Some(credit), peer: Some(3), play: true, .. } => {
+                    assert_eq!((tracks.len(), credit.as_str()), (1, "Various Artists"));
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(seen_json(&seen).1, serde_json::json!({ "album": "Mixtape Vol 1", "album_artist": "Various Artists" }));
+        }
+
+        #[test]
+        fn every_plugin_command_asks_the_session_and_the_facts_build_their_own() {
+            let reach = crate::tui::app::Reach {
+                base: "http://parent:3000".into(),
+                token: None,
+                self_signed: false,
+                peer: Some(3),
+                local_token: None,
+                compressed_art: true,
+            };
+            for cmd in [
+                ApiCmd::KeepGate { generation: 1 },
+                ApiCmd::JobsLookup { seq: 1, generation: 1, recs: vec![] },
+                ApiCmd::Jobs { seq: 1, generation: 1 },
+                ApiCmd::JobStart {
+                    ticket: 1,
+                    generation: 1,
+                    plugin: "federation-copy".into(),
+                    rec: Box::new(serde_json::json!({})),
+                    scope: JobScope::Album,
+                    destination: None,
+                },
+                ApiCmd::DestinationRead { seq: 1, generation: 1 },
+                ApiCmd::DestinationSave { seq: 1, generation: 1, destination: None },
+                ApiCmd::DestinationFolders { seq: 1, generation: 1, path: "/copies".into() },
+                ApiCmd::JobCancel { generation: 1, id: 2 },
+                ApiCmd::JobsClear { generation: 1 },
+                ApiCmd::PluginLinks { seq: 1, generation: 1, plugin: "links".into(), rec: Box::new(serde_json::json!({})) },
+                ApiCmd::KeepFacts { seq: 1, generation: 1, reach: Some(reach), ask: Box::new(KeepFactsAsk::default()) },
+            ] {
+                assert_eq!(cmd.reach(), None, "{cmd:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_probe_reads_both_rooms_flags_off_one_ping() {
+        let ping = Ping { discovery: true, discovery_path: true, discovery_taste: 1, ..Ping::default() };
+        assert!(matches!(probe_event(&ping), Event::DiscoveryProbe { available: true, taste: true }));
+        let ping = Ping { discovery: true, discovery_path: true, ..Ping::default() };
+        assert!(matches!(probe_event(&ping), Event::DiscoveryProbe { available: true, taste: false }));
+    }
+
+    /// A peer session's covers are the peer's compressed rendition over
+    /// either transport: the direct Connect names the peer only by its
+    /// identity, so that is what marks it (the review's direct-tunnel gap).
+    #[test]
+    fn a_peer_sessions_covers_ask_the_compressed_rendition_over_either_transport() {
+        let pid = crate::config::peer_identity("http://parent:3000", 7);
+        // Through the parent's proxies.
+        let proxied = aim_session(Client::new("http://parent:3000").unwrap(), &pid, Some(7));
+        assert_eq!(proxied.art_url("c.jpg", true).unwrap(), "http://parent:3000/api/v1/federation/peers/7/art/c.jpg?compress=l");
+        // Over the peer's own tunnel: no `peer`, the bridge's token after.
+        let direct = aim_session(Client::new("http://127.0.0.1:5000").unwrap(), &pid, None).with_local_token(Some("lt".into()));
+        assert_eq!(direct.art_url("c.jpg", true).unwrap(), "http://127.0.0.1:5000/album-art/c.jpg?compress=l&__lt=lt");
+        // A server of the user's own keeps its full-size cover.
+        let own = aim_session(Client::new("http://parent:3000").unwrap(), "http://parent:3000", None);
+        assert_eq!(own.art_url("c.jpg", false).unwrap(), "http://parent:3000/album-art/c.jpg");
+    }
 
     fn play(url: &str) -> AudioCmd {
         AudioCmd::Play { url: url.to_string(), duration_hint: None }
@@ -2391,6 +3501,380 @@ mod tests {
         cmd_tx.send(play("http://x/next.mp3")).expect("the channel is still alive");
         cmd_tx.send(AudioCmd::Shutdown).unwrap();
         listener.join().expect("the thread ended on its own terms");
+    }
+
+    /// A player that only counts: ticks (and when each came), pauses, and
+    /// whether it calls itself settled.
+    #[derive(Clone, Default)]
+    struct Counter {
+        ticks: Arc<std::sync::atomic::AtomicUsize>,
+        ticked_at: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+        pauses: Arc<std::sync::atomic::AtomicUsize>,
+        settled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::player::PlayerCtl for Counter {
+        fn play(&self, _source: &str, _hint: Option<f64>) -> Result<(), String> {
+            Ok(())
+        }
+        fn pause(&self) {
+            self.pauses.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn resume(&self) {}
+        fn stop(&self) {}
+        fn seek(&self, _position: f64) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_volume(&self, _volume: f32) {}
+        fn set_crossfade(&self, _seconds: f32) {}
+        fn set_gapless(&self, _on: bool) {}
+        fn set_blend_skips(&self, _on: bool) {}
+        fn set_pause_fade(&self, _on: bool) {}
+        fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
+        fn clear_next(&self) {}
+        fn status(&self) -> crate::player::PlayerStatus {
+            crate::player::PlayerStatus::default()
+        }
+        fn tick(&self) {
+            self.ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.ticked_at.lock().unwrap().push(std::time::Instant::now());
+        }
+        fn settled(&self) -> bool {
+            self.settled.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn a_settled_player_ticks_once_a_second_and_still_hears_commands_at_once() {
+        use std::sync::atomic::Ordering;
+        let player = Counter::default();
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let theirs = player.clone();
+        let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
+
+        // Moving: the brisk tick, ~8 a second. A loaded machine starts and
+        // wakes the thread late, so the count in 1.3s drifts (5 on a macOS
+        // runner and on a busy Windows box, against ~10), but late only ever
+        // lengthens a gap: the shortest says which wait the loop is on, and
+        // the settled one is a second at the least.
+        std::thread::sleep(Duration::from_millis(1300));
+        let moving = player.ticks.swap(0, Ordering::SeqCst);
+        let ticked_at = std::mem::take(&mut *player.ticked_at.lock().unwrap());
+        let closest = ticked_at.windows(2).map(|pair| pair[1] - pair[0]).min();
+        // Settled (paused, stopped): the device watch's pace — the wait in
+        // flight when it settled still ends on the brisk clock.
+        player.settled.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        player.ticks.store(0, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(2300));
+        let settled = player.ticks.swap(0, Ordering::SeqCst);
+        let brisk = closest.is_some_and(|gap| gap < Duration::from_millis(500));
+        assert!(brisk, "a moving player ticks briskly: {moving} in 1.3s, at closest {closest:?} apart");
+        assert!((1..=3).contains(&settled), "a settled player ticks once a second: {settled} in 2.3s");
+
+        // A command does not wait out the lazy tick: it lands, and its
+        // status goes out, at once.
+        while event_rx.try_recv().is_ok() {}
+        let sent = std::time::Instant::now();
+        cmd_tx.send(AudioCmd::Pause).unwrap();
+        let status = loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)).expect("a status after the command") {
+                Event::Status(status) => break status,
+                _ => continue,
+            }
+        };
+        assert_eq!(status, crate::player::PlayerStatus::default());
+        assert_eq!(player.pauses.load(Ordering::SeqCst), 1, "the pause was applied");
+        assert!(sent.elapsed() < Duration::from_millis(300), "took {:?}", sent.elapsed());
+
+        cmd_tx.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+    }
+
+    /// A player whose seeks each wait for the test's word, the way one over
+    /// a slow link waits for its bytes, and which refuses a seek past
+    /// 1000 s. Its status stands where the last seek put it.
+    #[derive(Clone)]
+    struct HeldSeeks {
+        at: Arc<std::sync::Mutex<f64>>,
+        begun: Arc<std::sync::Mutex<mpsc::Sender<f64>>>,
+        go: Arc<std::sync::Mutex<mpsc::Receiver<()>>>,
+    }
+
+    impl crate::player::PlayerCtl for HeldSeeks {
+        fn play(&self, _source: &str, _hint: Option<f64>) -> Result<(), String> {
+            Ok(())
+        }
+        fn pause(&self) {}
+        fn resume(&self) {}
+        fn stop(&self) {}
+        fn seek(&self, position: f64) -> Result<(), String> {
+            let _ = self.begun.lock().unwrap().send(position);
+            self.go.lock().unwrap().recv().map_err(|_| "the test went away".to_string())?;
+            if position > 1000.0 {
+                return Err("past the end".to_string());
+            }
+            *self.at.lock().unwrap() = position;
+            Ok(())
+        }
+        fn set_volume(&self, _volume: f32) {}
+        fn set_crossfade(&self, _seconds: f32) {}
+        fn set_gapless(&self, _on: bool) {}
+        fn set_blend_skips(&self, _on: bool) {}
+        fn set_pause_fade(&self, _on: bool) {}
+        fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
+        fn clear_next(&self) {}
+        fn status(&self) -> crate::player::PlayerStatus {
+            crate::player::PlayerStatus {
+                source: "http://x/a.flac".into(),
+                playing: true,
+                position: *self.at.lock().unwrap(),
+                duration: 240.0,
+                ..Default::default()
+            }
+        }
+        fn tick(&self) {}
+        fn settled(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn each_seek_the_thread_runs_is_named_before_the_status_that_says_where_it_landed() {
+        let (begun_tx, begun) = mpsc::channel();
+        let (go, go_rx) = mpsc::channel();
+        let player = HeldSeeks {
+            at: Arc::new(std::sync::Mutex::new(2.0)),
+            begun: Arc::new(std::sync::Mutex::new(begun_tx)),
+            go: Arc::new(std::sync::Mutex::new(go_rx)),
+        };
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let theirs = player.clone();
+        let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
+        let wait = Duration::from_secs(5);
+        // The errors said before the next seek's name, the name, and where
+        // the first status after it stands. Idle ticks' statuses in between
+        // say nothing new.
+        let answer = || {
+            let mut errors = Vec::new();
+            let target = loop {
+                match event_rx.recv_timeout(wait).expect("the thread answers the seek") {
+                    Event::Seeked { target } => break target,
+                    Event::Error(e) => errors.push(e),
+                    _ => {}
+                }
+            };
+            let landed = loop {
+                if let Event::Status(status) = event_rx.recv_timeout(wait).expect("its status") {
+                    break status.position;
+                }
+            };
+            (errors, target, landed)
+        };
+
+        cmd_tx.send(AudioCmd::Seek(62.0)).unwrap();
+        assert_eq!(begun.recv_timeout(wait), Ok(62.0));
+        // Two more presses arrive while it waits on its bytes.
+        cmd_tx.send(AudioCmd::Seek(122.0)).unwrap();
+        cmd_tx.send(AudioCmd::Seek(182.0)).unwrap();
+        go.send(()).unwrap();
+        assert_eq!(answer(), (vec![], 62.0, 62.0), "the first seek's name, then where it landed");
+        // The two that queued are boiled down to the last, and that is the
+        // seek the thread names next: one the UI's newest goal can know.
+        assert_eq!(begun.recv_timeout(wait), Ok(182.0));
+        go.send(()).unwrap();
+        assert_eq!(answer(), (vec![], 182.0, 182.0));
+        // A refused seek is named too, after its error: the thread is done
+        // with it either way, and the status says playback stayed put.
+        cmd_tx.send(AudioCmd::Seek(5000.0)).unwrap();
+        assert_eq!(begun.recv_timeout(wait), Ok(5000.0));
+        go.send(()).unwrap();
+        assert_eq!(answer(), (vec!["past the end".to_string()], 5000.0, 182.0));
+
+        cmd_tx.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+    }
+
+    /// A player whose opens each wait for the test's word, unless they are
+    /// given up first, and which tells the test everything it does as it
+    /// does it, an open's start included.
+    struct HeldOpens {
+        did: mpsc::Sender<String>,
+        go: mpsc::Receiver<()>,
+    }
+
+    impl HeldOpens {
+        fn note(&self, line: String) {
+            let _ = self.did.send(line);
+        }
+    }
+
+    impl crate::player::PlayerCtl for HeldOpens {
+        fn play(&self, source: &str, _hint: Option<f64>) -> Result<(), String> {
+            self.play_unless(source, None, &mut || false)
+        }
+        fn play_unless(
+            &self,
+            source: &str,
+            _hint: Option<f64>,
+            superseded: &mut dyn FnMut() -> bool,
+        ) -> Result<(), String> {
+            self.note(format!("opening {source}"));
+            loop {
+                if superseded() {
+                    self.note(format!("gave up {source}"));
+                    return Ok(());
+                }
+                match self.go.recv_timeout(Duration::from_millis(5)) {
+                    Ok(()) => break,
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return Err("the test went away".to_string());
+                    }
+                }
+            }
+            self.note(format!("playing {source}"));
+            Ok(())
+        }
+        fn pause(&self) {
+            self.note("pause".into());
+        }
+        fn resume(&self) {}
+        fn stop(&self) {
+            self.note("stop".into());
+        }
+        fn seek(&self, position: f64) -> Result<(), String> {
+            self.note(format!("seek {position}"));
+            Ok(())
+        }
+        fn set_volume(&self, _volume: f32) {}
+        fn set_crossfade(&self, _seconds: f32) {}
+        fn set_gapless(&self, _on: bool) {}
+        fn set_blend_skips(&self, _on: bool) {}
+        fn set_pause_fade(&self, _on: bool) {}
+        fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
+        fn clear_next(&self) {}
+        fn status(&self) -> crate::player::PlayerStatus {
+            crate::player::PlayerStatus::default()
+        }
+        fn tick(&self) {}
+    }
+
+    /// The audio thread around a [`HeldOpens`] player, which a test walks
+    /// through a step at a time. No step runs on the clock: each waits to
+    /// hear the last one land, so a machine too loaded to keep time can only
+    /// make the walk slower.
+    struct AudioThread {
+        cmds: mpsc::Sender<AudioCmd>,
+        did: mpsc::Receiver<String>,
+        go: mpsc::Sender<()>,
+        events: mpsc::Receiver<Event>,
+        listener: thread::JoinHandle<()>,
+    }
+
+    impl AudioThread {
+        /// `queued` is waiting when the thread starts: its first batch.
+        fn start(queued: Vec<AudioCmd>) -> Self {
+            let (cmds, cmd_rx) = mpsc::channel();
+            let (event_tx, events) = mpsc::channel();
+            let (did_tx, did) = mpsc::channel();
+            let (go, go_rx) = mpsc::channel();
+            for cmd in queued {
+                cmds.send(cmd).unwrap();
+            }
+            let player = HeldOpens { did: did_tx, go: go_rx };
+            let listener = thread::spawn(move || listen_guarded(&player, &cmd_rx, &event_tx));
+            Self { cmds, did, go, events, listener }
+        }
+
+        fn send(&self, cmd: AudioCmd) {
+            self.cmds.send(cmd).unwrap();
+        }
+
+        /// The player's next moves are these, in this order. Only a thread
+        /// that has gone wrong waits the time out.
+        fn player_did(&self, moves: &[&str]) {
+            for step in moves {
+                let next = self.did.recv_timeout(Duration::from_secs(60));
+                assert_eq!(next.as_deref(), Ok(*step));
+            }
+        }
+
+        /// Let the open in flight finish.
+        fn go(&self) {
+            self.go.send(()).unwrap();
+        }
+
+        /// Shut the thread down and hand back every event it sent, once the
+        /// player has done nothing more than the stop the thread always
+        /// makes on its way out.
+        fn finish(self) -> Vec<Event> {
+            self.cmds.send(AudioCmd::Shutdown).unwrap();
+            self.listener.join().expect("the thread ended on its own terms");
+            let rest: Vec<String> = self.did.try_iter().collect();
+            assert_eq!(rest, vec!["stop"], "the thread stops the player on its way out");
+            self.events.try_iter().collect()
+        }
+    }
+
+    #[test]
+    fn a_newer_play_or_a_stop_gives_up_the_open_in_flight() {
+        // The second pick arrives during the first one's open: the first is
+        // given up, not played for a moment and then replaced.
+        let audio = AudioThread::start(vec![play("a")]);
+        audio.player_did(&["opening a"]);
+        audio.send(play("b"));
+        audio.player_did(&["gave up a", "opening b"]);
+        audio.go();
+        audio.player_did(&["playing b"]);
+        let events = audio.finish();
+        // Nothing failed: a play overtaken is not a play that went wrong.
+        assert!(!events.iter().any(|e| matches!(e, Event::PlaybackFailed { .. })));
+
+        // A stop the same way: the open is dropped and the stop lands now.
+        let audio = AudioThread::start(vec![play("a")]);
+        audio.player_did(&["opening a"]);
+        audio.send(AudioCmd::Stop);
+        audio.player_did(&["gave up a", "stop"]);
+        audio.finish();
+
+        // What came with the play and was aimed at it goes with it: the
+        // seek behind a (a resume spot) dies; the pause behind b stands.
+        let audio = AudioThread::start(vec![play("a"), AudioCmd::Seek(30.0)]);
+        audio.player_did(&["opening a"]);
+        audio.send(play("b"));
+        audio.send(AudioCmd::Pause);
+        audio.player_did(&["gave up a", "opening b"]);
+        audio.go();
+        audio.player_did(&["playing b", "pause"]);
+        audio.finish();
+
+        // A seek that arrives during the open dies with it just the same.
+        let audio = AudioThread::start(vec![play("a")]);
+        audio.player_did(&["opening a"]);
+        audio.send(AudioCmd::Seek(30.0));
+        audio.send(play("b"));
+        audio.player_did(&["gave up a", "opening b"]);
+        audio.go();
+        audio.player_did(&["playing b"]);
+        audio.finish();
+    }
+
+    #[test]
+    fn a_pause_during_an_open_waits_for_it_and_lands_on_the_new_track() {
+        // Not everything overtakes: a pause or a seek sent while the track
+        // is opening is about that track, so it applies once it plays —
+        // the order the engine answers a Play's trailing Seek in. (The
+        // pair is one batch by then, and collapse puts the seek last.)
+        let audio = AudioThread::start(vec![play("a")]);
+        audio.player_did(&["opening a"]);
+        audio.send(AudioCmd::Seek(12.0));
+        audio.send(AudioCmd::Pause);
+        audio.go();
+        audio.player_did(&["playing a", "pause", "seek 12"]);
+        audio.finish();
     }
 
     #[test]
@@ -2614,6 +4098,7 @@ mod tests {
             self_signed: false,
             peer: None,
             local_token: None,
+            compressed_art: false,
         };
         api.send(ApiCmd::DirectAccess { parent: parent.clone(), id: peer.id, reach, refresh: false }).unwrap();
         let answer = wait("DirectAccess", &|e| matches!(e, Event::DirectAccess { .. }));
@@ -2758,5 +4243,393 @@ mod tests {
         // …and a four-stop journey that came back whole is not "the same
         // track" just because two of its rows are the seeds.
         assert!(journey_note(&stops(4), 4).is_none());
+    }
+
+    fn small_cover(file: &str) -> ApiCmd {
+        ApiCmd::AlbumArt { file: file.to_string(), reach: None, small: true }
+    }
+
+    fn asked_file(job: Option<(Option<Arc<Client>>, ApiCmd)>) -> Option<String> {
+        match job {
+            Some((_, ApiCmd::AlbumArt { file, .. })) => Some(file),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_art_lane_runs_six_at_a_time_newest_first_and_drops_what_was_withdrawn() {
+        // Performance audit #88: a page of covers was a thread and a
+        // connection per cover, all at once. The lane starts a runner for
+        // each of its first six asks and queues the rest; runners take the
+        // newest first, and a withdrawn ask is never taken.
+        let mut lane = ArtLane::default();
+        let started: Vec<bool> = (0..10).map(|i| lane.push(None, small_cover(&format!("c{i}.jpeg")))).collect();
+        assert_eq!(started, [true, true, true, true, true, true, false, false, false, false]);
+        assert_eq!(asked_file(lane.next()).as_deref(), Some("c9.jpeg"), "the page on screen was claimed last");
+        lane.withdraw("c8.jpeg");
+        assert_eq!(asked_file(lane.next()).as_deref(), Some("c7.jpeg"), "the withdrawn ask is skipped");
+        for _ in 0..7 {
+            assert!(lane.next().is_some());
+        }
+        assert_eq!(lane.running, 6);
+        assert!(lane.next().is_none(), "nothing left: the runner that asked goes");
+        assert_eq!(lane.running, 5);
+        assert!(lane.push(None, small_cover("late.jpeg")), "and a new ask may start one again");
+    }
+
+    #[test]
+    fn a_page_of_small_covers_never_has_more_than_six_in_flight_to_one_server() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let open = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        {
+            let (open, peak) = (open.clone(), peak.clone());
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let (open, peak) = (open.clone(), peak.clone());
+                    thread::spawn(move || {
+                        let now = open.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        let mut buf = [0u8; 2048];
+                        let _ = stream.read(&mut buf);
+                        thread::sleep(Duration::from_millis(40));
+                        open.fetch_sub(1, Ordering::SeqCst);
+                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    });
+                }
+            });
+        }
+        let client = Arc::new(Client::new_with(&format!("http://127.0.0.1:{port}"), false).unwrap());
+        let (tx, rx) = mpsc::channel();
+        let mut lanes = ArtLanes::default();
+        for i in 0..30 {
+            lanes.ask(Some(client.clone()), &tx, small_cover(&format!("c{i}.jpeg")));
+        }
+        let mut answered = 0;
+        while answered < 30 {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("every ask answers") {
+                Event::AlbumArt { settled: true, art: None, .. } => answered += 1,
+                other => panic!("a 404 is the server's own no: {other:?}"),
+            }
+        }
+        assert!(peak.load(Ordering::SeqCst) <= ART_LANE_WIDTH, "peak {}", peak.load(Ordering::SeqCst));
+        assert!(peak.load(Ordering::SeqCst) > 1, "and it does run them side by side");
+    }
+
+    /// A one-route-at-a-time HTTP server for the worker's own tests: each
+    /// request gets `answer(path)` — how long to hold it, the status line
+    /// and the body — on its own thread. Returns the base URL.
+    fn test_server(answer: impl Fn(&str) -> (Duration, &'static str, &'static str) + Send + Sync + 'static) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let answer = Arc::new(answer);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let answer = answer.clone();
+                thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&request).to_string();
+                    let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let (hold, status, body) = answer(&path);
+                    thread::sleep(hold);
+                    let reply = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes());
+                });
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn a_connect_that_hangs_holds_back_only_the_reads_that_ride_the_session() {
+        // Performance audit #84: a connection change ran on the dispatch
+        // loop, so a ping that hung held every later command behind it —
+        // another server's covers, play reports, tunnel dials. It runs on
+        // its own thread now; what does not ride the session goes straight
+        // on, and what does still lands on the session the change made.
+        const PING: &str = r#"{"vpaths":["lib"],"transcode":false,"noFileModify":true,"noUpload":true}"#;
+        let slow = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::from_millis(1500), "200 OK", PING),
+            p if p.starts_with("/api/v1/file-explorer") => {
+                (Duration::ZERO, "200 OK", r#"{"path":"lib/","directories":[],"files":[]}"#)
+            }
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        let other = test_server(|_| (Duration::ZERO, "404 Not Found", "{}"));
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+
+        let started = std::time::Instant::now();
+        tx.send(ApiCmd::Connect {
+            server: slow.clone(),
+            identity: slow.clone(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })
+        .unwrap();
+        tx.send(ApiCmd::Browse("lib".into())).unwrap();
+        let reach = crate::tui::app::Reach {
+            base: other,
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+            compressed_art: false,
+        };
+        tx.send(ApiCmd::AlbumArt { file: "far.jpg".into(), reach: Some(reach), small: true }).unwrap();
+
+        let mut order = Vec::new();
+        while order.len() < 3 {
+            let event = events.recv_timeout(Duration::from_secs(10)).expect("three answers");
+            let name = match event {
+                Event::AlbumArt { .. } => "cover",
+                Event::Connected { .. } => "connected",
+                Event::Listing(_) => "listing",
+                Event::TunnelStatus { .. } | Event::TunnelPath { .. } => continue,
+                other => panic!("unexpected {other:?}"),
+            };
+            order.push((name, started.elapsed()));
+        }
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
+
+        let names: Vec<&str> = order.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["cover", "connected", "listing"], "{order:?}");
+        assert!(order[0].1 < Duration::from_millis(1000), "the other server's cover did not wait: {order:?}");
+        assert!(order[1].1 >= Duration::from_millis(1400), "the ping really hung: {order:?}");
+    }
+
+    #[test]
+    fn connection_changes_keep_their_order_and_a_read_between_two_rides_the_first() {
+        // The property the serial loop gave (worker.rs's api_loop): changes
+        // one at a time, in order, and each session read on the client the
+        // change before it left (performance audit #84).
+        const PING: &str = r#"{"vpaths":["lib"],"transcode":false,"noFileModify":true,"noUpload":true}"#;
+        let first = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::from_millis(600), "200 OK", PING),
+            _ => (Duration::ZERO, "200 OK", r#"{"path":"one/","directories":[],"files":[]}"#),
+        });
+        let second = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::ZERO, "200 OK", PING),
+            _ => (Duration::ZERO, "200 OK", r#"{"path":"two/","directories":[],"files":[]}"#),
+        });
+        let connect = |server: &str| ApiCmd::Connect {
+            server: server.to_string(),
+            identity: server.to_string(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        };
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+        for cmd in [connect(&first), ApiCmd::Browse("lib".into()), connect(&second), ApiCmd::Browse("lib".into())] {
+            tx.send(cmd).unwrap();
+        }
+        let mut seen = Vec::new();
+        while seen.len() < 4 {
+            match events.recv_timeout(Duration::from_secs(10)).expect("four answers") {
+                Event::Connected { server, .. } => seen.push(format!("connected {}", server == first)),
+                Event::Listing(listing) => seen.push(format!("listing {}", listing.path)),
+                Event::TunnelStatus { .. } | Event::TunnelPath { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
+        // Reads answer on their own threads, so the first listing may pass
+        // the second connect's answer — as it always could. What holds: the
+        // changes land in order, the read between them asked the first
+        // server, and the read after the second asked the second, after it.
+        let at = |what: &str| seen.iter().position(|s| s == what).unwrap_or_else(|| panic!("{what}: {seen:?}"));
+        assert!(at("connected true") < at("connected false"), "{seen:?}");
+        assert!(at("connected true") < at("listing one/"), "{seen:?}");
+        assert!(at("connected false") < at("listing two/"), "{seen:?}");
+    }
+
+    #[test]
+    fn a_held_cover_is_never_between_the_session_and_its_lane() {
+        // The review's race (performance audit #84): the change thread took
+        // a held cover off the session, let the session go, and only then
+        // queued it in a lane, so a withdrawal handled in between found it
+        // in neither and it was fetched anyway. The session stays held
+        // until the lane has it — the order a withdrawal takes them in.
+        let session: Session = Arc::default();
+        {
+            let mut slot = lock_session(&session);
+            slot.changing = true;
+            slot.held.push_back(small_cover("held.jpeg"));
+        }
+        let lanes: Lanes = Arc::default();
+        let (events, _answers) = mpsc::channel();
+        let busy = lock_lanes(&lanes);
+        let worker = {
+            let (session, lanes) = (session.clone(), lanes.clone());
+            thread::spawn(move || work_through(&session, &lanes, &events))
+        };
+        let until = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < until {
+            if let Ok(slot) = session.try_lock() {
+                assert!(!slot.held.is_empty(), "the cover left the session before a lane had it");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(busy);
+        worker.join().unwrap();
+        assert!(lock_session(&session).held.is_empty());
+        assert_eq!(lock_lanes(&lanes).shelf.len(), 1, "and the lane has it");
+    }
+
+    const LANE_PING: &str = r#"{"vpaths":["lib"],"transcode":false,"noFileModify":true,"noUpload":true}"#;
+
+    fn connect_to(server: &str) -> ApiCmd {
+        ApiCmd::Connect {
+            server: server.to_string(),
+            identity: server.to_string(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        }
+    }
+
+    /// A server whose covers each hang `hold` before a 404, counting the
+    /// asks it was sent; its ping answers at once.
+    fn hanging_art(hold: Duration) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = asked.clone();
+        let base = test_server(move |path| match path {
+            "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
+            p if p.starts_with("/album-art/") => {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (hold, "404 Not Found", "{}")
+            }
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        (base, asked)
+    }
+
+    /// The next event that is not the tunnel sampler's.
+    fn next_answer(events: &Receiver<Event>, within: Duration) -> Event {
+        loop {
+            match events.recv_timeout(within).expect("an answer") {
+                Event::TunnelStatus { .. } | Event::TunnelPath { .. } => {}
+                event => return event,
+            }
+        }
+    }
+
+    /// Twenty covers on the session's lane, six of them on the wire.
+    fn twenty_covers_on(tx: &Sender<ApiCmd>, asked: &std::sync::atomic::AtomicUsize) {
+        for i in 0..20 {
+            tx.send(small_cover(&format!("old{i}.jpeg"))).unwrap();
+        }
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while asked.load(std::sync::atomic::Ordering::SeqCst) < ART_LANE_WIDTH && std::time::Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
+    }
+
+    #[test]
+    fn a_new_session_gets_a_lane_of_its_own_and_asks_the_old_server_nothing_more() {
+        // The review of performance audit #88: the session's lane outlived
+        // the session. After a switch away from a server whose art hangs,
+        // the leftovers kept all six runners for twenty seconds an ask, each
+        // still aimed at the server the user had left, and the new server's
+        // covers waited behind them.
+        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let new = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+        tx.send(connect_to(&old)).unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
+        twenty_covers_on(&tx, &asked_old);
+
+        tx.send(connect_to(&new)).unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
+        let asked = std::time::Instant::now();
+        tx.send(small_cover("new.jpeg")).unwrap();
+        match next_answer(&events, Duration::from_secs(5)) {
+            Event::AlbumArt { file, .. } => assert_eq!(file, "new.jpeg", "the new server's cover first"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(asked.elapsed() < Duration::from_millis(1000), "it did not wait: {:?}", asked.elapsed());
+
+        // The six on the wire land; the fourteen that waited are never sent.
+        for _ in 0..ART_LANE_WIDTH {
+            assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
+        }
+        assert!(events.recv_timeout(Duration::from_millis(300)).is_err(), "nothing more is answered");
+        assert_eq!(asked_old.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_retarget_moves_the_waiting_covers_onto_the_new_path() {
+        // The same server by another way: its claims stand in the App, so
+        // what waited on the old path is asked on the new one, at once,
+        // rather than behind the old path's six on the wire.
+        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let new = test_server(|path| match path {
+            "/api/" => (Duration::ZERO, "200 OK", "{}"),
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+        tx.send(connect_to(&old)).unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
+        twenty_covers_on(&tx, &asked_old);
+
+        let moved = std::time::Instant::now();
+        tx.send(ApiCmd::Retarget {
+            identity: old.clone(),
+            server: new,
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })
+        .unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Retargeted { .. }));
+        for _ in 0..20 - ART_LANE_WIDTH {
+            match next_answer(&events, Duration::from_secs(5)) {
+                Event::AlbumArt { settled: true, .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(moved.elapsed() < Duration::from_millis(1000), "the new path answered them: {:?}", moved.elapsed());
+        for _ in 0..ART_LANE_WIDTH {
+            assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
+        }
+        assert_eq!(asked_old.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
     }
 }
