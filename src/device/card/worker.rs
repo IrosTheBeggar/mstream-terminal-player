@@ -202,7 +202,15 @@ impl Volumes for System {
         // Looked at again: another card swapped in at that path since it was
         // listed is never opened as this one.
         let now = self.again(found)?;
-        Mounted::of(&now).map(|m| Box::new(m) as Box<dyn CardWrite>)
+        let mounted = Mounted::of(&now)?;
+        // And what its path reaches now is that card: on Linux a mount
+        // stacked over its folder since would take the writes.
+        if let Ok(Some(serial)) = mounted.serial()
+            && Some(serial) != now.volume.serial
+        {
+            return None;
+        }
+        Some(Box::new(mounted) as Box<dyn CardWrite>)
     }
 
     fn eject(&self, found: &Found) -> Result<(), String> {

@@ -110,6 +110,20 @@ pub(crate) fn mounts(text: &str) -> Vec<Mount> {
         .collect()
 }
 
+/// Whether the mount at `i` is the one its point shows: no later mount sits
+/// on the same point or on a folder above it, which would hide it (a fixed
+/// disk mounted over a card's folder takes its writes).
+pub(crate) fn on_top(all: &[Mount], i: usize) -> bool {
+    all.get(i + 1..).unwrap_or_default().iter().all(|later| !covers(&later.point, &all[i].point))
+}
+
+/// A mount at `upper` hides what is at `point`: the same folder, or one
+/// above it.
+fn covers(upper: &str, point: &str) -> bool {
+    let upper = upper.trim_end_matches('/');
+    point == upper || point.strip_prefix(upper).is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// /proc/swaps' entries after its header: (the device or file, whether it
 /// is a partition).
 pub(crate) fn swaps(text: &str) -> Vec<(String, bool)> {
@@ -373,7 +387,9 @@ pub(crate) fn found(host: &dyn Host) -> Option<Vec<Found>> {
         // A filesystem once, where it is mounted whole (a bind mount of a
         // folder shows the same device again).
         let Some(b) = &blocks[i] else { continue };
-        if m.root != "/" || !seen.insert(m.dev) {
+        // A mount another hides is no volume to write: what its path
+        // reaches is the other's.
+        if m.root != "/" || !on_top(&all, i) || !seen.insert(m.dev) {
             continue;
         }
         let w = whole(b);
@@ -468,14 +484,18 @@ pub(crate) fn found(host: &dyn Host) -> Option<Vec<Found>> {
 /// The serial of the filesystem mounted whole at `point` (the last mount
 /// there, the one on top), as /dev/disk/by-uuid names it: what a run reads
 /// again to be sure the card is still the one it was bound to. A few small
-/// reads, no lsblk. None when nothing is mounted there, or its device names
-/// no serial; an error when the mounts can't be read at all.
+/// reads, no lsblk. None when nothing is mounted there whole, a later mount
+/// on a folder above it hides it, or its device names no serial; an error
+/// when the mounts can't be read at all.
 pub(crate) fn serial_at(host: &dyn Host, point: &str) -> std::io::Result<Option<Serial>> {
     let Some(table) = host.read("/proc/self/mountinfo") else {
         return Err(std::io::Error::other("/proc/self/mountinfo can't be read"));
     };
     let all = mounts(&table);
-    let Some(m) = all.iter().rev().find(|m| m.point == point && m.root == "/") else { return Ok(None) };
+    let Some(m) = all.iter().rev().find(|m| covers(&m.point, point)) else { return Ok(None) };
+    if m.point != point || m.root != "/" {
+        return Ok(None);
+    }
     let Some(b) = block_of_mount(host, m) else { return Ok(None) };
     Ok(named(host, "/dev/disk/by-uuid", &b.name).map(|uuid| Serial::parse(&uuid)))
 }
@@ -822,6 +842,44 @@ mod tests {
         let card = at(&blind, "/media/user/CARD ONE");
         assert_eq!(card.disk.others, ["sda2 (unknown)"]);
         assert_eq!(card.volume.table, Table::Unknown, "no lsblk, no table");
+    }
+
+    /// A mount stacked over the card's folder, or over a folder above it,
+    /// hides the card: its path reaches the other filesystem, so the card
+    /// is no volume to write, and the serial read at its point is the
+    /// other's, or none (the review's TV7).
+    #[test]
+    fn a_card_another_mount_hides_is_no_volume_and_its_point_reads_no_card_serial() {
+        let point = "/media/user/CARD ONE";
+        for (stacked, serial) in [
+            // The Pi's own root partition mounted over the card's folder.
+            ("50 41 179:2 / /media/user/CARD\\040ONE rw,relatime - ext4 /dev/root rw\n", Some(())),
+            // A folder of the root bound over /media: the card's folder is
+            // the root's now, and nothing is mounted there whole.
+            ("50 22 179:2 /srv /media rw,relatime - ext4 /dev/root rw\n", None),
+        ] {
+            let mut f = pi();
+            let mut info = f.files["/proc/self/mountinfo"].clone();
+            info.push_str(stacked);
+            f.file("/proc/self/mountinfo", &info);
+            let found = found(&f).unwrap();
+            assert!(!found.iter().any(|v| v.volume.path == std::path::Path::new(point)), "{stacked}: {found:#?}");
+            let read = serial_at(&f, point).unwrap();
+            assert_ne!(read, Some(Serial::Fat(0x1A2B_3C4D)), "{stacked}");
+            assert_eq!(read.is_some(), serial.is_some(), "{stacked}: {read:?}");
+        }
+        // Mounted beside it, not over it: the card is still the card.
+        let mut f = pi();
+        let mut info = f.files["/proc/self/mountinfo"].clone();
+        info.push_str("50 22 179:2 / /media/user/CARD\\040ONE2 rw,relatime - ext4 /dev/root rw\n");
+        f.file("/proc/self/mountinfo", &info);
+        assert!(found(&f).unwrap().iter().any(|v| v.volume.path == std::path::Path::new(point) && v.accepted()));
+        assert_eq!(serial_at(&f, point).unwrap(), Some(Serial::Fat(0x1A2B_3C4D)));
+        // The rule itself: the same folder or one above it, never a sibling.
+        let all = mounts("1 0 8:1 / /media/a rw - vfat x rw\n2 0 8:2 / /media/ab rw - vfat y rw\n");
+        assert!(on_top(&all, 0) && on_top(&all, 1));
+        let all = mounts("1 0 8:1 / /media/a rw - vfat x rw\n2 0 8:2 / / rw - ext4 y rw\n");
+        assert!(!on_top(&all, 0) && on_top(&all, 1));
     }
 
     const LAPTOP_NVME: &str = "/sys/devices/pci0000:00/0000:00:1d.0/0000:3d:00.0/nvme/nvme0/nvme0n1";
