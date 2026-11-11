@@ -1343,15 +1343,18 @@ comes from the cache, or a download, beside them.
     choice 9). A second card's Sync waits its turn: "3 new · waits for Car
     music to finish (one sync at a time)", with *Don't wait*. A firmware
     write runs beside a sync under its own lock (clause 9).
-57. **Quitting during a sync.** `q`, the window's close button, Cmd-Q and
-    the app menu's Quit open a gold gate: "Stop syncing Car music and
-    quit?", with *◂ Keep syncing* first and the primary, and *Stop and
-    quit*. On the yes the GUI waits for the next save, at most about 30 s,
-    the busy line counting, then quits. Ctrl+C in a terminal stops at the
-    next save without asking, saying so on stderr; a second Ctrl+C quits at
-    once (the user's pick of 2026-10-19, card 07 §7, choice 8). A
-    force-quit, a pulled card or a power cut is recovered at the next run
-    (the card contract's crash table).
+57. **Quitting during a sync.** `q` (the GUI's own quit keys) opens a
+    gold gate: "Stop syncing Car music and quit?", with *◂ Keep syncing*
+    first and the primary, and *Stop and quit*. On the yes the GUI waits
+    for the next save, at most about 30 s, the busy line counting, then
+    quits. The window's close button, Cmd-Q and the app menu's Quit don't
+    ask: the window closes at once, and the player's teardown stops the
+    sync at its next save and waits for it, the same 30 s at most, saying
+    so on stderr. Ctrl+C in a terminal stops at the next save without
+    asking, saying so on stderr; a second Ctrl+C quits at once (the user's
+    pick of 2026-10-19, card 07 §7, choice 8). A force-quit, a pulled card
+    or a power cut is recovered at the next run (the card contract's crash
+    table).
     - **While a firmware write runs, the write's rule wins** (clauses
       9–11): `q` does nothing; Ctrl+C, the close button and Cmd-Q quit at
       once with no gate and no wait, leaving the board as clause 10 says;
@@ -1372,9 +1375,11 @@ comes from the cache, or a download, beside them.
     stays. Enter, Esc and `n` keep; `y` or a click on the second button
     goes; a click on another tab leaves, with nothing written.
     - **Gates in a chain:** a gate opened by the answer to the one before it
-      (Remove, then Adopt, then the relay) takes no answer for half a
-      second, so a held key or a double-click's second click that answered
-      the first doesn't answer it too.
+      (Remove, then Adopt, then the relay) takes no answer until the keys
+      and clicks have been quiet for half a second: one that comes sooner
+      is dropped and starts the half second again. A held key, however long
+      it repeats, or a double-click's second click that answered the first
+      doesn't answer it too.
     - **Removals (Q1):** up to 50 need no gate (Next sync says how many;
       Details lists them). Above 50: "Remove 214 tracks from Car music?",
       the first five paths and how many more, what stays in green, and how
@@ -3102,3 +3107,102 @@ setting no locale, prints in English.
     older than 0.14.0" to a board without the format, with no word of
     updating; `device list` offers the update on such a board's line as
     on any board behind the pin.
+- **2026-11-10 — The second landing review: the play history, the card
+  worker and the screens.** A second review read the fixes of the first
+  and found no way to write to a card other than the one picked and no
+  way to post a play twice; what it found besides, and how each was
+  settled.
+  - **A gift card's plays are kept on the card, not on this computer**
+    (clause 61). The first fix kept the ids of a card for someone else's
+    plays in this computer's outbox until a sync had stored the marks
+    past them. Three gaps were left: a store that turned the mark off
+    after the outbox failed to save let the next look send them; another
+    computer, or this one with its outbox lost, sent the ones a waiting
+    play held below the mark (the entry above's "Not closed"); and a sync
+    that would have marked the card and stopped before its state file
+    had them dropped all the same, though the card was never marked. The
+    card's `state.json` now keeps a **gift floor** (`giftPlays`: of each
+    player and epoch, the highest play counted as a gift's), written by
+    the same write as the marks and never ahead of it, and every look on
+    any computer counts a play at or below it as a gift's, whatever *For*
+    says by then; this computer keeps nothing of them. A state file older
+    than the floor has none. The commits of the sync that first counts
+    such a play leave it unacknowledged (they come before the state file
+    that stores the floor): the player trims it after the next sync, not
+    this one. The card contract (the firmware repo's docs/METADATA.md
+    2.12.7 and 2.20.6, item 11) is to say so; the words are proposed to
+    it. The plays' line in the run's notes says "played while the card was
+    for someone else" now, since a card made the listener's own again
+    still counts them.
+  - **`device card <drive> plays` on a gift card "asked its server
+    nothing"**: the command asks nothing for the plays, but its look at
+    the card (the one every command makes, to plan the next sync) asks
+    the server as for any card. Clause 61 says so now.
+  - **A play started ahead of this computer's clock waited for ever.**
+    Only a start older than 30 days was past the wait; one more than 5
+    minutes ahead (the player's clock was wrong) and turned away as a
+    track the server doesn't know held its mark for good. It is past the
+    wait at once now, and settles as the server says.
+  - **One play refused alone sent the rest of the post as `other`.** A
+    batch refused whole now goes one play at a time with the source it
+    had; a play with no source of its own refused with `device` goes once
+    more as `other`, and only when that is taken does the rest of the
+    post go as `other` (an mStream older than that source).
+  - **A sync paused for the sign-in went round and round.** A server that
+    lists its library and refuses the files (401) paused it, the look
+    after found a plan, and the sync went on under the same sign-in, to
+    pause again. It goes on only under another sign-in (clause 52), as
+    the servers' list already had it.
+  - **A card job's fault tore the terminal down.** Its thread caught the
+    panic, but the player's panic hook ran first and restored the
+    screen under a UI still running. The job, fit, eject and sync threads
+    are named now, and the hook stands back for them as for the audio
+    thread; the card says why the job ended.
+  - **A job that couldn't open its card said the card couldn't be read.**
+    Apply, Set up, *Send the plays* and Eject each fail as themselves
+    now (the command line exits 1, and never says the settings were
+    changed); a look that can't open the card says nothing and looks
+    again at the next look at the readers. A job looks at the volumes
+    once, not twice.
+  - **`cards.json` that couldn't be read was saved over.** A file the OS
+    wouldn't let the player read, or one that doesn't read as this
+    player's, was taken for an empty cache and saved with one job's
+    change: every other card's entry, the volumes hidden and the peers
+    left out were lost (a peer is asked about once, clause 58). The
+    update refuses now and says why.
+  - **One serial read that failed on a Mac was a card taken out.** At a
+    session's start (a look, a set-up, the settings' store, a sync), a
+    serial read that fails or reads none where one is expected is read
+    once more, as a run's own check already did.
+  - **A card with no serial wasn't one card.** Its key is its reader's
+    path, which the next card put in there shares: a Settings sheet or a
+    gate stayed open for whichever was in the reader, and Apply or the
+    gate's yes would have answered for it. A sheet and a gate keep the
+    card they were opened for (its serial, its card id) and go when it
+    goes or another is at its key; a sheet whose card left while another
+    was in view no longer holds the keys undrawn. *Send the plays* checks
+    the card as the other jobs do. And a card whose serial the OS lists
+    after it was listed (Linux's lsblk, now and then) keeps its slot,
+    re-keyed: its sync, its sheet and its gate follow it, never a card
+    taken out and a second tab.
+  - **The command line's wait spun when the worker was gone.** It looked
+    for two minutes, then went on as though the cards had settled. It
+    stops with the worker-gone line and exits 1.
+  - **"Not saved" blamed a server that wasn't there.** Settings for a card
+    whose saved server can't be reached now (Quick Connect on the command
+    line, a tunnel down) were said not saved for want of a server; they
+    are saved under the key the server was saved as, the card's source.
+    "Not saved" is said only with no server saved here for the card, and
+    its English words say that (`not_saved`; the nine translations said
+    so already).
+  - **A held key still answered a chained gate.** The half second counted
+    from the gate's opening, so a key held past it answered. Each key or
+    click the gate drops starts the half second again (clause 58).
+  - **Apply wrote the Budget row's limit to every peer.** The row shows
+    the limit saved on this computer; Apply wrote it to each peer of the
+    card's whenever anything else changed. It writes a budget only when
+    the listener changed it.
+  - **Words.** Clause 57 said the window's close button and Cmd-Q open the
+    quit gate; they never did. They close the window at once, and the
+    teardown stops the sync at its next save and waits for it, as the
+    Part B4 entry above says; clause 57 and the README say so now.

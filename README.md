@@ -803,8 +803,9 @@ choices on two tabs, Music (its server and libraries) and Writing (what is conve
 what, removals, covers, Auto DJ, a card for someone else), with a line that says at every
 change whether it fits. More than 50 removals, half the card gone, music on the card that
 mStream didn't put there, another server, a relay and a peer reached only through its parent
-each ask first, behind the gold warning. Quitting during a sync asks, then stops at the next
-save. `device cards` lists the cards, one line each, and `device card <drive>
+each ask first, behind the gold warning. Quitting with `q` during a sync asks, then stops at
+the next save; the window's close button and Cmd-Q stop it at the next save without asking.
+`device cards` lists the cards, one line each, and `device card <drive>
 status|setup|sync|plays|eject` does what the Card view does; each warning is a flag that names
 what it lets through (`--allow-removals 214`, `--server Work --take-over`, `--adopt` or
 `--keep-mine`, `--through-parent`), and `setup`'s flags are the Settings' (`--name`,

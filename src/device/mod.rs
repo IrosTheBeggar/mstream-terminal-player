@@ -1956,11 +1956,11 @@ mod tests {
         assert_eq!((code, lines), (1, vec!["No Core2 found".to_string()]));
     }
 
-    /// The hidden `device time`: the clock of a board the engine lists, read
-    /// with a bare `@time` and set when it is unset or more than 2 s off,
-    /// on the port as every listen opens it (never a reset). Older
+    /// `device time` (clause 66a): the clock of a board the engine lists,
+    /// read with a bare `@time` and set when it is unset or more than 2 s
+    /// off, on the port as every listen opens it (never a reset). Older
     /// firmware's `@err 7 time` is no clock verb; a port no board is on is
-    /// refused; it stays out of the help.
+    /// refused.
     #[test]
     fn device_time_reads_a_boards_clock_and_sets_it_only_when_unset_or_off() {
         let timed = |fake: &Fake, port: &str, dry_run: bool| {

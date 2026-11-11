@@ -1292,16 +1292,23 @@ fn a_held_answer_to_one_gate_doesnt_answer_the_next() {
     press(&mut page, KeyCode::Enter);
     assert!(matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(card::GateKind::Removals { .. })));
     press(&mut page, KeyCode::Char('y'));
-    assert!(matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(card::GateKind::Adopt { .. })));
-    // The same key again at once, and a click's: still the Adopt gate.
-    press(&mut page, KeyCode::Char('y'));
-    page.card_act(Act::CardGo);
-    press(&mut page, KeyCode::Esc);
-    assert!(matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(card::GateKind::Adopt { .. })));
+    let adopt = |page: &Page| {
+        matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(card::GateKind::Adopt { .. }))
+    };
+    assert!(adopt(&page));
+    // The key held: its repeats every 400 ms for two seconds, a click's and
+    // Esc among them, each sooner than half a second after the one before.
+    // Every one is dropped, past half a second from the gate's opening too.
+    let opened = page.card.chained.expect("a chained gate");
+    let mut at = opened;
+    for act in [Act::CardGo, Act::CardGo, Act::CardKeep, Act::CardGo, Act::CardBox] {
+        at += Duration::from_millis(400);
+        page.card_act_at(act.clone(), at);
+        assert!(adopt(&page), "{act:?} at {:?}", at - opened);
+    }
     assert!(sent(&inbox).is_empty(), "nothing answered under the guard");
-    // Past the guard, its own answer.
-    page.card.chained = page.card.chained.map(|t| t - card::CHAIN_GUARD);
-    press(&mut page, KeyCode::Char('y'));
+    // Half a second quiet after the last: its own answer.
+    page.card_act_at(Act::CardGo, at + card::CHAIN_GUARD);
     let synced = sent(&inbox);
     let [worker::Cmd::Sync { allow, .. }] = synced.as_slice() else { panic!("{synced:?}") };
     assert_eq!((allow.answers.removals, allow.answers.adopt), (true, Some(true)));
@@ -1386,5 +1393,27 @@ fn the_budget_row_says_the_saved_limit() {
     page.card_act(Act::CardApply);
     let told = sent(&inbox);
     assert!(told.iter().all(|c| !matches!(c, worker::Cmd::Apply { .. })), "nothing changed: {told:?}");
+    // Another setting changed, the budget not: Apply writes no budget (the
+    // second review's C2-3), so no peer's own limit is set to the first's.
+    press(&mut page, KeyCode::Char('o'));
+    let sheet = page.card.sheet.as_mut().expect("the sheet");
+    sheet.want.covers = !sheet.want.covers;
+    page.card_act(Act::CardApply);
+    let told = sent(&inbox);
+    let applied = told.iter().find_map(|c| match c {
+        worker::Cmd::Apply { want, .. } => Some(want.clone()),
+        _ => None,
+    });
+    assert_eq!(applied.map(|w| w.budget_mb), Some(None), "{told:?}");
+    // The budget changed: written.
+    press(&mut page, KeyCode::Char('o'));
+    page.card.sheet.as_mut().expect("the sheet").want.budget_mb = Some(900);
+    page.card_act(Act::CardApply);
+    let told = sent(&inbox);
+    let applied = told.iter().find_map(|c| match c {
+        worker::Cmd::Apply { want, .. } => Some(want.clone()),
+        _ => None,
+    });
+    assert_eq!(applied.map(|w| w.budget_mb), Some(Some(900)), "{told:?}");
     budget.with(|b| b.set_limit(PeerKey { parent_key, peer_id }, None)).unwrap();
 }

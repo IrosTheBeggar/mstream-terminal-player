@@ -55,9 +55,11 @@ pub(crate) struct CardUi {
     /// The cards on the row as the last look had them, in order: where a
     /// card taken out stood (clause 29).
     pub(crate) row: Vec<String>,
-    /// When a gate opened as the answer to the one before it: for
-    /// [`CHAIN_GUARD`] it takes no answer, so a held key or a double-click
-    /// that answered the first doesn't answer this one too.
+    /// When a gate opened as the answer to the one before it, or last
+    /// swallowed an answer: until the keys have been quiet for
+    /// [`CHAIN_GUARD`] it takes none, so a held key (however long its
+    /// repeats go on) or a double-click that answered the first doesn't
+    /// answer this one too.
     pub(crate) chained: Option<Instant>,
 }
 
@@ -74,9 +76,9 @@ fn saved_budget(link: Option<&ServerLink>, peers: &[u32]) -> Option<u64> {
     peers.iter().find_map(|&peer_id| book.peers.get(&PeerKey { parent_key, peer_id }).and_then(|a| a.daily_mb))
 }
 
-/// A chained gate's guard is still up.
-fn held(since: Instant) -> bool {
-    since.elapsed() < CHAIN_GUARD
+/// A chained gate's guard is still up at `now`.
+fn held(since: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(since) < CHAIN_GUARD
 }
 
 /// How long a gate opened by another's answer waits before it takes one:
@@ -551,6 +553,11 @@ impl Page {
 
     /// A card's act: its tab, its links, its gate's and its sheet's.
     pub(super) fn card_act(&mut self, act: Act) {
+        self.card_act_at(act, Instant::now());
+    }
+
+    /// [`Self::card_act`] at `now`: a chained gate's guard is judged by it.
+    pub(super) fn card_act_at(&mut self, act: Act, now: Instant) {
         let card = self.open_card();
         let key = card.as_ref().map(|c| c.key.clone()).unwrap_or_default();
         let locked = self.lock.is_some();
@@ -616,8 +623,14 @@ impl Page {
                     self.open_card_sheet(&card, false);
                 }
             }
-            // A gate just opened by the answer to the one before it.
-            Act::CardKeep | Act::CardGo | Act::CardBox if self.card.chained.is_some_and(held) => {}
+            // A gate just opened by the answer to the one before it: the
+            // answer is swallowed, and the guard waits for the keys to be
+            // quiet from this one on.
+            Act::CardKeep | Act::CardGo | Act::CardBox
+                if self.card.chained.is_some_and(|t| held(t, now)) =>
+            {
+                self.card.chained = Some(now);
+            }
             Act::CardKeep => self.gate_keep(),
             Act::CardGo => self.gate_go(),
             Act::CardBox => {
@@ -2208,6 +2221,13 @@ impl Page {
         if let Some(field) = sheet.field.take() {
             sheet.want.name = field.value().trim().to_string();
         }
+        let changed = sheet.want != sheet.was;
+        // The Budget row shows the limit saved on this computer: Apply
+        // writes one, to every peer of the card's, only when the listener
+        // changed it.
+        if sheet.want.budget_mb == sheet.was.budget_mb {
+            sheet.want.budget_mb = None;
+        }
         let key = sheet.key.clone();
         if sheet.setup {
             self.send_card(worker::Cmd::SetUp { key, want: Box::new(sheet.want) });
@@ -2235,7 +2255,7 @@ impl Page {
             self.card.gate = Some(CardGate { key, kind, allow: Allow::default(), card: opened });
             return;
         }
-        if sheet.want != sheet.was {
+        if changed {
             self.send_card(worker::Cmd::Apply { key, want: Box::new(sheet.want) });
         }
     }
