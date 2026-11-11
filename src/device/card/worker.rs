@@ -41,7 +41,7 @@ use super::cards::Cards;
 use super::contract::container;
 use super::contract::device_txt::DeviceTxt;
 use super::contract::server::server_url_key;
-use super::engine::{Answers, Env, Event as RunEvent, Guard, Removal, Stop};
+use super::engine::{Answers, Env, Event as RunEvent, Expect, Guard, Removal, Stop};
 use super::history::{self, Tally};
 use super::plan::{Fit, Hidden};
 use super::setup;
@@ -163,7 +163,15 @@ impl ServerLink {
 /// test's.
 pub(crate) trait Volumes: Send + Sync {
     fn find(&self) -> io::Result<Vec<Found>>;
-    /// The card of an accepted volume; None for a refused one.
+    /// The volume `found` names as it is now, looked at again: accepted, at
+    /// the same place, with the same serial (its free space, its refusals
+    /// as they are now); None when the card isn't that one any more.
+    fn again(&self, found: &Found) -> Option<Found> {
+        let now = self.find().ok()?;
+        now.into_iter().find(|f| f.volume.path == found.volume.path && same_volume(f, found) && f.accepted())
+    }
+    /// The card of an accepted volume; None for a refused one, or one that
+    /// isn't the card `found` names any more.
     fn open(&self, found: &Found) -> Option<Box<dyn CardWrite>>;
     fn eject(&self, found: &Found) -> Result<(), String>;
 }
@@ -191,7 +199,10 @@ impl Volumes for System {
     }
 
     fn open(&self, found: &Found) -> Option<Box<dyn CardWrite>> {
-        Mounted::of(found).map(|m| Box::new(m) as Box<dyn CardWrite>)
+        // Looked at again: another card swapped in at that path since it was
+        // listed is never opened as this one.
+        let now = self.again(found)?;
+        Mounted::of(&now).map(|m| Box::new(m) as Box<dyn CardWrite>)
     }
 
     fn eject(&self, found: &Found) -> Result<(), String> {
@@ -1131,6 +1142,7 @@ impl Worker {
                 self.tell(Event::Gone { key: slot.view.key.clone() });
             }
             if self.slots.iter().any(|s| s.view.key == key) {
+                self.seen_again(&key, f);
                 continue;
             }
             let view = CardView::new(f.clone());
@@ -1152,6 +1164,29 @@ impl Worker {
             }
         }
         self.tell(Event::Watched { failed: None });
+    }
+
+    /// A card that stays in, as the OS lists it now: its free space and its
+    /// refusals are kept up to date (a remount that lifts a refusal reads
+    /// it, one that brings one stops asking), never while a run is bound to
+    /// it, whose plan was made for the card as it was.
+    fn seen_again(&mut self, key: &str, found: &Found) {
+        let running = self.running.as_ref().is_some_and(|r| r.key == key);
+        let Some(slot) = self.slot(key) else { return };
+        if running || slot.view.out || slot.view.found == *found {
+            return;
+        }
+        let was = slot.view.found.accepted();
+        slot.view.found = found.clone();
+        let now = found.accepted();
+        if was != now {
+            slot.view.read = if now { Read::Reading } else { Read::Refused };
+            slot.view.next = Next::Unasked;
+        }
+        self.told(key);
+        if now && !was {
+            self.look(key);
+        }
     }
 
     fn taken_out(&mut self, key: &str) {
@@ -1307,12 +1342,13 @@ impl Worker {
             Cmd::NewIdentity { key } => {
                 let facts = self.slot(&key).and_then(|s| s.view.facts().cloned());
                 if let Some(name) = facts.map(|f| f.name().unwrap_or("").to_string()) {
-                    self.job(&key, Job::SetUp, move |card, home, _| {
+                    let picked = self.picked(&key);
+                    self.job(&key, Job::SetUp, move |card, _, home, _| {
                         let ask = setup::Ask { label: name, new_identity: true };
                         let before = home.cards();
                         let mut cards = before.clone();
                         let mut envs = home.envs();
-                        let done = setup::set_up(card, &ask, &mut *envs, &mut cards, &mut |_| {});
+                        let done = setup::set_up_as(card, &ask, &picked, &mut *envs, &mut cards, &mut |_| {});
                         let done = done.map(|_| ()).map_err(|stop| stop.to_string());
                         if done.is_ok() {
                             let _ = keep_cards(home, &before, &cards);
@@ -1378,7 +1414,7 @@ impl Worker {
     /// the home and its server's link; one job a card at a time.
     fn job<F>(&mut self, key: &str, job: Job, work: F)
     where
-        F: FnOnce(&dyn CardWrite, &dyn Home, Option<ServerLink>) -> JobDone + Send + 'static,
+        F: FnOnce(&dyn CardWrite, &Found, &dyn Home, Option<ServerLink>) -> JobDone + Send + 'static,
     {
         let running = self.running.as_ref().is_some_and(|r| r.key == key);
         let Some(slot) = self.slot(key) else { return };
@@ -1399,22 +1435,33 @@ impl Worker {
         let (me, key) = (self.me.clone(), key.to_string());
         self.told(&key);
         std::thread::spawn(move || {
-            let done = match volumes.open(&found) {
-                Some(card) => work(&*card, &*home, link),
+            // The card as it is now: its free space at the job's start.
+            let now = volumes.again(&found);
+            let done = match now.as_ref().and_then(|now| volumes.open(now).map(|card| (card, now))) {
+                Some((card, now)) => work(&*card, now, &*home, link),
                 None => JobDone::Read(Err("the volume can't be opened".into())),
             };
             let _ = me.send(In::Job(key, done));
         });
     }
 
+    /// The card at `key` as the listener picked it: its volume serial, and
+    /// its root's card id once read. A job's or a sync's card that is
+    /// another now is written nothing.
+    fn picked(&self, key: &str) -> Expect {
+        let Some(slot) = self.slots.iter().find(|s| s.view.key == key) else { return Expect::default() };
+        let card_id = slot.view.facts().and_then(|f| f.root).map(|r| r.0);
+        Expect { serial: slot.view.found.volume.serial.clone(), card_id, commit_id: None }
+    }
+
     /// Reads the card, then asks its server what a sync would do.
     fn look(&mut self, key: &str) {
         let servers = self.servers.clone();
         let take_over = self.slot(key).is_some_and(|s| s.view.take_over);
-        let space = self.slot(key).and_then(|s| s.view.found.volume.space);
+        let serial = self.slot(key).and_then(|s| s.view.found.volume.serial.clone());
         let me = self.me.clone();
         let key_owned = key.to_string();
-        self.job(key, Job::Look, move |card, home, _| {
+        self.job(key, Job::Look, move |card, now, home, _| {
             let facts = match read(card, &home.cards()) {
                 Ok(facts) => facts,
                 Err(e) => return JobDone::Read(Err(e)),
@@ -1426,10 +1473,11 @@ impl Worker {
             let answers = Answers { new_servers: take_over, ..Answers::default() };
             let link = server.link();
             let (also, same_server) = (also_of(link), same_server(&facts, link, take_over));
-            let ask = sync::Ask { answers, also, same_server, ..sync::Ask::default() };
+            let picked = Expect { serial, ..Expect::default() };
+            let ask = sync::Ask { answers, also, same_server, picked, ..sync::Ask::default() };
             match (facts.set_up(), link) {
                 (true, Some(link)) if link.base.is_ok() => {
-                    JobDone::Looked(dry_run(card, home, link, &ask, space))
+                    JobDone::Looked(dry_run(card, home, link, &ask, now.volume.space))
                 }
                 _ => JobDone::Looked(Next::Unasked),
             }
@@ -1462,22 +1510,26 @@ impl Worker {
             return;
         };
         let found = slot.view.found.clone();
+        let picked = self.picked(key);
         let (volumes, home) = (self.setup.volumes.clone(), self.setup.home.clone());
         let (me, key) = (self.me.clone(), key.to_string());
         self.told(&key);
-        // A fit is a read alone (a dry run): it runs beside another job.
+        // A fit is a read alone (a dry run): it runs beside another job. Its
+        // free space is the card's now.
         std::thread::spawn(move || {
-            let next = match volumes.open(&found) {
-                Some(card) => {
+            let now = volumes.again(&found);
+            let next = match now.as_ref().and_then(|now| volumes.open(now).map(|card| (card, now))) {
+                Some((card, now)) => {
                     let ask = sync::Ask {
                         libraries: want.libraries.clone(),
                         change: want.change(None),
                         answers: Answers { new_servers: take_over, ..Answers::default() },
                         also: also_of(Some(&link)),
                         same_server: same_server(&facts, Some(&link), take_over),
+                        picked,
                         ..sync::Ask::default()
                     };
-                    dry_run(&*card, &*home, &link, &ask, found.volume.space)
+                    dry_run(&*card, &*home, &link, &ask, now.volume.space)
                 }
                 None => Next::Refused("the volume can't be opened".into()),
             };
@@ -1487,17 +1539,22 @@ impl Worker {
 
     fn set_up(&mut self, key: &str, want: Want) {
         let servers = self.servers.clone();
-        self.job(key, Job::SetUp, move |card, home, _| {
+        let picked = self.picked(key);
+        self.job(key, Job::SetUp, move |card, _, home, _| {
             let ask = setup::Ask { label: want.name.trim().to_string(), new_identity: false };
             let before = home.cards();
             let mut cards = before.clone();
             let mut envs = home.envs();
-            if let Err(stop) = setup::set_up(card, &ask, &mut *envs, &mut cards, &mut |_| {}) {
-                return JobDone::SetUp(Err(stop.to_string()));
-            }
+            let set = setup::set_up_as(card, &ask, &picked, &mut *envs, &mut cards, &mut |_| {});
+            let done = match set {
+                Ok(done) => done,
+                Err(stop) => return JobDone::SetUp(Err(stop.to_string())),
+            };
             let _ = keep_cards(home, &before, &cards);
             let link = want.server.as_ref().and_then(|id| servers.iter().find(|s| s.id == *id));
-            JobDone::SetUp(store(card, home, &want, link))
+            // The card it set up, by the id it has now.
+            let picked = Expect { card_id: Some(done.card_id), ..picked };
+            JobDone::SetUp(store(card, home, &picked, &want, link))
         });
     }
 
@@ -1511,14 +1568,15 @@ impl Worker {
             // Another server chosen: the next sync takes the card over.
             slot.view.take_over = want.server.is_some() && want.server != current;
         }
-        self.job(key, Job::Apply, move |card, home, _| {
+        let picked = self.picked(key);
+        self.job(key, Job::Apply, move |card, _, home, _| {
             let link = want.server.as_ref().and_then(|id| servers.iter().find(|s| s.id == *id));
-            JobDone::Applied(store(card, home, &want, link))
+            JobDone::Applied(store(card, home, &picked, &want, link))
         });
     }
 
     fn plays(&mut self, key: &str) {
-        self.job(key, Job::Plays, move |card, home, link| {
+        self.job(key, Job::Plays, move |card, _, home, link| {
             let Some(link) = link else { return JobDone::Plays(Err("no server".into())) };
             let client = match link.client() {
                 Ok(client) => client,
@@ -1597,6 +1655,11 @@ impl Worker {
             return;
         };
         let facts = slot.view.facts().cloned().unwrap_or_default();
+        let picked = Expect {
+            serial: slot.view.found.volume.serial.clone(),
+            card_id: facts.root.map(|r| r.0),
+            commit_id: None,
+        };
         slot.view.ended = None;
         slot.view.gate = None;
         slot.view.run = Some(Run { phase: Phase::Listing, started, ..Run::default() });
@@ -1608,7 +1671,7 @@ impl Worker {
         self.told(&key);
         std::thread::spawn(move || {
             let (volumes, home) = (&*volumes, &*home);
-            let on = Card { found: &found, volumes, home, link: &link, facts: &facts };
+            let on = Card { found: &found, volumes, home, link: &link, facts: &facts, picked: &picked };
             let finished = run_sync(&on, &allow, stop.clone(), accepted, &me, &key);
             let _ = me.send(In::Job(key, JobDone::Synced(Box::new(finished))));
         });
@@ -2360,6 +2423,7 @@ fn planned(synced: &sync::Synced, now: u64) -> Next {
 fn store(
     card: &dyn CardWrite,
     home: &dyn Home,
+    picked: &Expect,
     want: &Want,
     link: Option<&ServerLink>,
 ) -> Result<(), String> {
@@ -2401,7 +2465,7 @@ fn store(
         }
     };
     let mut envs = home.envs();
-    let stored = setup::store(card, &mut change, home.plays(), &mut *envs, &mut |_| {});
+    let stored = setup::store_as(card, picked, &mut change, home.plays(), &mut *envs, &mut |_| {});
     stored.map_err(|stop| stop.to_string())?;
     // The peers' daily budget lives on this computer.
     if let (Some(mb), Some(key)) = (want.budget_mb, url_key) {
@@ -2430,6 +2494,8 @@ struct Card<'a> {
     home: &'a dyn Home,
     link: &'a ServerLink,
     facts: &'a Facts,
+    /// The card as the listener picked it ([`Worker::picked`]).
+    picked: &'a Expect,
 }
 
 /// One sync, on its own thread: its progress to the worker, its end back.
@@ -2441,7 +2507,7 @@ fn run_sync(
     me: &Sender<In>,
     key: &str,
 ) -> Finished {
-    let Card { found, volumes, home, link, facts } = *on;
+    let Card { found, volumes, home, link, facts, picked } = *on;
     let failed = |why: String| Finished {
         synced: None,
         why: Some(why),
@@ -2449,7 +2515,12 @@ fn run_sync(
         removal_libs: Vec::new(),
         stopped: false,
     };
-    let Some(card) = volumes.open(found) else {
+    // The card as it is now: another swapped in at that path is never
+    // opened, and the plan's room is its free space now.
+    let Some(now) = volumes.again(found) else {
+        return failed("the volume can't be opened".into());
+    };
+    let Some(card) = volumes.open(&now) else {
         return failed("the volume can't be opened".into());
     };
     let client = match link.client() {
@@ -2479,6 +2550,7 @@ fn run_sync(
         stop: Some(stop.clone()),
         also: also_of(Some(link)),
         same_server: same_server(facts, Some(link), allow.take_over),
+        picked: picked.clone(),
         ..sync::Ask::default()
     };
     // What the run changes of cards.json, made to the file as it is at the
@@ -2486,7 +2558,7 @@ fn run_sync(
     let before = home.cards();
     let mut cards = before.clone();
     let mut envs = home.envs();
-    let space = found.volume.space;
+    let space = now.volume.space;
     let mut say = |event: RunEvent| {
         let _ = me.send(In::RunEvent(key.to_string(), event));
     };

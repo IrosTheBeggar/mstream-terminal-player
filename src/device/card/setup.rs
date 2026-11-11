@@ -114,6 +114,21 @@ pub(crate) fn set_up(
     cards: &mut Cards,
     events: &mut dyn FnMut(Event),
 ) -> Result<SetUp, Stop> {
+    set_up_as(card, ask, &Expect::default(), envs, cards, events)
+}
+
+/// [`set_up`] of the card the listener picked: `picked` is what it was when
+/// picked (the transfer worker's volume serial, and the root's card id
+/// when it had one), and a card that is another now is written nothing
+/// ([`Stop::DifferentCard`], or [`Stop::Pulled`] for one with no serial).
+pub(crate) fn set_up_as(
+    card: &dyn CardWrite,
+    ask: &Ask,
+    picked: &Expect,
+    envs: &mut dyn FnMut() -> Env,
+    cards: &mut Cards,
+    events: &mut dyn FnMut(Event),
+) -> Result<SetUp, Stop> {
     let label = ask.label.trim();
     if let Some(fault) = state::label_fault(label) {
         return Err(Stop::Refused(fault.code().into()));
@@ -129,6 +144,7 @@ pub(crate) fn set_up(
         (m.header.card_id, m.header.generation, m.commit_id)
     });
     let (card_id, generation, commit_id) = root.unwrap_or_default();
+    picked.picked(serial.as_ref(), card_id, commit_id)?;
     let old = State::of(&seen.state);
     let own = old.as_ref().filter(|s| root.is_some() && s.card_id == card_id);
     let mut copied: Vec<Copied> = Vec::new();
@@ -243,6 +259,18 @@ pub(crate) fn store(
     envs: &mut dyn FnMut() -> Env,
     events: &mut dyn FnMut(Event),
 ) -> Result<State, Stop> {
+    store_as(card, &Expect::default(), change, plays, envs, events)
+}
+
+/// [`store`] on the card the listener picked, as [`set_up_as`] checks it.
+pub(crate) fn store_as(
+    card: &dyn CardWrite,
+    picked: &Expect,
+    change: &mut dyn FnMut(&mut State),
+    plays: Rc<dyn history::Store>,
+    envs: &mut dyn FnMut() -> Env,
+    events: &mut dyn FnMut(Event),
+) -> Result<State, Stop> {
     let seen = volume::inspect(card).map_err(|_| Stop::Pulled)?;
     if !seen.newer.is_empty() {
         return Err(Stop::Guard(Guard::Newer(seen.newer)));
@@ -253,6 +281,7 @@ pub(crate) fn store(
     let state = State::of(&seen.state).filter(|s| s.card_id == card_id);
     let mut state = state.ok_or_else(not_set_up)?;
     let serial = card.serial().map_err(|_| Stop::Pulled)?;
+    picked.picked(serial.as_ref(), card_id, commit_id)?;
     let expect = Expect { serial, card_id: Some(card_id), commit_id: Some(commit_id) };
     let (knobs, answers) = (Knobs::default(), Answers::default());
     let (was_gift, posted) = (state.settings.for_someone_else, (card_id, state.plays.clone()));

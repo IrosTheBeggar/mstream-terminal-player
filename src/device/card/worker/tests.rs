@@ -32,6 +32,15 @@ impl Shelf {
     fn take(&self, key: &str) {
         self.cards.lock().unwrap().retain(|(f, _)| key_of(f) != key);
     }
+
+    /// The card at `key` as the OS lists it now (its free space, say), in
+    /// one step: never seen gone between.
+    fn relist(&self, key: &str, change: impl FnOnce(&mut Found)) {
+        let mut cards = self.cards.lock().unwrap();
+        if let Some((found, _)) = cards.iter_mut().find(|(f, _)| key_of(f) == key) {
+            change(found);
+        }
+    }
 }
 
 impl Volumes for Shelf {
@@ -1542,4 +1551,74 @@ fn a_card_filled_over_quick_connect_is_its_servers_in_the_next_session_too() {
         assert!(matches!(ended, Some(Ended::Done { .. })), "session {session}: {ended:?}");
         assert!(rig.card(&key).gate.is_none(), "{:?}", rig.card(&key).gate);
     }
+}
+
+/// The review's TV1: a card that stays in is seen as the OS lists it now, its
+/// free space among it, and the next look plans for that room; while a run is
+/// bound to it, its card stays as the run's plan took it.
+#[test]
+fn a_card_that_stays_in_is_seen_as_it_is_now_and_a_look_plans_for_its_room_now() {
+    let scratch = Scratch::new("worker-room");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    assert!(planned(rig.card(&key)).unwrap().fit.is_some_and(|f| f.fits()));
+    let full = |found: &mut Found| {
+        let space = found.volume.space.as_mut().unwrap();
+        space.free = 1 << 20;
+    };
+    rig.shelf.relist(&key, full);
+    let wanted = key.clone();
+    let room = |c: &CardView| c.found.volume.space.is_some_and(|s| s.free == 1 << 20);
+    rig.until("seen again", |f| f.cards.iter().any(|c| c.key == wanted && room(c)));
+    rig.send(Cmd::Look { key: key.clone() });
+    let wanted = key.clone();
+    rig.until("the look for the room now", |f| {
+        let full = |p: &Planned| p.fit.is_some_and(|f| !f.fits());
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(full))
+    });
+
+    // Under a run, the card stays as the run took it.
+    let scratch = Scratch::new("worker-room-run");
+    let (mut worker, shelf, key, _stop) = running_at(&scratch, Phase::Copying);
+    let before = worker.slots[0].view.found.clone();
+    shelf.relist(&key, full);
+    worker.watch();
+    assert_eq!(worker.slots[0].view.found, before);
+    worker.running = None;
+    worker.watch();
+    assert!(worker.slots[0].view.found.volume.space.is_some_and(|s| s.free == 1 << 20));
+}
+
+/// The review's TV3: what a job or a sync is bound to is the card the
+/// listener picked, its serial and its card id, never merely what is in the
+/// reader when it starts: a set-up, the settings' write and a sync of
+/// another card stop before they write anything.
+#[test]
+fn a_job_on_a_card_another_now_writes_nothing() {
+    let scratch = Scratch::new("worker-picked");
+    let sim = card(&scratch);
+    let id = read(&sim, &Cards::default()).unwrap().root.unwrap().0;
+    let before = without_lock(&sim);
+    let other = Expect { serial: Some(Serial::Fat(SERIAL ^ 1)), ..Expect::default() };
+    let another_id = Expect { card_id: Some(id ^ 1), ..Expect::default() };
+    let ask = setup::Ask { label: "Car".into(), new_identity: true };
+    for picked in [&other, &another_id] {
+        let set = setup::set_up_as(&sim, &ask, picked, &mut envs_from(1), &mut Cards::default(), &mut |_| {});
+        assert!(matches!(set, Err(Stop::DifferentCard)), "{set:?}");
+        let mut change = |state: &mut State| state.label = "Changed".into();
+        let plays: Rc<dyn history::Store> = Rc::new(Outbox(Arc::default()));
+        let stored = setup::store_as(&sim, picked, &mut change, plays, &mut envs_from(2), &mut |_| {});
+        assert!(matches!(stored, Err(Stop::DifferentCard)), "{stored:?}");
+    }
+    let (base, _fake) = server();
+    let ask = sync::Ask { picked: other, ..sync::Ask::default() };
+    let synced = sync_now(&sim, &base, &ask, &mut envs_from(3)).0;
+    let end = &synced.end;
+    assert!(matches!(end, sync::End::Halted(sync::Halt::Card(Stop::DifferentCard))), "{end:?}");
+    assert_eq!(without_lock(&sim), before, "nothing written");
+    // The card it is: the same set-up and settings go through.
+    let mine = Expect { serial: Some(Serial::Fat(SERIAL)), card_id: Some(id), commit_id: None };
+    let mut change = |state: &mut State| state.label = "Changed".into();
+    let plays: Rc<dyn history::Store> = Rc::new(Outbox(Arc::default()));
+    let stored = setup::store_as(&sim, &mine, &mut change, plays, &mut envs_from(4), &mut |_| {});
+    assert_eq!(stored.map(|s| s.label).ok().as_deref(), Some("Changed"));
 }

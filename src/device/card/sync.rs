@@ -188,6 +188,10 @@ pub(crate) struct Ask {
     /// each session): each is confirmed as this server's in the card's
     /// source, so the card names it by a key that lasts.
     pub(crate) also: Vec<u64>,
+    /// The card the listener picked, as it was then (the transfer worker's
+    /// volume serial and root card id; never its commit, which a run moves):
+    /// a card that is another now is written nothing.
+    pub(crate) picked: Expect,
     /// Read the manifest whole, whatever the schedule says.
     pub(crate) whole: bool,
     /// Plan, and write nothing.
@@ -467,7 +471,9 @@ fn run(
     ask.change.apply(&mut state.settings);
     state.settings.stored = true;
     let serial = card.serial().map_err(|_| (None, Halt::Card(Stop::Pulled)))?;
-    let expect = Expect { serial, ..Expect::default() };
+    let picked = &ask.picked;
+    let serial = picked.serial.clone().or(serial);
+    let expect = Expect { serial, card_id: picked.card_id, commit_id: None };
     let knobs = knobs_of(&state.settings);
     // The card's plays, mapped once the session has listed the card: none
     // of a card for someone else, which it is when its settings say so as
