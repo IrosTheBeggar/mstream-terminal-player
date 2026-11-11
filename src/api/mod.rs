@@ -10,6 +10,10 @@
 //! request, so a token-less client is valid and supported.
 
 pub mod server_url;
+/// The SD-card transfer's routes and its downloads to a file. Native only,
+/// as the `device` module that drives it is (src/main.rs).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod transfer;
 pub mod types;
 pub mod urls;
 // Add from YouTube's routes, with an error that keeps what its copy needs.
@@ -18,7 +22,8 @@ pub mod ytdl;
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -462,6 +467,17 @@ pub struct Client {
     /// no flag, no probe — has nothing to read. This is the next best thing:
     /// probe once, believe the answer, and stop asking for the session.
     no_waveforms: AtomicBool,
+    /// Where the card transfer's calls add every body byte they read: a
+    /// federated peer's daily quota counts JSON, art and probes as well as
+    /// files. `None` counts nothing. Set by [`transfer`]'s `with_meter`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    meter: Option<Arc<AtomicU64>>,
+    /// The card transfer's requests say `X-mStream-Purpose: copy`, which a
+    /// peer whose key forbids copies refuses (mStream's
+    /// `federation-limits.js`). Only a peer reached directly sees it: the
+    /// parent's stream proxy does not forward the header.
+    #[cfg_attr(not(test), allow(dead_code))]
+    copying: bool,
 }
 
 impl Client {
@@ -514,6 +530,8 @@ impl Client {
             local_token: None,
             plain_listings: AtomicBool::new(false),
             no_waveforms: AtomicBool::new(false),
+            meter: None,
+            copying: false,
         })
     }
 
@@ -747,9 +765,9 @@ impl Client {
             req = req.header("x-access-token", token);
         }
 
-        let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let resp = req.send().await.map_err(unreached)?;
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let bytes = resp.bytes().await.map_err(unreached)?;
         let refusal = || extract_error(&String::from_utf8_lossy(&bytes));
         match status {
             StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized),
@@ -1751,9 +1769,9 @@ impl Client {
             req = req.header("x-access-token", token);
         }
 
-        let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let resp = req.send().await.map_err(unreached)?;
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let bytes = resp.bytes().await.map_err(unreached)?;
 
         match status {
             StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized),
@@ -3083,31 +3101,46 @@ impl Multipart {
 /// Send a built request and read its answer whole: the status and the
 /// body as text.
 async fn read_answer(req: reqwest::RequestBuilder) -> Result<(StatusCode, String), ApiError> {
-    let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+    let resp = req.send().await.map_err(unreached)?;
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| ApiError::Network(e.to_string()))?;
+    let text = resp.text().await.map_err(unreached)?;
     Ok((status, text))
 }
 
-/// An answer mapped: only 401 is a session problem, the other failures
-/// carry the server's words as [`extract_error`] reads them out of the
-/// body — a 404's too on the plug-in routes (`words_on_404`).
+/// A request that got no answer, in words without its URL: a tunnel's
+/// carries its loopback token (`__lt`), and the words reach reports.
+fn unreached(e: reqwest::Error) -> ApiError {
+    ApiError::Network(e.without_url().to_string())
+}
+
+/// An answer mapped: a refusal as [`refused`] words it, else the body read
+/// as `T`.
 fn answer_of<T: DeserializeOwned>(status: StatusCode, text: &str, path: &str, words_on_404: bool) -> Result<T, ApiError> {
-    match status {
-        StatusCode::UNAUTHORIZED => return Err(ApiError::Unauthorized),
-        StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(extract_error(text))),
-        StatusCode::NOT_FOUND if words_on_404 => return Err(ApiError::NotFound(extract_error(text))),
-        StatusCode::NOT_FOUND => return Err(ApiError::NotFound(path.to_string())),
-        s if !s.is_success() => {
-            return Err(ApiError::Server { status: s.as_u16(), message: extract_error(text) });
-        }
-        _ => {}
+    if let Some(refusal) = refused(status, text, path, words_on_404) {
+        return Err(refusal);
     }
 
     serde_json::from_str(text).map_err(|e| ApiError::Decode {
         endpoint: path.to_string(),
         message: e.to_string(),
     })
+}
+
+/// What a status that is not a 2xx means: only 401 is a session problem,
+/// the other failures carry the server's words as [`extract_error`] reads
+/// them out of the body — a 404's too on the plug-in routes
+/// (`words_on_404`), where any other call's names its path. `None` for a
+/// success. The card transfer's calls, which read their answers
+/// themselves, map them through it too.
+fn refused(status: StatusCode, body: &str, path: &str, words_on_404: bool) -> Option<ApiError> {
+    match status {
+        StatusCode::UNAUTHORIZED => Some(ApiError::Unauthorized),
+        StatusCode::FORBIDDEN => Some(ApiError::Forbidden(extract_error(body))),
+        StatusCode::NOT_FOUND if words_on_404 => Some(ApiError::NotFound(extract_error(body))),
+        StatusCode::NOT_FOUND => Some(ApiError::NotFound(path.to_string())),
+        s if !s.is_success() => Some(ApiError::Server { status: s.as_u16(), message: extract_error(body) }),
+        _ => None,
+    }
 }
 
 /// A start's 409 that says the destination it showed is no longer the one
@@ -3839,6 +3872,22 @@ pub(crate) mod tests {
         assert_eq!(body, serde_json::json!({ "recommendation": { "title": "x" } }));
         let listing = wait(client.discovery_plugins_async()).unwrap();
         assert!(listing.copies(JobScope::Album) && !listing.copies(JobScope::Artist));
+    }
+
+    #[test]
+    fn a_request_that_gets_no_answer_never_says_its_url() {
+        // A port nothing listens on: bound, then let go.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let client = Client::new(&format!("http://127.0.0.1:{port}"))
+            .unwrap()
+            .with_local_token(Some("bridge-secret".into()));
+        let art = client.album_art("d.png", false).unwrap_err();
+        let words = [client.admin_logs_download().unwrap_err(), client.ping().unwrap_err(), art];
+        for e in words {
+            let said = e.to_string();
+            assert!(matches!(e, ApiError::Network(_)), "{said}");
+            assert!(!said.contains("bridge-secret") && !said.contains("__lt"), "{said}");
+        }
     }
 
     #[test]

@@ -907,7 +907,21 @@ pub(crate) const AUDIO_THREAD: &str = "mstream-audio";
 /// spawn and read as a failed open, so a malformed file costs a blend, not
 /// the terminal.
 pub fn panics_are_caught(thread: Option<&str>) -> bool {
-    thread == Some(AUDIO_THREAD) || thread == Some(crate::engine::PREPARE_THREAD)
+    thread == Some(AUDIO_THREAD)
+        || thread == Some(crate::engine::PREPARE_THREAD)
+        || card_thread(thread)
+}
+
+/// A card transfer's job, fit, eject or sync thread: each catches its own
+/// panic, and its card says why the job ended.
+#[cfg(not(target_arch = "wasm32"))]
+fn card_thread(thread: Option<&str>) -> bool {
+    thread.is_some_and(|t| crate::device::worker::CAUGHT_THREADS.contains(&t))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn card_thread(_thread: Option<&str>) -> bool {
+    false
 }
 
 /// Returns the tap alongside the command channel: the engine is built on the
@@ -3955,6 +3969,12 @@ mod tests {
         // malformed file must cost a blend, not the screen (audit #32).
         assert!(panics_are_caught(Some(crate::engine::PREPARE_THREAD)));
         assert!(!panics_are_caught(Some("mstream-api")), "the api thread is not caught");
+        // A card's job, fit, eject and sync threads catch theirs and end
+        // with why: the hook leaves the screen alone there too.
+        for name in crate::device::worker::CAUGHT_THREADS {
+            assert!(panics_are_caught(Some(name)), "{name}");
+        }
+        assert!(!panics_are_caught(Some("card-transfer")), "the worker's own thread is not caught");
         assert!(!panics_are_caught(None), "an unnamed thread is not caught");
     }
 

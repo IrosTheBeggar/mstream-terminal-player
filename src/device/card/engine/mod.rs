@@ -1,0 +1,874 @@
+//! The sync engine: every write the transfer makes to a card, in the order
+//! the firmware repo's docs/METADATA.md 2.12 lays down, so a card pulled at
+//! any moment is still one the player reads — the last commit, or the next.
+//!
+//! **In and out.** A run is given a card ([`CardWrite`], a volume the
+//! volume layer accepted and the listener picked), a *wanted card*
+//! ([`WantedCard`]: the files of a selection, each with its server's ledger
+//! fields, what its bytes will be and their size) and the card's settings
+//! ([`Knobs`]). It gives back a plan ([`Plan`]: what it will write, rename,
+//! keep and delete, and the decisions it needs, [`Guard`]), then runs it,
+//! saying what it does as it goes ([`Event`]) and what came of it
+//! ([`Outcome`]). The bytes come through a [`Fetcher`]; what the server's
+//! side of a sync adds — the plays of the card's log, a conversion's checks,
+//! a converted file's cover and tags put back, the thumbnails, the Auto DJ
+//! and waveform indexes, the mood tails — through [`Hooks`], each a no-op
+//! until its part fills it (the waveform index's keeps what its old file's
+//! slots hold, the mood tails' what the records hold).
+//!
+//! **A run, step by step** (2.12.1; the transfer plan's 2.3):
+//! - [`Session::open`]: 2.4.5's check (a newer major stops it before any
+//!   write); the card bound — its identity triple and its locks
+//!   ([`bind`]); steps 1-4 ([`settle`]): the root and the plan settled,
+//!   the private files read, the cut-rename check (a stop for a disk
+//!   check), the clean-up; then the card listed and every ledger row
+//!   matched against it ([`survey`]), and the plays hook (step 5).
+//! - [`Session::plan`]: the server's side paired with the ledger, the plan
+//!   table, the names, the guards ([`plan`]).
+//! - [`Session::run`]: `pending.bin`, the deletes, each file staged,
+//!   checked, renamed into `/music` and read back, checkpoints, thumbnails,
+//!   the Auto DJ and waveform indexes, the final commit, the collection, and a
+//!   last read of the card as the device reads it ([`run`]).
+//!
+//! A file whose source says a later run may take up its bytes (a peer's,
+//! under its daily quota: [`Fetcher::resumable`]) goes into a partial of
+//! `/.mstream/resume/` instead of a stage file, kept across runs and listed
+//! in `resume.json` as it grows (2.12.8, [`resume`]).
+//!
+//! Beside a run, a session writes what a card's set-up needs (B2): `/music`
+//! ([`Session::music_folder`]) and the card's settings, `state.json`, by
+//! 2.12.7's rule ([`private`]). A set-up's first commit is a run of an empty
+//! plan, which mints the card id.
+//!
+//! The card is the reference for every name and stamp (2.8.5, 2.3.4): what
+//! the engine records is what it reads back, never what it meant to write.
+
+mod bind;
+mod plan;
+mod private;
+mod resume;
+mod run;
+mod settle;
+mod survey;
+
+#[cfg(test)]
+pub(crate) mod fatsim;
+#[cfg(test)]
+mod tests;
+
+use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
+
+pub(crate) use self::bind::{Expect, serial_read};
+pub(crate) use self::plan::{Footprint, Plan};
+pub(crate) use self::run::CARD_WRITE;
+
+use self::bind::{Bound, Identity};
+use self::settle::Settled;
+use self::survey::{Music, Survey};
+use super::contract::WriteError;
+use super::contract::device_txt::DeviceTxt;
+use super::contract::moods::Tail;
+use super::contract::mptg::{Ledger, RecordIn};
+use super::contract::mpth::Pixels;
+use super::contract::msmf::Ack;
+use super::contract::server::{Server, Talk};
+use super::names::{self, Bytes};
+use super::volume::{CardFs, CardWrite, Private, Root};
+use super::waves::{self, Index, IndexIn, Old, Shapes};
+
+/// The writer and its version, as every file it writes names it (2.5.1's
+/// `producer`, run.lock's).
+pub(crate) fn producer() -> String {
+    format!("mstream-terminal {}", env!("CARGO_PKG_VERSION"))
+}
+
+// ── What a run is given ─────────────────────────────────────────────────────
+
+/// A server the run reads: its own (server 0), another reached by its own
+/// URL, or a federation peer (2.5.5).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Origin {
+    /// What the software reads now, for 2.11's same-server test.
+    pub(crate) talk: Talk,
+    /// How the card names it: the root's header fields when it is server 0,
+    /// else its SRVS entry.
+    pub(crate) server: Server,
+    /// Its sync manifest's `revision` (its ETag): the root's when it is
+    /// server 0, written with the final commit only; another server's is the
+    /// caller's to keep (2.12.7).
+    pub(crate) revision: String,
+    /// The manifest said `scanning: true`: no path missing from it is a
+    /// deletion (2.10.2).
+    pub(crate) scanning: bool,
+    /// The audio hashes of the server's whole manifest, when the caller read
+    /// it whole: most of a server's rows missing from it is a mass deletion
+    /// (2.10.2, step 5).
+    pub(crate) whole: Option<HashSet<[u8; 16]>>,
+}
+
+/// One file of the selection.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WantedFile {
+    /// Its server, an index into [`WantedCard::origins`].
+    pub(crate) origin: usize,
+    /// ORIG's fields as the server gives them (2.6.6): the server path, the
+    /// ids, the hashes, `modified`, `file-size`, `created-at`, `hash-v`. The
+    /// origin flags, the conversion and the server index are the engine's.
+    pub(crate) ledger: Ledger,
+    /// What goes on the card: the server's bytes, or a conversion.
+    pub(crate) bytes: Bytes,
+    /// A conversion's bitrate in kbit/s.
+    pub(crate) kbps: u16,
+    /// The bytes on the card: `file-size` for an original, an estimate for
+    /// a conversion (the names' 4 GiB check, the plan's sizes).
+    pub(crate) size: u64,
+    /// mStream's analysis, recorded when the card file's own tags have
+    /// neither a BPM nor a key (2.7: BPM_ANALYSED).
+    pub(crate) bpm10: u16,
+    pub(crate) camelot: u8,
+}
+
+/// A wanted file's bytes, unless it says otherwise: the server's own.
+impl Default for Bytes {
+    fn default() -> Bytes {
+        Bytes::Original { ogg_opus: false }
+    }
+}
+
+impl WantedFile {
+    /// ORIG's `convertedTo`: 0 for the server's bytes.
+    pub(crate) fn converted_to(&self) -> u8 {
+        match self.bytes {
+            Bytes::Converted(container) => container,
+            _ => 0,
+        }
+    }
+
+    /// The server's own bytes go on the card: the size and the MD5 are the
+    /// server's.
+    pub(crate) fn original(&self) -> bool {
+        matches!(self.bytes, Bytes::Original { .. })
+    }
+
+    /// The server's `file-size` of it, when its listing gave one: ORIG's
+    /// serverSize 0 is unknown (2.6.6), and a fetch of it then expects no
+    /// length (it trusts the answer's, and what reads back).
+    pub(crate) fn server_size(&self) -> Option<u64> {
+        Some(self.ledger.server_size).filter(|&size| size != 0)
+    }
+}
+
+/// What the card should hold of the servers this run reads. Where each
+/// file goes is the engine's to say: a file already on the card stays
+/// where the ledger has it (or where the listener moved it), and a new one
+/// is named by 2.8.3's rules against the card as listed and the rows that
+/// stay (the names layer), which only a session that has listed the card
+/// can do.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WantedCard {
+    pub(crate) origins: Vec<Origin>,
+    pub(crate) files: Vec<WantedFile>,
+}
+
+/// Q1: what happens to a file that left the selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Removal {
+    /// The card mirrors the selection: the file goes, after the list is
+    /// shown and past the gates.
+    #[default]
+    Mirror,
+    /// The card never loses a file: it stays, and stays the software's.
+    Never,
+}
+
+/// A card's settings that shape a plan (the transfer plan's section 6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Knobs {
+    pub(crate) removal: Removal,
+    /// U4: a file the listener deleted is written again.
+    pub(crate) rewrite_missing: bool,
+    /// U4: a file the listener moved is followed where it went.
+    pub(crate) follow_moves: bool,
+    /// U5: a file the listener changed is replaced by the server's — the
+    /// listener's explicit say-so (2.11). Off: kept, left out of the ledger.
+    pub(crate) replace_edits: bool,
+    /// U2: the vpath layout (`/music/<vpath>/…`, 2.8.6). None: as the card
+    /// has it, or for a card with no ledger yet, when the selection holds
+    /// more than one library.
+    pub(crate) vpath: Option<bool>,
+    /// Q1's gate: more removals than this ask first.
+    pub(crate) gate: usize,
+    /// Checkpoints (2.12.1, step 9): after this many files, or this many
+    /// seconds.
+    pub(crate) checkpoint_files: usize,
+    pub(crate) checkpoint_secs: u64,
+    /// A partial download (2.12.8) is flushed and listed in `resume.json`
+    /// again once this many more of its bytes came, or this many seconds
+    /// after its last listing: what a pulled card or a crash costs of it.
+    pub(crate) part_bytes: u64,
+    pub(crate) part_secs: u64,
+    /// The final check reads every owned file's fingerprint too.
+    pub(crate) deep_check: bool,
+}
+
+impl Default for Knobs {
+    fn default() -> Knobs {
+        Knobs {
+            removal: Removal::Mirror,
+            rewrite_missing: true,
+            follow_moves: true,
+            replace_edits: false,
+            vpath: None,
+            gate: 50,
+            checkpoint_files: 500,
+            checkpoint_secs: 300,
+            part_bytes: 8 * 1024 * 1024,
+            part_secs: 30,
+            deep_check: false,
+        }
+    }
+}
+
+/// The listener's answers to the guards of a plan (2.8's table).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Answers {
+    /// The OS's disk check has run since a cut rename was found.
+    pub(crate) disk_checked: bool,
+    /// More removals than the gate: go ahead.
+    pub(crate) removals: bool,
+    /// Most of the ledger, or of one server's files, removed: go ahead.
+    pub(crate) mass_removals: bool,
+    /// The count a yes to a removals gate named (the gate's own, or
+    /// `--allow-removals N`): a plan that removes another number asks
+    /// again, so a server that changed after the look never takes more
+    /// than was allowed. None: whatever the plan's count.
+    pub(crate) removals_seen: Option<usize>,
+    /// U6: take the listener's files that equal the selection's into the
+    /// ledger. None: not asked yet.
+    pub(crate) adopt: Option<bool>,
+    /// U7: a server that may be one the card's files came from under
+    /// another address is a server of its own.
+    pub(crate) new_servers: bool,
+    /// A copied card (2.10: B2's checks) takes an identity of its own: the
+    /// commit mints a new card id, which every file it writes carries. A
+    /// run of its own, whose plan writes, deletes and adopts nothing.
+    pub(crate) new_card_id: bool,
+}
+
+/// A decision a plan needs before its run, or a refusal (the transfer
+/// plan's 2.8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Guard {
+    /// 2.4.5: a contract file of a newer major, or a private file of a
+    /// version this software doesn't know: it writes nothing (no answer).
+    Newer(Vec<String>),
+    /// 2.12.1, step 3: a rename may have been cut between its two directory
+    /// writes, leaving two names on one cluster chain (the pairs). The run
+    /// stops before it deletes or writes anything; the OS's disk check, then
+    /// [`Answers::disk_checked`].
+    DiskCheck(Vec<(String, String)>),
+    /// U6: the listener's files that equal files of the selection, by path,
+    /// size and fingerprint: [`Answers::adopt`].
+    Adopt(Vec<String>),
+    /// Q1: the files that left the selection, more than the gate allows
+    /// ([`Answers::removals`]); or `strong` ([`Answers::mass_removals`]):
+    /// more than half the ledger left it, or most of a server's files are
+    /// gone from its whole manifest while the run would delete or replace
+    /// any (2.10.2, step 5), and the paths are every file the run would
+    /// delete or replace.
+    Removals { paths: Vec<String>, strong: bool },
+    /// U7: a server none of the card's servers is known to be, while files
+    /// on the card came from a server that can't be told apart from it, or
+    /// from another server by its own id: [`Answers::new_servers`], or the
+    /// caller confirms it as a server whose id the card doesn't know (2.11's
+    /// key rule) and plans again. `rows`: the files of those servers.
+    Server { origin: usize, rows: usize },
+}
+
+/// Why a session stops.
+#[derive(Debug)]
+pub(crate) enum Stop {
+    /// Another run holds this card: in this process, or another program on
+    /// this computer (run.lock's OS lock).
+    Busy,
+    /// The card in the reader isn't the one named or bound: its serial, its
+    /// card id or its commit differs. Nothing more is written to it.
+    DifferentCard,
+    /// The card stopped answering (pulled). Nothing more is written.
+    Pulled,
+    /// A guard that holds before anything is written: a newer format, or a
+    /// cut rename.
+    Guard(Guard),
+    /// The plan's decisions still to answer.
+    Unanswered(Vec<Guard>),
+    /// A plan made in another session.
+    StalePlan,
+    /// What the plan or the run won't do: a layout the device can't keep, a
+    /// path the run doesn't own, a file a writer refuses. The card is left
+    /// as it is for the next run to recover.
+    Refused(String),
+    /// A write the card refused (full, read-only, damaged), the card still
+    /// the bound one: what the run did so far stays for the next to recover.
+    Card(io::Error),
+}
+
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stop::Busy => f.write_str("another run holds this card"),
+            Stop::DifferentCard => f.write_str("this is a different card"),
+            Stop::Pulled => f.write_str("the card stopped answering"),
+            Stop::Guard(g) => write!(f, "a guard holds: {g:?}"),
+            Stop::Unanswered(g) => write!(f, "{} decisions to answer", g.len()),
+            Stop::StalePlan => f.write_str("a plan of another session"),
+            Stop::Refused(why) => write!(f, "refused: {why}"),
+            Stop::Card(e) => write!(f, "the card refused a write: {e}"),
+        }
+    }
+}
+
+// ── What a run says ─────────────────────────────────────────────────────────
+
+/// What a run does, as it does it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Event {
+    /// A run.lock with no live lock behind it was taken over (2.12.7): what
+    /// it held, informational.
+    TookOver(String),
+    /// A plan of another card (its card id, not the root's) was found and
+    /// deleted: none of its targets is this card's work (2.11).
+    ForeignPlan(u64),
+    /// A file left the card.
+    Deleted(String),
+    /// Bytes of a file arriving, so far.
+    Progress { path: String, bytes: u64 },
+    /// A file is in place, read back: its path as stored, its size.
+    Wrote { path: String, bytes: u64 },
+    /// A file moved on the server, moved on the card.
+    Renamed { from: String, to: String },
+    /// A file failed and was skipped: its server path and why.
+    Failed { server_path: String, why: String },
+    /// A commit: its generation, and whether it ended the run.
+    Committed { generation: u32, last: bool },
+    /// The final commit would say what the root says already, and isn't made:
+    /// the run goes on to its last look all the same.
+    Unchanged,
+    /// A sync's server side read (B4's progress): its listing in hand, the
+    /// plan still to make.
+    Listed,
+    /// A sync's plan made, its run about to start: the files it fetches and
+    /// their bytes (B4's progress bar).
+    Planned { files: usize, bytes: u64 },
+    /// The final commit's waveform index: the recordings the server has
+    /// answered for so far, of those asked.
+    Waves { done: usize, of: usize },
+}
+
+/// What a plan or a run reports beside its work (2.8.4, 2.10.2, U4-U5).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Report {
+    /// U5: files the listener changed, kept as they are and left out of the
+    /// ledger.
+    pub(crate) edited: Vec<String>,
+    /// U4: ledger files no longer on the card, left out of the ledger (the
+    /// listener deleted them, and the run doesn't write them again).
+    pub(crate) gone: Vec<String>,
+    /// Ledger files whose server can't be told (an SRVS entry that breaks
+    /// 2.5.5's rules): the listener's from now on.
+    pub(crate) unknown: Vec<String>,
+    /// Files that left the selection and stay ([`Removal::Never`]).
+    pub(crate) kept: Vec<String>,
+    /// Files the names refused (2.8.3, 2.8.4).
+    pub(crate) refused: Vec<names::Skipped>,
+    /// Folders past about 2,000 entries (2.8.4).
+    pub(crate) big_folders: Vec<(String, usize)>,
+    /// Files that failed in the run: the server path and why.
+    pub(crate) failed: Vec<(String, String)>,
+    /// Deletes, replacements and moves not made: the file changed between
+    /// the listing and its turn, and is the listener's now (2.11).
+    pub(crate) spared: Vec<String>,
+    /// Ledger files the card has at a path no record may name (past 2.6.3's
+    /// 248 bytes, as the listener moved or spelled it): the listener's now,
+    /// and the file written again where the ledger can have it (U4).
+    pub(crate) unfollowed: Vec<String>,
+}
+
+/// What a run came to.
+#[derive(Debug)]
+pub(crate) struct Outcome {
+    /// The root it left: its generation, card id and commit id.
+    pub(crate) generation: u32,
+    pub(crate) card_id: u64,
+    pub(crate) commit_id: u64,
+    /// Files the final ledger lists.
+    pub(crate) records: usize,
+    pub(crate) written: usize,
+    pub(crate) renamed: usize,
+    pub(crate) deleted: usize,
+    /// The source stopped the run (a quota, lost sign-in): why. Its plan
+    /// stays on the card for the next run to take up (2.12.8).
+    pub(crate) parked: Option<String>,
+    pub(crate) report: Report,
+    /// The files of the selection the run passed by (each origin and server
+    /// path): failed, spared, or a name the card had. A final commit that
+    /// reads server 0 and missed one of its files names no revision of it
+    /// (2.5.1: "" unknown), so the next run reads its manifest whole; another
+    /// server's revision is the caller's to withhold.
+    pub(crate) missed: Vec<(usize, String)>,
+    /// What went wrong after the final commit (the plan's or the leftovers'
+    /// clean-up), which the next run finishes: the commit stands.
+    pub(crate) notes: Vec<String>,
+    /// The card read back as the device reads it (2.3, step 16).
+    pub(crate) verified: Result<(), String>,
+    /// The `state.json` [`Hooks::state`] gave, written, or why not; Ok when
+    /// it gave none.
+    pub(crate) stored: Result<(), String>,
+}
+
+// ── Where the bytes come from, and what other parts add ─────────────────────
+
+/// What a fetch said of the bytes it wrote.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Fetched {
+    /// The answer's Content-Type: a conversion's is checked (B1's hook).
+    pub(crate) content_type: Option<String>,
+}
+
+/// A fetch that failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Failed {
+    pub(crate) why: String,
+    /// The whole run must stop, not only this file: a quota, lost
+    /// sign-in, a server gone. The run parks at a checkpoint.
+    pub(crate) stop: bool,
+}
+
+/// A partial a fetch takes up (2.12.8): the first `bytes` of the file are
+/// on the card already, fetched under `validator` — their ETag, else the
+/// HTTP date of the server's `modified` — which the rest is asked for under
+/// (If-Range).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Have {
+    pub(crate) bytes: u64,
+    pub(crate) validator: String,
+}
+
+/// Where a resumable fetch's bytes go: the card's partial (2.12.8).
+pub(crate) trait Part: Write {
+    /// The answer is good, and its bytes go from `from` on: the partial's
+    /// before it kept ([`Have::bytes`]), or at 0 the partial started over —
+    /// the server's file changed. `validator` is the answer's (its ETag,
+    /// else its Last-Modified). Before the answer's first byte; not at all
+    /// when the partial holds the whole file already.
+    fn answered(&mut self, from: u64, validator: Option<&str>) -> io::Result<()>;
+}
+
+/// The source of a file's bytes: the server over HTTP, the local disk, a
+/// peer, a local ffmpeg (the transfer plan's 2.4, 2.5).
+pub(crate) trait Fetcher {
+    /// The file's bytes, written into `into` from their first byte.
+    fn fetch(&mut self, file: &WantedFile, into: &mut dyn Write) -> Result<Fetched, Failed>;
+    /// `len` bytes from `start` of the source's file (fewer at its end):
+    /// the server's side of a fingerprint, for U6's adoption.
+    fn read_range(&mut self, file: &WantedFile, start: u64, len: usize) -> Result<Vec<u8>, Failed>;
+    /// A later run may take up the file's bytes where this one leaves them
+    /// (2.12.8): a peer's, whose daily quota a second fetch would spend
+    /// again. Only the server's own bytes can be (a conversion streams with
+    /// no ranges); their fetches go through [`Fetcher::fetch_part`].
+    fn resumable(&self, _file: &WantedFile) -> bool {
+        false
+    }
+    /// [`Fetcher::fetch`] into a partial that holds `have`'s bytes of the
+    /// file already, when there is one: the rest, asked for under its
+    /// validator, or the whole file when the server's changed, the partial
+    /// told which ([`Part::answered`]). This one starts it over.
+    fn fetch_part(
+        &mut self,
+        file: &WantedFile,
+        _have: Option<&Have>,
+        into: &mut dyn Part,
+    ) -> Result<Fetched, Failed> {
+        let started = into.answered(0, None);
+        started.map_err(|e| Failed { why: e.to_string(), stop: false })?;
+        self.fetch(file, into)
+    }
+    /// `file` waits for a later run, and why: every file of a peer whose
+    /// day's quota or budget is spent (2.12.8's parking, of one source
+    /// alone), or one file its day can't take whole now. Asked before each
+    /// fetch and after one that failed: a file that waits is neither
+    /// fetched nor skipped, and stays in the plan of the checkpoint the run
+    /// ends with, the other files done first.
+    fn waits(&self, _file: &WantedFile) -> Option<String> {
+        None
+    }
+}
+
+/// An album folder as the thumbnail step sees it (2.14).
+pub(crate) struct Album<'a> {
+    /// Relative to `/music` (2.14.1's album folder).
+    pub(crate) folder: &'a str,
+    /// Its files: each card path and ledger row, the row's `server` the
+    /// run's numbering of the card's servers ([`Plan::origin_at`] says
+    /// which origin each one read is).
+    pub(crate) files: Vec<(&'a str, &'a Ledger)>,
+    /// Its thumbnail is on the card and reads as its own (2.12.1, step 10).
+    pub(crate) on_card: bool,
+}
+
+/// What becomes of an album's thumbnail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Cover {
+    /// The one on the card, if it is there and reads as the album's.
+    Keep,
+    /// A new thumbnail from these pixels (`source_bytes`: the image's size).
+    New { pixels: Pixels, source_bytes: u32 },
+    /// No thumbnail: the device's own cover order (2.14.3).
+    Gone,
+}
+
+/// What the final commit's index steps are given (2.13, AUTODJ-INDEX.md 7;
+/// 2.21, WAVEFORM-INDEX.md 7).
+pub(crate) struct Commit<'a> {
+    pub(crate) generation: u32,
+    pub(crate) card_id: u64,
+    /// Unix seconds now: a new file's builtTime.
+    pub(crate) now: u32,
+    /// The commit's records, each with its ledger row.
+    pub(crate) records: &'a [RecordIn],
+    pub(crate) device: &'a DeviceTxt,
+    /// The index the current root names, when it is valid.
+    pub(crate) old: Option<&'a [u8]>,
+    /// The waveform index the current root names, when it is valid and the
+    /// card's player reads one, joined through the tags ledger of the root the
+    /// run began from. Read for this step alone: a run holds none of its bytes
+    /// till then, a look or a parked run never reads them, and a file of 64 MB
+    /// costs no more than a commit's moment.
+    pub(crate) old_waves: Option<&'a Old<'a>>,
+    /// Each origin's server in the records' numbering (their ledger's
+    /// `server`); None for one with no record in the commit.
+    pub(crate) origins: Vec<Option<u16>>,
+}
+
+impl Commit<'_> {
+    /// WAVEFORM-INDEX.md 7.3's answer for the bars a run's fetch brought, the
+    /// old file's slots that still hold beside them.
+    pub(crate) fn waves_index(&self, fetched: &Shapes) -> Result<Index, WriteError> {
+        let (generation, card_id, records) = (self.generation, self.card_id, self.records);
+        let old = self.old_waves;
+        waves::index(self.device, &IndexIn { generation, card_id, records, old, fetched })
+    }
+}
+
+/// The final commit's Auto DJ index (AUTODJ-INDEX.md 7.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AutoDj {
+    /// The new root names none.
+    None,
+    /// The new root names the old file again.
+    Same,
+    /// A new file, `autodj-<generation>.bin` of this commit.
+    New(Vec<u8>),
+}
+
+/// The final commit's waveform index (WAVEFORM-INDEX.md 7.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Waves {
+    /// The new root names none.
+    None,
+    /// The new root names the old file again.
+    Same,
+    /// A new file, `waves-<generation>.bin` of this commit.
+    New(Vec<u8>),
+}
+
+impl From<Index> for Waves {
+    fn from(index: Index) -> Waves {
+        match index {
+            Index::None(_) => Waves::None,
+            Index::Same => Waves::Same,
+            Index::New(file) => Waves::New(file),
+        }
+    }
+}
+
+/// The final commit's mood tails (METADATA.md 2.6.4; the player's
+/// docs/MOOD-FILTERS.md 5.2), laid over its records once the index steps
+/// are done with them and before the commit is weighed: equal scores make
+/// no commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Moods {
+    /// Each record's tail as the run holds it: carried (a file fetched again
+    /// over its row keeps the row's), or none for a file new to the card.
+    Keep,
+    /// No record keeps one (a card for someone else): rows of 72 at minor 0
+    /// again.
+    Clear,
+    /// These records' tails, by path (8 zero bytes clear one); a record not
+    /// named keeps its own.
+    Overlay(HashMap<String, Tail>),
+}
+
+/// What other parts add to a run, each a no-op here ([`NoHooks`]): B15's
+/// plays, B1's conversion checks, retags, covers, Auto DJ index and mood
+/// tails (kept). The waveform index's is as a fetch that got no answer.
+pub(crate) trait Hooks {
+    /// Step 5, once the card is listed: the new plays of the card's log,
+    /// mapped through the tags file of the root that counts before a
+    /// checkpoint deletes it (2.12.1; 2.20.6), its stamps held to `skew`,
+    /// the uniform skew of this listing (2.3.4). Before anything is planned
+    /// or written to `/music`.
+    fn plays(&mut self, _card: &dyn CardFs, _root: Option<&Root>, _skew: i32) {}
+    /// Step 8: a conversion's bytes are the ones asked for (the type, the
+    /// length within 1 s of the manifest's). Err: the file is skipped.
+    fn conversion(
+        &mut self,
+        _file: &WantedFile,
+        _fetched: &Fetched,
+        _card: &dyn CardFs,
+        _stage: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Step 9, before a file's record is read: what a conversion dropped
+    /// (the cover, the source's own BPM and key) written back into the
+    /// staged file. Err: the file is skipped.
+    fn before_record(
+        &mut self,
+        _file: &WantedFile,
+        _card: &dyn CardWrite,
+        _stage: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Step 10: an album folder's thumbnail.
+    fn cover(&mut self, _album: &Album<'_>) -> Cover {
+        Cover::Keep
+    }
+    /// The final commit's index steps may keep the card waiting long, on a
+    /// server, ahead of that commit's first write: the files a run copied are
+    /// named by a checkpoint before them.
+    fn long_index_steps(&self) -> bool {
+        false
+    }
+    /// Step 11: the final commit's Auto DJ index.
+    fn autodj(&mut self, _commit: &Commit<'_>) -> AutoDj {
+        AutoDj::None
+    }
+    /// Step 11, after the Auto DJ index: the final commit's waveform index,
+    /// from what its fetch brought, saying as it goes ([`Event::Waves`]). A
+    /// stopped fetch is no stop: the rows are what came, and the table answers.
+    /// With no fetch at all, the old file's slots that still hold: a run with
+    /// no server to ask (a copied card's new identity) loses no shape.
+    fn waves(&mut self, commit: &Commit<'_>, _events: &mut dyn FnMut(Event)) -> Waves {
+        commit.waves_index(&Shapes::new()).map_or(Waves::Same, Waves::from)
+    }
+    /// Step 11, beside the waveform index: the final commit's mood tails. A
+    /// checkpoint asks for none, and carries the tails as the run holds them.
+    fn moods(&mut self, _commit: &Commit<'_>) -> Moods {
+        Moods::Keep
+    }
+    /// The plays a commit acknowledges (2.5.6), from the root's before:
+    /// each raised to the software's mark, never lowered. Only a commit the
+    /// run makes anyway carries them: a run that changes nothing else makes
+    /// none for them.
+    fn acks(&mut self, carried: &[Ack]) -> Vec<Ack> {
+        carried.to_vec()
+    }
+    /// The run's end, before the card is let go: the card's `state.json` as
+    /// the run leaves it (2.12.7; `seq`, the one the file must have),
+    /// written under the run's own lock and binding. None: as it is.
+    fn state(&mut self, _outcome: &Outcome, _seq: u64) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// No part added yet.
+pub(crate) struct NoHooks;
+
+impl Hooks for NoHooks {}
+
+/// The run's clock and ids: the system's, or fixed ones in the tests.
+pub(crate) struct Env {
+    /// Unix seconds now: commitTime, run.lock's start.
+    pub(crate) now: Box<dyn FnMut() -> u64 + Send>,
+    /// A random u64, never 0: commitIds, the runId, a new cardId.
+    pub(crate) id: Box<dyn FnMut() -> u64 + Send>,
+    /// The writer and its version ([`producer`]).
+    pub(crate) producer: String,
+}
+
+impl Env {
+    pub(crate) fn system() -> Env {
+        let since = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH);
+        let now = move || since(std::time::SystemTime::now()).map_or(0, |d| d.as_secs());
+        Env { now: Box::new(now), id: Box::new(|| fastrand::u64(..)), producer: producer() }
+    }
+
+    fn id(&mut self) -> u64 {
+        loop {
+            let id = (self.id)();
+            if id != 0 {
+                return id;
+            }
+        }
+    }
+
+    fn now(&mut self) -> u64 {
+        (self.now)()
+    }
+}
+
+// ── The session ─────────────────────────────────────────────────────────────
+
+/// One card, bound, settled and listed: plans are made against it, and one
+/// of them runs. Dropping it lets the card go without deleting run.lock
+/// (the next run takes it over); [`Session::close`] deletes it.
+pub(crate) struct Session<'c> {
+    card: &'c dyn CardWrite,
+    bound: Bound<'c>,
+    env: Env,
+    knobs: Knobs,
+    /// Ties a plan to this session's listing.
+    token: u64,
+    run_id: u64,
+    settled: Settled,
+    device: DeviceTxt,
+    music: Music,
+    survey: Survey,
+    /// Files that leave the card whatever Q1's setting says
+    /// ([`Session::let_go`]).
+    leaving: HashSet<String>,
+}
+
+impl<'c> Session<'c> {
+    /// Opens a card for a run: 2.4.5's check, the card bound to the run
+    /// ([`Expect`]: what the caller says the card is), steps 1-4 of 2.12.1,
+    /// and the card listed and matched. A stop leaves the card as steps
+    /// 1-4 left it.
+    pub(crate) fn open(
+        card: &'c dyn CardWrite,
+        expect: &Expect,
+        knobs: Knobs,
+        answers: &Answers,
+        mut env: Env,
+        hooks: &mut dyn Hooks,
+        events: &mut dyn FnMut(Event),
+    ) -> Result<Session<'c>, Stop> {
+        let newer = settle::newer(card).map_err(|_| Stop::Pulled)?;
+        if !newer.is_empty() {
+            return Err(Stop::Guard(Guard::Newer(newer)));
+        }
+        let found = bind::look(card, expect.serial.as_ref())?;
+        expect.matches(&found)?;
+        let (token, run_id) = (env.id(), env.id());
+        let note = bind::note(run_id, env.now(), &env.producer);
+        let (mut bound, stale) = Bound::take(card, found, &note)?;
+        if let Some(stale) = stale {
+            events(Event::TookOver(stale));
+        }
+        let mut look = || -> Result<_, Stop> {
+            let settled = settle::settle(card, &mut bound, answers)?;
+            let music = Music::list(card).map_err(|e| bound.failed(e))?;
+            let survey = survey::survey(card, &music, &settled, &knobs).map_err(|e| bound.failed(e))?;
+            let device = settle::device_txt(card).map_err(|e| bound.failed(e))?;
+            Ok((settled, music, survey, device))
+        };
+        let (settled, music, survey, device) = match look() {
+            Ok(looked) => {
+                if let Some(card_id) = looked.0.foreign {
+                    events(Event::ForeignPlan(card_id));
+                }
+                hooks.plays(card, looked.0.root.as_ref(), looked.2.skew);
+                looked
+            }
+            // A card still the bound one is let go; a pulled or different
+            // one is never written again, run.lock included.
+            Err(stop @ (Stop::Pulled | Stop::DifferentCard)) => return Err(stop),
+            Err(stop) => {
+                bound.release();
+                return Err(stop);
+            }
+        };
+        Ok(Session {
+            card,
+            bound,
+            env,
+            knobs,
+            token,
+            run_id,
+            settled,
+            device,
+            music,
+            survey,
+            leaving: HashSet::new(),
+        })
+    }
+
+    /// The plans made from now on take these files off the card — each by
+    /// its path as the tags file has it — once they are no longer wanted,
+    /// even on a card that never loses a file (Q1's [`Removal::Never`]): a
+    /// multi-card set's files that the card of their range holds now (B7).
+    /// They pass the gates as any removal does.
+    pub(crate) fn let_go(&mut self, paths: HashSet<String>) {
+        self.leaving = paths;
+    }
+
+    /// The card's settings and state (`state.json`, 2.12.7), as step 2
+    /// settled it.
+    pub(crate) fn state(&self) -> &Private {
+        &self.settled.state
+    }
+
+    /// The card's `/.player/device.txt`, or its no-file values (2.15).
+    pub(crate) fn device(&self) -> &DeviceTxt {
+        &self.device
+    }
+
+    /// The root that counts, as step 1 settled it (2.5.4), and the tags file
+    /// it names: the committed ledger a plan is made against.
+    pub(crate) fn root(&self) -> Option<&Root> {
+        self.settled.root.as_ref()
+    }
+
+    /// A cut or parked run's plan is on the card (2.12.5): its writes still
+    /// to do may be files the root's ledger doesn't name yet.
+    pub(crate) fn pending(&self) -> bool {
+        self.settled.pending.is_some()
+    }
+
+    /// The identity the run is bound to.
+    pub(crate) fn identity(&self) -> (Option<super::volume::Serial>, u64, u64) {
+        let Identity { serial, card_id, commit_id } = self.bound.id.clone();
+        (serial, card_id, commit_id)
+    }
+
+    /// `/music`, made when the card has none (2.8.1: the software creates
+    /// it if missing, and never deletes it). True when this made it.
+    pub(crate) fn music_folder(&mut self) -> Result<bool, Stop> {
+        if self.music.top.is_some() {
+            return Ok(false);
+        }
+        self.bound.alive()?.mkdir("/music").map_err(|e| self.bound.failed(e))?;
+        self.music.top = Some("music".into());
+        self.music.dirs.insert(String::new(), Vec::new());
+        Ok(true)
+    }
+
+    /// A plan for this card: the selection paired with the ledger, the
+    /// table's actions, the names, and the decisions it needs. Plan again
+    /// with new answers as often as needed.
+    pub(crate) fn plan(
+        &mut self,
+        wanted: &WantedCard,
+        answers: &Answers,
+        fetcher: &mut dyn Fetcher,
+    ) -> Result<Plan, Stop> {
+        plan::plan(self, wanted, answers, fetcher)
+    }
+
+    /// Lets the card go without a run: run.lock closed and deleted.
+    pub(crate) fn close(self) {
+        self.bound.release();
+    }
+}

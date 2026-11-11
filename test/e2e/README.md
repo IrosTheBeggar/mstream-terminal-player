@@ -40,6 +40,14 @@ room against the taste route, is described in run.sh):
   written", `d` opens Details, Esc leaves. Then, without expect, `device
   list` on two fake boards, `--yes` writing a fresh board end to end, and a
   held port refused.
+- **J** — the SD-card transfer: the fake with `FAKE_LIBRARY=1` serves a
+  made-up library on the routes a card sync reads (the paged sync
+  manifest with its ETag and 304, `metadata/batch`, `/media` with Range
+  and HEAD, `/transcode`, album art, embeddings), checked without expect;
+  and the hidden `device card-sync` refuses a volume that isn't one. A
+  sync itself needs a card in a reader, which CI has none of: the Rust
+  tests run one end to end with a host folder as the card
+  (src/device/card/sync/tests.rs).
 - **K** — Keep a copy, end to end (`FAKE_TASTE=1 FAKE_PLUGINS=1`: the
   ping's `discoveryPlugins`, the plug-in listing, a throwaway `copies`
   destination, jobs that walk queued → running → done on the wall clock):

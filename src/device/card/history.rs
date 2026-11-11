@@ -1,0 +1,1684 @@
+//! A card's play history, to its server (the transfer plan's part B15; the
+//! firmware repo's docs/METADATA.md 2.20.6 and 2.5.6). The player logs
+//! every play of a card file in `/.player/plays*.jnl` ([`mppl`]); with the
+//! card in this computer's reader, the software reads the log, maps each new
+//! play through the card's ledger to the server file it is a copy of, and
+//! posts it to `POST /api/v1/stats/plays`, backdated by its own start and
+//! idempotent by its id.
+//!
+//! **A look** ([`History::look`]: the engine's plays hook, step 5 of a run,
+//! once the card is listed; or the hidden `device card-plays`, which only
+//! reads the card):
+//! - the card's part of the outbox taken, whatever the card holds now: the
+//!   plays mapped before wait there for their server;
+//! - the log's files read, each slot judged by the kit; a card that fails a
+//!   read is looked at no further, so no play is ever passed over;
+//! - the new plays: above the posted mark of their device and epoch in the
+//!   card's `state.json` (2.12.7);
+//! - each mapped through the tags file of the root that counts, by its path
+//!   hash, held to its row's size and FAT time under the listing's skew
+//!   ([`resolve`]): the row's server path on the row's server, or not sent
+//!   and counted ([`Unsent`]: the listener's own file, a file that changed,
+//!   a play from before the clock was ever set, a row whose server the card
+//!   can't tell);
+//! - on a card for someone else (its settings' word, [`History::gift()`]),
+//!   none mapped at all, with a ledger or without: each new play that
+//!   wasn't mapped before the card was marked is counted and settled as it
+//!   is, unsent, and the mark rises over it. The card's gift ranges take
+//!   it in too ([`History::gift_ranges()`], `giftPlays` in its state file:
+//!   of each device and epoch, the seqs from the lowest counted so to the
+//!   highest, split where a play between them wasn't), stored by the write
+//!   that stores the marks and never ahead of it: on any computer, and
+//!   whatever the settings say by then, a play in a range is counted so
+//!   and never mapped, so nothing of the time the card was someone else's
+//!   reaches an account, then or once the card is the listener's own
+//!   again. A play mapped before the card was marked lies below its
+//!   range, and is the listener's own on every computer;
+//! - the plays to send saved in the outbox ([`Outbox`], `card-plays.json`
+//!   in the config folder, written whole) before the run writes anything:
+//!   a checkpoint deletes the tags file they map through. A sync whose
+//!   plays to send are in no outbox after its post, since a save failed,
+//!   stops before it plans ([`History::unstored`]).
+//!
+//! **The post** ([`History::post`]): a path the server moved since the
+//! ledger was written is found again by its audio hash in the server's
+//! whole manifest ([`History::remap`]); then the plays whose row's server
+//! is the one read now (2.11's test; a peer's go to its parent, with the
+//! peer's id and a snapshot of the track) go in batches of 200, each answer
+//! saved as it comes: accepted, duplicates and rejected alike are settled,
+//! but a rejection that may pass:
+//! - a server in a scan answers that it doesn't know a track its scan
+//!   hasn't reached: such a play settles only when a whole listing this
+//!   run read, trusted for deletions, lacks its path
+//!   ([`History::listing`]); else it waits, and while an untrusted listing
+//!   lacks its path it isn't even sent;
+//! - a server whose clock is off refuses a start its own clock finds ahead
+//!   or too old: the play waits while this computer's clock finds the
+//!   start recent, and settles when it is truly ahead;
+//! - either waits 30 days from its start at most ([`WAIT_MS`]); a start
+//!   ahead of this computer's clock (its clock slow, or the player's
+//!   wrong) from when this computer first held the play instead.
+//!
+//! A play the server's schema refuses is never sent and settles as one not
+//! sent: it would fail every batch it rode in. One it refuses that this
+//! software didn't know to hold back fails its batch all the same: the
+//! batch's plays then go one by one, and the play refused alone settles so
+//! too, once the server has taken another call of the post. With none taken
+//! the fault may be the request's: the play waits like the others a server
+//! turns away, 30 days from its start at most. Plays of another server, and
+//! those of a post that failed, wait in the outbox for a run that reads
+//! their server. A card for someone else posts none: the plays that waited
+//! from before it was one wait on. A play that waits is never forgotten for
+//! the card's mark having passed it (its log lost the slot, or another
+//! computer's run settled it): it goes to its server when that is the one
+//! read, which answers a play it has as a duplicate, and is forgotten only
+//! by a run that reads another server.
+//!
+//! **The marks** ([`History::marks`]): each device and epoch's rises over
+//! the plays settled or not sent, to the first that waits. A sync stores
+//! them in the card's state file at its end, and raises its commits' ACKS
+//! to them ([`History::acks`]) so the device may trim its log, only in a
+//! commit the run makes anyway: `device card-plays` writes nothing to the
+//! card, ACKS included. Only the card holds its marks: the outbox keeps the
+//! ids the server settled, which are the board's own (a MAC, a random
+//! epoch), so a card copied with its id never takes another's plays for
+//! settled. A crash between a post and the outbox saying so only sends
+//! those plays again, which the server answers as duplicates.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::{self, Write};
+use std::rc::Rc;
+
+use serde_json::{Map, Value, json};
+
+use super::contract::device_txt::DeviceTxt;
+use super::contract::fat::skew;
+use super::contract::mppl::{self, FILE_BYTES, Log, LogFile, NAMES, Slot};
+use super::contract::mptg::{Entry, Ledger, Tags};
+use super::contract::msmf::Ack;
+use super::contract::prim::{hex, hex16};
+use super::contract::server::{
+    NO_INSTANCE, Server, Servers, Talk, Verdict, instance_of, server_url_key,
+};
+use super::contract::text::{ALBUM, ARTIST, TITLE};
+use super::engine::Hooks;
+use super::names::match_key;
+use super::state::{GiftRange, State, device_of, from_hex, hex as id_hex, marks_value, merged};
+use super::volume::{self, CardFs, Mounted, Root};
+use crate::api::transfer::{
+    CardPlay, MANIFEST_PAGE_MAX, Manifest, ManifestEntry, PLAYS_PER_CALL, PlayClient, PlayOutcome,
+    PlaySource, PlayTrack, play_fault, play_version,
+};
+use crate::api::types::RejectedPlay;
+use crate::api::{ApiError, Client, wait};
+
+/// Who reports a card's plays: the player, by its card (2.20.6's table).
+pub(crate) const CLIENT: &str = "mstream-core2";
+/// How long a play waits for a server that turned it away for a reason
+/// that may pass (a track it doesn't know while it scans, a time its clock
+/// disagrees with): this long from the play's start, by this computer's
+/// clock. Past it the server's word settles the play, so those of a file
+/// truly gone can't pile up for good.
+pub(crate) const WAIT_MS: u64 = 30 * 86_400_000;
+/// How far ahead of its clock the server takes a start (mStream's
+/// `FUTURE_SKEW_MS`): this computer's clock allows a rejected one as much.
+const AHEAD_MS: u64 = 5 * 60 * 1000;
+/// mStream's words for a play whose path names no track it has scanned,
+/// and for one whose start is ahead of its clock or older than it keeps
+/// (its `REASONS`).
+const UNKNOWN_TRACK: &str = "unknown-track";
+const BAD_TIME: &str = "bad-time";
+/// Why a card for someone else isn't made the listener's own while its log
+/// can't be read ([`History::blind`]): what the sync and the settings'
+/// store that would have done it refuse with.
+pub(crate) const LOG_UNREAD: &str = "the card's play log can't be read: the card stays one for \
+                                     someone else, so that none of its plays is sent";
+
+// ── Where a play goes ───────────────────────────────────────────────────────
+
+/// The server a play is posted to: the one that filled its row, or for a
+/// federation peer's row the peer's parent, with the peer's id there
+/// (2.5.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct To {
+    /// A server reached by its own URL, never a peer: its instance when the
+    /// card knows it, its URL's key.
+    pub(crate) server: Server,
+    pub(crate) peer: Option<u32>,
+}
+
+impl To {
+    /// Where a play of a row of server `index` goes; None for a server the
+    /// card can't tell (2.5.5: an entry that breaks a writer rule, or none).
+    pub(crate) fn of(servers: &Servers, index: usize) -> Option<To> {
+        let srv = servers.get(index)?;
+        if !srv.is_peer() {
+            return Some(To { server: Server::direct(srv.instance, srv.url_key), peer: None });
+        }
+        // The parent as the card has it, else by its key alone.
+        let parent = servers.parent(srv.parent_key).and_then(|i| servers.get(i));
+        let server = match parent {
+            Some(p) => Server::direct(p.instance, p.url_key),
+            None => Server::direct(NO_INSTANCE, srv.parent_key),
+        };
+        Some(To { server, peer: Some(srv.peer_id) })
+    }
+
+    /// The server read now is this one, by 2.11's test: a play goes only
+    /// there.
+    pub(crate) fn reached(&self, talk: &Talk) -> bool {
+        let talk = Talk { peer: None, ..talk.clone() };
+        Servers { root: self.server, entries: Vec::new() }.same_root(&talk) == Verdict::Same
+    }
+}
+
+// ── A play to send ──────────────────────────────────────────────────────────
+
+/// What a peer's play says of its track, which its parent can't look up
+/// (mStream's federated plays): from the row's record, and the row's file
+/// hash as the player's own plays of a peer's track give it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Snapshot {
+    pub(crate) title: String,
+    pub(crate) artist: String,
+    pub(crate) album: String,
+    pub(crate) duration_ms: u32,
+    /// Lowercase hex; "" for none.
+    pub(crate) hash: String,
+}
+
+/// A play mapped to its server's file, waiting to be posted: what the
+/// outbox keeps of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Owed {
+    /// The play's id (2.20.4), and its key.
+    pub(crate) id: String,
+    pub(crate) device_id: [u8; 6],
+    pub(crate) epoch: u64,
+    pub(crate) seq: u32,
+    pub(crate) to: To,
+    /// `vpath/rel` on that server: the row's server path.
+    pub(crate) file_path: String,
+    /// The row's audio hash, to find a path the server moved since; zeros
+    /// for none.
+    pub(crate) audio_hash: [u8; 16],
+    /// Unix ms, as dated (2.20.6, item 7).
+    pub(crate) started_at: u64,
+    pub(crate) played_ms: u32,
+    /// 0: not said.
+    pub(crate) duration_ms: u32,
+    /// The slot's codes, unknown values read as 2.20.3 says: an outcome of
+    /// 1-3, a source of 0-3.
+    pub(crate) outcome: u8,
+    pub(crate) source: u8,
+    pub(crate) pause_count: u16,
+    /// A peer's track.
+    pub(crate) track: Option<Snapshot>,
+    /// When this computer first held it, Unix ms (`heldAt`): the wait of a
+    /// start ahead of this computer's clock counts from it ([`past_wait`]).
+    /// None until a post first holds it: an entry without one counts from
+    /// then.
+    pub(crate) held_at: Option<u64>,
+}
+
+impl Owed {
+    fn of(p: &Slot, to: To, e: &Entry, ledger: &Ledger, started_at: u64) -> Owed {
+        let artists: Vec<String> =
+            e.run.values(ARTIST).map(|v| String::from_utf8_lossy(v).into()).collect();
+        let hash = [ledger.file_hash, ledger.audio_hash].into_iter().find(|h| *h != [0; 16]);
+        let track = to.peer.map(|_| Snapshot {
+            title: e.run.text(TITLE).into(),
+            artist: artists.join(", "),
+            album: e.run.text(ALBUM).into(),
+            duration_ms: if p.duration_ms != 0 { p.duration_ms } else { e.rec.duration_ms },
+            hash: hash.map_or_else(String::new, |h| hex(&h)),
+        });
+        Owed {
+            id: p.id(),
+            device_id: p.device_id,
+            epoch: p.epoch,
+            seq: p.seq,
+            to,
+            file_path: ledger.server_path.clone(),
+            audio_hash: ledger.audio_hash,
+            started_at,
+            played_ms: p.played_ms,
+            duration_ms: p.duration_ms,
+            outcome: if (1..=3).contains(&p.outcome) { p.outcome } else { 3 },
+            source: if p.source <= 3 { p.source } else { 0 },
+            pause_count: p.pause_count,
+            track,
+            held_at: None,
+        }
+    }
+
+    /// The play as `stats/plays` takes it. A source the device didn't say
+    /// is `device` where the server takes it, else `other`: 2.20.6's table,
+    /// proposed before mStream had a `device` source, says `other`; the
+    /// plan's mStream batch (B11) added `device` for these plays.
+    fn play(&self, device: bool) -> CardPlay {
+        let outcome = match self.outcome {
+            1 => PlayOutcome::Completed,
+            2 => PlayOutcome::Skipped,
+            _ => PlayOutcome::Stopped,
+        };
+        let source = match self.source {
+            1 => PlaySource::Manual,
+            2 => PlaySource::Shuffle,
+            3 => PlaySource::Autodj,
+            _ if device => PlaySource::Device,
+            _ => PlaySource::Other,
+        };
+        let text = |s: &str| (!s.is_empty()).then(|| s.to_string());
+        let track = self.track.as_ref().map(|t| PlayTrack {
+            title: text(&t.title),
+            artist: text(&t.artist),
+            album: text(&t.album),
+            duration_ms: (t.duration_ms != 0).then_some(t.duration_ms as u64),
+            hash: text(&t.hash),
+            art_file: None,
+        });
+        CardPlay {
+            id: self.id.clone(),
+            file_path: self.file_path.clone(),
+            peer_id: self.to.peer.map(i64::from),
+            started_at: self.started_at,
+            ended_at: None,
+            played_ms: self.played_ms as u64,
+            duration_ms: (self.duration_ms != 0).then_some(self.duration_ms as u64),
+            outcome,
+            source: Some(source),
+            session_id: None,
+            pause_count: self.pause_count as u32,
+            track,
+        }
+    }
+
+    fn json(&self) -> Value {
+        let mut server = Map::new();
+        if self.to.server.instance != NO_INSTANCE {
+            server.insert("instance".into(), hex(&self.to.server.instance).into());
+        }
+        server.insert("urlKey".into(), id_hex(self.to.server.url_key).into());
+        let mut out = json!({
+            "id": self.id, "deviceId": hex(&self.device_id), "epoch": id_hex(self.epoch),
+            "seq": self.seq,
+            "server": server, "filePath": self.file_path, "audioHash": hex(&self.audio_hash),
+            "startedAt": self.started_at, "playedMs": self.played_ms, "durationMs": self.duration_ms,
+            "outcome": mppl::outcome_name(self.outcome), "source": mppl::source_name(self.source),
+            "pauseCount": self.pause_count,
+        });
+        if let Some(peer) = self.to.peer {
+            out["peerId"] = peer.into();
+        }
+        if let Some(t) = &self.track {
+            out["track"] = json!({"title": t.title, "artist": t.artist, "album": t.album,
+                                  "durationMs": t.duration_ms, "hash": t.hash});
+        }
+        if let Some(held) = self.held_at {
+            out["heldAt"] = held.into();
+        }
+        out
+    }
+
+    fn read(v: &Value) -> Option<Owed> {
+        let text = |key: &str| v.get(key).and_then(Value::as_str);
+        let number = |key: &str| v.get(key).and_then(Value::as_u64);
+        let small = |key: &str| number(key).and_then(|n| u32::try_from(n).ok());
+        let server = v.get("server")?;
+        let instance = server.get("instance").and_then(Value::as_str);
+        let instance = instance.map_or(Some(NO_INSTANCE), hex16)?;
+        let url_key = server.get("urlKey").and_then(Value::as_str).and_then(from_hex)?;
+        let peer = match v.get("peerId") {
+            None => None,
+            Some(p) => Some(p.as_u64().and_then(|p| u32::try_from(p).ok())?),
+        };
+        let code = |key: &str, names: &[&str]| names.iter().position(|n| Some(*n) == text(key));
+        let track = match v.get("track") {
+            None => None,
+            Some(t) => Some(Snapshot {
+                title: t.get("title")?.as_str()?.into(),
+                artist: t.get("artist")?.as_str()?.into(),
+                album: t.get("album")?.as_str()?.into(),
+                duration_ms: t.get("durationMs")?.as_u64().and_then(|d| u32::try_from(d).ok())?,
+                hash: t.get("hash")?.as_str()?.into(),
+            }),
+        };
+        let owed = Owed {
+            id: text("id")?.into(),
+            device_id: device_of(text("deviceId")?)?,
+            epoch: from_hex(text("epoch")?)?,
+            seq: small("seq")?,
+            to: To { server: Server::direct(instance, url_key), peer },
+            file_path: text("filePath")?.into(),
+            audio_hash: hex16(text("audioHash")?)?,
+            started_at: number("startedAt")?,
+            played_ms: small("playedMs")?,
+            duration_ms: small("durationMs")?,
+            outcome: code("outcome", &["", "completed", "skipped", "stopped"]).filter(|&c| c > 0)?
+                as u8,
+            source: code("source", &["other", "manual", "shuffle", "autodj"])? as u8,
+            pause_count: number("pauseCount").and_then(|n| u16::try_from(n).ok())?,
+            track,
+            held_at: number("heldAt"),
+        };
+        // An id that isn't its key's is no play this player made.
+        let key = (owed.device_id, owed.epoch, owed.seq);
+        (key_of_id(&owed.id) == Some(key) && owed.seq >= 1).then_some(owed)
+    }
+}
+
+/// A play's key from its id (2.20.4), spelled as the player spells it.
+pub(crate) fn key_of_id(id: &str) -> Option<mppl::Key> {
+    let mut parts = id.strip_prefix("core2-")?.splitn(3, '-');
+    let device_id = device_of(parts.next()?)?;
+    let epoch = u64::from_str_radix(parts.next().filter(|e| e.len() == 16)?, 16).ok()?;
+    let seq = parts.next().filter(|s| s.bytes().all(|b| b.is_ascii_digit()))?.parse().ok()?;
+    let slot = Slot { device_id, epoch, seq, ..Slot::default() };
+    (slot.id() == id).then_some(slot.key())
+}
+
+// ── Resolving (2.20.6) ──────────────────────────────────────────────────────
+
+/// Why a new play isn't sent; it is counted (2.20.6, item 8), and it settles
+/// as it is: the mark passes it. A card for someone else's plays aren't
+/// judged at all, and settle the same ([`History::gift()`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Unsent {
+    /// No ledger row has its path: the listener's own file.
+    Own,
+    /// Its file isn't its row's (the size, or the time under the skew), or
+    /// two rows share its path hash.
+    Changed,
+    /// Played before the clock was ever set, and no later play of its boot
+    /// dates it: no start.
+    Clock,
+    /// Its row's server can't be told (an SRVS entry that breaks a rule).
+    Server,
+}
+
+/// The posted mark of a device and epoch among `marks`; 0 for none.
+fn mark_of(marks: &[Ack], device_id: [u8; 6], epoch: u64) -> u32 {
+    marks.iter().filter(|a| a.key() == (device_id, epoch)).map(|a| a.seq).max().unwrap_or(0)
+}
+
+/// The new plays of `log` (above their marks), each mapped through the
+/// ledger of `tags` and the card's servers, its stamps held to `skew`: a
+/// play to send, or why not (2.20.6, items 4-9).
+pub(crate) fn resolve(
+    log: &Log,
+    tags: &Tags,
+    servers: &Servers,
+    skew: i32,
+    marks: &[Ack],
+) -> Vec<(Slot, Result<Owed, Unsent>)> {
+    // A row with no server path (an owned file with no server track, 2.6.6)
+    // is none: its plays are the listener's, as the reference has them.
+    let mut rows: HashMap<u64, Vec<(&Entry, &Ledger)>> = HashMap::new();
+    for e in &tags.records {
+        if let Some(ledger) = e.ledger.as_ref().filter(|l| !l.server_path.is_empty()) {
+            rows.entry(e.hash).or_default().push((e, ledger));
+        }
+    }
+    let dates = mppl::dates(&log.plays);
+    let new = log.plays.iter().filter(|p| p.seq > mark_of(marks, p.device_id, p.epoch));
+    let mut out = Vec::new();
+    for p in new {
+        let fate = match rows.get(&p.path_hash).map_or(&[][..], Vec::as_slice) {
+            [] => Err(Unsent::Own),
+            [(e, _)] if !mppl::same_file(p, e.rec.size, e.rec.fat_time, skew) => {
+                Err(Unsent::Changed)
+            }
+            [(e, ledger)] => match dates.get(&p.key()).copied().flatten() {
+                None => Err(Unsent::Clock),
+                Some(start) => match To::of(servers, ledger.server as usize) {
+                    Some(to) => Ok(Owed::of(p, to, e, ledger, start)),
+                    None => Err(Unsent::Server),
+                },
+            },
+            _ => Err(Unsent::Changed),
+        };
+        out.push((*p, fate));
+    }
+    out
+}
+
+// ── The outbox ──────────────────────────────────────────────────────────────
+
+/// Where the outbox lives: `card-plays.json` in the config folder
+/// ([`ConfigStore`]), or a test's.
+pub(crate) trait Store {
+    /// The file's text; None when there is none.
+    fn load(&self) -> Result<Option<String>, String>;
+    /// The file written whole, atomically.
+    fn save(&self, text: &str) -> Result<(), String>;
+}
+
+/// `card-plays.json` beside the player's other files.
+pub(crate) struct ConfigStore;
+
+impl Store for ConfigStore {
+    fn load(&self) -> Result<Option<String>, String> {
+        crate::config::load_card_plays_file()
+    }
+
+    fn save(&self, text: &str) -> Result<(), String> {
+        crate::config::save_card_plays_file(text)
+    }
+}
+
+/// The file's schema.
+pub(crate) const OUTBOX_VERSION: u64 = 1;
+
+/// One card's part of the outbox.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Owing {
+    /// The firmware that keeps the card's log, as its `device.txt` says:
+    /// the `client` block's version.
+    pub(crate) firmware: String,
+    /// The plays the server settled above the card's marks, those its
+    /// schema refuses and those of a card for someone else (never sent):
+    /// until a sync stores marks past them on the card, or the card's log
+    /// holds them no more.
+    pub(crate) done: BTreeSet<String>,
+    /// The plays waiting to be posted.
+    pub(crate) plays: Vec<Owed>,
+    /// Entries of `plays` this player can't read, and the members of the
+    /// card's object it doesn't know: a newer player's, kept as they are.
+    kept: Vec<Value>,
+    keep: Map<String, Value>,
+}
+
+const OWING_KNOWN: [&str; 3] = ["firmware", "done", "plays"];
+
+impl Owing {
+    fn read(v: &Value) -> Owing {
+        let Some(object) = v.as_object() else { return Owing::default() };
+        let mut owing = Owing {
+            firmware: object.get("firmware").and_then(Value::as_str).unwrap_or_default().into(),
+            ..Owing::default()
+        };
+        let done = object.get("done").and_then(Value::as_array).into_iter().flatten();
+        let ids = done.filter_map(Value::as_str).filter(|id| key_of_id(id).is_some());
+        owing.done = ids.map(Into::into).collect();
+        for item in object.get("plays").and_then(Value::as_array).into_iter().flatten() {
+            match Owed::read(item) {
+                Some(owed) if !owing.plays.iter().any(|o| o.id == owed.id) => owing.plays.push(owed),
+                Some(_) => {}
+                None => owing.kept.push(item.clone()),
+            }
+        }
+        let unknown = object.iter().filter(|(k, _)| !OWING_KNOWN.contains(&k.as_str()));
+        owing.keep = unknown.map(|(k, v)| (k.clone(), v.clone())).collect();
+        owing
+    }
+
+    fn json(&self) -> Value {
+        let mut object = self.keep.clone();
+        object.insert("firmware".into(), self.firmware.as_str().into());
+        object.insert("done".into(), self.done.iter().cloned().collect::<Vec<_>>().into());
+        let plays = self.plays.iter().map(Owed::json).chain(self.kept.iter().cloned());
+        object.insert("plays".into(), plays.collect::<Vec<_>>().into());
+        Value::Object(object)
+    }
+}
+
+/// `card-plays.json`: the plays read from cards that wait for their
+/// server, and those the server settled that no card's marks pass yet, by
+/// card id. A newer player's file is read as none and never written over,
+/// and so is one that doesn't read as this player's (not JSON, no version,
+/// cards that aren't an object): the plays it holds can't be mapped again
+/// once a sync has replaced their ledger. Every member this player doesn't
+/// know is kept, a card key that isn't a card id among them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Outbox {
+    pub(crate) cards: BTreeMap<u64, Owing>,
+    others: Map<String, Value>,
+    keep: Map<String, Value>,
+    newer: bool,
+    damaged: bool,
+}
+
+impl Outbox {
+    pub(crate) fn parse(text: &str) -> Outbox {
+        let damaged = || Outbox { damaged: true, ..Outbox::default() };
+        if text.trim().is_empty() {
+            return Outbox::default();
+        }
+        let Ok(Value::Object(top)) = serde_json::from_str::<Value>(text) else { return damaged() };
+        match top.get("version").and_then(Value::as_u64) {
+            Some(OUTBOX_VERSION) => {}
+            Some(v) if v > OUTBOX_VERSION => return Outbox { newer: true, ..Outbox::default() },
+            _ => return damaged(),
+        }
+        let listed = match top.get("cards") {
+            None => None,
+            Some(Value::Object(listed)) => Some(listed),
+            Some(_) => return damaged(),
+        };
+        let (mut cards, mut others) = (BTreeMap::new(), Map::new());
+        for (key, card) in listed.into_iter().flatten() {
+            if let Some(id) = from_hex(key) {
+                cards.insert(id, Owing::read(card));
+            } else {
+                others.insert(key.clone(), card.clone());
+            }
+        }
+        let keep = top.iter().filter(|(k, _)| !matches!(k.as_str(), "version" | "cards"));
+        let keep = keep.map(|(k, v)| (k.clone(), v.clone())).collect();
+        Outbox { cards, others, keep, newer: false, damaged: false }
+    }
+
+    pub(crate) fn text(&self) -> String {
+        let mut top = self.keep.clone();
+        top.insert("version".into(), OUTBOX_VERSION.into());
+        let mut cards = self.others.clone();
+        cards.extend(self.cards.iter().map(|(id, owing)| (id_hex(*id), owing.json())));
+        top.insert("cards".into(), Value::Object(cards));
+        serde_json::to_string_pretty(&Value::Object(top)).unwrap_or_default() + "\n"
+    }
+
+    pub(crate) fn load(store: &dyn Store) -> Result<Outbox, String> {
+        Ok(store.load()?.as_deref().map(Outbox::parse).unwrap_or_default())
+    }
+}
+
+/// One card's part written into the outbox as it is now on disk: another
+/// process's cards stay as it left them.
+fn save_card(store: &dyn Store, card_id: u64, owing: &Owing) -> Result<(), String> {
+    let mut outbox = Outbox::load(store)?;
+    if outbox.newer {
+        return Err("card-plays.json is a newer player's".into());
+    }
+    if outbox.damaged {
+        return Err("card-plays.json doesn't read as this player's, and isn't written over".into());
+    }
+    // A card with nothing waiting or settled past its marks has no part.
+    let idle = owing.plays.is_empty() && owing.done.is_empty() && owing.kept.is_empty();
+    if idle && owing.keep.is_empty() {
+        outbox.cards.remove(&card_id);
+    } else {
+        outbox.cards.insert(card_id, owing.clone());
+    }
+    store.save(&outbox.text())
+}
+
+// ── A look, a post, the marks ───────────────────────────────────────────────
+
+/// What a look and a post came to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tally {
+    /// What the reader skipped, and the drop notes' sum: plays lost before
+    /// any software read them.
+    pub(crate) read: mppl::Counts,
+    /// The plays above the posted marks.
+    pub(crate) new: usize,
+    /// Of them, those to send (mapped now, or already waiting), and those
+    /// not sent, by why.
+    pub(crate) owed: usize,
+    pub(crate) own: usize,
+    pub(crate) changed: usize,
+    pub(crate) clock: usize,
+    pub(crate) server: usize,
+    /// The new plays of a card for someone else, and those in its gift
+    /// ranges: counted, sent nowhere, and settled as they are (the mark
+    /// passes them).
+    pub(crate) gift: usize,
+    /// Paths the server moved, found again by their audio hash.
+    pub(crate) remapped: usize,
+    /// The server's answers.
+    pub(crate) accepted: usize,
+    pub(crate) duplicates: usize,
+    pub(crate) rejected: usize,
+    /// Plays the server's schema refuses (a path too long, say): never
+    /// sent, or sent and refused alone; they settle as the plays not sent
+    /// do.
+    pub(crate) refused: usize,
+    /// Plays for the server read that wait all the same: it doesn't know
+    /// their tracks, and no listing says they are gone (not sent while an
+    /// untrusted listing lacks their path, or rejected as `unknown-track`).
+    pub(crate) unknown: usize,
+    /// And those whose times it refuses (`bad-time`) though this computer's
+    /// clock finds them recent: the server's clock disagrees.
+    pub(crate) mistimed: usize,
+    /// For the server read now and not posted: a dry run's, after a post
+    /// that failed, or those that wait though it was read.
+    pub(crate) due: usize,
+    /// In the outbox after it all, for any server.
+    pub(crate) waiting: usize,
+    /// A read of the card or a post failed.
+    pub(crate) failed: bool,
+    pub(crate) notes: Vec<String>,
+}
+
+impl Tally {
+    pub(crate) fn json(&self) -> Value {
+        let c = &self.read;
+        json!({
+            "read": {"slots": c.slots, "damaged": c.damaged, "tail": c.tail, "newer": c.newer,
+                     "unknownKinds": c.unknown_kinds, "unusable": c.unusable, "twins": c.twins,
+                     "conflicts": c.conflicts},
+            "dropped": c.dropped,
+            "new": self.new,
+            "owed": self.owed,
+            "unsent": {"own": self.own, "changed": self.changed, "clock": self.clock,
+                       "server": self.server, "gift": self.gift},
+            "remapped": self.remapped,
+            "posted": {"accepted": self.accepted, "duplicates": self.duplicates,
+                       "rejected": self.rejected},
+            "refused": self.refused,
+            "held": {"unknownTrack": self.unknown, "badTime": self.mistimed},
+            "due": self.due,
+            "waiting": self.waiting,
+            "failed": self.failed,
+            "notes": self.notes,
+        })
+    }
+
+    /// Why plays the card holds went nowhere though its server was read, a
+    /// line each (the run's own words): a card for someone else, a server
+    /// that turned them away for a reason that may pass.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> Vec<String> {
+        let mut lines = self.gift_line();
+        if self.unknown > 0 {
+            lines.push(unknown_line(self.unknown));
+        }
+        if self.mistimed > 0 {
+            lines.push(mistimed_line(self.mistimed));
+        }
+        lines
+    }
+
+    /// Everything the look and the post have to tell the listener, a line
+    /// each: a card for someone else's count, then the run's notes in the
+    /// order they came (the plays that wait and why, a server that takes
+    /// none, a play its schema refuses, a card with no ledger yet, a post
+    /// that failed). For Details' log and the command line, where a run's
+    /// other notes go: a job that succeeds says them too, not only one
+    /// that fails.
+    pub(crate) fn said(&self) -> Vec<String> {
+        let mut lines = self.gift_line();
+        lines.extend(self.notes.iter().cloned());
+        lines
+    }
+
+    /// The line of a card for someone else's plays, when it has new ones.
+    fn gift_line(&self) -> Vec<String> {
+        let why = "played while the card was for someone else";
+        let line = || format!("{} not sent: {why}", plays(self.gift));
+        (self.gift > 0).then(line).into_iter().collect()
+    }
+}
+
+/// `1 play`, `3 plays`.
+fn plays(n: usize) -> String {
+    if n == 1 { "1 play".to_string() } else { format!("{n} plays") }
+}
+
+/// `1 play waits`, `3 plays wait`.
+fn waits(n: usize) -> String {
+    if n == 1 { "1 play waits".to_string() } else { format!("{n} plays wait") }
+}
+
+/// The line of the plays whose tracks the server doesn't know yet.
+fn unknown_line(n: usize) -> String {
+    let (tracks, are) = if n == 1 { ("its track", "it is") } else { ("their tracks", "they are") };
+    let why = format!("the server doesn't know {tracks}, and no listing says {are} gone");
+    format!("{}: {why} (a scan may be under way)", waits(n))
+}
+
+/// The line of the plays whose times the server refuses, recent as they
+/// are by this computer's clock.
+fn mistimed_line(n: usize) -> String {
+    let (time, finds) = if n == 1 { ("its time", "finds it") } else { ("their times", "finds them") };
+    let why = format!("the server refuses {time}, though this computer's clock {finds} recent");
+    format!("{}: {why} (the server's clock disagrees)", waits(n))
+}
+
+/// The server refused the call whole: its schema found a fault in it.
+fn bad_request(e: &ApiError) -> bool {
+    matches!(e, ApiError::Server { status: 400, .. })
+}
+
+/// The play started more than [`WAIT_MS`] ago, by a clock at `now_ms`: it
+/// settles as the server says. A start further ahead of that clock than a
+/// server takes ([`AHEAD_MS`]) says nothing of the play's age (this
+/// computer's clock may be slow, as the player's may be fast): its wait
+/// counts from when this computer first held the play, or from now. A
+/// server's `bad-time` for such a start settles it at once all the same
+/// ([`History::passing`]).
+fn past_wait(o: &Owed, now_ms: u64) -> bool {
+    let ahead = o.started_at > now_ms.saturating_add(AHEAD_MS);
+    let from = if ahead { o.held_at.unwrap_or(now_ms) } else { o.started_at };
+    from.saturating_add(WAIT_MS) < now_ms
+}
+
+/// One card's plays through a run: looked at once, then remapped and
+/// posted, its marks given to the run's commits and state file.
+pub(crate) struct History {
+    store: Rc<dyn Store>,
+    /// Read and resolve only: nothing saved, nothing posted.
+    dry: bool,
+    /// The card is for someone else, as its settings say ([`History::gift()`]):
+    /// no play of its log is mapped, and none is posted.
+    gift: bool,
+    /// The card's state file's marks, and the card id that file names: the
+    /// marks are taken only for that card's root.
+    posted: Vec<Ack>,
+    posted_for: u64,
+    card_id: u64,
+    /// The card's gift ranges as its state file holds them, whatever card
+    /// id that names ([`History::with_gift_ranges`]); and the plays this run
+    /// counted as a gift's, by id, which they take in
+    /// ([`History::gift_ranges()`]).
+    ranges: Vec<GiftRange>,
+    gifted: HashSet<String>,
+    /// The log as the look read it; None until a look read one whole. And
+    /// whether a look failed to read it (`blind`): it settled nothing of
+    /// what the log holds.
+    log: Option<Log>,
+    blind: bool,
+    /// The card's part of the outbox, taken by a look of a card with a root
+    /// (`loaded`); `unread` when the outbox couldn't be read, so this part
+    /// is never saved over the one on disk.
+    owing: Owing,
+    loaded: bool,
+    unread: bool,
+    /// The plays the outbox on disk holds, as this run knows (those it
+    /// read, then those of its last save), and why the last save failed.
+    stored: HashSet<String>,
+    unsaved: Option<String>,
+    /// The new plays not sent, by id: they settle as they are.
+    unsent: HashSet<String>,
+    /// The plays waiting for the server read whose path its listing, read
+    /// whole by this run, covers and doesn't hold ([`History::listing`]);
+    /// None when the run read none. And whether a path that listing lacks
+    /// is gone from the server.
+    absent: Option<HashSet<String>>,
+    trusted: bool,
+    pub(crate) tally: Tally,
+}
+
+impl History {
+    /// `posted`: the marks of the card's state file and the card id it
+    /// names, read by the caller (2.12.7) since a session's look comes
+    /// before it says what the file holds.
+    pub(crate) fn new(store: Rc<dyn Store>, dry: bool, posted: (u64, Vec<Ack>)) -> History {
+        History {
+            store,
+            dry,
+            gift: false,
+            posted: posted.1,
+            posted_for: posted.0,
+            card_id: 0,
+            ranges: Vec::new(),
+            gifted: HashSet::new(),
+            log: None,
+            blind: false,
+            owing: Owing::default(),
+            loaded: false,
+            unread: false,
+            stored: HashSet::new(),
+            unsaved: None,
+            unsent: HashSet::new(),
+            absent: None,
+            trusted: false,
+            tally: Tally::default(),
+        }
+    }
+
+    /// The card is for someone else (its settings' `forSomeoneElse`): its
+    /// plays are sent to nobody's account, now or ever. Each new one is
+    /// counted and none is mapped, so none joins the plays to send; and
+    /// each is settled as it is, like a play from before the clock was
+    /// set: the mark rises over it, and the card's gift ranges take it in
+    /// ([`History::gift_ranges()`]), both stored on the card by the one write (a
+    /// sync's state file, the settings' store). No look after that, on any
+    /// computer, maps it, the card the listener's own again or not. Nothing
+    /// of it is kept on this computer: a run that halts before the write
+    /// leaves the plays new, as the card that was never marked has them.
+    /// Nothing is posted meanwhile: the plays mapped before the card was
+    /// marked wait in the outbox, hold the mark at the first of them, and
+    /// go once the card is the listener's own.
+    ///
+    /// A run that changes the setting, either way, is one of a card for
+    /// someone else: the plays the log holds at a change can't be told
+    /// apart by when they were made, and none of them may go.
+    pub(crate) fn gift(mut self, gift: bool) -> History {
+        self.gift = gift;
+        self
+    }
+
+    /// The card's gift ranges, its state file's `giftPlays` (2.12.7), read
+    /// whatever card id the file names: a play in one was counted as a card
+    /// for someone else's, and is so again, whatever the settings say now.
+    pub(crate) fn with_gift_ranges(mut self, ranges: Vec<GiftRange>) -> History {
+        self.ranges = ranges;
+        self
+    }
+
+    /// The gift ranges to store with the marks: the card's, and the plays
+    /// this run counted as a gift's, each device and epoch's from the
+    /// lowest to the highest. A play of the log between two of them that
+    /// wasn't counted so (one mapped before the card was marked, waiting
+    /// in this computer's outbox) splits the range, so no computer counts
+    /// it as a gift's. Written only by the write that writes
+    /// [`History::marks`].
+    pub(crate) fn gift_ranges(&self) -> Vec<GiftRange> {
+        let mut ranges = self.ranges.clone();
+        let mut plays: Vec<&Slot> = self.log.iter().flat_map(|log| &log.plays).collect();
+        plays.sort_by_key(|p| (p.device_id, p.epoch, p.seq));
+        let mut open: Option<GiftRange> = None;
+        for p in plays {
+            let gifted = self.gifted.contains(&p.id());
+            match &mut open {
+                Some(r) if gifted && (r.device_id, r.epoch) == (p.device_id, p.epoch) => r.to = p.seq,
+                _ => {
+                    ranges.extend(open.take());
+                    open = gifted.then(|| GiftRange::one(p.device_id, p.epoch, p.seq));
+                }
+            }
+        }
+        ranges.extend(open);
+        merged(ranges)
+    }
+
+    /// In one of the card's gift ranges as they were read: a play of its
+    /// time as someone else's.
+    fn in_gift_ranges(&self, p: &Slot) -> bool {
+        self.ranges.iter().any(|r| r.holds(p.device_id, p.epoch, p.seq))
+    }
+
+    /// The play counted as a gift's: settled as it is, unsent, and taken
+    /// into the gift ranges.
+    fn count_gift(&mut self, id: String) {
+        self.tally.gift += 1;
+        self.unsent.insert(id.clone());
+        self.gifted.insert(id);
+    }
+
+    /// The look couldn't read the card's log: nothing it holds was settled
+    /// or mapped. A run that makes a card for someone else the listener's
+    /// own must not go on then: the next look would send those plays.
+    pub(crate) fn blind(&self) -> bool {
+        self.blind
+    }
+
+    fn note(&mut self, failed: bool, note: String) {
+        self.tally.failed |= failed;
+        self.tally.notes.push(note);
+    }
+
+    fn save(&mut self) {
+        if self.dry || !self.loaded {
+            return;
+        }
+        self.tally.waiting = self.owing.plays.len();
+        let saved = match self.unread {
+            true => Err("it can't be read, so it isn't written over".to_string()),
+            false => save_card(&*self.store, self.card_id, &self.owing),
+        };
+        match saved {
+            Ok(()) => {
+                self.stored = self.owing.plays.iter().map(|o| o.id.clone()).collect();
+                self.unsaved = None;
+            }
+            Err(e) => {
+                self.note(true, format!("the plays' outbox wasn't saved: {e}"));
+                self.unsaved = Some(e);
+            }
+        }
+    }
+
+    /// Why plays to send are held by nothing but this run, when some are:
+    /// mapped and not in the outbox on disk, since its save failed. A run
+    /// that went on would replace the rows they map through, and the next
+    /// look would take them for the listener's files (2.20.6, item 5: the
+    /// store comes before any checkpoint). None in a dry run, which writes
+    /// nothing to the card.
+    pub(crate) fn unstored(&self) -> Option<String> {
+        let held = self.owing.plays.iter().filter(|o| !self.stored.contains(&o.id)).count();
+        if self.dry || held == 0 {
+            return None;
+        }
+        let why = self.unsaved.as_deref().unwrap_or("not saved");
+        Some(format!("{held} of the card's plays to send aren't in the plays' outbox ({why})"))
+    }
+
+    /// Reads the card's log and maps its new plays through the root's tags
+    /// file, `skew` its listing's (the engine's plays hook). The card's part
+    /// of the outbox is taken first, whenever the root names the card: the
+    /// plays mapped before go to their server even when the card has no
+    /// log, tags file or ledger now to map new ones through. A card with no
+    /// root, ledger or log has nothing to map; one that fails a read is left
+    /// for the next look.
+    pub(crate) fn look(&mut self, card: &dyn CardFs, root: Option<&Root>, skew: i32) {
+        if let Some(root) = root {
+            self.load(card, root.manifest.header.card_id);
+        }
+        let files = match read_files(card) {
+            Ok(files) if files.is_empty() => return,
+            Ok(files) => files,
+            Err(e) => {
+                self.blind = true;
+                self.note(true, format!("the play log can't be read: {e}"));
+                return;
+            }
+        };
+        // A card for someone else's plays need no ledger: none is mapped.
+        if self.gift {
+            self.look_gift(&files);
+            return;
+        }
+        let tags = root.map(|r| r.tags.as_ref());
+        let (Some(root), Some(Ok(tags))) = (root, tags) else {
+            self.note(false, "the card has no tags file to map its plays through: they wait".into());
+            return;
+        };
+        if !tags.has_ledger {
+            self.note(false, "the card has no ledger yet: its plays wait for a sync".into());
+            return;
+        }
+        let named: Vec<LogFile<'_>> =
+            files.iter().map(|(name, bytes, size)| LogFile { name, bytes, size: *size }).collect();
+        let log = mppl::read_log(&named);
+        let mut owing = std::mem::take(&mut self.owing);
+        // A settled id the log holds no more goes: its play is never read
+        // again, and a seq the card doesn't hold holds no mark back.
+        let held: HashSet<String> = log.plays.iter().map(Slot::id).collect();
+        owing.done.retain(|id| held.contains(id));
+
+        self.tally.read = log.counts;
+        let servers = root.manifest.server_table();
+        for (slot, fate) in resolve(&log, tags, &servers, skew, &self.posted) {
+            self.tally.new += 1;
+            // Played while the card was someone else's, by its ranges: never
+            // mapped, whatever the settings say now. One that waited from
+            // before it was marked is the listener's own, and waits on.
+            let id = slot.id();
+            if self.in_gift_ranges(&slot) && !owing.plays.iter().any(|o| o.id == id) {
+                self.count_gift(id);
+                continue;
+            }
+            let owed = match fate {
+                Ok(owed) => owed,
+                Err(why) => {
+                    *match why {
+                        Unsent::Own => &mut self.tally.own,
+                        Unsent::Changed => &mut self.tally.changed,
+                        Unsent::Clock => &mut self.tally.clock,
+                        Unsent::Server => &mut self.tally.server,
+                    } += 1;
+                    self.unsent.insert(slot.id());
+                    continue;
+                }
+            };
+            self.tally.owed += 1;
+            // A play mapped already keeps its first mapping, through the
+            // ledger it was played against.
+            if !owing.done.contains(&owed.id) && !owing.plays.iter().any(|o| o.id == owed.id) {
+                owing.plays.push(owed);
+            }
+        }
+        (self.log, self.owing) = (Some(log), owing);
+        self.save();
+    }
+
+    /// A look at a card for someone else ([`History::gift()`]), its log's
+    /// `files` read: each new play is counted and settled unsent, and
+    /// goes into the gift ranges; nothing of it is saved on this computer. All but
+    /// the plays mapped before the card was marked, which wait in the
+    /// outbox as they did: those are the listener's own.
+    fn look_gift(&mut self, files: &[(&'static str, Vec<u8>, u64)]) {
+        let named: Vec<LogFile<'_>> =
+            files.iter().map(|(name, bytes, size)| LogFile { name, bytes, size: *size }).collect();
+        let log = mppl::read_log(&named);
+        let mut owing = std::mem::take(&mut self.owing);
+        let held: HashSet<String> = log.plays.iter().map(Slot::id).collect();
+        owing.done.retain(|id| held.contains(id));
+        self.tally.read = log.counts;
+        let above = |p: &&Slot| p.seq > mark_of(&self.posted, p.device_id, p.epoch);
+        let new: Vec<Slot> = log.plays.iter().filter(above).copied().collect();
+        for p in new {
+            self.tally.new += 1;
+            let id = p.id();
+            if owing.plays.iter().any(|o| o.id == id) {
+                self.tally.owed += 1;
+            } else {
+                self.count_gift(id);
+            }
+        }
+        (self.log, self.owing) = (Some(log), owing);
+        self.save();
+    }
+
+    /// The card's part of the outbox, less the settled ids the card's marks
+    /// pass, and the firmware its `device.txt` names now. A play that waits
+    /// stays whatever the marks say: [`History::post`] decides. An outbox
+    /// that can't be read gives an empty part, which is never saved: it
+    /// would take the place of the part on disk.
+    fn load(&mut self, card: &dyn CardFs, card_id: u64) {
+        let mut owing = match Outbox::load(&*self.store) {
+            Ok(mut outbox) => outbox.cards.remove(&card_id).unwrap_or_default(),
+            Err(e) => {
+                self.note(true, format!("the plays' outbox can't be read: {e}"));
+                self.unread = true;
+                Owing::default()
+            }
+        };
+        // A state file of another identity says nothing of this card's log.
+        if self.posted_for != card_id {
+            self.posted.clear();
+        }
+        // The ids settled as the card's marks say (by a run of this
+        // computer's, or another's) are forgotten. A play still waiting
+        // isn't: a mark passes a seq the log lost as it passes one another
+        // computer's run settled, so nothing says this one was ever posted.
+        let posted = &self.posted;
+        let above = |d: [u8; 6], e: u64, s: u32| s > mark_of(posted, d, e);
+        owing.done.retain(|id| key_of_id(id).is_some_and(|(d, e, s)| above(d, e, s)));
+        let device = card.read("/.player/device.txt", 64 * 1024).ok().flatten();
+        let device = DeviceTxt::read(device.as_deref());
+        if !device.firmware.is_empty() {
+            owing.firmware = device.firmware;
+        }
+        self.stored = owing.plays.iter().map(|o| o.id.clone()).collect();
+        self.tally.waiting = owing.plays.len();
+        (self.card_id, self.owing, self.loaded) = (card_id, owing, true);
+    }
+
+    /// The plays for the server `talk` reads now whose paths that server
+    /// moved since: found again by their audio hash in its whole manifest
+    /// (`entries`), when one entry has it. `libraries`: the vpaths it
+    /// listed, None for every one.
+    pub(crate) fn remap(
+        &mut self,
+        talk: &Talk,
+        entries: &[ManifestEntry],
+        libraries: Option<&[String]>,
+    ) {
+        let listed: HashSet<&str> = entries.iter().map(|e| e.filepath.as_str()).collect();
+        let mut by_audio: HashMap<[u8; 16], Vec<&str>> = HashMap::new();
+        for e in entries {
+            if let Some(hash) = e.audio_hash.as_deref().and_then(hex16) {
+                by_audio.entry(hash).or_default().push(&e.filepath);
+            }
+        }
+        let vpath = |p: &str| p.split('/').next().unwrap_or_default().to_string();
+        let mut moved = 0;
+        let ours = |o: &&mut Owed| o.to.peer.is_none() && o.to.reached(talk);
+        for o in self.owing.plays.iter_mut().filter(ours) {
+            let looked = libraries.is_none_or(|l| l.contains(&vpath(&o.file_path)));
+            if !looked || listed.contains(o.file_path.as_str()) || o.audio_hash == [0; 16] {
+                continue;
+            }
+            if let Some([one]) = by_audio.get(&o.audio_hash).map(Vec::as_slice) {
+                o.file_path = one.to_string();
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            self.tally.remapped += moved;
+            self.save();
+        }
+    }
+
+    /// What a whole listing of the server `talk` reads says of the plays
+    /// waiting for that server (`entries`; `libraries` the vpaths it
+    /// listed, None for every one), their paths as [`History::remap`] left
+    /// them: which of them it covers and doesn't hold, and whether a path
+    /// it lacks is gone from the server (`trusted`: no scan was running
+    /// and nothing moved while it was read, the listing's
+    /// `deletions_trusted`). The post goes by it. A run that read no
+    /// listing (a 304) says nothing of any path.
+    pub(crate) fn listing(
+        &mut self,
+        talk: &Talk,
+        entries: &[ManifestEntry],
+        libraries: Option<&[String]>,
+        trusted: bool,
+    ) {
+        let listed: HashSet<&str> = entries.iter().map(|e| e.filepath.as_str()).collect();
+        let vpath = |p: &str| p.split('/').next().unwrap_or_default().to_string();
+        let lacked = |o: &&Owed| {
+            let looked = libraries.is_none_or(|l| l.contains(&vpath(&o.file_path)));
+            looked && !listed.contains(o.file_path.as_str())
+        };
+        let ours = |o: &&Owed| o.to.peer.is_none() && o.to.reached(talk);
+        let absent = self.owing.plays.iter().filter(ours).filter(lacked).map(|o| o.id.clone());
+        (self.absent, self.trusted) = (Some(absent.collect()), trusted);
+    }
+
+    /// The plays a post to the server `talk` reads would send: those
+    /// waiting for it; none on a card for someone else.
+    pub(crate) fn due(&self, talk: &Talk) -> usize {
+        self.due_ids(talk).len()
+    }
+
+    fn due_ids(&self, talk: &Talk) -> Vec<String> {
+        let ours = |o: &&Owed| !self.gift && o.to.reached(talk);
+        self.owing.plays.iter().filter(ours).map(|o| o.id.clone()).collect()
+    }
+
+    /// The plays that waited while the card's mark passed them, of a server
+    /// other than the one `talk` reads: forgotten, as the mark says. One of
+    /// the server read goes with the rest instead, and its answer settles
+    /// it: a play another computer's run posted comes back a duplicate.
+    fn forget_passed(&mut self, talk: &Talk) {
+        let posted = &self.posted;
+        let passed = |o: &Owed| o.seq <= mark_of(posted, o.device_id, o.epoch);
+        let before = self.owing.plays.len();
+        self.owing.plays.retain(|o| o.to.reached(talk) || !passed(o));
+        if self.owing.plays.len() != before {
+            self.save();
+        }
+    }
+
+    /// Posts the plays waiting for the server `client` reaches (`talk`), in
+    /// batches of [`PLAYS_PER_CALL`], each answer saved as it comes. `stats`:
+    /// the server takes plays (its Stats API); `device`: it takes the
+    /// `device` source; `now`: Unix seconds, by this computer's clock. A
+    /// post that fails leaves the rest waiting. A card for someone else
+    /// posts none ([`History::gift()`]): what waited from before it was
+    /// marked waits on.
+    ///
+    /// The server's answer settles a play, accepted, a duplicate or
+    /// rejected, but a rejection that may pass ([`History::passing`]):
+    /// that play waits for a later run, [`WAIT_MS`] from its start at most.
+    pub(crate) fn post(&mut self, client: &Client, talk: &Talk, stats: bool, device: bool, now: u64) {
+        let mut due = self.due_ids(talk);
+        self.tally.due = due.len();
+        if self.dry || !self.loaded || self.gift {
+            return;
+        }
+        self.forget_passed(talk);
+        // A play first held by this post: its wait, for a start ahead of
+        // this computer's clock, counts from now ([`past_wait`]).
+        let now_ms = now.saturating_mul(1000);
+        let mut held = false;
+        for o in self.owing.plays.iter_mut().filter(|o| o.held_at.is_none()) {
+            o.held_at = Some(now_ms);
+            held = true;
+        }
+        if held {
+            self.save();
+        }
+        if due.is_empty() {
+            return;
+        }
+        if !stats {
+            self.note(false, "the server takes no plays (it has no Stats API): they wait".into());
+            return;
+        }
+        // A play the server's schema refuses would fail each batch it rode
+        // in, at every run, and hold its device's mark for good: it isn't
+        // sent, and settles as a play not sent does.
+        let mut refused = HashSet::new();
+        for o in self.owing.plays.iter().filter(|o| o.to.reached(talk)) {
+            if let Some(fault) = play_fault(&o.play(false)) {
+                let note = format!("a play the server would refuse isn't sent: {fault}");
+                self.tally.notes.push(note);
+                refused.insert(o.id.clone());
+            }
+        }
+        if !refused.is_empty() {
+            self.tally.refused += refused.len();
+            due.retain(|id| !refused.contains(id));
+            self.owing.plays.retain(|o| !refused.contains(&o.id));
+            self.owing.done.extend(refused);
+            self.tally.due = due.len();
+            self.save();
+        }
+        // A path the run's listing lacks while it can't be trusted for
+        // deletions (a scan running, the library moving under the read):
+        // the server would answer that it doesn't know the track, of a file
+        // its scan hasn't reached. That play isn't sent: it waits for a
+        // listing that can be trusted. One past its wait goes all the same,
+        // and its answer settles it.
+        let (mut unknown, mut mistimed) = (HashSet::<String>::new(), HashSet::<String>::new());
+        if !self.trusted && let Some(absent) = &self.absent {
+            let lacked = |o: &&Owed| absent.contains(&o.id) && !past_wait(o, now_ms);
+            let lacked: HashSet<&str> =
+                self.owing.plays.iter().filter(lacked).map(|o| o.id.as_str()).collect();
+            unknown = due.iter().filter(|id| lacked.contains(id.as_str())).cloned().collect();
+            due.retain(|id| !unknown.contains(id));
+        }
+        // A version longer than the server takes is left out, not the plays.
+        let block = PlayClient {
+            name: CLIENT.into(),
+            version: play_version(&self.owing.firmware),
+            instance_id: Some(format!("{:016x}", self.card_id)),
+        };
+        let mut device = device;
+        // The server took a call of this post: the request's shape is one
+        // it takes, so a call it refuses after is refused for its plays.
+        let mut taken = false;
+        for ids in due.chunks(PLAYS_PER_CALL) {
+            let send = |ids: &[String], device: bool| {
+                let owed = |id: &String| self.owing.plays.iter().find(|o| &o.id == id);
+                let plays: Vec<CardPlay> = ids.iter().filter_map(owed).map(|o| o.play(device)).collect();
+                client.report_card_plays(&block, &plays)
+            };
+            // Refused whole: a play in it is one the server's schema refuses
+            // and [`play_fault`] doesn't know. Each goes alone, and the one
+            // refused alone is the one. A play refused alone with the
+            // `device` source goes again as `other`: a server older than
+            // that source refuses a call for it whole. Taken so, the rest
+            // of the post goes as `other`; refused so too, it is the play's.
+            let quiet = |id: &String| self.owing.plays.iter().any(|o| &o.id == id && o.source == 0);
+            let (mut answers, mut refused, mut failed) = (Vec::new(), Vec::new(), None);
+            let whole = (ids.len() > 1).then(|| send(ids, device));
+            match whole {
+                Some(Ok(answer)) => answers.push(answer),
+                Some(Err(e)) if !bad_request(&e) => failed = Some(e),
+                _ => {
+                    for id in ids {
+                        let one = std::slice::from_ref(id);
+                        let mut answer = send(one, device);
+                        if device && answer.as_ref().is_err_and(bad_request) && quiet(id) {
+                            answer = send(one, false);
+                            device = answer.is_err();
+                        }
+                        match answer {
+                            Ok(answer) => answers.push(answer),
+                            Err(e) if bad_request(&e) => refused.push(id.clone()),
+                            Err(e) => {
+                                failed = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            taken |= !answers.is_empty();
+            let asked: HashSet<&String> = ids.iter().collect();
+            let mut settled: HashSet<String> = HashSet::new();
+            let accepted = answers.iter().flat_map(|a| &a.accepted);
+            for id in accepted.filter(|id| asked.contains(id)) {
+                self.tally.accepted += settled.insert(id.clone()) as usize;
+            }
+            let duplicates = answers.iter().flat_map(|a| &a.duplicates);
+            for id in duplicates.filter(|id| asked.contains(id)) {
+                self.tally.duplicates += settled.insert(id.clone()) as usize;
+            }
+            // Refused alone by a server that takes the others: the play's
+            // own fault, and it settles as a play not sent does. With no
+            // call taken the fault may be the request's (the client block,
+            // a schema this software doesn't know): the play waits, its
+            // wait ([`WAIT_MS`]) at most, as the others a server turns
+            // away, so it never holds its device's mark for good.
+            let old = |id: &String| {
+                let owed = self.owing.plays.iter().find(|o| &o.id == id);
+                owed.is_some_and(|o| past_wait(o, now_ms))
+            };
+            let (gone, unproven): (Vec<String>, Vec<String>) =
+                refused.into_iter().partition(|id| taken || old(id));
+            for id in gone {
+                self.tally.notes.push(format!("a play the server refuses alone settles unsent: {id}"));
+                self.tally.refused += settled.insert(id) as usize;
+            }
+            for r in answers.iter().flat_map(|a| &a.rejected).filter(|r| asked.contains(&r.id)) {
+                match self.passing(r, now_ms) {
+                    Some(Passing::Unknown) => {
+                        unknown.insert(r.id.clone());
+                    }
+                    Some(Passing::Clock) => {
+                        mistimed.insert(r.id.clone());
+                    }
+                    None => self.tally.rejected += settled.insert(r.id.clone()) as usize,
+                }
+            }
+            self.owing.plays.retain(|o| !settled.contains(&o.id));
+            self.owing.done.extend(settled);
+            self.tally.due = self.due(talk);
+            self.save();
+            if let Some(e) = failed {
+                self.note(true, format!("the plays weren't posted: {e}"));
+                break;
+            }
+            if !unproven.is_empty() {
+                let why = "the server refuses every call (400), whatever plays it holds";
+                self.note(true, format!("the plays weren't posted: {why}"));
+                break;
+            }
+        }
+        if !unknown.is_empty() {
+            self.tally.unknown += unknown.len();
+            self.tally.notes.push(unknown_line(unknown.len()));
+        }
+        if !mistimed.is_empty() {
+            self.tally.mistimed += mistimed.len();
+            self.tally.notes.push(mistimed_line(mistimed.len()));
+        }
+    }
+
+    /// Why the server's rejection `r` may pass, when it may: its play
+    /// waits, where any other rejection settles it. A play past its wait
+    /// ([`WAIT_MS`], by a clock at `now_ms`) settles whatever the reason.
+    fn passing(&self, r: &RejectedPlay, now_ms: u64) -> Option<Passing> {
+        let o = self.owing.plays.iter().find(|o| o.id == r.id)?;
+        if past_wait(o, now_ms) {
+            return None;
+        }
+        match r.reason.as_str() {
+            // Gone from the server only on the word of a trusted listing
+            // that covers the path and lacks it.
+            UNKNOWN_TRACK => {
+                let gone = self.trusted && self.absent.as_ref().is_some_and(|a| a.contains(&o.id));
+                (!gone).then_some(Passing::Unknown)
+            }
+            // A start within the wait, and no further ahead than the
+            // server itself allows, is one a server whose clock is right
+            // takes: its clock is the one that disagrees. A start truly
+            // ahead (the player's clock was wrong) settles as it says.
+            BAD_TIME => (o.started_at <= now_ms.saturating_add(AHEAD_MS)).then_some(Passing::Clock),
+            _ => None,
+        }
+    }
+
+    /// The posted marks now: the card's, each device and epoch's risen over
+    /// the plays settled or not sent (2.20.6, item 10).
+    pub(crate) fn marks(&self) -> Vec<Ack> {
+        self.risen(false)
+    }
+
+    /// The marks, risen over the plays settled; with `stored`, over only
+    /// those the card already holds settled: a play this run first counted
+    /// as a gift's holds its mark, since the range that says so is stored
+    /// by the state file a run writes after its commits.
+    fn risen(&self, stored: bool) -> Vec<Ack> {
+        let Some(log) = &self.log else { return self.posted.clone() };
+        let waiting: HashSet<&str> = self.owing.plays.iter().map(|o| o.id.as_str()).collect();
+        let done = |p: &Slot| {
+            let id = p.id();
+            if stored && self.gifted.contains(&id) && !self.in_gift_ranges(p) {
+                return false;
+            }
+            let settled = self.unsent.contains(&id) || self.owing.done.contains(&id);
+            settled && !waiting.contains(id.as_str())
+        };
+        mppl::next_marks(&log.plays, &self.posted, &done)
+    }
+
+    /// The ACKS of a commit (2.5.6): each entry of the root before raised to
+    /// its mark, never lowered; an entry for each device and epoch the log
+    /// holds plays of; never above the highest seq read of the card's log.
+    /// A run that read no log carries them as they are. They pass no play
+    /// this run first counted as a gift's: a commit comes before the state
+    /// file that stores the ranges, and a run halted between the two would
+    /// have the player trim plays the card's settings still call the
+    /// listener's (the next commit passes them).
+    pub(crate) fn acks(&self, carried: &[Ack]) -> Vec<Ack> {
+        let Some(log) = &self.log else { return carried.to_vec() };
+        let mut out = carried.to_vec();
+        for mark in self.risen(true) {
+            let read = log.last_seq(mark.device_id, mark.epoch);
+            let seq = mark.seq.min(read);
+            match out.iter_mut().find(|a| a.key() == mark.key()) {
+                Some(a) => a.seq = a.seq.max(seq),
+                None if seq > 0 => out.push(Ack { seq, ..mark }),
+                None => {}
+            }
+        }
+        out
+    }
+}
+
+impl Hooks for History {
+    fn plays(&mut self, card: &dyn CardFs, root: Option<&Root>, skew: i32) {
+        self.look(card, root, skew);
+    }
+}
+
+/// A rejection that may pass: the server may answer otherwise at a later
+/// run, so the play it turned away waits ([`History::passing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Passing {
+    /// `unknown-track`, of a path no trusted listing says is gone: a scan
+    /// may not have reached the file yet.
+    Unknown,
+    /// `bad-time`, of a start this computer's clock finds recent: the
+    /// server's clock disagrees, and may be set right.
+    Clock,
+}
+
+/// The log's files on the card ([`NAMES`], in any case): each one's name as
+/// a reader names it, its bytes up to the cap, and its whole length. A file
+/// that reads short has changed or the card was pulled: an error, so no
+/// play is passed over.
+fn read_files(card: &dyn CardFs) -> io::Result<Vec<(&'static str, Vec<u8>, u64)>> {
+    let items = match card.list("/.player") {
+        Ok(items) => items,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for item in items.iter().filter(|i| !i.dir) {
+        let Some(name) = NAMES.iter().find(|n| n.eq_ignore_ascii_case(&item.name)) else {
+            continue;
+        };
+        let want = item.size.min(FILE_BYTES as u64) as usize;
+        let bytes = card.read_at(&format!("/.player/{}", item.name), 0, want)?;
+        if bytes.len() != want {
+            let short = "a play log shorter than listed";
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, short));
+        }
+        out.push((*name, bytes, item.size));
+    }
+    Ok(out)
+}
+
+/// The skew (2.3.4) of a tags file's rows against the card as it lists now,
+/// read only: a run's survey finds the same over its own listing.
+pub(crate) fn listed_skew(card: &dyn CardFs, tags: &Tags) -> io::Result<i32> {
+    let mut folders: BTreeMap<&str, Vec<&Entry>> = BTreeMap::new();
+    for e in tags.records.iter().filter(|e| e.ledger.is_some()) {
+        let folder = e.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        folders.entry(folder).or_default().push(e);
+    }
+    let mut pairs = Vec::new();
+    for (folder, rows) in folders {
+        let dir = match folder {
+            "" => "/music".to_string(),
+            _ => format!("/music/{folder}"),
+        };
+        let items = match card.list(&dir) {
+            Ok(items) => items,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for e in rows {
+            let name = e.path.rsplit('/').next().unwrap_or_default();
+            let files = || items.iter().filter(|i| !i.dir);
+            let item = files().find(|i| i.name == name).or_else(|| {
+                let mut same = files().filter(|i| match_key(&i.name) == match_key(name));
+                match (same.next(), same.next()) {
+                    (Some(one), None) => Some(one),
+                    _ => None,
+                }
+            });
+            if let Some(item) = item.filter(|i| i.size == e.rec.size as u64) {
+                pairs.push((e.rec.fat_time, item.fat_time));
+            }
+        }
+    }
+    Ok(skew(pairs))
+}
+
+// ── Without a sync: the hidden command ──────────────────────────────────────
+
+/// A card's plays read, mapped and posted without a sync, the card only
+/// read: it writes nothing to it, so no ACKS (they ride on a sync's commit)
+/// and no marks in its state file (the outbox keeps what the server
+/// settled until a sync stores the marks). With `dry_run`, nothing is saved
+/// or posted either. `now`: Unix seconds, by this computer's clock. What it
+/// came to, and the marks after it.
+///
+/// The listing this reads for the paths the server moved
+/// ([`History::remap`]) is the server's whole one, every library's, and
+/// says of a play the server doesn't know what a sync's says
+/// ([`History::listing`]): its file is gone when no scan was running and
+/// the listing lacks its path, and the play settles; otherwise it waits,
+/// and the tally says so.
+pub(crate) fn plays_of(
+    card: &dyn CardFs,
+    client: &Client,
+    dry_run: bool,
+    store: Rc<dyn Store>,
+    now: u64,
+) -> (Tally, Vec<Ack>) {
+    let mut history = History::new(store, dry_run, (0, Vec::new()));
+    let seen = match volume::inspect(card) {
+        Ok(seen) => seen,
+        Err(e) => {
+            history.note(true, format!("the card can't be read: {e}"));
+            return (history.tally, Vec::new());
+        }
+    };
+    let Some(root) = seen.root.as_ref() else {
+        history.note(false, "the card has no commit: its plays wait for a sync".into());
+        return (history.tally, Vec::new());
+    };
+    // The card's word that it is for someone else, and its gift ranges,
+    // whatever card id its state file names: only the marks are an
+    // identity's own.
+    let state = State::of(&seen.state);
+    if let Some(state) = &state {
+        history.gift = state.settings.for_someone_else;
+        history.ranges = state.gifts.clone();
+    }
+    let state = state.filter(|s| s.card_id == root.manifest.header.card_id);
+    if let Some(state) = &state {
+        (history.posted, history.posted_for) = (state.plays.clone(), state.card_id);
+    }
+    let skew = match root.tags.as_ref().map(|tags| listed_skew(card, tags)) {
+        Ok(Err(e)) => {
+            history.note(true, format!("the card can't be listed: {e}"));
+            return (history.tally.clone(), history.marks());
+        }
+        Ok(Ok(skew)) => skew,
+        Err(_) => 0,
+    };
+    history.look(card, Some(root), skew);
+    // A card for someone else: its plays are counted, and no server is
+    // asked anything.
+    if history.gift {
+        return (history.tally.clone(), history.marks());
+    }
+    let url_key = server_url_key(&client.server());
+    let confirmed = state.as_ref().map_or_else(Vec::new, |s| s.settings.keys(url_key));
+    let mut talk = Talk { url_key, instance: NO_INSTANCE, confirmed, peer: None };
+    // A dry run asks no server, so it counts by the key rule alone.
+    if dry_run || history.owing.plays.is_empty() {
+        history.tally.due = history.due(&talk);
+        return (history.tally.clone(), history.marks());
+    }
+    let info = match wait(client.layered_info_async()) {
+        Ok(info) => info,
+        Err(e) => {
+            history.note(true, format!("the server: {e}"));
+            return (history.tally.clone(), history.marks());
+        }
+    };
+    // The server's own id decides first (2.11): this server at another
+    // address is the card's, and another set up at its address isn't.
+    talk.instance = instance_of(info.instance_id.as_deref());
+    if history.due(&talk) == 0 {
+        history.tally.due = 0;
+        return (history.tally.clone(), history.marks());
+    }
+    // The paths it moved since, found again before any play goes: a play
+    // of a path it doesn't know is rejected, and what this listing says
+    // of its path decides whether it settles or waits. Only for a server
+    // that takes plays: its whole manifest is a long read to make for a
+    // post that won't be.
+    let stats = info.features.stats.is_some();
+    if stats && info.features.sync {
+        match client.manifest(&[], MANIFEST_PAGE_MAX, None, &mut |_| {}) {
+            Ok(Manifest::Listed(listing)) => {
+                history.remap(&talk, &listing.entries, None);
+                let trusted = listing.deletions_trusted();
+                history.listing(&talk, &listing.entries, None, trusted);
+            }
+            Ok(Manifest::NotModified) => {}
+            Err(e) => {
+                history.note(true, format!("the server's listing: {e}"));
+                return (history.tally.clone(), history.marks());
+            }
+        }
+    }
+    history.post(client, &talk, stats, info.instance_id.is_some(), now);
+    (history.tally.clone(), history.marks())
+}
+
+/// `device card-plays <volume> [--dry-run]`, undocumented: the plays of the
+/// card at `volume` (where it is mounted, or the OS's name for it), which
+/// must be one the volume layer accepts, read, mapped through its ledger
+/// and posted to the server of the terminal's saved session, without a
+/// sync. It only reads the card: the plays it settles are acknowledged on
+/// the card (ACKS, the state file's marks) by the next sync's commit, never
+/// by it. With `dry_run` it maps them and says what it would post, and
+/// saves and posts nothing. Prints what it found and did as JSON. Exit 0;
+/// 1 when the card or the server failed; 2 when the volume isn't one it may
+/// read, the volumes can't be listed, or there is no saved session.
+pub(crate) fn command(
+    volume: &str,
+    dry_run: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let found = match volume::find() {
+        Ok(found) => found,
+        Err(e) => {
+            let _ = writeln!(err, "mstream-player: the volumes can't be listed: {e}");
+            return 2;
+        }
+    };
+    let mut saved = || Client::resolve(None, None).map_err(|e| e.to_string());
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    let now = since.map_or(0, |d| d.as_secs());
+    on(&found, volume, dry_run, &mut saved, Rc::new(ConfigStore), now, out, err)
+}
+
+/// [`command`] on the volumes found; `saved` the saved session's client,
+/// asked for only once the volume is one it may read; `now`: Unix seconds.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn on(
+    found: &[volume::Found],
+    named: &str,
+    dry_run: bool,
+    saved: &mut dyn FnMut() -> Result<Client, String>,
+    store: Rc<dyn Store>,
+    now: u64,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let Some(found) = super::setup::pick(found, named) else {
+        let _ = writeln!(err, "mstream-player: {named} isn't a volume this computer lists");
+        return 2;
+    };
+    let Some(card) = Mounted::of(found) else {
+        let codes: Vec<&str> = found.refusals.iter().map(volume::Refusal::code).collect();
+        let _ = writeln!(err, "mstream-player: {named} is refused: {}", codes.join(", "));
+        return 2;
+    };
+    let client = match saved() {
+        Ok(client) => client,
+        Err(e) => {
+            let _ = writeln!(err, "mstream-player: no saved session: {e}");
+            return 2;
+        }
+    };
+    let (tally, marks) = plays_of(&card, &client, dry_run, store, now);
+    let mut printed = tally.json();
+    printed["dryRun"] = dry_run.into();
+    printed["marks"] = marks_value(&marks);
+    let acks = "written only by a sync's commit: this command writes nothing to the card";
+    printed["acks"] = acks.into();
+    let _ = writeln!(out, "{}", serde_json::to_string_pretty(&printed).unwrap_or_default());
+    if tally.failed { 1 } else { 0 }
+}
+
+#[cfg(test)]
+pub(crate) mod tests;
