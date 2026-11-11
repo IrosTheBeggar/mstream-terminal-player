@@ -4677,6 +4677,70 @@ mod tests {
     }
 
     #[test]
+    fn under_this_builds_pin_a_board_that_cant_format_is_told_updating_lets_it_in_every_locale() {
+        // The page's other tests draw against a stand-in pin (v0.8.0); this
+        // one is told the real one, as the worker tells it. The pin formats
+        // (PINNED_ANSWERS_FORMAT), so 0.12.0 and 0.13.0, which name their
+        // card and have no format, are behind it with Update ▸, and their
+        // row says that updating lets them where the fix line would be.
+        use crate::device::firmware::{PINNED_ANSWERS_FORMAT, pin_target};
+        assert!(PINNED_ANSWERS_FORMAT, "this build's pin formats a card");
+        let codes = crate::setup::LANGS.map(|(code, _)| code);
+        let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
+        let target = pin_target().expect("this build pins a release");
+        // A row's words wrap in some locales: they are compared with the
+        // frame's spaces and borders left out.
+        let bare = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace() && *c != '│').collect() };
+        let row = |fw: &str, kind: CardKind| -> (Board, String) {
+            let mut board = answering_with("COM3", fw, |s| (s.card, s.cid) = (kind, CardRoot::None));
+            board.verdict = board.judge(Some(&target));
+            let (mut page, ends) = page_with(|e| e.boards(vec![board.clone()]));
+            ends.tell([Event::Target(target.clone())]);
+            page.pump();
+            (board, window(&mut page))
+        };
+        let update = format!("{} ▸", t!("dev.btn_update"));
+        for (fw, kind) in [("v0.13.0", CardKind::ExFat), ("v0.12.0", CardKind::Gpt), ("v0.11.0", CardKind::Ntfs)] {
+            let (board, frame) = row(fw, kind);
+            assert_eq!(board.verdict, Verdict::Update, "{code}: {fw} is behind {}", target.version);
+            assert!(!board.can_format(), "{fw}: no clock=, no format");
+            let lets = format!("{} {}", t!("dev.card.fmt_old", version = fw), t!("dev.card.fmt_old_update"));
+            assert!(bare(&frame).contains(&bare(&lets)), "{code}, {fw}: {lets:?}
+{frame}");
+            assert!(bare(&frame).contains(&bare(&update)), "{code}, {fw}: {update:?}
+{frame}");
+            for pc in ["dev.card_fix_format_pc", "dev.card_fix_mbr_pc"] {
+                assert!(!bare(&frame).contains(&bare(&t!(pc))), "{code}, {fw}: no computer's fix
+{frame}");
+            }
+            assert!(!bare(&frame).contains(&bare(&t!("dev.card.link_format"))), "{code}, {fw}: no format offered
+{frame}");
+        }
+        // A damaged card: a computer's disk check first, then that updating
+        // lets the player format it.
+        let (_, frame) = row("v0.13.0", CardKind::Other);
+        assert!(bare(&frame).contains(&bare(&t!("dev.card_try_computer"))), "{code}:
+{frame}");
+        let lets = format!("{} {}", t!("dev.card.fmt_old", version = "v0.13.0"), t!("dev.card.fmt_old_update"));
+        assert!(bare(&frame).contains(&bare(&lets)), "{code}: {lets:?}
+{frame}");
+        // On the pin, with `clock=`, the board formats: no such line.
+        let mut on_pin = answering_with("COM3", &target.version, |s| {
+            (s.card, s.cid, s.clock) = (CardKind::ExFat, CardRoot::None, crate::device::board::Clock::Ok);
+        });
+        on_pin.verdict = on_pin.judge(Some(&target));
+        assert_eq!(on_pin.verdict, Verdict::UpToDate);
+        let (mut page, ends) = page_with(|e| e.boards(vec![on_pin]));
+        ends.tell([Event::Target(target.clone())]);
+        page.pump();
+        let frame = window(&mut page);
+        assert!(!bare(&frame).contains(&bare(&t!("dev.card.fmt_old_update"))), "{code}:
+{frame}");
+        assert!(bare(&frame).contains(&bare(&format!("{} ▸", t!("dev.card.btn_format")))), "{code}:
+{frame}");
+    }
+
+    #[test]
     fn behind_the_pin_damaged_or_the_players_own_card_the_format_is_a_dim_link_and_f() {
         let _en = english();
         // An update to make first: Update ▸ wins, the format is f and a link.

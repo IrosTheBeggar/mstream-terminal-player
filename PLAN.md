@@ -3064,12 +3064,14 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > mode, `device list`, the fake board and its e2e leg; then the page's UX from the design cards
 > (mStream `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time
 > left, what to do next, the port watch, and the log behind `l`. The pin in
-> `src/device/firmware.rs` is firmware v0.11.0 (17 Oct 2026; before it v0.10.0 from 13 Oct,
-> v0.9.0 from 11 Oct, v0.8.0 from 10 Oct, v0.7.0 from 7 Oct, v0.6.0 from 4 Oct, and the first
-> release, v0.5.0) — `device flash` with no flags writes it; `--firmware` / `--release` still
-> override. v0.11.0 answers the running firmware's `@status` (v0.9.0 and later do; v0.8.0 and
-> older say their version only), which the pin says beside its checksums
-> (`PINNED_ANSWERS_STATUS`, true since the bump to v0.10.0 below).
+> `src/device/firmware.rs` is firmware v0.14.0 (10 Nov 2026; before it v0.13.0, v0.12.0,
+> v0.11.0 from 17 Oct, v0.10.0 from 13 Oct, v0.9.0 from 11 Oct, v0.8.0 from 10 Oct, v0.7.0 from
+> 7 Oct, v0.6.0 from 4 Oct, and the first release, v0.5.0) — `device flash` with no flags writes
+> it; `--firmware` / `--release` still override. v0.14.0 answers the running firmware's `@status`
+> (v0.9.0 and later do; v0.8.0 and older say their version only) and formats a card at the
+> tab's ask (`@format`, v0.14.0 and later), which the pin says beside its checksums
+> (`PINNED_ANSWERS_STATUS`, true since the bump to v0.10.0 below, and `PINNED_ANSWERS_FORMAT`,
+> true since the bump to v0.14.0).
 > **2026-10-10:** the backend of the MP3 Player tab's redesign (mStream
 > `docs/designs/mp3-tab`, alternate A, "One card"): `src/device/listen.rs` asks the running
 > firmware with no reset, `board.rs` is one board's verdict and card, `desk.rs` the worker that
@@ -3131,6 +3133,15 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > transfer waits for before it writes an Auto DJ index (the firmware's docs/AUTODJ-INDEX.md), so
 > a board written at the old pin would never be given one. No test changed: the device tests
 > take the pin from the constants, as the bump to v0.10.0 meant them to.
+> **2026-11-10, the pin moves to v0.14.0** (published 10 Nov; its code ran on a Core2 that day:
+> boot, settings kept, the clock set, plays written, a card formatted by hand; both checksums
+> read from its SHA256SUMS, equal to GitHub's digests; the ELF table given v0.12.0's, v0.13.0's
+> and v0.14.0's pairs as the releases name them; the published image not yet written by this
+> player). It is the first release with what the card transfer talks to (the clock and `@time`,
+> the play log, `@format`), so `PINNED_ANSWERS_FORMAT` turns true: a board that can't format is
+> told "Updating lets it." in its fix line's place, beside Update ▸ (the screen's contract,
+> clauses 20 and 59, and its deviations log). Boards on v0.11.0 to v0.13.0 are now offered the
+> update.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this

@@ -547,7 +547,7 @@ comes from the cache, or a download, beside them.
       again"); firmware too old to report it ("? v0.7.0 can't report the
       card." — and "Updating shows it." only when the pinned release
       answers the status query, which the pin says beside its checksum:
-      v0.11.0 does, as every release from v0.9.0 on; v0.8.0, the pin the
+      v0.14.0 does, as every release from v0.9.0 on; v0.8.0, the pin the
       examples here were drawn with, did not); a board that is not
       mStream firmware ("? Only mStream firmware can read the card"); a
       port in use ("? unknown until the port is free").
@@ -558,14 +558,15 @@ comes from the cache, or a download, beside them.
     the player (below). That erases the whole card.") on a board that can
     format: its status carries `clock=` (clause 59). On one that can't, no
     line points below at a format that isn't there:
-    - while the pinned release formats, clause 59's line takes the fix
-      line's place, "v0.11.0 can't format a card. Updating lets it.", with
-      the verdict's *Update ▸* (the set's card 06 §4);
-    - while it doesn't (the pin v0.11.0), the fix lines keep today's words
-      ("Fix: format it FAT32 (MBR) on a computer. That erases it." and its
-      MBR twin), moved with their ten locales to `dev.card_fix_format_pc`
-      and `dev.card_fix_mbr_pc`, and clause 59's line, "v0.11.0 can't
-      format a card.", follows them.
+    - while the pinned release formats (the pin v0.14.0, the first that
+      does), clause 59's line takes the fix line's place, "v0.11.0 can't
+      format a card. Updating lets it.", with the verdict's *Update ▸* (the
+      set's card 06 §4);
+    - while it doesn't (every pin before v0.14.0), the fix lines keep the
+      words from before the format ("Fix: format it FAT32 (MBR) on a
+      computer. That erases it." and its MBR twin), moved with their ten
+      locales to `dev.card_fix_format_pc` and `dev.card_fix_mbr_pc`, and
+      clause 59's line, "v0.11.0 can't format a card.", follows them.
 
     The line that says where music goes under a card with no tracks gives
     way to clause 20a's *not filled yet* line on a card whose `cid=` is
@@ -911,7 +912,7 @@ comes from the cache, or a download, beside them.
     its own bootloader header (byte 3's low nibble: `F` the QIO build, `0`
     the DIO build), never from its name; a board's from the ELF id it
     reports, against every release's QIO/DIO pair the player carries
-    (v0.5.0–v0.11.0, bumped with the pin) and the images it has had in hand
+    (v0.5.0–v0.14.0, bumped with the pin) and the images it has had in hand
     this run. A board whose ELF says its DIO was chosen (a release that had
     both builds) says so under its chip, once, dim: "In DIO (runs on every
     Core2): updates keep it." — and its Update ▸ and Update all write the
@@ -1436,10 +1437,11 @@ comes from the cache, or a download, beside them.
       when the pinned release answers `@format`, which the pin says beside
       its checksum as it says `PINNED_ANSWERS_STATUS` (a
       `PINNED_ANSWERS_FORMAT`, part B6), the rule of clause 20's "Updating
-      shows it.". The pin v0.11.0 does not
-      answer it, so today the line ends at "can't format a card." under
-      today's fix line (clause 20): a v0.11.0 board is up to date with no
-      Update (clause 19), and an update to the pin would not let it format.
+      shows it.". The pin v0.14.0 answers it, so the line ends "Updating
+      lets it." in the fix line's place (clause 20), beside the verdict's
+      *Update ▸*: every board without `clock=` is on 0.13.0 or older,
+      behind the pin (clause 19), a build of 0.14.0's own development
+      (`v0.14.0-dev+…`) among them.
     - **The tab's gate:** "Format the card in COM3 as FAT32?" — the player
       erases the whole card, every part of it, even parts it can't read,
       and makes one FAT32 volume with an empty `/music`; about how long,
@@ -3054,3 +3056,34 @@ setting no locale, prints in English.
   - **The command line looked stopped at 90%.** Its progress lines said the
     tenths 1 to 9 only. They say the tenth of the end too, and a phase's
     last count as it ends when that wasn't the last one said.
+- **2026-11-10 — The pin moves to v0.14.0, which formats a card.**
+  Firmware v0.14.0 (10 Nov) is the pin: the first release with the clock
+  and `@time`, the play log and `@format`, which the card transfer talks
+  to; at v0.11.0 an Update would have installed a firmware without them.
+  Both checksums are its SHA256SUMS's (equal to GitHub's digests of the
+  assets, read the same day), and the ELF table (clause 37) gains
+  v0.12.0's, v0.13.0's and v0.14.0's pairs (QIO `769811d5`, `e43d98f7`,
+  `08a671e0`; DIO `14294679`, `cd577310`, `91c7b448`), as the releases
+  name them. The release's code ran on a Core2 that day (its settings
+  kept, the clock set, plays written, a card formatted by hand); the
+  published image itself has not been written by this player yet.
+  - **The pin formats** (`PINNED_ANSWERS_FORMAT` true now, the test still
+    holding it to the pin), so what clauses 20 and 59 kept for that day
+    is drawn: a board with no `clock=` (0.13.0 and older) says "v0.13.0
+    can't format a card. Updating lets it." in its fix line's place, under
+    an exFAT, NTFS or GPT card, beside the verdict's *Update ▸*, and the
+    `_pc` fix lines ("on a computer") are no longer drawn under any board
+    the tab asks: a board that formats points at its own Format, one
+    that can't at the update. A damaged card still goes to a computer's
+    disk check first, with the same line under it. The clauses say so in
+    place.
+  - **Where boards fall** (clause 19): one on v0.11.0, v0.12.0 or v0.13.0
+    is now *Update available* with *Update ▸*, as is a build of 0.14.0's
+    own development (`v0.14.0-dev+…`, before the release); one on v0.14.0
+    is up to date; a development build past it (`v0.14.0-3-g…`) stays up
+    to date with the "Ahead of" line (the 2026-10-10 entry), never offered
+    a step back. Nothing in those rules moved; only the constants did.
+  - **The command line** (`device format`) still says "its firmware is
+    older than 0.14.0" to a board without the format, with no word of
+    updating; `device list` offers the update on such a board's line as
+    on any board behind the pin.

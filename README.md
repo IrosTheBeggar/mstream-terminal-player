@@ -697,7 +697,7 @@ or a development build based below it), ✗ *Not mStream firmware*, ? *Not answe
 free space under it, in decimal GB as the Core2's About shows them — or what the card is and
 how to fix it (no card, exFAT, GPT), or why it cannot be shown (firmware too old to report it,
 a write under way): the card comes from the firmware's `@status`, which firmware 0.9.0 and
-later answer — v0.11.0, the release this player pins, among them, so a board on v0.8.0 or
+later answer — v0.14.0, the release this player pins, among them, so a board on v0.8.0 or
 older is told *Updating shows it.* Free space a card never counted is offered as one count
 (`c`), never started by itself. One button follows the chip — *Update ▸*, *Install ▸*,
 *Read the board ▸* (a board that does not answer: reading it restarts it, said on the card
@@ -706,7 +706,7 @@ dark screen while it writes, what stays (settings, the paired headphones, the mu
 card), and that unplugging halfway leaves it half written; Enter, Esc and `n` keep the board
 as it is, `y` writes, and the board is reset only then. The erase box is in the install's
 warning alone, on by default over other firmware. When the board restarts, the card is the
-board again — `✓ Up to date · v0.11.0 · just written`, its SD card as the new firmware reports
+board again — `✓ Up to date · v0.14.0 · just written`, its SD card as the new firmware reports
 it — and one line says what was done. Everything technical — the port and bridge, the flash
 size, the firmware's ELF, where this player's image came from, the card's bytes, the run's log
 with a clock, and *Write again* — is behind **Details** (`d`, or
@@ -766,7 +766,7 @@ step and writes without a screen, the flags answering the warning.
 opened with DTR and RTS held low, so the music on it plays on): the firmware's `@status` line —
 its version and its SD card's size, free space and tracks — or, from firmware older than the
 query, the console's `L` for the version alone. Each board's line is the port's as before, then
-its firmware against the pin (`v0.7.0, update to v0.11.0`) and its card (`card 38.2 GB free of
+its firmware against the pin (`v0.7.0, update to v0.14.0`) and its card (`card 38.2 GB free of
 59.6 GB, 1,284 tracks`); a board that says nothing is `not answering`, and a port another
 program holds is `in use by another program`. With several boards, `--yes` still asks for
 `--port` — its refusal lists each board's firmware now — or `--all`, which updates every board
@@ -774,7 +774,7 @@ running an older release of this firmware to the pin, one after another, each in
 it runs (or the one `--flash-mode` names), stopping at the first failure; it never installs
 over other firmware, never erases and never goes back, and names the boards it left alone.
 
-The pinned release is v0.11.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
+The pinned release is v0.14.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
 ships the Core2 in DIO and only one Core2 has been tried in QIO, so the release also carries a
 `-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install,
 `device flash --flash-mode dio` writes it, or the tab's Advanced… does (Flash mode, DIO). It
@@ -818,7 +818,8 @@ the computer: with firmware 0.14.0 or later, the board's SD card row offers *For
 a gold warning that says what is lost. The tab only asks: the player shows the question on its
 own screen, *Format…* then its red button held 2 s, restarts and formats the card, and the row
 follows it to the empty card, ready to fill in a card reader. A damaged card is sent to a
-computer's disk check first. Leaving the tab never stops it. `device format` does the same from a
+computer's disk check first. On older firmware the row says it can't format the card, and
+that updating to v0.14.0, the pinned release, lets it. Leaving the tab never stops it. `device format` does the same from a
 terminal; it has no `--yes`, since the player confirms.
 
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your

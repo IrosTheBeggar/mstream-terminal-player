@@ -2105,7 +2105,8 @@ mod tests {
         assert_eq!(refused("status:v0.14.0/format=second-size"), size);
         let write = "Couldn't format the card in FAKE0: the card refused a write.";
         assert_eq!(refused("status:v0.14.0/card=gpt/format=fail-write"), write);
-        // Older firmware: the pin has no format; one that can't say its card.
+        // Older firmware: v0.11.0 (the pin before v0.14.0) has no format;
+        // one that can't say its card.
         let pin = "FAKE0 can't format a card: its firmware is older than 0.14.0.";
         assert_eq!(refused("status:v0.11.0/card=exfat"), pin);
         let old = refused("old:v0.8.0");
