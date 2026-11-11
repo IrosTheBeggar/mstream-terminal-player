@@ -21,7 +21,8 @@ use crate::kit::{dim, width};
 use crate::tui::worker::LibraryNode;
 
 use super::{
-    ALBUMS_NAV, ARTISTS_NAV, Act, DISCOVER_NAV, Gui, RATED_NAV, RECENT_NAV, Screen, accent, bright_bold, put, sel,
+    ALBUMS_NAV, ARTISTS_NAV, Act, DISCOVER_NAV, DJ_NAV, Gui, RATED_NAV, RECENT_NAV, Screen, accent, bright_bold, put,
+    sel,
 };
 
 /// One room's choice: its moods and level — as chosen, so a level picked
@@ -138,6 +139,9 @@ pub(crate) fn room_offers(gui: &Gui, nav: usize) -> bool {
     match nav {
         ALBUMS_NAV | ARTISTS_NAV | RECENT_NAV | RATED_NAV => own && caps.mood_filters,
         DISCOVER_NAV => own && caps.taste_moods(),
+        // Auto DJ's Smart filters (auto-dj contract): the DJ's server, not
+        // the session's — where it says it has scores, and never a peer.
+        DJ_NAV => gui.app.dj_mood_gate().is_none() && gui.app.dj_info.as_ref().is_some_and(|info| info.mood_filters),
         _ => false,
     }
 }
@@ -150,6 +154,7 @@ pub(crate) fn room(gui: &Gui, nav: usize) -> RoomMoods {
         RECENT_NAV => gui.moods.recent,
         RATED_NAV => gui.moods.rated,
         DISCOVER_NAV => RoomMoods { filter: gui.app.taste.moods, sort: MoodSort::Own },
+        DJ_NAV => RoomMoods { filter: gui.app.dj.moods, sort: MoodSort::Own },
         _ => RoomMoods::default(),
     }
 }
@@ -177,6 +182,14 @@ pub(crate) fn by_match(gui: &Gui, nav: usize) -> bool {
 /// Sort, which the answer lands in.
 pub(crate) fn apply(gui: &mut Gui, nav: usize, next: RoomMoods) -> Applied {
     let was = room(gui, nav);
+    // Auto DJ's: the setting changes, and the next pick keeps to it —
+    // there is no list here to ask again.
+    if nav == DJ_NAV {
+        if was.filter != next.filter {
+            super::dj::edit(gui, crate::tui::app::DjEdit::Moods(next.filter));
+        }
+        return Applied::Nothing;
+    }
     match nav {
         ALBUMS_NAV => gui.moods.albums = next,
         ARTISTS_NAV => gui.moods.artists = next,
@@ -295,7 +308,22 @@ pub(crate) fn offered_here(gui: &Gui) -> bool {
 /// Whether the modal is up: the room on screen's own, where it still
 /// offers the filters.
 pub(crate) fn is_open(gui: &Gui) -> bool {
-    gui.moods.draft.is_some_and(|draft| draft.nav == gui.active) && offered_here(gui)
+    dj_open(gui) || (gui.moods.draft.is_some_and(|draft| draft.nav == gui.active) && offered_here(gui))
+}
+
+/// Whether the modal is up as Auto DJ's Smart filters: the DJ's own
+/// draft, over whichever room it was opened from — the room's row, or
+/// quick config on the bar.
+pub(crate) fn dj_open(gui: &Gui) -> bool {
+    gui.moods.draft.is_some_and(|draft| draft.nav == DJ_NAV) && room_offers(gui, DJ_NAV)
+}
+
+/// Open the modal as Auto DJ's Smart filters, on the setting as it
+/// stands — off, still at the level last picked. `key` puts the hand up.
+pub(crate) fn open_for_dj(gui: &mut Gui, key: bool) {
+    if room_offers(gui, DJ_NAV) {
+        gui.moods.draft = Some(MoodDraft::opened(DJ_NAV, room(gui, DJ_NAV), key));
+    }
 }
 
 /// Whether the strip stands (clause 35): where the room offers the filters
@@ -827,7 +855,13 @@ pub(crate) fn draw_modal(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
     super::keep::modal_box(frame, rect);
     gui.ui.click(own, Act::Guard);
-    super::keep::border_title(frame, rect, &t!("gui.moods.title"));
+    if draft.nav == DJ_NAV {
+        // The row's name, and its value following the draft.
+        let (value, tone) = super::dj::moods_value(draft.moods.filter);
+        super::dj::border_title_value(frame, rect, &t!("gui.dj.smart"), &value, tone);
+    } else {
+        super::keep::border_title(frame, rect, &t!("gui.moods.title"));
+    }
 
     let cols = modal_cols(&locale);
     let x0 = rect.x + 2;

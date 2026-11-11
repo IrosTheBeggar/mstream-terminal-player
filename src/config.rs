@@ -147,6 +147,12 @@ pub struct PlayerPrefs {
     /// (clause 61).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autodj_server: Option<String>,
+    /// Play from's home: the server Start arms the DJ on, whichever one is
+    /// browsed — the one chosen in the room's Play from, and whichever
+    /// server the DJ last ran on. Absent until then (the session's own
+    /// stands in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autodj_home: Option<String>,
     /// The old mode — "off", "similar" or "tempo+key" — read once for the
     /// migration (a mode other than off arms the DJ on the remembered
     /// session's server) and never written again.
@@ -183,6 +189,7 @@ impl Default for PlayerPrefs {
             repeat: "off".to_string(),
             shuffle: false,
             autodj_server: None,
+            autodj_home: None,
             autodj: String::new(),
             crossfade_seconds: 0.0,
             gapless: true,
@@ -243,11 +250,25 @@ pub struct AutoDjPrefs {
     /// zero is off. Kept from the player's own panel (decision 9).
     pub artist_cooldown: u32,
     /// The track-length window, in seconds; a bound on its rail (0 below,
-    /// 1200 above) is not sent.
+    /// `length_ceiling` above) is not sent.
     pub length: bool,
     pub min_seconds: u32,
     pub max_seconds: u32,
+    /// What "no maximum" was when the file was written: a day (86400)
+    /// since the window took any length, and absent in a file from before,
+    /// where it was the 20:00 end of a bar — so that file's `max_seconds =
+    /// 1200` still reads as no maximum.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length_ceiling: Option<u32>,
     pub allow_unknown_length: bool,
+    /// Smart filters — the mood filter every pick keeps to: a value per
+    /// scale ("" is none), the tags, and how sure every group must be
+    /// ("strict", "standard", "loose"). Nothing chosen is the filter off.
+    pub mood_valence: String,
+    pub mood_energy: String,
+    pub mood_voice: String,
+    pub mood_tags: Vec<String>,
+    pub mood_level: String,
     /// The client-side keyword filter over title, artist, album, filepath.
     pub keyword_filter: bool,
     pub keywords: Vec<String>,
@@ -265,6 +286,10 @@ pub struct AutoDjPrefs {
     /// `dj_genre_mode` / `dj_genres` override.
     pub genre_mode: String,
     pub genres: Vec<String>,
+    /// Which genre links the list matches: "tag", "model", or absent for
+    /// both; a server entry's own `dj_genre_source` overrides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre_source: Option<String>,
     /// Legacy (the three-mode panel): a percent, "off" / "compatible" /
     /// "strict", and the perceptual 1–100 slider. Read for the migration,
     /// dropped on the next write.
@@ -298,7 +323,13 @@ impl Default for AutoDjPrefs {
             length: false,
             min_seconds: 0,
             max_seconds: crate::dj::LENGTH_RAIL_SECONDS,
+            length_ceiling: None,
             allow_unknown_length: false,
+            mood_valence: String::new(),
+            mood_energy: String::new(),
+            mood_voice: String::new(),
+            mood_tags: Vec::new(),
+            mood_level: "standard".to_string(),
             keyword_filter: false,
             keywords: Vec::new(),
             min_rating: 0,
@@ -310,6 +341,7 @@ impl Default for AutoDjPrefs {
             genre_filter: None,
             genre_mode: "off".to_string(),
             genres: Vec::new(),
+            genre_source: None,
             tempo_tolerance: None,
             key_matching: None,
             sonic_tightness: None,
@@ -330,6 +362,8 @@ pub struct DjLibraryOverrides {
     pub genre_filter: Option<bool>,
     pub genre_mode: Option<String>,
     pub genres: Option<Vec<String>>,
+    /// "tag", "model" or "both" when the entry chose a kind of its own.
+    pub genre_source: Option<String>,
 }
 
 /// A server entry's Add from YouTube choices as one value: what the room
@@ -647,6 +681,8 @@ pub struct ServerEntry {
     pub dj_genre_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dj_genres: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_genre_source: Option<String>,
     /// Add from YouTube's Where new songs land for this server: the
     /// library, the folders a song files into under it, and which of the
     /// presets that layout is — needed beside it, since "Same as Discover"
@@ -736,6 +772,11 @@ pub fn follow_rename(config: &mut Config, old: &str, new: &str) {
         }
     }
     if let Some(server) = config.player.autodj_server.as_mut()
+        && let Some(renamed) = renamed_identity(server, old, new)
+    {
+        *server = renamed;
+    }
+    if let Some(server) = config.player.autodj_home.as_mut()
         && let Some(renamed) = renamed_identity(server, old, new)
     {
         *server = renamed;
@@ -1406,6 +1447,7 @@ pub fn save_dj_library(identity: &str, overrides: &DjLibraryOverrides) -> Result
     entry.dj_genre_filter = overrides.genre_filter;
     entry.dj_genre_mode = overrides.genre_mode.clone();
     entry.dj_genres = overrides.genres.clone();
+    entry.dj_genre_source = overrides.genre_source.clone();
     save(&config)
 }
 

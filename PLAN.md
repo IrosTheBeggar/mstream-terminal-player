@@ -2319,6 +2319,44 @@ a LATER secondary screen (party view), Columns retired.
   lock lasts from the gate's yes until the board's write has ended; leaving
   keeps a page that saw a board aside until its worker says every port is
   free. The standalone `device flash` is the same page at 72×24.
+- **Add from YouTube, the redesign ✅ 2026-11-10** (the entry under this
+  one is the first build) — the owner asked for a better way to add a
+  video, approved the canvas "Add from YouTube · GUI" (claude.ai artifact
+  `JL4aG7b1Nut1YVSqLJcojQ`, sixteen boards) and said build it: the phone's
+  own shape in the GUI's cells. One block, centred, at most 56 cells: the
+  link in a bordered card with `Paste` beside it (the window flavour
+  reads its clipboard — `YtUi::clipboard`; a terminal cannot, so the
+  button is not drawn there); the found song a card — an 8 × 4 cover,
+  the title with `edit tags ▸`, the artist, album and year, YouTube's own
+  line — whose cover is YouTube's thumbnail for the video's id, fetched
+  from `i.ytimg.com` by the player on a thread of its own (`Work::Thumb`;
+  the id's letters make the address, never the server's answer) and cut
+  to its middle square; `Saves to` and `Format` as rows that each open a
+  sheet; the tall primary the block's width under the song, a slab on
+  the title row at the 100 × 24 floor; and the From YouTube list in the
+  room under the form — its window, the title row's word and the
+  tracker's `Summary` are gone, the Files door's `! failed` opens the
+  room. Three sheets (`gui/ytdl_sheets.rs`, a new file: the sheet's
+  frame, Edit tags as four bordered text boxes, Format as radios with
+  what each is good for; `gui/ytdl_where.rs`'s Saves to restyled as one,
+  its layouts in two columns; the Files window's `Saves here` sheet in
+  `gui/ytdl_here.rs`), standing where a room's window does so they cover
+  the block they were opened from. The Files window draws the same form
+  (`form_rows`, `draw_row`). The page's controls are words now, never a
+  key's letter — the letters still act where their control is drawn and
+  the tips line names them — so the page's words are each locale's key
+  words without their key, and the only new word in ten languages is
+  `Paste`; the limits, the first time's words, `Saves to`, the sheet's
+  title and Format's two lines are the phone's own strings. The contract
+  is amended clause by clause with a log of what the canvas's sample got
+  wrong against the kit's rules (`docs/ux-contracts/add-from-youtube.md`).
+  Tests: the canvas's fifteen boards are the tests' boards, written into
+  them from the canvas's own files cell for cell with their tokens
+  (`gui::ytdl` 44, `gui::ytdl_here` 18, `gui::ytdl_where` 10), and every
+  language drawn whole; `scenario_ytdl` walks the new room on a pty.
+  Left open: the cover is fetched only from YouTube (a server-side
+  thumbnail proxy would keep the player off YouTube's host altogether);
+  the list has no scrollbar; the TUI still gets nothing.
 - **Add from YouTube ✅ 2026-11-09** (built; the smoke still to run) —
   designed first (the canvas "Add from YouTube — webapp & desktop", its
   terminal page's five boards and its notes, the user's answers of
@@ -2384,6 +2422,51 @@ a LATER secondary screen (party view), Columns retired.
   and the shell's give-way table at ten sizes for four sets of tools;
   `scenario_ytdl` opens the room from its nav row, and passes on both
   servers after the move.
+- **The Auto DJ room rebuilt ✅ 2026-11-10** — the record's Auto DJ
+  screen was rebuilt (mstream_music `1d4e8974`: one row per setting, a
+  sheet behind each, a split button with quick settings, Recently played,
+  Smart filters, the genre kind, Play from) and the canvas "Auto DJ Panel
+  · GUI" drew it in cells — twenty boards, built as drawn (auto-dj
+  contract, clauses 2, 8, 16, 20, 40–58; decisions 13–19). **The room**:
+  Start / Stop is the status (a 3-row frame the rows' width, the kit's
+  slab on the title row where the room is short); Play from · First song ·
+  Batch; MUST MATCH — Sonic similarity, Smart filters, Genres, Rating,
+  Length; PREFER — Beat matching, Harmonic mixing, Skip words, Artist
+  cooldown; a value in its tone (DIM · OK · GOLD behind `!`), a row the
+  server cannot do DIM in its place with the reason; `Preview picks ▸` on
+  the title row. Nothing scrolls: 23 rows at 100×30, every row whole at
+  100×24, the spare rows coming back in one order. In a wider room the
+  block grows to 56 cells and then stands centred (the owner's call on
+  seeing it in the window). **The sheets**
+  (`src/gui/dj/sheets.rs`): the mood Filters' modal shape with the row's
+  value on the border following a draft; bars a cell a step; Length typed
+  to the second; five stars by halves; Skip words as chips under the
+  kit's text input, a `+` beside it for the pointer (the owner's call
+  too); Genres with
+  Only · Skip and Generated · Tags · Mixed where the server has both;
+  Play from's servers (one ticked) and its folders, behind a window where
+  they outgrow the sheet; Preview's three picks. Smart filters is the
+  mood modal retitled. **The bar**: `│ auto-dj │ ▴ │`, the chevron opening
+  quick config (`src/gui/dj/quick.rs`) — Play from, Sonic with Drift ·
+  Stay close, Smart filters, the room's door — every change at once.
+  **The model**: the toggle's Stop always stops and Start goes to Play
+  from's home (`[player] autodj_home`; the TUI, with no Play from row,
+  starts where it stands); `moods` on a pick and the opener where the
+  server said it has scores; `genreSource` from 6.32.2; the length window
+  to a day with an older file's 20:00 as no maximum (`length_ceiling`);
+  `retrySonic` when a sonic setting changes; Recently played from
+  `stats/recently-played`, each song once, twenty at most, as a fourth
+  First song and a third opener of the empty queue. The shell hands a
+  modal's wheel to the DJ's layers (the old genre picker's never turned).
+  73 locale keys the old room said are gone, 50 arrive in ten languages
+  (the record's ARB words where it has them). Not built: sessions across
+  several servers, the docked sheet, a key for quick config. Tests: 30 in
+  `gui::dj` (the room cell for cell, the floor, the gates, every sheet's
+  draft law, the wheel, ten locales), with the model's, the worker's and
+  the App's beside them; `scenario_dj` rewritten for the new room and
+  passing on the rig (the deviations log has the run, and what it could
+  not show: a server with discovery data, mood scores or both genre
+  kinds).
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

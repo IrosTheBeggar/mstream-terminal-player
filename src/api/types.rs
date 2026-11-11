@@ -1420,6 +1420,15 @@ pub struct RandomSongRequest {
     /// blocks untagged tracks, a blacklist lets them through.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub genre_mode: Option<String>,
+    /// Which genre links `genres` matches — "tag" or "model" (mStream
+    /// #1102, 6.32.2). Left out, the list matches both, as before the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre_source: Option<String>,
+    /// Smart filters: the browse lists' mood filter in its wire form
+    /// (mStream #1096) — a base condition the server never relaxes. Only
+    /// for a filter that is not empty, and only to a server with scores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moods: Option<MoodFilter>,
 
     // The sonic pool. The server's Joi schema binds these with `.and(...)`,
     // so sending one without the other is a 400 — see `with_sonic_pool`.

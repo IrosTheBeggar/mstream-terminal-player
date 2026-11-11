@@ -59,6 +59,10 @@ pub struct DjLane {
     pub warned_auth: bool,
     pub logged_not_ready: bool,
     pub logged_deferred: bool,
+    /// Why this lane is picking without sonic similarity, once it had to
+    /// let the pool go (clause 30) — what the room's row says in gold
+    /// until the sonic settings change or the lane ends.
+    pub sonic_drop: Option<DjNote>,
 }
 
 impl DjLane {
@@ -78,22 +82,32 @@ pub enum DjEdit {
     /// A bar's absolute value — songs, BPM, artists, a rating in halves,
     /// seconds — and hundredths of cosine for the strictness bar.
     Set(DjRow, u32),
-    Anchor(dj::SonicAnchor),
     EmptyQueue(dj::EmptyQueueStart),
-    /// Whitelist or blacklist; Off is the switch (a step on the Genres row
-    /// cycles all three, the TUI's habit).
-    /// The mode apart from the switch (clause 48; the record's
-    /// `autoDJGenreMode` beside `autoDJGenreEnabled`) — the switch is the
-    /// row's [`DjEdit::Step`], like every other switch: switching off keeps
-    /// whitelist or blacklist for the next switch on, and a click never
-    /// has to pass through the other mode to get there.
-    GenreMode(dj::GenreMode),
-    /// The TUI row's ←→: off → whitelist → blacklist → off, one key.
+    /// The TUI row's ←→: off → whitelist → blacklist → off, one key. The
+    /// switch and the mode are two fields all the same (clause 48; the
+    /// record's `autoDJGenreMode` beside `autoDJGenreEnabled`): switching
+    /// off keeps whitelist or blacklist for the next switch on.
     GenreCycle,
     /// A genre in or out of the chosen set.
     Genre(String),
     AddKeyword(String),
     RemoveKeyword(String),
+    // The GUI room's sheets: each closes on one edit of everything it holds.
+    /// Sonic similarity: the switch, the floor in hundredths of cosine,
+    /// and the anchor. A lane that had dropped the pool gets another go.
+    Sonic { on: bool, floor: u32, anchor: dj::SonicAnchor },
+    /// Smart filters: nothing chosen is the filter off.
+    Moods(crate::api::types::MoodFilter),
+    /// Beat matching: the switch and ± BPM.
+    Tempo { on: bool, tolerance: u32 },
+    /// Length, to the second: a side left `None` has no limit; both `None`
+    /// is Any, which is the window off.
+    LengthWindow { min: Option<u32>, max: Option<u32>, unknown: bool },
+    /// Skip words: the whole list; empty is the filter off.
+    Keywords(Vec<String>),
+    /// Genres, for the library the rules are for: the way the list cuts,
+    /// the kind of genre it matches, and the list — empty is the filter off.
+    GenreRule { mode: dj::GenreMode, source: GenreSource, genres: Vec<String> },
 }
 
 /// The empty-queue chooser (clause 2): "Start Auto DJ with what?" — Surprise
@@ -102,10 +116,41 @@ pub enum DjEdit {
 pub struct DjChooser {
     pub row: usize,
     pub remember: bool,
+    /// Recently played's list is down, and the row in it the cursor is on.
+    pub recent_open: bool,
+    pub recent_row: usize,
+    /// The list came down on its own once (the remembered way to start),
+    /// so a list folded since stays folded.
+    pub recent_seated: bool,
 }
 
 /// The chooser's rows: the two answers, then the remember box.
 pub const DJ_CHOOSER_ROWS: usize = 3;
+
+/// Why the DJ's server cannot do one of the room's settings — said in a
+/// few words where the row's value would be (the record's rows never move:
+/// a setting the server can't do keeps its place).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DjGate {
+    /// The server is known to predate the release that brought it.
+    NeedsServer((u32, u32, u32)),
+    DiscoveryOff,
+    StillScanning,
+    NoMoodData,
+    NotOnPeers,
+}
+
+/// The TUI's Longest row on its 0:00–20:00 walk: the walk's end is "no
+/// maximum" (the rail), one step under it 19:45; a longer bound — set in
+/// the GUI's sheet — steps as it is.
+fn step_longest(now: u32, by: i32, floor: u32) -> u32 {
+    let top = dj::LENGTH_LEGACY_RAIL_SECONDS;
+    if now >= dj::LENGTH_RAIL_SECONDS {
+        return if by < 0 { (top as i32 + by).max(floor as i32) as u32 } else { now };
+    }
+    let next = (now as i32 + by).max(floor as i32) as u32;
+    if (now < top && next >= top) || next >= dj::LENGTH_RAIL_SECONDS { dj::LENGTH_RAIL_SECONDS } else { next }
+}
 
 impl App {
     // ── Where the DJ stands ─────────────────────────────────────────────────
@@ -202,24 +247,105 @@ impl App {
         None
     }
 
+    /// Why sonic similarity cannot run on the DJ's server (the GUI room's
+    /// row): it predates it, its scan has produced no vectors yet, or
+    /// discovery is off there. `None` while it can — or nobody knows yet.
+    pub fn dj_sonic_gate(&self) -> Option<DjGate> {
+        let info = self.dj_info.as_ref()?;
+        if dj::known_older(info.version.as_deref(), dj::FLOOR_SONIC) {
+            return Some(DjGate::NeedsServer(dj::FLOOR_SONIC));
+        }
+        if info.discovery && info.discovery_ready == Some(false) {
+            return Some(DjGate::StillScanning);
+        }
+        (!info.discovery).then_some(DjGate::DiscoveryOff)
+    }
+
+    /// Why Smart filters cannot narrow the picks there: a peer's key has
+    /// no say over them, or the server has no mood scores.
+    pub fn dj_mood_gate(&self) -> Option<DjGate> {
+        if self.dj_target_is_peer() {
+            return Some(DjGate::NotOnPeers);
+        }
+        let info = self.dj_info.as_ref()?;
+        (!info.mood_filters).then_some(DjGate::NoMoodData)
+    }
+
+    /// Whether `moods` may ride a pick: the server SAID it has scores. One
+    /// that has not answered yet is not sent the key.
+    fn dj_mood_scores(&self) -> bool {
+        !self.dj_target_is_peer() && self.dj_info.as_ref().is_some_and(|info| info.mood_filters)
+    }
+
+    /// A setting the DJ's server is KNOWN to predate (clause 50).
+    pub fn dj_floor_gate(&self, floor: (u32, u32, u32)) -> Option<DjGate> {
+        let version = self.dj_info.as_ref().and_then(|info| info.version.as_deref());
+        dj::known_older(version, floor).then_some(DjGate::NeedsServer(floor))
+    }
+
+    /// Whether the library the room's rules are for is a federated peer's.
+    pub fn dj_target_is_peer(&self) -> bool {
+        self.dj_library_target().is_some_and(|id| self.origin_of(&id).peer.is_some())
+    }
+
+    /// The sonic settings changed: a lane that had dropped the pool gets
+    /// another go with them (the record's `retrySonic`).
+    fn dj_retry_sonic(&mut self) {
+        if self.lane.sonic_drop.take().is_some() {
+            self.lane.warned_sonic = false;
+        }
+        if let Some(identity) = self.dj_server.as_deref() {
+            crate::tui::worker::dj_retry_sonic(identity, self.lane.epoch);
+        }
+    }
+
     // ── The toggle (entry point 1) ──────────────────────────────────────────
 
-    /// The record's toggle: off → arm for the session's server; on here →
-    /// off; on elsewhere → move here.
+    /// The record's toggle (re-extracted 2026-11-10): on → off, wherever
+    /// the DJ is armed — Stop always stops; off → armed for Play from's
+    /// server, whichever one is browsed — the browsed one itself in a
+    /// shell with no Play from. (Before, a DJ armed elsewhere was moved to
+    /// the browsed server, so one button meant two things.)
     pub(super) fn toggle_autodj(&mut self) -> Vec<Effect> {
-        let Some(here) = self.session_identity() else {
-            // No session to arm for; an armed DJ can still be switched off.
-            if self.dj_armed() {
-                return self.disarm_dj();
-            }
+        if self.dj_armed() {
+            return self.disarm_dj();
+        }
+        let Some(target) = self.dj_play_from() else {
             self.info(t!("dj.needs_server"));
             return Vec::new();
         };
-        match self.dj_server.clone() {
-            Some(current) if crate::config::same_server(&current, &here) => self.disarm_dj(),
-            _ if self.queue.items.is_empty() => self.begin_empty_start(here),
-            _ => self.arm_dj(here),
+        if self.queue.items.is_empty() { self.begin_empty_start(target) } else { self.arm_dj(target) }
+    }
+
+    /// Play from's server while the DJ is off — where Start arms it: the
+    /// home (the server chosen in the room, or the one the DJ last ran on)
+    /// while it is still a saved server, else the session's. A shell that
+    /// shows no Play from has no home to start on: the session's it is.
+    pub(crate) fn dj_play_from(&self) -> Option<String> {
+        self.dj_home
+            .as_ref()
+            .filter(|_| self.dj_shows_play_from)
+            .filter(|home| self.servers.iter().any(|s| crate::config::same_server(&s.id, home)))
+            .cloned()
+            .or_else(|| self.session_identity())
+    }
+
+    /// Play from names a server (the room's sheet): the home either way; a
+    /// DJ running somewhere else starts afresh there, one already there
+    /// carries on, and a DJ that is off stays off.
+    pub(crate) fn dj_play_from_set(&mut self, identity: String) -> Vec<Effect> {
+        if self.dj_armed() {
+            return self.dj_move_to(identity);
         }
+        if self.dj_play_from().is_some_and(|now| crate::config::same_server(&now, &identity)) {
+            self.dj_home = Some(identity);
+            return Vec::new();
+        }
+        self.dj_home = Some(identity);
+        // Off, the rows describe the server Start would use: ask it.
+        self.dj_info = None;
+        self.dj_panel.rebuild(&self.dj, None, self.dj_is_peer());
+        self.dj_room_opened()
     }
 
     /// Arm the DJ for `identity` (clause 1): a fresh lane when it is a
@@ -229,8 +355,10 @@ impl App {
         let fresh = !self.dj_server.as_deref().is_some_and(|s| crate::config::same_server(s, &identity));
         if fresh {
             self.lane.reset();
-            self.dj_info = None;
+            self.forget_dj_info_unless_for(&identity);
         }
+        // Play from always holds the server the DJ runs on, as its home.
+        self.dj_home = Some(identity.clone());
         self.dj_server = Some(identity);
         self.dj_chooser = None;
         // An opener still out was asked for another start: its target must
@@ -240,6 +368,17 @@ impl App {
         let mut effects = self.probe_dj();
         effects.extend(self.dj_look_at_the_end());
         effects
+    }
+
+    /// The DJ is about to stand on `identity`: what the room knew of
+    /// another server goes, and what it already asked of this one — the
+    /// room open with the DJ off probes Play from's server — stays, so
+    /// the rows do not blink to unknown and back on Start.
+    fn forget_dj_info_unless_for(&mut self, identity: &str) {
+        let same = self.dj_library_target().is_some_and(|target| crate::config::same_server(&target, identity));
+        if !same {
+            self.dj_info = None;
+        }
     }
 
     fn say_armed(&mut self) {
@@ -298,15 +437,67 @@ impl App {
     /// Switching on with nothing queued: the opening question, or the
     /// answer the user asked to remember.
     fn begin_empty_start(&mut self, identity: String) -> Vec<Effect> {
-        self.dj_target = Some(identity);
+        self.dj_target = Some(identity.clone());
         match self.dj.empty_queue {
-            dj::EmptyQueueStart::Ask => {
-                self.dj_chooser = Some(DjChooser::default());
-                Vec::new()
+            // Recently played names a song, so it asks every time too —
+            // with its list already down once the songs are in hand.
+            dj::EmptyQueueStart::Ask | dj::EmptyQueueStart::Recent => {
+                let recent_open = self.dj.empty_queue == dj::EmptyQueueStart::Recent;
+                self.dj_chooser = Some(DjChooser { recent_open, ..Default::default() });
+                self.dj_want_recent(&identity)
             }
             dj::EmptyQueueStart::Random => self.dj_surprise(),
             dj::EmptyQueueStart::Pick => self.dj_pick_from_library(),
         }
+    }
+
+    /// Ask a server for the songs last played on it (Recently played): the
+    /// list in hand, if it is that server's, stands until the new one
+    /// lands. A peer is not asked — a key or a guest has no history there —
+    /// and nor is a server that cannot be reached right now.
+    pub(crate) fn dj_want_recent(&mut self, identity: &str) -> Vec<Effect> {
+        let kept = self
+            .dj_recent
+            .take()
+            .filter(|(whose, _)| crate::config::same_server(whose, identity))
+            .and_then(|(_, list)| list);
+        if self.origin_of(identity).peer.is_some() {
+            self.dj_recent = Some((identity.to_string(), Some(Vec::new())));
+            return Vec::new();
+        }
+        match self.reach_for(identity) {
+            Ok(reach) => {
+                self.dj_recent = Some((identity.to_string(), kept));
+                vec![Effect::Api(ApiCmd::DjRecent { identity: identity.to_string(), reach })]
+            }
+            Err(_) => {
+                self.dj_recent = Some((identity.to_string(), Some(kept.unwrap_or_default())));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The songs Recently played offers for the server an opener is for —
+    /// none while the list is out, or when there is nothing to offer.
+    pub fn dj_recent_songs(&self) -> &[Track] {
+        let Some(target) = self.opener_target() else { return &[] };
+        match &self.dj_recent {
+            Some((whose, Some(list))) if crate::config::same_server(whose, &target) => list,
+            _ => &[],
+        }
+    }
+
+    /// One of Recently played's songs opens the session (the chooser's
+    /// list, or the armed empty queue's): it is the seed, on the server it
+    /// was played on. What is remembered is the way to start, not the song.
+    pub(crate) fn answer_dj_start_recent(&mut self, index: usize, remember: bool) -> Vec<Effect> {
+        let Some(track) = self.dj_recent_songs().get(index).cloned() else { return Vec::new() };
+        let Some(server) = self.opener_target() else { return Vec::new() };
+        if remember {
+            self.dj.empty_queue = dj::EmptyQueueStart::Recent;
+        }
+        self.dj_chooser = None;
+        self.start_from_seed(DjSeed { track, server, picked_by_dj: false })
     }
 
     /// The server an opener is for: the one the toggle was pressed on, or
@@ -369,9 +560,10 @@ impl App {
         let fresh = !self.dj_server.as_deref().is_some_and(|s| crate::config::same_server(s, &seed.server));
         if fresh {
             self.lane.reset();
-            self.dj_info = None;
+            self.forget_dj_info_unless_for(&seed.server);
         }
         self.dj_server = Some(seed.server.clone());
+        self.dj_home = Some(seed.server.clone());
         // The clear that starts it consumes the seed: a new lane, and nothing
         // left for a later empty-queue start to replay.
         self.lane.reset();
@@ -440,7 +632,8 @@ impl App {
         match choice {
             dj::EmptyQueueStart::Random => self.dj_surprise(),
             dj::EmptyQueueStart::Pick => self.dj_pick_from_library(),
-            dj::EmptyQueueStart::Ask => Vec::new(),
+            // Recently played answers with a song: `answer_dj_start_recent`.
+            dj::EmptyQueueStart::Ask | dj::EmptyQueueStart::Recent => Vec::new(),
         }
     }
 
@@ -518,6 +711,7 @@ impl App {
             // What the probe learned of the server: a key it is known to
             // predate stays out of the body (clauses 25, 27, 50).
             server_version: self.dj_info.as_ref().and_then(|info| info.version.clone()),
+            mood_scores: self.dj_mood_scores(),
         }
     }
 
@@ -574,6 +768,7 @@ impl App {
                 discovery: self.capabilities.discovery,
                 discovery_ready: None,
                 libraries: self.libraries.clone(),
+                mood_filters: self.capabilities.mood_filters,
             });
             self.dj_panel.rebuild(&self.dj, self.dj_info.as_ref(), self.dj_is_peer());
         }
@@ -656,12 +851,17 @@ impl App {
                 }
                 self.lane.ignore = ignore_list;
                 let mut explained = false;
-                if let Some(note) = note
-                    && !self.lane.warned_sonic
-                {
-                    self.lane.warned_sonic = true;
-                    self.info(dj_note_words(&note));
-                    explained = true;
+                if let Some(note) = note {
+                    // What the room's row says until the sonic settings
+                    // change or the lane ends.
+                    if matches!(note, DjNote::SonicRange | DjNote::SonicUnscanned) {
+                        self.lane.sonic_drop = Some(note.clone());
+                    }
+                    if !self.lane.warned_sonic {
+                        self.lane.warned_sonic = true;
+                        self.info(dj_note_words(&note));
+                        explained = true;
+                    }
                 }
                 if let Some(failure) = failure {
                     return self.dj_turn_failed(failure, opener);
@@ -698,6 +898,30 @@ impl App {
                     picker.failed = None;
                     picker.all = genres.into_iter().map(|g| g.name).collect();
                     picker.row = picker.row.min(picker.all.len().saturating_sub(1));
+                }
+                Vec::new()
+            }
+            // The Genres sheet's list: the kind it asked for, and what the
+            // server has of each. An answer under a kind no longer asked
+            // for is dropped.
+            Event::DjGenres { source, genres, sources } => {
+                if let Some(picker) = self.dj_panel.genres.as_mut()
+                    && picker.shown.is_none_or(|asked| asked == source)
+                {
+                    picker.loading = false;
+                    picker.failed = None;
+                    picker.all = genres.into_iter().map(|g| g.name).collect();
+                    picker.sources = sources;
+                    picker.shown = Some(source);
+                    picker.row = picker.row.min(picker.all.len().saturating_sub(1));
+                }
+                Vec::new()
+            }
+            Event::DjRecent { identity, tracks } => {
+                if let Some((whose, list)) = self.dj_recent.as_mut()
+                    && crate::config::same_server(whose, &identity)
+                {
+                    *list = Some(tracks);
                 }
                 Vec::new()
             }
@@ -952,14 +1176,17 @@ impl App {
                         self.lane.history.clear();
                         self.lane.locked_pin = None;
                     }
+                    self.dj_retry_sonic();
                 }
                 DjRow::Strictness => {
                     let raw = self.dj.sonic_min_similarity + f64::from(delta) * dj::SONIC_STEP;
                     self.dj.sonic_min_similarity = dj::clamp_similarity(raw);
+                    self.dj_retry_sonic();
                 }
                 DjRow::Anchor => {
                     self.dj.sonic_anchor = self.dj.sonic_anchor.next();
                     self.lane.locked_pin = None;
+                    self.dj_retry_sonic();
                 }
                 DjRow::EmptyQueue => self.dj.empty_queue = self.dj.empty_queue.next(),
                 DjRow::Bpm => self.dj.bpm = !self.dj.bpm,
@@ -987,8 +1214,7 @@ impl App {
                 }
                 DjRow::Longest => {
                     let by = delta * dj::LENGTH_STEP_SECONDS as i32;
-                    self.dj.max_seconds =
-                        step(self.dj.max_seconds, by, self.dj.min_seconds, dj::LENGTH_RAIL_SECONDS);
+                    self.dj.max_seconds = step_longest(self.dj.max_seconds, by, self.dj.min_seconds);
                 }
                 DjRow::UnknownLength => self.dj.allow_unknown_length = !self.dj.allow_unknown_length,
                 DjRow::Genres => {
@@ -1001,6 +1227,7 @@ impl App {
                 DjRow::SongsPerFetch => self.dj.songs_per_fetch = value.clamp(1, dj::SONGS_PER_FETCH_MAX),
                 DjRow::Strictness => {
                     self.dj.sonic_min_similarity = dj::clamp_similarity(f64::from(value) / 100.0);
+                    self.dj_retry_sonic();
                 }
                 DjRow::Tolerance => {
                     self.dj.bpm_tolerance = value.clamp(dj::BPM_TOLERANCE_MIN, dj::BPM_TOLERANCE_MAX);
@@ -1013,14 +1240,7 @@ impl App {
                 }
                 _ => {}
             },
-            DjEdit::Anchor(anchor) => {
-                if self.dj.sonic_anchor != anchor {
-                    self.dj.sonic_anchor = anchor;
-                    self.lane.locked_pin = None;
-                }
-            }
             DjEdit::EmptyQueue(choice) => self.dj.empty_queue = choice,
-            DjEdit::GenreMode(mode) => effects = self.set_dj_genre_mode(mode),
             DjEdit::GenreCycle => {
                 let library = self.dj_library();
                 effects = match (library.genre_filter, library.genre_mode) {
@@ -1048,6 +1268,54 @@ impl App {
                 self.dj.keyword_filter = true;
             }
             DjEdit::RemoveKeyword(word) => self.dj.keywords.retain(|k| !k.eq_ignore_ascii_case(&word)),
+            DjEdit::Sonic { on, floor, anchor } => {
+                let floor = dj::clamp_similarity(f64::from(floor) / 100.0);
+                let changed = (self.dj.sonic, self.dj.sonic_min_similarity, self.dj.sonic_anchor) != (on, floor, anchor);
+                if self.dj.sonic_anchor != anchor {
+                    self.lane.locked_pin = None;
+                }
+                // Switching off clears the lane's anchors (clause 43).
+                if self.dj.sonic && !on {
+                    self.lane.history.clear();
+                    self.lane.locked_pin = None;
+                }
+                self.dj.sonic = on;
+                self.dj.sonic_min_similarity = floor;
+                self.dj.sonic_anchor = anchor;
+                if changed {
+                    self.dj_retry_sonic();
+                }
+            }
+            DjEdit::Moods(filter) => self.dj.moods = filter,
+            DjEdit::Tempo { on, tolerance } => {
+                self.dj.bpm = on;
+                self.dj.bpm_tolerance = tolerance.clamp(dj::BPM_TOLERANCE_MIN, dj::BPM_TOLERANCE_MAX);
+            }
+            DjEdit::LengthWindow { min, max, unknown } => {
+                let rail = dj::LENGTH_RAIL_SECONDS;
+                let mut lo = min.unwrap_or(0).min(rail);
+                // No maximum is the rail; a typed zero is none too.
+                let mut hi = max.filter(|m| *m > 0).unwrap_or(rail).min(rail);
+                // A window with no possible match: the bounds change places.
+                if lo > hi {
+                    std::mem::swap(&mut lo, &mut hi);
+                }
+                self.dj.min_seconds = lo;
+                self.dj.max_seconds = hi;
+                self.dj.length = lo > 0 || hi < rail;
+                self.dj.allow_unknown_length = unknown;
+            }
+            DjEdit::Keywords(words) => {
+                let mut seen = std::collections::HashSet::new();
+                self.dj.keywords = words
+                    .iter()
+                    .map(|w| w.trim().to_string())
+                    .filter(|w| !w.is_empty() && seen.insert(w.to_lowercase()))
+                    .take(dj::KEYWORDS_MAX)
+                    .collect();
+                self.dj.keyword_filter = !self.dj.keywords.is_empty();
+            }
+            DjEdit::GenreRule { mode, source, genres } => effects = self.set_dj_genres(mode, source, genres),
         }
         self.dj_panel.rebuild(&self.dj, self.dj_info.as_ref(), self.dj_is_peer());
         effects
@@ -1058,7 +1326,7 @@ impl App {
     /// The library a room edits: the DJ's server while armed, else the
     /// session's — the one Start would use.
     pub(crate) fn dj_library_target(&self) -> Option<String> {
-        self.dj_server.clone().or_else(|| self.session_identity())
+        self.dj_server.clone().or_else(|| self.dj_play_from())
     }
 
     /// That library's rules as the room shows them and the request sends
@@ -1113,11 +1381,6 @@ impl App {
         }
     }
 
-    fn set_dj_genre_mode(&mut self, mode: dj::GenreMode) -> Vec<Effect> {
-        let filter = self.dj_library().genre_filter;
-        self.set_dj_genre_rule(filter, mode)
-    }
-
     fn set_dj_genre_filter(&mut self, on: bool) -> Vec<Effect> {
         let mode = self.dj_library().genre_mode;
         self.set_dj_genre_rule(on, mode)
@@ -1155,6 +1418,47 @@ impl App {
         }
     }
 
+    /// The Genres sheet's Done: the rule whole — the way it cuts, the kind
+    /// of genre it matches, and the list, at most [`dj::GENRES_MAX`]. An
+    /// empty list is the filter off; the mode and the kind are kept.
+    fn set_dj_genres(&mut self, mode: dj::GenreMode, source: GenreSource, genres: Vec<String>) -> Vec<Effect> {
+        let mut seen = std::collections::HashSet::new();
+        let genres: Vec<String> = genres
+            .into_iter()
+            .filter(|g| !g.is_empty() && seen.insert(g.clone()))
+            .take(dj::GENRES_MAX)
+            .collect();
+        let filter = !genres.is_empty();
+        match self.dj_library_entry() {
+            Some(i) => {
+                let own = &mut self.servers[i].dj;
+                own.genres = Some(genres);
+                own.genre_filter = Some(filter);
+                own.genre_mode = Some(mode.label().to_string());
+                own.genre_source = Some(source.as_str().to_string());
+                self.save_dj_library(i)
+            }
+            None => {
+                self.dj.genres = genres;
+                self.dj.genre_filter = filter;
+                self.dj.genre_mode = mode;
+                self.dj.genre_source = source;
+                Vec::new()
+            }
+        }
+    }
+
+    /// The Genres sheet asks for its list: the genres of one kind in the
+    /// library the rule is for. What the server said it has of each kind
+    /// stays in hand while the answer is out.
+    pub(crate) fn dj_genres_ask(&mut self, source: GenreSource) -> Vec<Effect> {
+        let sources = self.dj_panel.genres.as_ref().and_then(|picker| picker.sources);
+        self.dj_panel.genres =
+            Some(GenrePicker { loading: true, sources, shown: Some(source), ..Default::default() });
+        let reach = self.dj_library_target().and_then(|target| self.reach_for(&target).ok()).flatten();
+        vec![Effect::Api(ApiCmd::DjGenres { reach, source })]
+    }
+
     /// The room's server picker (clause 41): re-selecting the DJ's server is
     /// a no-op (a restart would drop the lane for nothing); another moves the
     /// DJ there and starts a new lane.
@@ -1178,7 +1482,8 @@ impl App {
         if self.dj_server.is_some() || self.dj_info.is_some() {
             return Vec::new();
         }
-        let Some(identity) = self.session_identity() else { return Vec::new() };
+        // Play from's server: the one Start would use, the session's or not.
+        let Some(identity) = self.dj_play_from() else { return Vec::new() };
         match self.reach_for(&identity) {
             Ok(reach) => vec![Effect::Api(ApiCmd::DjProbe { identity, reach })],
             Err(_) => Vec::new(),
@@ -1276,7 +1581,7 @@ impl App {
         if self.dj_panel.sample_pending {
             return Vec::new();
         }
-        let Some(identity) = self.dj_server.clone().or_else(|| self.session_identity()) else {
+        let Some(identity) = self.dj_library_target() else {
             self.info(t!("dj.needs_server"));
             return Vec::new();
         };
