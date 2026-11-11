@@ -32,8 +32,10 @@ const WORDS: usize = 4 * 1024;
 /// ([`ceiling`]).
 const CEILING_BASE: Duration = Duration::from_secs(5 * 60);
 /// A source of no known length is taken as this many bytes a second of
-/// audio (about a FLAC's): its size says how long it plays.
-const BYTES_A_SECOND: u64 = 128 * 1024;
+/// audio (64 kbps: a low rate, so a long spoken-word file at 32 kbps is
+/// still given more than the time it plays): its size says how long it
+/// plays at most, give or take a factor of two.
+const BYTES_A_SECOND: u64 = 8 * 1024;
 
 /// The longest a conversion of a source of `expected_ms` (its length, when
 /// known) or else `size` bytes may run before it is given up: a few minutes,
@@ -295,6 +297,10 @@ mod tests {
         assert_eq!(ceiling(Some(181_500), 1 << 30), Duration::from_secs(300 + 363));
         assert_eq!(ceiling(None, 30 * BYTES_A_SECOND), Duration::from_secs(300 + 60));
         assert!(ceiling(Some(u64::MAX), 0) >= Duration::from_millis(u64::MAX), "never wraps");
+        // Ten hours of a 32 kbps audiobook whose length isn't known: more
+        // than nine hours, where a FLAC's rate gave it some 41 minutes.
+        let audiobook = 10 * 3600 * 4000;
+        assert!(ceiling(None, audiobook) >= Duration::from_secs(9 * 3600), "{:?}", ceiling(None, audiobook));
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let started = Instant::now();
         let why = wait_for(&mut long_child(), Duration::from_millis(300), &stop).unwrap_err();
