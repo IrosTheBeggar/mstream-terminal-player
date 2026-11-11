@@ -478,6 +478,11 @@ pub(crate) struct Source {
     /// row is passed over until it changes, so it no longer holds back the
     /// revision every run reads the manifest whole for.
     pub(crate) failing: Vec<Failing>,
+    /// The last run's every fetch of the server's own files failed, so it
+    /// added no run to their counts (`faultRun`; absent: false): the next
+    /// such run counts them, so files that always fail are still passed
+    /// over.
+    pub(crate) fault_run: bool,
     /// The object as read: the members this software doesn't know stay.
     raw: Kept,
 }
@@ -724,6 +729,7 @@ impl Settings {
                 failing: (raw.get("failing").and_then(Value::as_array).into_iter().flatten())
                     .filter_map(Failing::read)
                     .collect(),
+                fault_run: raw.get("faultRun").and_then(Value::as_bool).unwrap_or(false),
                 raw: Kept(raw.clone()),
             });
         }
@@ -915,6 +921,10 @@ impl Source {
         match self.failing.is_empty() {
             true => drop(object.remove("failing")),
             false => set("failing", self.failing.iter().map(Failing::object).collect()),
+        }
+        match self.fault_run {
+            false => drop(object.remove("faultRun")),
+            true => drop(object.insert("faultRun".into(), true.into())),
         }
         Value::Object(object)
     }

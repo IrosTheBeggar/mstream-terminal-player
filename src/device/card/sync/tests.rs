@@ -2112,9 +2112,12 @@ fn a_file_passed_over_is_tried_again_by_a_whole_read_and_its_count_starts_over()
 /// A run in which every fetch of the server's files failed (a server that
 /// answers 500 to every file) adds no run to any file's count: the
 /// server's fault, not the files'. A run in which one came counts the
-/// others'.
+/// others'. The server's fault is taken once in a row: files that always
+/// fail, with nothing else to fetch, look so at every run, and the next
+/// such run counts them, so they are passed over all the same (the last
+/// review's Z2).
 #[test]
-fn a_run_whose_every_fetch_failed_counts_no_file_against_it() {
+fn a_run_whose_every_fetch_failed_counts_no_file_against_it_once_in_a_row() {
     let scratch = Scratch::new("failing-server");
     let sim = card(&scratch);
     let (base, fake) = server();
@@ -2125,22 +2128,35 @@ fn a_run_whose_every_fetch_failed_counts_no_file_against_it() {
         let failing = home_source(sim).failing;
         failing.iter().map(|b| (b.path.clone(), b.tries)).collect::<Vec<_>>()
     };
+    let both = |n: u32| vec![(one.to_string(), n), (two.to_string(), n)];
     // The first: the others came, so these two failed on their own.
     let first = sync_now(&sim, &base, &rock(), &mut envs).0;
     assert_eq!(ran(&first).missed.len(), 2);
-    assert_eq!(tries(&sim), [(one.to_string(), 1), (two.to_string(), 1)]);
+    assert_eq!((tries(&sim), home_source(&sim).fault_run), (both(1), false));
     // The next asks for these two alone, and neither comes: no count moves.
-    for _ in 0..3 {
-        let next = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
-        assert_eq!(ran(&next).missed.len(), 2);
-        assert_eq!(tries(&sim), [(one.to_string(), 1), (two.to_string(), 1)]);
-        assert_eq!(root_revision(&sim), "", "a run that missed a file names no revision");
-    }
-    // One comes: the other failed on its own.
-    fake.lock().unwrap().broken.remove(one);
-    let mended = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
-    assert_eq!(ran(&mended).missed, [(0, two.to_string())]);
-    assert_eq!(tries(&sim), [(two.to_string(), 2)]);
+    let fault = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(ran(&fault).missed.len(), 2);
+    assert_eq!((tries(&sim), home_source(&sim).fault_run), (both(1), true));
+    assert_eq!(root_revision(&sim), "", "a run that missed a file names no revision");
+    // A new file on the server comes: these two failed on their own.
+    a_new_recording(&fake, 6);
+    let good = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!((ran(&good).written, ran(&good).missed.len()), (1, 2));
+    assert_eq!((tries(&sim), home_source(&sim).fault_run), (both(2), false));
+    // One fault run between good runs counts against neither.
+    ran(&sync_now(&sim, &base, &Ask::default(), &mut envs).0);
+    assert_eq!((tries(&sim), home_source(&sim).fault_run), (both(2), true));
+    // A second in a row counts, as any run does: they have failed three
+    // runs in a row now, and the next passes them over, its revision the
+    // card's again.
+    ran(&sync_now(&sim, &base, &Ask::default(), &mut envs).0);
+    assert_eq!(tries(&sim), both(3));
+    let passed = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    let skipped = vec![(one.to_string(), Skip::Failing), (two.to_string(), Skip::Failing)];
+    assert_eq!(passed.summary.as_ref().unwrap().skipped, skipped);
+    assert!(ran(&passed).missed.is_empty());
+    assert_ne!(root_revision(&sim), "");
+    assert!(!home_source(&sim).fault_run, "nothing asked for: no fault");
 }
 
 #[test]

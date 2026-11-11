@@ -2067,8 +2067,12 @@ impl Hooks for SyncHooks {
             // read the listener asked for or the schedule's tries it again:
             // failed again, its count starts over. A run whose every fetch
             // of the server's failed adds no run to any file's count: the
-            // server's fault, not theirs.
-            let servers_fault = store.fetches.get().servers_fault();
+            // server's fault, not theirs. Once in a row: files that always
+            // fail, with nothing else to fetch, look so at every run, and
+            // the next such run counts them as any run does.
+            let fault = store.fetches.get().servers_fault();
+            let servers_fault = fault && !source.fault_run;
+            source.fault_run = fault;
             let missed: Vec<state::Failing> = (outcome.missed.iter())
                 .filter(|(origin, _)| *origin == 0)
                 .filter_map(|(_, path)| {
