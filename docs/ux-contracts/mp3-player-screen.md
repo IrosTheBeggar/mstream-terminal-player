@@ -839,7 +839,8 @@ comes from the cache, or a download, beside them.
       (clause 36).
     - **ERASE**: `[ ] Erase the whole flash first — loses the settings`
       (`[✓]` ticked, Space or a click).
-    - **The help line** (the Auto DJ room's): a dim rule and at most two
+    - **The help line** (as the Auto DJ room drew one before its
+      2026-11-10 redesign, which dropped it): a dim rule and at most two
       dim lines about the focused group — what the pin is and that "Up to
       date" always means it, when GitHub is asked, what DIO costs and buys,
       what a local build is checked for, what an erase loses. Short of rows
@@ -1354,7 +1355,9 @@ comes from the cache, or a download, beside them.
     asking, saying so on stderr; a second Ctrl+C quits at once (the user's
     pick of 2026-10-19, card 07 §7, choice 8). A force-quit, a pulled card
     or a power cut is recovered at the next run (the card contract's crash
-    table).
+    table). While the gate is up it holds every key but Ctrl+C, every
+    paste and the mouse wheel: nothing under it moves, an Auto DJ sheet or
+    the header's server list among them.
     - **While a firmware write runs, the write's rule wins** (clauses
       9–11): `q` does nothing; Ctrl+C, the close button and Cmd-Q quit at
       once with no gate and no wait, leaving the board as clause 10 says;

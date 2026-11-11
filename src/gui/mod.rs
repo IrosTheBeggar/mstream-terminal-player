@@ -3906,6 +3906,12 @@ impl Gui {
     /// that, and swipes silently went nowhere).
     fn wheel(&mut self, at: Position, delta: i32) {
         self.ui.pointer = Some(at);
+        // The quit's gate during a sync holds the wheel as it holds keys
+        // and pastes (clause 57): nothing under it moves, an Auto DJ sheet,
+        // the header dropdown or a room's list among them.
+        if device::quit_gate_open(self) {
+            return;
+        }
         // The header dropdown is on top of everything while it is open.
         if self.servers.drop_open {
             servers::wheel_dropdown(self, delta);

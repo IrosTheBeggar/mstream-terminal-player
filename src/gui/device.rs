@@ -1551,6 +1551,35 @@ mod tests {
         assert_eq!((gui.files_view.scroll, gui.queue_view.scroll), (0, 0), "nothing hidden scrolled");
     }
 
+    /// The quit's gate holds the wheel as it holds keys and pastes (clause
+    /// 57): an Auto DJ sheet or the header dropdown under it never moves.
+    #[test]
+    fn the_quit_gate_holds_the_wheel_over_a_sheet_or_the_dropdown_under_it() {
+        let _en = english();
+        let (mut gui, _worker) = syncing_gui();
+        for n in 0..10 {
+            let url = format!("http://box{n:02}:3000");
+            gui.config.servers.push(crate::config::ServerEntry { url, ..Default::default() });
+        }
+        // The gate up, and a sheet under it (opened as the gate came up).
+        key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(quit_gate_open(&gui));
+        gui.act(super::super::Act::DjRow(super::super::dj::Row::PlayFrom));
+        assert!(super::super::dj::modal_open(&gui), "the sheet is up");
+        let at = Position::new(50, 12);
+        gui.wheel(at, 5);
+        assert_eq!(gui.dj.list.scroll, 0, "the sheet under the gate never moves");
+        gui.servers.drop_open = true;
+        gui.wheel(at, 5);
+        assert_eq!(gui.servers.drop_scroll, 0, "nor the dropdown");
+        gui.servers.drop_open = false;
+        // The gate answered: the wheel reaches the sheet again.
+        key_in(&mut gui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!quit_gate_open(&gui));
+        gui.wheel(at, 5);
+        assert_eq!(gui.dj.list.scroll, 5, "the control: the sheet's list moves");
+    }
+
     #[test]
     fn the_pointer_below_the_bar_is_the_pages_and_the_bar_stays_the_guis() {
         let _en = english();
