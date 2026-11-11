@@ -197,6 +197,17 @@ struct Session {
     /// results here, never in the fold's, which keeps only the last few.
     notes: Vec<Note>,
     logs: Vec<(String, LogItem)>,
+    /// The cards told busy since a wait for a job last looked: a job that
+    /// began and ended within one pump is seen to have begun.
+    busied: Vec<String>,
+}
+
+/// Why the cards couldn't be read and asked.
+enum Unsettled {
+    /// The volumes can't be listed.
+    Volumes(String),
+    /// The worker is gone.
+    Gone,
 }
 
 impl Session {
@@ -207,8 +218,9 @@ impl Session {
     }
 
     fn of(link: Link, events: Receiver<Event>) -> Session {
-        let (notes, logs) = (Vec::new(), Vec::new());
-        Session { link, events, fold: Fold::default(), told: Instant::now(), gone: false, notes, logs }
+        let (notes, logs, busied) = (Vec::new(), Vec::new(), Vec::new());
+        let (fold, told) = (Fold::default(), Instant::now());
+        Session { link, events, fold, told, gone: false, notes, logs, busied }
     }
 
     /// Folds what was told within `wait`.
@@ -231,6 +243,7 @@ impl Session {
             match &event {
                 Event::Note(note) => self.notes.push(note.clone()),
                 Event::Log { key, item } => self.logs.push((key.clone(), item.clone())),
+                Event::Card(view) if view.busy.is_some() => self.busied.push(view.key.clone()),
                 _ => {}
             }
             self.fold.apply(event);
@@ -240,13 +253,17 @@ impl Session {
 
     /// Folds until the readers were looked at and the cards (or the one at
     /// `key`) are read and their servers asked, quiet a moment. Err: the
-    /// volumes can't be listed.
-    fn settle(&mut self, key: Option<&str>) -> Result<(), String> {
+    /// volumes can't be listed, or the worker is gone (it tells nothing
+    /// more, and waiting would only spin).
+    fn settle(&mut self, key: Option<&str>) -> Result<(), Unsettled> {
         let t0 = Instant::now();
         loop {
             self.pump(Duration::from_millis(50));
+            if self.gone {
+                return Err(Unsettled::Gone);
+            }
             if let Some(why) = &self.fold.failed {
-                return Err(why.clone());
+                return Err(Unsettled::Volumes(why.clone()));
             }
             let cards = self.fold.cards.iter().filter(|c| key.is_none_or(|k| c.key == k));
             let settled = self.fold.watched && cards.into_iter().all(settled);
@@ -256,7 +273,9 @@ impl Session {
         }
     }
 
+    /// The card known by `key`, under the key it has now.
     fn card(&self, key: &str) -> Option<&CardView> {
+        let key = self.fold.key_now(key);
         self.fold.cards.iter().find(|c| c.key == key)
     }
 
@@ -278,7 +297,7 @@ impl Session {
 const WORKER_GONE: &str = "the card transfer stopped unexpectedly: nothing more will be done";
 
 /// Settings applied to a card no saved server answers.
-const NOT_SAVED: &str = "settings written, but not its libraries, server or peers: no server saved here answers this card";
+const NOT_SAVED: &str = "settings written, but not its libraries, server or peers: no server saved here is this card's";
 
 /// Read, and its server asked or not to be asked: nothing pending.
 fn settled(card: &CardView) -> bool {
@@ -293,9 +312,8 @@ fn settled(card: &CardView) -> bool {
 /// the volumes can't be listed.
 pub(crate) fn cards(setup: Setup, servers: Vec<ServerLink>, io: &mut Io) -> i32 {
     let mut session = Session::start(setup, servers);
-    if let Err(why) = session.settle(None) {
-        io.warn(&format!("the volumes can't be listed: {why}"));
-        return 2;
+    if let Some(code) = unsettled(session.settle(None), io) {
+        return code;
     }
     let lines: Vec<String> = session.fold.cards.iter().filter(|c| !c.out).map(card_line).collect();
     session.end();
@@ -490,9 +508,8 @@ pub(crate) fn card(
     io: &mut Io,
 ) -> i32 {
     let mut session = Session::start(setup, servers.clone());
-    if let Err(why) = session.settle(None) {
-        io.warn(&format!("the volumes can't be listed: {why}"));
-        return 2;
+    if let Some(code) = unsettled(session.settle(None), io) {
+        return code;
     }
     let key = match pick(&session.fold.cards, drive) {
         Ok(key) => key,
@@ -707,8 +724,25 @@ fn job_done(session: &mut Session, key: &str, began: &mut bool) -> bool {
         return true;
     }
     let busy = session.card(key).is_some_and(|c| c.busy.is_some());
-    *began |= busy;
+    let key = session.fold.key_now(key);
+    let told = std::mem::take(&mut session.busied).iter().any(|k| session.fold.key_now(k) == key);
+    *began |= busy || told;
     *began && !busy
+}
+
+/// What a settle that failed says, and the exit code; None when it didn't.
+fn unsettled(settled: Result<(), Unsettled>, io: &mut Io) -> Option<i32> {
+    match settled {
+        Ok(()) => None,
+        Err(Unsettled::Volumes(why)) => {
+            io.warn(&format!("the volumes can't be listed: {why}"));
+            Some(2)
+        }
+        Err(Unsettled::Gone) => {
+            io.warn(WORKER_GONE);
+            Some(1)
+        }
+    }
 }
 
 /// The notes told since `from`.
@@ -849,6 +883,7 @@ fn settings_lines(want: &Want, server: &str, io: &mut Io) {
 /// A job's end: `done` said, or the note that it failed.
 fn wait_job(session: &mut Session, key: &str, io: &mut Io, done: &str) -> i32 {
     let from = session.notes.len();
+    session.busied.clear();
     let (t0, mut began) = (Instant::now(), false);
     while !job_done(session, key, &mut began) {
         if t0.elapsed() >= JOB_WITHIN {
@@ -1093,6 +1128,7 @@ fn sync(session: &mut Session, key: &str, flags: &Flags, servers: &[ServerLink],
     if let Some(want) = take_over {
         let from = session.notes.len();
         session.link.send(Cmd::Apply { key: key.to_string(), want: Box::new(want) });
+        session.busied.clear();
         let (t0, mut began) = (Instant::now(), false);
         while !job_done(session, key, &mut began) {
             if t0.elapsed() >= JOB_WITHIN {
@@ -1451,6 +1487,7 @@ fn plays(session: &mut Session, key: &str, flags: &Flags, io: &mut Io) -> i32 {
     }
     let (from, logs) = (session.notes.len(), session.logs.len());
     session.link.send(Cmd::Plays { key: key.to_string() });
+    session.busied.clear();
     let (t0, mut began) = (Instant::now(), false);
     while !job_done(session, key, &mut began) {
         if t0.elapsed() >= JOB_WITHIN {

@@ -95,7 +95,7 @@ use super::dry::DryCard;
 use super::engine::{
     Album, Answers, AutoDj, Commit, Cover, Env, Event, Expect, Failed, Fetched, Fetcher, Footprint,
     Guard, Have, Hooks, Knobs, Moods, Origin, Outcome, Plan, Report, Session, Stop, WantedFile,
-    Waves,
+    Waves, serial_read,
 };
 use super::history::{self, History, Tally};
 use super::names::{self, Bytes};
@@ -470,8 +470,9 @@ fn run(
     let was = state.clone();
     ask.change.apply(&mut state.settings);
     state.settings.stored = true;
-    let serial = card.serial().map_err(|_| (None, Halt::Card(Stop::Pulled)))?;
     let picked = &ask.picked;
+    let serial = serial_read(card, picked.serial.as_ref());
+    let serial = serial.map_err(|_| (None, Halt::Card(Stop::Pulled)))?;
     let serial = picked.serial.clone().or(serial);
     let expect = Expect { serial, card_id: picked.card_id, commit_id: None };
     let knobs = knobs_of(&state.settings);

@@ -80,6 +80,9 @@ pub(crate) struct FatSim {
     /// Writes the card refuses, the card still in the reader: each whose
     /// "op path" starts with this (a folder another program holds open).
     refuse: RefCell<Option<String>>,
+    /// Serial reads that read none, the card in the reader all the same (a
+    /// Mac's diskutil that couldn't be run at that moment).
+    serial_misses: Cell<u32>,
 }
 
 fn pulled() -> io::Error {
@@ -112,6 +115,7 @@ impl FatSim {
             quiet: Cell::new(false),
             bad: RefCell::new(None),
             refuse: RefCell::new(None),
+            serial_misses: Cell::new(0),
         }
     }
 
@@ -174,6 +178,11 @@ impl FatSim {
     pub(crate) fn replug(&self) {
         let mut s = self.state.borrow_mut();
         (s.pulled, s.cut) = (false, None);
+    }
+
+    /// The next `n` serial reads read none.
+    pub(crate) fn miss_serial(&self, n: u32) {
+        self.serial_misses.set(n);
     }
 
     /// After the `n`th write from now on, `dir` is the card in the reader.
@@ -493,6 +502,10 @@ impl CardWrite for FatSim {
 
     fn serial(&self) -> io::Result<Option<Serial>> {
         self.reading()?;
+        if let Some(left) = self.serial_misses.get().checked_sub(1) {
+            self.serial_misses.set(left);
+            return Ok(None);
+        }
         Ok(Some(Serial::Fat(self.state.borrow().serial)))
     }
 

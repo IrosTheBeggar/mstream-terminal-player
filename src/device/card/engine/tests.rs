@@ -4687,7 +4687,7 @@ fn a_serial_that_cant_be_read_is_a_card_taken_out_never_another_card() {
     let failed = || Err(io::Error::other("diskutil couldn't be run"));
     let check = |script: Vec<io::Result<Option<Serial>>>| {
         let flaky = Flaky { card: &card, armed: false.into(), script: std::cell::RefCell::new(script.into()) };
-        let id = bind::look(&flaky).expect("the card as it is");
+        let id = bind::look(&flaky, None).expect("the card as it is");
         let (mut bound, _) = Bound::take(&flaky, id, "{}").expect("the card taken");
         flaky.armed.set(true);
         let checked = bound.check(true).map(|_| ());
@@ -4708,4 +4708,26 @@ fn a_serial_that_cant_be_read_is_a_card_taken_out_never_another_card() {
     assert!(matches!(expect.matches(&none), Err(Stop::Pulled)));
     let another = Identity { serial: Some(Serial::Fat(SERIAL ^ 1)), ..none };
     assert!(matches!(expect.matches(&another), Err(Stop::DifferentCard)));
+}
+
+/// The second review's C1-5: a session's own look at the card reads its
+/// serial twice when the first read reads none where one is expected (a
+/// Mac's diskutil that couldn't be run): once is no card taken out, twice
+/// is. With none expected, one read stands.
+#[test]
+fn a_sessions_look_reads_a_missing_serial_once_more() {
+    let dir = std::env::temp_dir().join(format!("mstream-engine-serial-miss-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let card = FatSim::new(&dir, 0x1A2B_3C4D);
+    let serial = Serial::Fat(0x1A2B_3C4D);
+    card.miss_serial(1);
+    let id = bind::look(&card, Some(&serial)).expect("read twice");
+    assert_eq!(id.serial, Some(serial.clone()));
+    card.miss_serial(2);
+    let id = bind::look(&card, Some(&serial)).expect("a look");
+    let expect = Expect { serial: Some(serial.clone()), ..Expect::default() };
+    assert!(matches!(expect.matches(&id), Err(Stop::Pulled)), "twice: a card taken out");
+    card.miss_serial(1);
+    assert_eq!(bind::look(&card, None).expect("a look").serial, None, "none expected: one read");
+    let _ = std::fs::remove_dir_all(&dir);
 }

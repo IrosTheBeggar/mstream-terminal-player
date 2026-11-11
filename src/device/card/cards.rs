@@ -15,9 +15,12 @@
 //! the listener left out of a card's syncs at the proxy gate (clause 58:
 //! asked once per peer); and the removable volumes the listener hid from
 //! the tab's row (clause 63), by their volume serials. Disposable, as
-//! stats.json is: a file that doesn't read is no cache at all, and the next
-//! save writes it over; one of a newer player is read as none and never
-//! written over. Every member this player doesn't know is kept.
+//! stats.json is in what it holds, but not in how it is written: a file
+//! that doesn't read is no cache at all, and no save writes it over (it
+//! holds every card's entry, the volumes hidden and the peers left out:
+//! [`Cards::update`] refuses and says why); one of a newer player is read
+//! as none and never written over. Every member this player doesn't know
+//! is kept.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -183,25 +186,57 @@ impl Cards {
         }
     }
 
-    /// Written back, through config.rs's atomic write; a newer player's file
-    /// is left as it is.
-    pub(crate) fn save(&self) -> Result<(), String> {
-        if self.newer {
-            return Ok(());
-        }
-        crate::config::save_cards_file(&self.text())
-    }
-
     /// `change` made to what the file holds now, and saved: reloaded under
     /// one lock for this process, so two jobs (a sync of two hours and the
     /// listener's hiding a volume meanwhile) never write back a stale copy.
     /// Another program (the command line) writes it whole too: what it saved
     /// is reloaded here, before the change, not overwritten.
+    ///
+    /// A file it can't read, or one that doesn't read as this player's (not
+    /// JSON, no version it knows), is never saved over: every other card's
+    /// entry, the hidden volumes and the peers left out would go with it.
+    /// It refuses, and says why.
     pub(crate) fn update(change: &mut dyn FnMut(&mut Cards)) -> Result<(), String> {
+        let (load, save) = (crate::config::load_cards_file, crate::config::save_cards_file);
+        Cards::update_in(&mut || load(), &mut |text| save(text), change)
+    }
+
+    /// [`Cards::update`] on the file `load` reads and `save` writes.
+    fn update_in(
+        load: &mut dyn FnMut() -> Result<Option<String>, String>,
+        save: &mut dyn FnMut(&str) -> Result<(), String>,
+        change: &mut dyn FnMut(&mut Cards),
+    ) -> Result<(), String> {
         let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
-        let mut now = Cards::load();
+        let text = load().map_err(|e| format!("cards.json isn't written over: {e}"))?;
+        let mut now = match text {
+            Some(text) => Cards::checked(&text)?,
+            None => Cards::default(),
+        };
         change(&mut now);
-        now.save()
+        if now.newer {
+            return Ok(());
+        }
+        save(&now.text())
+    }
+
+    /// The file's `text` read as [`Cards::parse`] reads it, but Err when it
+    /// holds something that isn't this player's cache (an empty file is
+    /// none; a newer player's is read as none, never written over).
+    fn checked(text: &str) -> Result<Cards, String> {
+        if text.trim().is_empty() {
+            return Ok(Cards::default());
+        }
+        let ours = match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(top)) => {
+                top.get("version").and_then(Value::as_u64).is_some_and(|v| v >= VERSION)
+            }
+            _ => false,
+        };
+        match ours {
+            true => Ok(Cards::parse(text)),
+            false => Err("cards.json doesn't read as this player's, and isn't written over".into()),
+        }
     }
 
     /// What changed from `before` to `self`, made to `onto` (the file as it
@@ -394,6 +429,37 @@ mod tests {
         }
         let future = Cards::parse(r#"{"version": 2, "cards": {"0x01": {"label": "x"}}}"#);
         assert!(future.cards.is_empty() && future.newer);
+    }
+
+    /// The second review's C1-4: an update never saves over a file it
+    /// couldn't read or that doesn't read as this player's; it refuses, and
+    /// the file stays as it was.
+    #[test]
+    fn an_update_never_saves_over_a_file_it_couldnt_read() {
+        let saved = std::cell::RefCell::new(Vec::<String>::new());
+        let mut save = |text: &str| {
+            saved.borrow_mut().push(text.to_string());
+            Ok(())
+        };
+        let mut hide = |cards: &mut Cards| cards.hide("1A2B-3C4D");
+        let unread = Cards::update_in(&mut || Err("access denied".into()), &mut save, &mut hide);
+        assert!(unread.is_err_and(|e| e.contains("access denied")));
+        let broken = ["not json", "[]", "{\"cards\": {}}", "{\"version\": 0}", "{\"version\": \"1\"}"];
+        for broken in broken {
+            let text = broken.to_string();
+            let refused = Cards::update_in(&mut || Ok(Some(text.clone())), &mut save, &mut hide);
+            assert!(refused.is_err_and(|e| e.contains("isn't written over")), "{broken}");
+        }
+        assert!(saved.borrow().is_empty(), "nothing saved over any of them");
+        // None, or an empty one: a new cache. A newer player's: left alone.
+        for none in [None, Some(String::new())] {
+            Cards::update_in(&mut || Ok(none.clone()), &mut save, &mut hide).expect("saved");
+        }
+        let newer = r#"{"version": 2}"#.to_string();
+        Cards::update_in(&mut || Ok(Some(newer.clone())), &mut save, &mut hide).expect("left alone");
+        let saved = saved.borrow();
+        assert_eq!(saved.len(), 2);
+        assert!(saved.iter().all(|t| Cards::parse(t).is_hidden("1A2B-3C4D")), "{saved:?}");
     }
 
     #[test]

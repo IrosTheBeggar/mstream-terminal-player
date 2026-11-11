@@ -59,7 +59,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
-pub(crate) use self::bind::Expect;
+pub(crate) use self::bind::{Expect, serial_read};
 pub(crate) use self::plan::{Footprint, Plan};
 pub(crate) use self::run::CARD_WRITE;
 
@@ -759,7 +759,7 @@ impl<'c> Session<'c> {
         if !newer.is_empty() {
             return Err(Stop::Guard(Guard::Newer(newer)));
         }
-        let found = bind::look(card)?;
+        let found = bind::look(card, expect.serial.as_ref())?;
         expect.matches(&found)?;
         let (token, run_id) = (env.id(), env.id());
         let note = bind::note(run_id, env.now(), &env.producer);

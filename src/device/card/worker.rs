@@ -41,7 +41,7 @@ use super::cards::Cards;
 use super::contract::container;
 use super::contract::device_txt::DeviceTxt;
 use super::contract::server::server_url_key;
-use super::engine::{Answers, Env, Event as RunEvent, Expect, Guard, Removal, Stop};
+use super::engine::{Answers, Env, Event as RunEvent, Expect, Guard, Removal, Stop, serial_read};
 use super::history::{self, Tally};
 use super::plan::{Fit, Hidden};
 use super::setup;
@@ -165,13 +165,18 @@ pub(crate) trait Volumes: Send + Sync {
     fn find(&self) -> io::Result<Vec<Found>>;
     /// The volume `found` names as it is now, looked at again: accepted, at
     /// the same place, with the same serial (its free space, its refusals
-    /// as they are now); None when the card isn't that one any more.
+    /// as they are now); None when the card isn't that one any more. One
+    /// listed with no serial is the one listed there with a serial now, as
+    /// the worker re-keys its slot ([`Event::Rekeyed`]).
     fn again(&self, found: &Found) -> Option<Found> {
         let now = self.find().ok()?;
-        now.into_iter().find(|f| f.volume.path == found.volume.path && same_volume(f, found) && f.accepted())
+        let late = |f: &Found| found.volume.serial.is_none() && f.volume.fs == found.volume.fs;
+        let same = |f: &Found| same_volume(f, found) || late(f);
+        now.into_iter().find(|f| f.volume.path == found.volume.path && same(f) && f.accepted())
     }
-    /// The card of an accepted volume; None for a refused one, or one that
-    /// isn't the card `found` names any more.
+    /// The card of an accepted volume, `found` as [`Volumes::again`] gave
+    /// it just now (one look at the volumes a job, not two); None for a
+    /// refused one, or one whose path reaches another card now.
     fn open(&self, found: &Found) -> Option<Box<dyn CardWrite>>;
     fn eject(&self, found: &Found) -> Result<(), String>;
 }
@@ -199,14 +204,13 @@ impl Volumes for System {
     }
 
     fn open(&self, found: &Found) -> Option<Box<dyn CardWrite>> {
-        // Looked at again: another card swapped in at that path since it was
-        // listed is never opened as this one.
-        let now = self.again(found)?;
-        let mounted = Mounted::of(&now)?;
+        // `found` is as `again` listed it just now: another card swapped in
+        // at that path since the slot was made is never opened as this one.
+        let mounted = Mounted::of(found)?;
         // And what its path reaches now is that card: on Linux a mount
         // stacked over its folder since would take the writes.
         if let Ok(Some(serial)) = mounted.serial()
-            && Some(serial) != now.volume.serial
+            && Some(serial) != found.volume.serial
         {
             return None;
         }
@@ -826,6 +830,10 @@ pub(crate) enum Event {
     /// A card's run's progress alone.
     Progress { key: String, run: Run },
     Gone { key: String },
+    /// A card listed first with no serial (its key a path alone) whose
+    /// serial the OS lists now: the same slot under its key with the
+    /// serial (its sync, its sheet and its gate follow it).
+    Rekeyed { from: String, to: String },
     Log { key: String, item: LogItem },
     Note(Note),
     /// Nothing runs: a quit may end.
@@ -843,6 +851,19 @@ pub(crate) fn key_of(found: &Found) -> String {
         Some(serial) => format!("{path}#{serial}"),
         None => path,
     }
+}
+
+/// `key` as it is now, after the renames `rekeyed` (from, to) made.
+fn rekeyed(rekeyed: &[(String, String)], key: &str) -> String {
+    let mut key = key.to_string();
+    // Each rename is followed once at most: a chain is as long as the list.
+    for _ in 0..rekeyed.len() {
+        match rekeyed.iter().find(|(from, _)| *from == key) {
+            Some((_, to)) => key = to.clone(),
+            None => break,
+        }
+    }
+    key
 }
 
 /// `E:` on Windows; the mount point's last part elsewhere.
@@ -917,9 +938,17 @@ pub(crate) struct Fold {
     /// The servers saved on this computer, as the worker was last told
     /// them: the Settings sheet's From (clause 48).
     pub(crate) servers: Vec<ServerLink>,
+    /// Each card given a new key ([`Event::Rekeyed`]), from its old one:
+    /// what holds a key follows it ([`Fold::key_now`]).
+    pub(crate) rekeyed: Vec<(String, String)>,
 }
 
 impl Fold {
+    /// The key a card known by `key` has now, its renames followed.
+    pub(crate) fn key_now(&self, key: &str) -> String {
+        rekeyed(&self.rekeyed, key)
+    }
+
     pub(crate) fn apply(&mut self, event: Event) {
         match event {
             Event::Watched { failed } => {
@@ -942,6 +971,12 @@ impl Fold {
                 }
             }
             Event::Gone { key } => self.cards.retain(|c| c.key != key),
+            Event::Rekeyed { from, to } => {
+                if let Some(card) = self.cards.iter_mut().find(|c| c.key == from) {
+                    card.key = to.clone();
+                }
+                self.rekeyed.push((from, to));
+            }
             Event::Log { key, item } => {
                 self.logs.push((key, item));
                 // A page reads them as they come; with none up, the last few.
@@ -993,6 +1028,9 @@ pub(crate) enum JobDone {
     Plays(Result<Tally, String>),
     Ejected(Result<(), String>),
     Synced(Box<Finished>),
+    /// A look that couldn't open the card: tried again at the next look at
+    /// the readers.
+    Unopened,
 }
 
 /// What a sync's thread came back with.
@@ -1031,6 +1069,12 @@ struct Slot {
     view: CardView,
     /// Read again once the job on it is done.
     look_again: bool,
+    /// Its look couldn't open the card: read again at the next look at the
+    /// readers, while it is still listed.
+    reopen: bool,
+    /// The server link its last sync ran with (its id and sign-in): a sync
+    /// paused for the sign-in goes on only under another.
+    synced_with: Option<(String, Option<String>)>,
     /// Its last tell of progress.
     told: Option<Instant>,
     /// A paused sync's retry: when, and its gates.
@@ -1054,6 +1098,9 @@ struct Worker {
     /// Syncs waiting their turn, with their gates' answers.
     queue: Vec<(String, Allow)>,
     quitting: bool,
+    /// Each slot given a new key, from its old one: a job's or a sync's
+    /// answer under the old key reaches it ([`Event::Rekeyed`]).
+    rekeyed: Vec<(String, String)>,
 }
 
 impl Worker {
@@ -1067,6 +1114,7 @@ impl Worker {
             running: None,
             queue: Vec::new(),
             quitting: false,
+            rekeyed: Vec::new(),
         }
     }
 
@@ -1081,8 +1129,8 @@ impl Worker {
             let wait = next_watch.saturating_duration_since(Instant::now());
             match inbox.recv_timeout(wait) {
                 Ok(In::Cmd(cmd)) => self.cmd(cmd),
-                Ok(In::Job(key, done)) => self.done(&key, done),
-                Ok(In::RunEvent(key, event)) => self.progress(&key, event),
+                Ok(In::Job(key, done)) => self.done(&rekeyed(&self.rekeyed, &key), done),
+                Ok(In::RunEvent(key, event)) => self.progress(&rekeyed(&self.rekeyed, &key), event),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -1125,6 +1173,9 @@ impl Worker {
             .filter(listed)
             .filter(|f| f.volume.serial.as_ref().is_none_or(|s| !hidden.is_hidden(&s.to_string())))
             .collect();
+        for f in &shown {
+            self.serial_came(f);
+        }
         // Gone, or another card in that reader now (another serial).
         let gone: Vec<String> = self
             .slots
@@ -1157,6 +1208,10 @@ impl Worker {
             }
             if self.slots.iter().any(|s| s.view.key == key) {
                 self.seen_again(&key, f);
+                let reopen = self.slot(&key).is_some_and(|s| std::mem::take(&mut s.reopen));
+                if reopen {
+                    self.look(&key);
+                }
                 continue;
             }
             let view = CardView::new(f.clone());
@@ -1164,6 +1219,8 @@ impl Worker {
             let slot = Slot {
                 view,
                 look_again: false,
+                reopen: false,
+                synced_with: None,
                 told: None,
                 retry: None,
                 tries: 0,
@@ -1178,6 +1235,36 @@ impl Worker {
             }
         }
         self.tell(Event::Watched { failed: None });
+    }
+
+    /// A card listed with no serial at first (Linux's lsblk may list a UUID
+    /// late), its key its path alone, that `found` lists now with one: the
+    /// slot takes the key with the serial, and stays the same card, its run
+    /// and its queue place with it. Never one taken out, nor two of a kind.
+    fn serial_came(&mut self, found: &Found) {
+        if found.volume.serial.is_none() {
+            return;
+        }
+        let (path, key) = (found.volume.path.display().to_string(), key_of(found));
+        if self.slots.iter().any(|s| s.view.key == key) {
+            return;
+        }
+        let same = |s: &&mut Slot| {
+            let was = &s.view.found.volume;
+            s.view.key == path && !s.view.out && was.serial.is_none() && was.fs == found.volume.fs
+        };
+        let Some(slot) = self.slots.iter_mut().find(same) else { return };
+        slot.view.key = key.clone();
+        slot.view.found.volume.serial = found.volume.serial.clone();
+        if let Some(running) = self.running.as_mut().filter(|r| r.key == path) {
+            running.key = key.clone();
+        }
+        for (k, _) in self.queue.iter_mut().filter(|(k, _)| *k == path) {
+            *k = key.clone();
+        }
+        self.rekeyed.push((path.clone(), key.clone()));
+        self.tell(Event::Rekeyed { from: path, to: key.clone() });
+        self.told(&key);
     }
 
     /// A card that stays in, as the OS lists it now: its free space and its
@@ -1464,13 +1551,13 @@ impl Worker {
         let (volumes, home) = (self.setup.volumes.clone(), self.setup.home.clone());
         let (me, key) = (self.me.clone(), key.to_string());
         self.told(&key);
-        std::thread::spawn(move || {
+        spawn_caught(JOB_THREAD, move || {
             // The card as it is now: its free space at the job's start.
             let done = unbroken(job, || {
                 let now = volumes.again(&found);
                 match now.as_ref().and_then(|now| volumes.open(now).map(|card| (card, now))) {
                     Some((card, now)) => work(&*card, now, &*home, link),
-                    None => JobDone::Read(Err("the volume can't be opened".into())),
+                    None => unopened(job),
                 }
             });
             let _ = me.send(In::Job(key, done));
@@ -1548,7 +1635,7 @@ impl Worker {
         self.told(&key);
         // A fit is a read alone (a dry run): it runs beside another job. Its
         // free space is the card's now.
-        std::thread::spawn(move || {
+        spawn_caught(FIT_THREAD, move || {
             // A fit that breaks says so, never "asking" for ever.
             let fit = || {
                 let now = volumes.again(&found);
@@ -1613,7 +1700,13 @@ impl Worker {
     }
 
     fn plays(&mut self, key: &str) {
+        let picked = self.picked(key);
         self.job(key, Job::Plays, move |card, _, home, link| {
+            // The card the listener picked, as the other jobs check it: it
+            // writes nothing, but would send another card's plays.
+            if let Err(why) = is_picked(card, &picked) {
+                return JobDone::Plays(Err(why));
+            }
             let Some(link) = link else { return JobDone::Plays(Err("no server".into())) };
             let client = match link.client() {
                 Ok(client) => client,
@@ -1637,7 +1730,7 @@ impl Worker {
         let found = slot.view.found.clone();
         let (volumes, me, key) = (self.setup.volumes.clone(), self.me.clone(), key.to_string());
         self.told(&key);
-        std::thread::spawn(move || {
+        spawn_caught(EJECT_THREAD, move || {
             let done = unbroken(Job::Eject, || JobDone::Ejected(volumes.eject(&found)));
             let _ = me.send(In::Job(key, done));
         });
@@ -1691,6 +1784,7 @@ impl Worker {
             self.told(key);
             return;
         };
+        slot.synced_with = Some((link.id.clone(), link.token.clone()));
         let facts = slot.view.facts().cloned().unwrap_or_default();
         let picked = Expect {
             serial: slot.view.found.volume.serial.clone(),
@@ -1706,7 +1800,7 @@ impl Worker {
         let (volumes, home) = (self.setup.volumes.clone(), self.setup.home.clone());
         let (me, key) = (self.me.clone(), key.to_string());
         self.told(&key);
-        std::thread::spawn(move || {
+        spawn_caught(SYNC_THREAD, move || {
             let (volumes, home) = (&*volumes, &*home);
             let on = Card { found: &found, volumes, home, link: &link, facts: &facts, picked: &picked };
             // A sync that breaks ends with why, never "running" for ever.
@@ -1846,6 +1940,12 @@ impl Worker {
                     return;
                 }
             }
+            JobDone::Unopened => {
+                if let Some(slot) = self.slot(key) {
+                    slot.view.busy = None;
+                    slot.reopen = true;
+                }
+            }
             JobDone::Looked(next) => {
                 if let Some(slot) = self.slot(key) {
                     slot.view.busy = None;
@@ -1870,10 +1970,16 @@ impl Worker {
                 }
                 if let Some(slot) = self.slot(key) {
                     let first = slot.view.next == Next::Asking;
-                    // Its server answers a look again: a sync paused for the
-                    // sign-in goes on (clause 52).
+                    // Its server answers a look again under another sign-in
+                    // than the paused sync ran with: it goes on (clause 52).
+                    // Under the same one it waits: a server whose listing
+                    // answers may still refuse its files, and going on then
+                    // would only pause again, and again.
                     let paused = matches!(slot.view.paused(), Some(Pause::SignIn));
-                    if paused && matches!(next, Next::Plan(_)) && !slot.view.out {
+                    let link = slot.view.server.link().map(|l| (l.id.clone(), l.token.clone()));
+                    let signed = link.as_ref().is_some_and(|l| l.1.is_some());
+                    let another = signed && link != slot.synced_with;
+                    if paused && another && matches!(next, Next::Plan(_)) && !slot.view.out {
                         resume = Some(finished_allow(&slot.view));
                     }
                     slot.view.next = next;
@@ -2174,19 +2280,49 @@ pub(crate) fn relay_ahead(card: &CardView, plan: &Planned) -> bool {
 /// panic in its thread), said instead of it running for ever.
 pub(crate) const BROKE: &str = "the transfer stopped unexpectedly (a fault in this player): try again";
 
+/// The threads of a card's jobs, fits, ejects and syncs, by name. Each
+/// catches its own panic and ends with why ([`BROKE`]), so the player's
+/// panic hook stands back there ([`crate::tui::worker::panics_are_caught`]):
+/// the terminal stays as it is, under a UI that is still running.
+pub(crate) const JOB_THREAD: &str = "card-job";
+pub(crate) const FIT_THREAD: &str = "card-fit";
+pub(crate) const EJECT_THREAD: &str = "card-eject";
+pub(crate) const SYNC_THREAD: &str = "card-sync";
+pub(crate) const CAUGHT_THREADS: [&str; 4] = [JOB_THREAD, FIT_THREAD, EJECT_THREAD, SYNC_THREAD];
+
+/// `work` on a thread named `name`, one of [`CAUGHT_THREADS`].
+fn spawn_caught(name: &str, work: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new().name(name.into()).spawn(work).expect("a card's thread");
+}
+
 /// `work`'s answer, or the job's failure when it breaks.
 fn unbroken(job: Job, work: impl FnOnce() -> JobDone) -> JobDone {
     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
-    done.unwrap_or_else(|_| {
-        let why = BROKE.to_string();
-        match job {
-            Job::Look => JobDone::Read(Err(why)),
-            Job::SetUp => JobDone::SetUp(Err(why)),
-            Job::Apply => JobDone::Applied(Err(why)),
-            Job::Plays => JobDone::Plays(Err(why)),
-            Job::Eject => JobDone::Ejected(Err(why)),
-        }
-    })
+    done.unwrap_or_else(|_| failed(job, BROKE.to_string()))
+}
+
+/// `job` failed for `why`, as that job answers.
+fn failed(job: Job, why: String) -> JobDone {
+    match job {
+        Job::Look => JobDone::Read(Err(why)),
+        Job::SetUp => JobDone::SetUp(Err(why)),
+        Job::Apply => JobDone::Applied(Err(why)),
+        Job::Plays => JobDone::Plays(Err(why)),
+        Job::Eject => JobDone::Ejected(Err(why)),
+    }
+}
+
+/// Why a job's card couldn't be opened.
+pub(crate) const UNOPENED: &str = "the volume can't be opened";
+
+/// A job whose card couldn't be opened (taken out or remounted as the job
+/// began): that job's own failure, with its note. A look's is no failed
+/// read: the card is looked at again at the next look at the readers.
+fn unopened(job: Job) -> JobDone {
+    match job {
+        Job::Look => JobDone::Unopened,
+        job => failed(job, UNOPENED.into()),
+    }
 }
 
 /// The answers a paused sync is retried with: its take-over, if any.
@@ -2522,7 +2658,11 @@ fn store(
     want: &Want,
     link: Option<&ServerLink>,
 ) -> Result<bool, String> {
-    let url_key = link.and_then(ServerLink::url_key);
+    // The key of the address the server is read at; when it can't be
+    // reached now (Quick Connect on the command line, a tunnel down), the
+    // key it was saved under, which a sync or these settings confirmed into
+    // the card's source. Not saved only with no server to key them by.
+    let url_key = link.and_then(|l| l.url_key().or_else(|| l.saved_key()));
     let keyed = want.libraries.is_some() || !want.peers.is_empty() || want.budget_mb.is_some();
     let all = url_key.is_some() || !keyed;
     let name = want.name.trim().to_string();
@@ -2541,7 +2681,7 @@ fn store(
         if let Some(key) = url_key {
             // Its tunnel id first, then its source (the confirm may make one
             // source of two, the card's selection the one kept).
-            if let Some(saved) = link.and_then(ServerLink::saved_key) {
+            if let Some(saved) = link.and_then(ServerLink::saved_key).filter(|saved| *saved != key) {
                 s.confirm(key, saved);
             }
             let source = s.source(key);
@@ -2574,6 +2714,18 @@ fn store(
         })?;
     }
     Ok(all)
+}
+
+/// The card a job opened is the one the listener picked ([`Worker::picked`]):
+/// its serial (read as a session's start reads it), and its root's card id
+/// once one was read. A job that writes checks it in its session; this is
+/// for one that only reads.
+fn is_picked(card: &dyn CardWrite, picked: &Expect) -> Result<(), String> {
+    let serial = serial_read(card, picked.serial.as_ref()).map_err(|_| Stop::Pulled.to_string())?;
+    let seen = volume::inspect(card).map_err(|_| Stop::Pulled.to_string())?;
+    let root = seen.root.as_ref().map(|r| (r.manifest.header.card_id, r.manifest.commit_id));
+    let (card_id, commit_id) = root.unwrap_or_default();
+    picked.picked(serial.as_ref(), card_id, commit_id).map_err(|stop| stop.to_string())
 }
 
 /// What a job changed of `cards.json` (`before` to `after`), made to what

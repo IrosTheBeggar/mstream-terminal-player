@@ -97,9 +97,26 @@ pub(super) fn root_ids(card: &dyn CardFs) -> io::Result<(u64, u64)> {
     Ok(root.map_or((0, 0), |m| (m.header.card_id, m.commit_id)))
 }
 
-/// The card as it is now, read only.
-pub(super) fn look(card: &dyn CardWrite) -> Result<Identity, Stop> {
-    let serial = card.serial().map_err(|_| Stop::Pulled)?;
+/// The card's serial, read for a check against `expected`: a read that
+/// fails, or reads none where one is expected, is asked once more (a Mac's
+/// diskutil that couldn't be run at that moment, say). What the second
+/// read says stands: none where one is expected is a card taken out.
+pub(crate) fn serial_read(
+    card: &dyn CardWrite,
+    expected: Option<&Serial>,
+) -> io::Result<Option<Serial>> {
+    let off = |read: &io::Result<Option<Serial>>| match read {
+        Ok(now) => expected.is_some() && now.is_none(),
+        Err(_) => true,
+    };
+    let now = card.serial();
+    if off(&now) { card.serial() } else { now }
+}
+
+/// The card as it is now, read only, its serial read as a check against
+/// `expected` reads it ([`serial_read`]).
+pub(super) fn look(card: &dyn CardWrite, expected: Option<&Serial>) -> Result<Identity, Stop> {
+    let serial = serial_read(card, expected).map_err(|_| Stop::Pulled)?;
     let (card_id, commit_id) = root_ids(card).map_err(|_| Stop::Pulled)?;
     Ok(Identity { serial, card_id, commit_id })
 }
@@ -196,14 +213,7 @@ impl<'c> Bound<'c> {
             // twice, it is a card taken out, which a run goes on from. Only
             // another serial read is another card.
             let bound = self.id.serial.clone();
-            let off = |read: &io::Result<Option<Serial>>| match read {
-                Ok(now) => bound.is_some() && now.is_none(),
-                Err(_) => true,
-            };
-            let mut now = self.card.serial();
-            if off(&now) {
-                now = self.card.serial();
-            }
+            let now = serial_read(self.card, bound.as_ref());
             self.serial_read = Instant::now();
             match now {
                 Ok(now) if now == bound => {}

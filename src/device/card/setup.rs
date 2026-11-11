@@ -39,7 +39,7 @@ use super::cards::Cards;
 use super::dry::DryCard;
 use super::engine::{
     Answers, Env, Event, Expect, Failed, Fetched, Fetcher, Guard, Hooks, Knobs, NoHooks, Session,
-    Stop, WantedCard, WantedFile,
+    Stop, WantedCard, WantedFile, serial_read,
 };
 use super::history::{self, History};
 use super::state::{self, Copied, State, hex};
@@ -138,7 +138,7 @@ pub(crate) fn set_up_as(
     if !seen.newer.is_empty() {
         return Err(Stop::Guard(Guard::Newer(seen.newer)));
     }
-    let serial = card.serial().map_err(|_| Stop::Pulled)?;
+    let serial = serial_read(card, picked.serial.as_ref()).map_err(|_| Stop::Pulled)?;
     let root = seen.root.as_ref().map(|r| {
         let m = &r.manifest;
         (m.header.card_id, m.header.generation, m.commit_id)
@@ -281,7 +281,7 @@ pub(crate) fn store_as(
     let (card_id, commit_id) = (root.manifest.header.card_id, root.manifest.commit_id);
     let state = State::of(&seen.state).filter(|s| s.card_id == card_id);
     let mut state = state.ok_or_else(not_set_up)?;
-    let serial = card.serial().map_err(|_| Stop::Pulled)?;
+    let serial = serial_read(card, picked.serial.as_ref()).map_err(|_| Stop::Pulled)?;
     picked.picked(serial.as_ref(), card_id, commit_id)?;
     let expect = Expect { serial, card_id: Some(card_id), commit_id: Some(commit_id) };
     let (knobs, answers) = (Knobs::default(), Answers::default());

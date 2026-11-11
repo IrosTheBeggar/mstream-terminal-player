@@ -789,6 +789,24 @@ fn a_worker_gone_under_a_sync_ends_the_command_with_a_line() {
     assert!(term.said().contains("the card transfer stopped unexpectedly"), "{}", term.said());
 }
 
+/// The second review's C1-8: a worker gone while the command waits for the
+/// cards to settle stops it with the same line and exit 1, never a spin
+/// of two minutes that ends as though all was well.
+#[test]
+fn a_worker_gone_before_the_cards_settle_ends_the_command_with_a_line() {
+    let (link, _inbox) = Link::pair();
+    let (tell, events) = std::sync::mpsc::channel::<worker::Event>();
+    drop(tell);
+    let mut session = Session::of(link, events);
+    let t0 = Instant::now();
+    let settled = session.settle(None);
+    assert!(matches!(settled, Err(Unsettled::Gone)) && t0.elapsed() < Duration::from_secs(60));
+    let mut term = Term::new();
+    let code = with_io(&mut term, |io| unsettled(settled, io));
+    assert_eq!(code, Some(1));
+    assert!(term.said().contains("the card transfer stopped unexpectedly"), "{}", term.said());
+}
+
 // ── The run's lines and the command's own copies (the review's TU5, TU9) ──
 
 /// The terminal's side over a `Term`, no one to ask.
@@ -876,17 +894,17 @@ fn with_four_cards_a_failed_setup_says_so_and_exits_one() {
     let card = f::ready("E:", now());
     let key = card.key.clone();
     let (mut session, tell) = busy_session(&card);
+    // The job begins and ends before the command looks: all three told in
+    // one pump. Its card told busy is seen all the same.
     let busy = f::with(card.clone(), |c| c.busy = Some(worker::Job::Apply));
     tell.send(Event::Card(Box::new(busy))).unwrap();
-    let feeder = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        tell.send(Event::Note(Note::Failed { why: "the card is read-only".into() })).unwrap();
-        tell.send(Event::Card(Box::new(card))).unwrap();
-        tell
-    });
+    tell.send(Event::Note(Note::Failed { why: "the card is read-only".into() })).unwrap();
+    tell.send(Event::Card(Box::new(card))).unwrap();
     let mut term = Term::new();
+    let t0 = Instant::now();
     let code = with_io(&mut term, |io| wait_job(&mut session, &key, io, "E:'s settings are changed."));
-    let _ = feeder.join();
+    assert!(t0.elapsed() < Duration::from_secs(60), "never waited out");
+    drop(tell);
     let said = term.said();
     assert_eq!(code, 1, "{said}");
     assert!(said.contains("the card is read-only") && !said.contains("settings are changed"), "{said}");

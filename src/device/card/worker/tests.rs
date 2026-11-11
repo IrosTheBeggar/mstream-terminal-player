@@ -24,6 +24,10 @@ pub(crate) struct Shelf {
     pub(crate) ejected: Mutex<Vec<String>>,
     /// Opening a card breaks the thread that asks (a fault of the worker's).
     breaks: AtomicBool,
+    /// A card listed but not opened (taken out or remounted as a job
+    /// began), and how many times one was.
+    unopenable: AtomicBool,
+    opened: std::sync::atomic::AtomicUsize,
 }
 
 impl Shelf {
@@ -52,6 +56,10 @@ impl Volumes for Shelf {
 
     fn open(&self, found: &Found) -> Option<Box<dyn CardWrite>> {
         assert!(!self.breaks.load(Ordering::SeqCst), "a test's fault in the worker");
+        if self.unopenable.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.opened.fetch_add(1, Ordering::SeqCst);
         let cards = self.cards.lock().unwrap();
         let (_, serial) = cards.iter().find(|(f, _)| key_of(f) == key_of(found))?;
         let card = || Box::new(FatSim::new(&found.volume.path, *serial)) as Box<dyn CardWrite>;
@@ -488,6 +496,8 @@ fn the_waveforms_counts_are_told_every_so_often_and_their_phase_at_once() {
     worker.slots.push(Slot {
         view,
         look_again: false,
+        reopen: false,
+        synced_with: None,
         told: None,
         retry: None,
         tries: 0,
@@ -909,6 +919,8 @@ fn running_at(scratch: &Scratch, phase: Phase) -> (Worker, Arc<Shelf>, String, A
     worker.slots.push(Slot {
         view,
         look_again: false,
+        reopen: false,
+        synced_with: None,
         told: None,
         retry: None,
         tries: 0,
@@ -982,6 +994,8 @@ fn a_card_taken_out_in_its_sync_keeps_its_tab_marked_out() {
     let slot = Slot {
         view,
         look_again: false,
+        reopen: false,
+        synced_with: None,
         told: None,
         retry: None,
         tries: 0,
@@ -1038,6 +1052,8 @@ fn a_sync_takes_the_server_its_settings_chose_and_leaves_out_the_peers_left_out(
     worker.slots.push(Slot {
         view,
         look_again: false,
+        reopen: false,
+        synced_with: None,
         told: None,
         retry: None,
         tries: 0,
@@ -1434,6 +1450,8 @@ fn another_card_in_the_reader_of_one_taken_out_mid_sync_is_its_own_subject() {
     worker.slots.push(Slot {
         view,
         look_again: false,
+        reopen: false,
+        synced_with: None,
         told: None,
         retry: None,
         tries: 0,
@@ -1663,6 +1681,122 @@ fn a_sync_paused_for_the_sign_in_goes_on_once_signed_in() {
     });
 }
 
+/// The second review's C1-1: a server that answers its listing and refuses
+/// the files (401) pauses the sync for the sign-in, and the looks after it
+/// (the one the pause asks for, another asked for) find a plan: under the
+/// same sign-in the sync waits, asking for no file again. Signed in anew,
+/// it goes on.
+#[test]
+fn a_sync_paused_for_the_sign_in_waits_for_another_though_its_listing_answers() {
+    let scratch = Scratch::new("worker-sign-in-loop");
+    let (mut rig, key, fake, _sim) = with_card(&scratch);
+    let count = |fake: &Fake, what: &str| {
+        fake.lock().unwrap().asked.iter().filter(|a| a.contains(what)).count()
+    };
+    {
+        let mut lib = fake.lock().unwrap();
+        let paths: Vec<String> = lib.tracks.iter().map(|t| t.path.clone()).collect();
+        lib.refused.extend(paths);
+    }
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let wanted = key.clone();
+    let paused_and_planned = |f: &Fold| {
+        f.cards.iter().any(|c| {
+            let paused = matches!(c.paused(), Some(Pause::SignIn));
+            c.key == wanted && paused && c.busy.is_none() && planned(c).is_some()
+        })
+    };
+    rig.until("the pause, and the look after it", paused_and_planned);
+    let (fetched, listed) = (count(&fake, "/media/"), count(&fake, "/sync/manifest"));
+    rig.send(Cmd::Look { key: key.clone() });
+    let looked_again = |f: &Fold| paused_and_planned(f) && count(&fake, "/sync/manifest") > listed;
+    rig.until("another look past the pause", looked_again);
+    assert_eq!(count(&fake, "/media/"), fetched, "no file asked for again under the same sign-in");
+    assert!(matches!(rig.card(&key).paused(), Some(Pause::SignIn)));
+
+    fake.lock().unwrap().refused.clear();
+    let home = rig.card(&key).server.link().unwrap().clone();
+    rig.send(Cmd::Servers(vec![ServerLink { token: Some("tok-again".into()), ..home }]));
+    let wanted = key.clone();
+    rig.until("the sync gone on", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.ended, Some(Ended::Done { .. })))
+    });
+}
+
+/// The second review's C1-9: settings for a card whose saved server can't
+/// be reached now are saved under the key it was saved as, the card's
+/// source; "not saved" only when there is no server at all to key them by.
+#[test]
+fn settings_for_a_server_out_of_reach_are_saved_under_its_saved_key() {
+    let scratch = Scratch::new("worker-store-unreached");
+    let sim = card(&scratch);
+    let here = Here::default();
+    let saved = "http://music.example:3000";
+    let gone = ServerLink { base: Err("its tunnel is down".into()), ..home_server(saved) };
+    let want = Want { libraries: Some(vec!["Rock".into()]), ..Want::of(&Facts::default(), None) };
+    assert_eq!(store(&sim, &here, &Expect::default(), &want, Some(&gone)), Ok(true));
+    let state = State::of(&volume::inspect(&sim).expect("it reads").state).expect("a state");
+    let source = state.settings.sources.iter().find(|s| s.url_key == server_url_key(saved));
+    assert_eq!(source.map(|s| s.libraries.clone()), Some(vec!["Rock".to_string()]), "{state:?}");
+    assert_eq!(store(&sim, &here, &Expect::default(), &want, None), Ok(false), "no server at all");
+}
+
+/// A card listed with no serial at first, then with one (lsblk may list a
+/// UUID late) and its run's answers under the old key.
+fn unserialled(scratch: &Scratch) -> (Rig, String, Option<Serial>, Fake) {
+    let _sim = card(scratch);
+    let (base, fake) = server();
+    let mut found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let serial = found.volume.serial.take();
+    let path_key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = path_key.clone();
+    rig.until("read by its path", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+    (rig, path_key, serial, fake)
+}
+
+/// The second review's C1-7: a card keyed by its path alone whose serial
+/// the OS lists later is re-keyed, never taken out: one tab, the same
+/// card, its sync running on under the new key and ending as its own.
+#[test]
+fn a_card_whose_serial_comes_late_keeps_its_slot_under_the_key_with_it() {
+    let scratch = Scratch::new("worker-rekey");
+    let (mut rig, path_key, serial, _fake) = unserialled(&scratch);
+    rig.send(Cmd::Sync { key: path_key.clone(), allow: Box::default() });
+    rig.shelf.relist(&path_key, |f| f.volume.serial = serial.clone());
+    let with_serial = format!("{path_key}#{}", serial.expect("a serial"));
+    let wanted = with_serial.clone();
+    rig.until("its key with the serial", |f| f.cards.iter().any(|c| c.key == wanted));
+    assert_eq!(rig.fold.key_now(&path_key), with_serial);
+    rig.until("the sync's end", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.ended, Some(Ended::Done { .. })))
+    });
+    assert_eq!(rig.fold.cards.len(), 1, "one card, never two tabs");
+    assert!(!rig.card(&with_serial).out, "never taken out");
+}
+
+/// The second review's C1-6: a card is the card with no serial too. Another
+/// card put in the same reader (no serial either: the same key) before the
+/// slot is read again isn't the one *Send the plays* was asked of: the job
+/// sends nothing, and says so.
+#[test]
+fn the_plays_job_checks_the_card_it_was_asked_of() {
+    let scratch = Scratch::new("worker-plays-picked");
+    let (mut rig, path_key, _serial, fake) = unserialled(&scratch);
+    // Another card at that path: set up anew, another id.
+    let sim = FatSim::new(&scratch.0.join("card"), SERIAL);
+    let ask = setup::Ask { label: "Gym".into(), new_identity: true };
+    setup::set_up(&sim, &ask, &mut envs_from(9), &mut Cards::default(), &mut |_| {}).expect("set up anew");
+    rig.send(Cmd::Plays { key: path_key.clone() });
+    let different = Note::Failed { why: Stop::DifferentCard.to_string() };
+    rig.until("the job's own answer", |f| f.notes.contains(&different));
+    let posts = fake.lock().unwrap().asked.iter().filter(|a| a.contains("/stats/plays")).count();
+    assert_eq!(posts, 0, "nothing sent for the other card");
+}
+
 /// The review's TU8: a sync's or a job's thread that breaks ends with why,
 /// never left running or busy for ever.
 #[test]
@@ -1685,6 +1819,44 @@ fn a_sync_or_a_job_that_breaks_ends_with_why() {
     rig.until("the job's end", |f| f.notes.iter().any(|n| *n == Note::Failed { why: BROKE.into() }));
     let wanted = key.clone();
     rig.until("not busy", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+}
+
+/// The second review's C1-3: a job whose card can't be opened as it begins
+/// fails as that job, with its own note (Apply, Plays, Set up and Eject
+/// alike), never as a failed read; a look that can't open it is no failed
+/// read either, and the card is looked at again at the next look at the
+/// readers.
+#[test]
+fn a_job_that_cant_open_its_card_fails_as_that_job_and_a_look_tries_again() {
+    let scratch = Scratch::new("worker-unopened");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    rig.shelf.unopenable.store(true, Ordering::SeqCst);
+    let unopened = Note::Failed { why: UNOPENED.into() };
+    let failures = |f: &Fold| f.notes.iter().filter(|n| **n == unopened).count();
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(Want::of(&Facts::default(), None)) });
+    rig.until("Apply's own failure", |f| failures(f) == 1);
+    let wanted = key.clone();
+    rig.until("not busy", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("the plays' own failure", |f| failures(f) == 2);
+    assert!(matches!(rig.card(&key).read, Read::Read(_)), "no failed read: {:?}", rig.card(&key).read);
+
+    // A look: nothing failed, and the card read again once it opens.
+    rig.until("not busy", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+    let before = rig.shelf.opened.load(Ordering::SeqCst);
+    rig.send(Cmd::Look { key: key.clone() });
+    rig.until("the look over", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+    assert!(matches!(rig.card(&key).read, Read::Read(_)), "{:?}", rig.card(&key).read);
+    rig.shelf.unopenable.store(false, Ordering::SeqCst);
+    let t0 = Instant::now();
+    while rig.shelf.opened.load(Ordering::SeqCst) == before {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the card was never looked at again");
+        if let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) {
+            rig.fold.apply(event);
+        }
+    }
+    rig.until("read again", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+    assert!(matches!(rig.card(&key).read, Read::Read(_)));
 }
 
 /// The review's smaller items: a read that failed lets what waited for it

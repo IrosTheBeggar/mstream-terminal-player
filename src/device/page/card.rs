@@ -362,6 +362,7 @@ impl Page {
             let keys: Vec<String> = fold.cards.iter().map(|c| c.key.clone()).collect();
             (notes, logs, keys, fold.syncing().map(|c| c.key.clone()))
         };
+        self.follow_keys(&transfer.fold.borrow());
         let drives: Vec<(String, String)> =
             self.cards().iter().map(|c| (c.key.clone(), c.drive())).collect();
         for (key, item) in logs {
@@ -405,10 +406,43 @@ impl Page {
             }
         }
         self.card.row = keys.clone();
+        // A sheet or a gate goes with its card: taken out, or another card
+        // at its key now (a card with no serial has a reader's path for
+        // one). Left open, it would hold the keys undrawn, or answer for
+        // the card put in after.
+        let gone = |key: &str, opened: &Opened| !self.card_of(key).is_some_and(|c| opened.still(&c));
+        let gate_gone = self.card.gate.as_ref().is_some_and(|g| gone(&g.key, &g.card));
+        let sheet_gone = self.card.sheet.as_ref().is_some_and(|s| gone(&s.key, &s.card));
+        if gate_gone {
+            self.card.gate = None;
+        }
+        if sheet_gone {
+            self.card.sheet = None;
+        }
         // A card put in takes the view only from the empty card (clause 25,
         // the pick of 2026-10-19).
         if self.card_open.is_none() && self.boards.is_empty() {
             self.card_open = keys.first().cloned();
+        }
+    }
+
+    /// A card given its key with the serial (the worker's
+    /// [`Event::Rekeyed`](worker::Event::Rekeyed)): the view, the row, the
+    /// sheet and the gate follow it, the serial it has now theirs.
+    fn follow_keys(&mut self, fold: &Fold) {
+        let now = |key: &mut String| *key = fold.key_now(key);
+        let serial = |key: &str| fold.cards.iter().find(|c| c.key == key).map(Opened::of);
+        if let Some(open) = self.card_open.as_mut() {
+            now(open);
+        }
+        self.card.row.iter_mut().for_each(now);
+        if let Some(gate) = self.card.gate.as_mut() {
+            now(&mut gate.key);
+            gate.card.follow(serial(&gate.key));
+        }
+        if let Some(sheet) = self.card.sheet.as_mut() {
+            now(&mut sheet.key);
+            sheet.card.follow(serial(&sheet.key));
         }
     }
 
@@ -1495,6 +1529,44 @@ pub(crate) struct CardGate {
     pub(crate) kind: GateKind,
     /// The answers already given, the next sync's with this gate's yes.
     pub(crate) allow: Allow,
+    /// The card it was opened for: dropped once that card is gone.
+    pub(crate) card: Opened,
+}
+
+/// The card a sheet or a gate was opened for, as its slot showed it then:
+/// its volume serial, and its root's card id. A card at that slot's key
+/// with another serial, or read with another id (or none), is another
+/// card, whatever its key: two cards with no serial share one, a reader's
+/// path. The sheet or the gate goes with the card it was opened for,
+/// never answered for another.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Opened {
+    serial: Option<String>,
+    card_id: Option<u64>,
+}
+
+impl Opened {
+    pub(crate) fn of(card: &CardView) -> Opened {
+        let serial = card.found.volume.serial.as_ref().map(|s| s.to_string());
+        Opened { serial, card_id: card.facts().and_then(|f| f.root).map(|r| r.0) }
+    }
+
+    /// Its card renamed with the serial the OS lists late: that serial is
+    /// its own.
+    fn follow(&mut self, now: Option<Opened>) {
+        if let Some(now) = now.filter(|_| self.serial.is_none()) {
+            self.serial = now.serial;
+        }
+    }
+
+    /// `card`, as the row shows it now, is still the card opened for: in
+    /// the reader, its serial, and its id once read (a read under way says
+    /// nothing yet).
+    pub(crate) fn still(&self, card: &CardView) -> bool {
+        let now = Opened::of(card);
+        let read = matches!(card.read, Read::Read(_));
+        !card.out && now.serial == self.serial && (!read || now.card_id == self.card_id)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1530,7 +1602,7 @@ fn gate_for(card: &CardView, plan: &Planned, allow: Allow) -> Option<CardGate> {
         }
         None => return None,
     };
-    Some(CardGate { key, kind, allow })
+    Some(CardGate { key, kind, allow, card: Opened::of(card) })
 }
 
 /// The card's plays that wait for its server, as its last look counted
@@ -1599,7 +1671,8 @@ impl Page {
         let Some(card) = self.open_card() else { return };
         let Some(asks) = card.gate.as_ref() else { return };
         if let Some(kind) = asks.iter().find_map(|a| gate_of_asked(&card, a)) {
-            self.card.gate = Some(CardGate { key: card.key.clone(), kind, allow: Allow::default() });
+            let opened = Opened::of(&card);
+            self.card.gate = Some(CardGate { key: card.key.clone(), kind, allow: Allow::default(), card: opened });
         }
     }
 
@@ -1963,6 +2036,8 @@ pub(crate) enum SRow {
 #[derive(Clone, Debug)]
 pub(crate) struct CardSheet {
     pub(crate) key: String,
+    /// The card it was opened for: dropped once that card is gone.
+    pub(crate) card: Opened,
     /// Set up (a new card) rather than its settings.
     pub(crate) setup: bool,
     pub(crate) tab: SheetTab,
@@ -2049,6 +2124,7 @@ impl Page {
         self.card.seq += 1;
         let sheet = CardSheet {
             key: card.key.clone(),
+            card: Opened::of(card),
             setup,
             tab: SheetTab::Music,
             was: want.clone(),
@@ -2142,6 +2218,7 @@ impl Page {
         let filled = card.as_ref().and_then(|c| c.facts()).is_some_and(|f| f.tracks > 0);
         if filled && sheet.want.server.is_some() && sheet.want.server != current {
             let card = card.expect("the card");
+            let opened = Opened::of(&card);
             let servers = self.servers();
             let new = servers.iter().find(|s| Some(&s.id) == sheet.want.server.as_ref()).map(|s| s.name.clone());
             // The gate first, nothing written (clause 58): its yes writes the
@@ -2155,7 +2232,7 @@ impl Page {
                 plays: plays_waiting(&card),
                 want: Some(Box::new(sheet.want)),
             };
-            self.card.gate = Some(CardGate { key, kind, allow: Allow::default() });
+            self.card.gate = Some(CardGate { key, kind, allow: Allow::default(), card: opened });
             return;
         }
         if sheet.want != sheet.was {

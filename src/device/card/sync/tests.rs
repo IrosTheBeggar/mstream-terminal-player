@@ -1348,6 +1348,31 @@ fn a_card_whose_log_cant_be_read_stays_for_someone_else_and_the_store_settles_it
     assert_eq!((stored.label.as_str(), stored.plays.clone()), ("Gym", mark));
 }
 
+/// The second review's C1-5: one serial read that reads none at a
+/// session's start (a Mac's diskutil that couldn't be run at that moment)
+/// is asked again, as a run's own check does: the settings' store and a
+/// set-up go on. Two in a row are a card taken out.
+#[test]
+fn one_serial_read_that_reads_none_at_a_sessions_start_is_asked_again() {
+    use crate::device::card::volume::Serial;
+    let scratch = Scratch::new("serial-miss");
+    let sim = card(&scratch);
+    let mut envs = envs();
+    let picked = Expect { serial: Some(Serial::Fat(SERIAL)), ..Expect::default() };
+    let plays = Rc::new(MemStore::default());
+    let mut rename = |state: &mut State| state.label = "Gym".into();
+    sim.miss_serial(1);
+    let stored = setup::store_as(&sim, &picked, &mut rename, plays.clone(), &mut envs, &mut |_| {});
+    assert_eq!(stored.map(|s| s.label).ok().as_deref(), Some("Gym"));
+    sim.miss_serial(2);
+    let stored = setup::store_as(&sim, &picked, &mut rename, plays.clone(), &mut envs, &mut |_| {});
+    assert!(matches!(stored, Err(Stop::Pulled)), "{:?}", stored.err());
+    sim.miss_serial(1);
+    let ask = setup::Ask { label: "Gym".into(), new_identity: false };
+    let set_up = setup::set_up_as(&sim, &ask, &picked, &mut envs, &mut Cards::default(), &mut |_| {});
+    assert!(set_up.is_ok(), "{:?}", set_up.err());
+}
+
 /// A server in a scan (the listing says so, and lacks the tracks the scan
 /// hasn't reached) would answer that it doesn't know those tracks: their
 /// plays aren't sent, and wait. Nothing settles them, the state file's mark

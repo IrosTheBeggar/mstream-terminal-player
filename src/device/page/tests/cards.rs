@@ -1307,6 +1307,62 @@ fn a_held_answer_to_one_gate_doesnt_answer_the_next() {
     assert_eq!((allow.answers.removals, allow.answers.adopt), (true, Some(true)));
 }
 
+/// The second review's C1-6 and C2-2: a sheet and a gate are the card they
+/// were opened for. Another card at their key (two cards with no serial
+/// share their reader's path) drops them, and so does their card's leaving
+/// while another card is in view: never left open undrawn, holding the
+/// keys, and never answered for another card.
+#[test]
+fn a_sheet_and_a_gate_go_with_the_card_they_were_opened_for() {
+    let _en = english();
+    let many: Vec<String> = (0..214).map(|i| format!("Velvet Static/Harbour Songs/{i:03} - Track.flac")).collect();
+    let card = cards::with(cards::ready("E:", now()), |c| {
+        c.found.volume.serial = None;
+        if let Next::Plan(plan) = &mut c.next {
+            plan.removals = many.clone();
+        }
+    });
+    let other = cards::with(card.clone(), |c| cards::facts(c).root = Some((0x0BAD_CAFE_0000_0001, 3, 1)));
+    let (mut page, _ends, inbox, fold) = with_cards(|_| {}, vec![card.clone()]);
+    let tell = |fold: &Rc<RefCell<Fold>>, card: &CardView| {
+        fold.borrow_mut().apply(worker::Event::Card(Box::new(card.clone())));
+    };
+    press(&mut page, KeyCode::Char('o'));
+    assert!(page.card.sheet.is_some());
+    // Read again, as it was: the same card, the sheet stays.
+    tell(&fold, &card);
+    page.pump_cards(Instant::now());
+    assert!(page.card.sheet.is_some(), "the same card");
+    // Another card in that reader, with no serial either: the same key.
+    tell(&fold, &other);
+    page.pump_cards(Instant::now());
+    assert!(page.card.sheet.is_none(), "the sheet went with its card");
+    page.card_act(Act::CardApply);
+    // A gate the same way.
+    tell(&fold, &card);
+    page.pump_cards(Instant::now());
+    press(&mut page, KeyCode::Enter);
+    assert!(matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(card::GateKind::Removals { .. })));
+    tell(&fold, &other);
+    page.pump_cards(Instant::now());
+    assert!(page.card.gate.is_none(), "the gate went with its card");
+    press(&mut page, KeyCode::Char('y'));
+    let told = sent(&inbox);
+    let answered = |c: &worker::Cmd| matches!(c, worker::Cmd::Apply { .. } | worker::Cmd::Sync { .. });
+    assert!(!told.iter().any(answered), "nothing answered for the other card: {told:?}");
+
+    // Its card leaving while another is in view: the sheet goes too.
+    let second = cards::ready("F:", now());
+    let (mut page, _ends, _inbox, fold) = with_cards(|_| {}, vec![card.clone(), second.clone()]);
+    page.card_open = Some(card.key.clone());
+    press(&mut page, KeyCode::Char('o'));
+    assert!(page.card.sheet.is_some());
+    page.card_open = Some(second.key.clone());
+    fold.borrow_mut().apply(worker::Event::Gone { key: card.key.clone() });
+    page.pump_cards(Instant::now());
+    assert!(page.card.sheet.is_none(), "no sheet left open for a card that is gone");
+}
+
 /// The Budget row says the limit saved on this computer for the card's
 /// peers, not the default; Apply with it unchanged writes nothing.
 #[test]
