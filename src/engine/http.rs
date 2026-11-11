@@ -457,7 +457,12 @@ pub(crate) mod tests {
 
     /// A keep-alive server: answers every request on a connection with the
     /// same four-byte body, counts connections, and keeps each request's
-    /// head for the test to read.
+    /// head for the test to read. It answers on ::1 too, at the same port,
+    /// where the loopback has one: Windows tries `localhost` at ::1 first
+    /// and takes two seconds to refuse a port nothing holds there, so each
+    /// `localhost` open waited out happy eyeballs' 300 ms before it dialed
+    /// 127.0.0.1 — most of the test build's 400 ms OPEN_TIMEOUT, which a
+    /// busy run then overran.
     fn keep_alive_server() -> (
         std::net::SocketAddr,
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -468,26 +473,29 @@ pub(crate) mod tests {
         use std::sync::{Arc, Mutex};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        let v6 = std::net::TcpListener::bind(("::1", addr.port())).ok();
         let conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let heads = Arc::new(Mutex::new(Vec::new()));
-        let (counter, seen) = (conns.clone(), heads.clone());
-        std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                counter.fetch_add(1, Ordering::SeqCst);
-                let seen = seen.clone();
-                std::thread::spawn(move || {
-                    let mut stream = stream;
-                    let mut head = [0u8; 2048];
-                    while let Ok(n @ 1..) = stream.read(&mut head) {
-                        seen.lock().unwrap().push(String::from_utf8_lossy(&head[..n]).into_owned());
-                        let answer = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nRIFF";
-                        if stream.write_all(answer).is_err() {
-                            break;
+        for listener in std::iter::once(listener).chain(v6) {
+            let (counter, seen) = (conns.clone(), heads.clone());
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let seen = seen.clone();
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        let mut head = [0u8; 2048];
+                        while let Ok(n @ 1..) = stream.read(&mut head) {
+                            seen.lock().unwrap().push(String::from_utf8_lossy(&head[..n]).into_owned());
+                            let answer = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nRIFF";
+                            if stream.write_all(answer).is_err() {
+                                break;
+                            }
                         }
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
+        }
         (addr, conns, heads)
     }
 
