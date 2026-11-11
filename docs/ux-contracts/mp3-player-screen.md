@@ -1793,7 +1793,11 @@ landing review of 2026-11-10 adds one `dev` key, `log_all_formatting`
 (clause 28), changes one, `plays_old` (clause 61: counted, not kept), and
 draws `plays_gift` for the first time (Details' *Plays* fact and the busy
 line of a card for someone else); the lines of the plays that wait are the
-run's, in English.
+run's, in English. Its worker fixes add two `dev.card` keys for the busy
+line: `worker_gone` (a command the transfer worker can no longer take,
+clause 55) and `not_saved` (settings written to a card no saved server
+answers, whose libraries, server and peers are kept by a server's key,
+clause 48).
 Not keys: the invented names, paths, sizes and versions; the command
 line's lines (plain English, like `device list`'s); the firmware's own
 strings for its dialogs (its repo's lib/core UiStrings, ten languages).
@@ -1811,6 +1815,8 @@ and the caret.
 | `dev.card.plays_gift` | not sent: a card for someone else |
 | `dev.card.plays_old` (changed) | %{n} from before the player's clock was set: counted, not sent |
 | `dev.log_all_formatting` | update all: %{port} is formatting its card — passed over |
+| `dev.card.worker_gone` | The card transfer has stopped: quit and start the player again to sync cards. |
+| `dev.card.not_saved` | %{card}: the libraries, server and peers weren't saved: no server saved here answers this card. |
 | `dev.card.btn_sync` · `btn_setup` · `btn_eject` | Sync · Set up · Eject |
 | `dev.card.link_settings` · `link_stop` | Settings… · Stop at the next save |
 | `dev.card.board_is` | This is %{card} · synced %{when} from %{server} |

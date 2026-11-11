@@ -309,8 +309,10 @@ impl Page {
     }
 
     pub(super) fn send_card(&mut self, cmd: worker::Cmd) {
-        if let Some(t) = &self.transfer {
-            t.link.send(cmd);
+        let sent = self.transfer.as_ref().is_none_or(|t| t.link.send(cmd));
+        if !sent {
+            // The worker is gone: nothing asked of a card is done.
+            self.say(t!("dev.card.worker_gone").to_string(), true, None);
         }
     }
 
@@ -415,6 +417,7 @@ impl Page {
                 (t!("dev.card.done_plays", n = fmt_count(n as u64), server = server).to_string(), false, false)
             }
             Note::PlaysGift => (t!("dev.card.plays_gift").to_string(), false, false),
+            Note::NotSaved { card } => (t!("dev.card.not_saved", card = card).to_string(), true, true),
             Note::Failed { why } => (why, true, true),
         };
         self.say(text, gold, (!stays).then_some(now + NOTE_FOR));

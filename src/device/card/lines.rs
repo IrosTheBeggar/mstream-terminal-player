@@ -191,18 +191,27 @@ struct Session {
     fold: Fold,
     /// When the last report came.
     told: Instant,
+    /// The worker is gone: nothing more will be told.
+    gone: bool,
 }
 
 impl Session {
     fn start(setup: Setup, servers: Vec<ServerLink>) -> Session {
         let (link, events) = worker::spawn(setup);
         link.send(Cmd::Servers(servers));
-        Session { link, events, fold: Fold::default(), told: Instant::now() }
+        Session { link, events, fold: Fold::default(), told: Instant::now(), gone: false }
     }
 
     /// Folds what was told within `wait`.
     fn pump(&mut self, wait: Duration) {
-        let Ok(first) = self.events.recv_timeout(wait) else { return };
+        let first = match self.events.recv_timeout(wait) {
+            Ok(first) => first,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.gone = true;
+                return;
+            }
+            Err(_) => return,
+        };
         let mut next = Some(first);
         while let Some(event) = next {
             // The readers are looked at every few seconds, said or not: what
@@ -250,6 +259,12 @@ impl Session {
         }
     }
 }
+
+/// The worker ended under a command (a fault of its own): the line said.
+const WORKER_GONE: &str = "the card transfer stopped unexpectedly: nothing more will be done";
+
+/// Settings applied to a card no saved server answers.
+const NOT_SAVED: &str = "settings written, but not its libraries, server or peers: no server saved here answers this card";
 
 /// Read, and its server asked or not to be asked: nothing pending.
 fn settled(card: &CardView) -> bool {
@@ -674,6 +689,9 @@ fn server_named<'a>(servers: &'a [ServerLink], name: &str) -> Result<&'a ServerL
 /// with no job, or a note said how it went).
 fn job_done(session: &mut Session, key: &str, began: &mut bool) -> bool {
     session.pump(Duration::from_millis(50));
+    if session.gone {
+        return true;
+    }
     let busy = session.card(key).is_some_and(|c| c.busy.is_some());
     *began |= busy;
     *began && !busy
@@ -825,10 +843,21 @@ fn wait_job(session: &mut Session, key: &str, io: &mut Io, done: &str) -> i32 {
         }
     }
     for note in notes_since(session, from) {
-        if let Note::Failed { why } = note {
-            io.warn(&why);
-            return 1;
+        match note {
+            Note::Failed { why } => {
+                io.warn(&why);
+                return 1;
+            }
+            Note::NotSaved { card } => {
+                io.warn(&format!("{card}: {NOT_SAVED}"));
+                return 1;
+            }
+            _ => {}
         }
+    }
+    if session.gone {
+        io.warn(WORKER_GONE);
+        return 1;
     }
     io.say(done);
     0
@@ -1075,7 +1104,7 @@ fn asked_of(session: &mut Session, key: &str, want: &Want) -> Next {
     let seq = 1;
     session.link.send(Cmd::Fit { key: key.to_string(), want: Box::new(want.clone()), seq });
     let t0 = Instant::now();
-    while t0.elapsed() < SETTLE_WITHIN {
+    while t0.elapsed() < SETTLE_WITHIN && !session.gone {
         session.pump(Duration::from_millis(50));
         let answer = session.card(key).and_then(|c| c.fit.clone());
         if let Some((_, next)) = answer.filter(|(n, next)| *n == seq && *next != Next::Asking) {
@@ -1092,6 +1121,10 @@ fn run(session: &mut Session, key: &str, mut allow: Allow, flags: &Flags, io: &m
     let mut started = false;
     loop {
         session.pump(Duration::from_millis(100));
+        if session.gone {
+            io.warn(WORKER_GONE);
+            return 1;
+        }
         if io.ctrl_c.load(Ordering::SeqCst) > 0 && !stopping {
             stopping = true;
             session.link.send(Cmd::Stop { key: key.to_string() });
@@ -1362,6 +1395,10 @@ fn plays(session: &mut Session, key: &str, flags: &Flags, io: &mut Io) -> i32 {
             return 1;
         }
     }
+    if session.gone {
+        io.warn(WORKER_GONE);
+        return 1;
+    }
     // Why some went nowhere, in the job's own words.
     for (k, item) in session.fold.logs.iter().skip(logs) {
         if k == key && let Some(line) = log_line(item) {
@@ -1396,6 +1433,10 @@ fn eject(session: &mut Session, key: &str, io: &mut Io) -> i32 {
     let t0 = Instant::now();
     while t0.elapsed() < JOB_WITHIN {
         session.pump(Duration::from_millis(50));
+        if session.gone {
+            io.warn(WORKER_GONE);
+            return 1;
+        }
         for note in notes_since(session, from) {
             match note {
                 Note::Ejected { card: name } => {

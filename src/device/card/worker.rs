@@ -800,6 +800,11 @@ pub(crate) enum Note {
     /// *Send the plays* on a card for someone else: none is sent (clause
     /// 61).
     PlaysGift,
+    /// The settings were written but for the card's libraries, its server
+    /// and its peers: no server saved here answers the card, and those are
+    /// kept by a server's key.
+    NotSaved { card: String },
+    /// A job or a sync that broke ([`BROKE`]), or the OS's words.
     Failed { why: String },
 }
 
@@ -974,8 +979,9 @@ pub(crate) enum JobDone {
     Read(Result<Box<Facts>, String>),
     Looked(Next),
     Fit(u64, Next),
-    SetUp(Result<(), String>),
-    Applied(Result<(), String>),
+    /// Ok(false): written, but for what [`Note::NotSaved`] says.
+    SetUp(Result<bool, String>),
+    Applied(Result<bool, String>),
     Plays(Result<Tally, String>),
     Ejected(Result<(), String>),
     Synced(Box<Finished>),
@@ -1270,7 +1276,21 @@ impl Worker {
                     // is asked now (one being read is read again after).
                     let keys: Vec<String> = self.slots.iter().map(|s| s.view.key.clone()).collect();
                     for key in keys {
+                        let link = |s: &Slot| s.view.server.link().map(|l| (l.id.clone(), l.token.clone()));
+                        let was = self.slot(&key).and_then(|s| link(s));
                         self.resolve(&key);
+                        // A sync paused for a sign-in goes on once its server's
+                        // sign-in is another (clause 52: the card says it will).
+                        let signed_in = self.slot(&key).is_some_and(|s| {
+                            let now = link(s);
+                            let paused = matches!(s.view.paused(), Some(Pause::SignIn));
+                            paused && !s.view.out && now.as_ref().is_some_and(|l| l.1.is_some()) && now != was
+                        });
+                        if signed_in {
+                            let allow = self.slot(&key).map(|s| finished_allow(&s.view)).unwrap_or_default();
+                            self.sync(&key, allow);
+                            continue;
+                        }
                         let ask = self.slot(&key).is_some_and(|s| {
                             let unasked = matches!(
                                 s.view.next,
@@ -1297,7 +1317,9 @@ impl Worker {
             }
             Cmd::DontWait { key } => {
                 self.queue.retain(|(k, _)| *k != key);
-                if let Some(slot) = self.slot(&key) {
+                // A sync that started meanwhile is no longer waiting.
+                let running = self.running.as_ref().is_some_and(|r| r.key == key);
+                if let Some(slot) = self.slot(&key).filter(|_| !running) {
                     slot.view.run = None;
                 }
                 self.told(&key);
@@ -1349,7 +1371,7 @@ impl Worker {
                         let mut cards = before.clone();
                         let mut envs = home.envs();
                         let done = setup::set_up_as(card, &ask, &picked, &mut *envs, &mut cards, &mut |_| {});
-                        let done = done.map(|_| ()).map_err(|stop| stop.to_string());
+                        let done = done.map(|_| true).map_err(|stop| stop.to_string());
                         if done.is_ok() {
                             let _ = keep_cards(home, &before, &cards);
                         }
@@ -1436,11 +1458,13 @@ impl Worker {
         self.told(&key);
         std::thread::spawn(move || {
             // The card as it is now: its free space at the job's start.
-            let now = volumes.again(&found);
-            let done = match now.as_ref().and_then(|now| volumes.open(now).map(|card| (card, now))) {
-                Some((card, now)) => work(&*card, now, &*home, link),
-                None => JobDone::Read(Err("the volume can't be opened".into())),
-            };
+            let done = unbroken(job, || {
+                let now = volumes.again(&found);
+                match now.as_ref().and_then(|now| volumes.open(now).map(|card| (card, now))) {
+                    Some((card, now)) => work(&*card, now, &*home, link),
+                    None => JobDone::Read(Err("the volume can't be opened".into())),
+                }
+            });
             let _ = me.send(In::Job(key, done));
         });
     }
@@ -1517,22 +1541,27 @@ impl Worker {
         // A fit is a read alone (a dry run): it runs beside another job. Its
         // free space is the card's now.
         std::thread::spawn(move || {
-            let now = volumes.again(&found);
-            let next = match now.as_ref().and_then(|now| volumes.open(now).map(|card| (card, now))) {
-                Some((card, now)) => {
-                    let ask = sync::Ask {
-                        libraries: want.libraries.clone(),
-                        change: want.change(None),
-                        answers: Answers { new_servers: take_over, ..Answers::default() },
-                        also: also_of(Some(&link)),
-                        same_server: same_server(&facts, Some(&link), take_over),
-                        picked,
-                        ..sync::Ask::default()
-                    };
-                    dry_run(&*card, &*home, &link, &ask, now.volume.space)
+            // A fit that breaks says so, never "asking" for ever.
+            let fit = || {
+                let now = volumes.again(&found);
+                match now.as_ref().and_then(|now| volumes.open(now).map(|card| (card, now))) {
+                    Some((card, now)) => {
+                        let ask = sync::Ask {
+                            libraries: want.libraries.clone(),
+                            change: want.change(None),
+                            answers: Answers { new_servers: take_over, ..Answers::default() },
+                            also: also_of(Some(&link)),
+                            same_server: same_server(&facts, Some(&link), take_over),
+                            picked,
+                            ..sync::Ask::default()
+                        };
+                        dry_run(&*card, &*home, &link, &ask, now.volume.space)
+                    }
+                    None => Next::Refused("the volume can't be opened".into()),
                 }
-                None => Next::Refused("the volume can't be opened".into()),
             };
+            let next = std::panic::catch_unwind(std::panic::AssertUnwindSafe(fit));
+            let next = next.unwrap_or_else(|_| Next::Refused(BROKE.into()));
             let _ = me.send(In::Job(key, JobDone::Fit(seq, next)));
         });
     }
@@ -1601,8 +1630,8 @@ impl Worker {
         let (volumes, me, key) = (self.setup.volumes.clone(), self.me.clone(), key.to_string());
         self.told(&key);
         std::thread::spawn(move || {
-            let done = volumes.eject(&found);
-            let _ = me.send(In::Job(key, JobDone::Ejected(done)));
+            let done = unbroken(Job::Eject, || JobDone::Ejected(volumes.eject(&found)));
+            let _ = me.send(In::Job(key, done));
         });
     }
 
@@ -1672,7 +1701,15 @@ impl Worker {
         std::thread::spawn(move || {
             let (volumes, home) = (&*volumes, &*home);
             let on = Card { found: &found, volumes, home, link: &link, facts: &facts, picked: &picked };
-            let finished = run_sync(&on, &allow, stop.clone(), accepted, &me, &key);
+            // A sync that breaks ends with why, never "running" for ever.
+            let run = std::panic::AssertUnwindSafe(|| run_sync(&on, &allow, stop.clone(), accepted, &me, &key));
+            let finished = std::panic::catch_unwind(run).unwrap_or_else(|_| Finished {
+                synced: None,
+                why: Some(BROKE.into()),
+                by_library: Vec::new(),
+                removal_libs: Vec::new(),
+                stopped: false,
+            });
             let _ = me.send(In::Job(key, JobDone::Synced(Box::new(finished))));
         });
     }
@@ -1720,6 +1757,12 @@ impl Worker {
             RunEvent::Failed { server_path, why } => {
                 run.skipped += 1;
                 run.done_files += 1;
+                // A run whose last file failed is past its copying all the
+                // same, as one whose last file was written.
+                if run.done_files >= run.files {
+                    run.phase = Phase::Index;
+                    run.now = None;
+                }
                 log = Some(LogItem::Skipped { path: server_path.clone(), why: why.clone() });
             }
             RunEvent::Committed { last, .. } => {
@@ -1757,6 +1800,7 @@ impl Worker {
 
     fn done(&mut self, key: &str, done: JobDone) {
         let now = self.setup.home.now();
+        let mut resume = None;
         match done {
             JobDone::Read(read) => {
                 let Some(slot) = self.slot(key) else { return };
@@ -1780,12 +1824,16 @@ impl Worker {
                         }
                     }
                     Err(why) => {
+                        // The job is over: what waited for it goes now.
                         slot.view.read = Read::Failed(why);
                         slot.view.busy = None;
                     }
                 }
-                self.told(key);
-                return;
+                if self.slot(key).is_some_and(|s| s.view.busy.is_some()) {
+                    // Read: its server is asked next, the job goes on.
+                    self.told(key);
+                    return;
+                }
             }
             JobDone::Looked(next) => {
                 if let Some(slot) = self.slot(key) {
@@ -1811,6 +1859,12 @@ impl Worker {
                 }
                 if let Some(slot) = self.slot(key) {
                     let first = slot.view.next == Next::Asking;
+                    // Its server answers a look again: a sync paused for the
+                    // sign-in goes on (clause 52).
+                    let paused = matches!(slot.view.paused(), Some(Pause::SignIn));
+                    if paused && matches!(next, Next::Plan(_)) && !slot.view.out {
+                        resume = Some(finished_allow(&slot.view));
+                    }
                     slot.view.next = next;
                     if first {
                         let _ = self.out.send(Event::Note(Note::Read { key: key.to_string() }));
@@ -1825,11 +1879,14 @@ impl Worker {
                 }
             }
             JobDone::SetUp(result) | JobDone::Applied(result) => {
+                let card = self.slot(key).map(|s| s.view.name().unwrap_or_else(|| s.view.drive()));
                 if let Some(slot) = self.slot(key) {
                     slot.view.busy = None;
                     slot.look_again = true;
-                    if let Err(why) = result {
-                        self.tell(Event::Note(Note::Failed { why }));
+                    match result {
+                        Ok(true) => {}
+                        Ok(false) => self.tell(Event::Note(Note::NotSaved { card: card.unwrap_or_default() })),
+                        Err(why) => self.tell(Event::Note(Note::Failed { why })),
                     }
                 }
             }
@@ -1891,6 +1948,9 @@ impl Worker {
                 slot.deferred.extend(deferred);
             }
             self.cmd(cmd);
+        }
+        if let Some(allow) = resume {
+            self.sync(key, allow);
         }
         let again = self.slot(key).is_some_and(|s| s.look_again && s.view.busy.is_none());
         self.next_in_queue();
@@ -2094,6 +2154,25 @@ pub(crate) fn gate_ahead(card: &CardView, plan: &Planned, allow: &Allow) -> Opti
 /// big enough to say so first (clause 58).
 pub(crate) fn relay_ahead(card: &CardView, plan: &Planned) -> bool {
     card.server.link().is_some_and(|l| l.relay) && plan.bytes > RELAY_WARN
+}
+
+/// Why a job or a sync that broke ended: a fault of this software's (a
+/// panic in its thread), said instead of it running for ever.
+pub(crate) const BROKE: &str = "the transfer stopped unexpectedly (a fault in this player): try again";
+
+/// `work`'s answer, or the job's failure when it breaks.
+fn unbroken(job: Job, work: impl FnOnce() -> JobDone) -> JobDone {
+    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+    done.unwrap_or_else(|_| {
+        let why = BROKE.to_string();
+        match job {
+            Job::Look => JobDone::Read(Err(why)),
+            Job::SetUp => JobDone::SetUp(Err(why)),
+            Job::Apply => JobDone::Applied(Err(why)),
+            Job::Plays => JobDone::Plays(Err(why)),
+            Job::Eject => JobDone::Ejected(Err(why)),
+        }
+    })
 }
 
 /// The answers a paused sync is retried with: its take-over, if any.
@@ -2419,15 +2498,19 @@ fn planned(synced: &sync::Synced, now: u64) -> Next {
     }
 }
 
-/// Writes the sheet's settings to the card's `state.json` (clauses 47, 48).
+/// Writes the sheet's settings to the card's `state.json` (clauses 47, 48):
+/// false when the libraries, the server or the peers chosen had no key to be
+/// kept by (no server saved here answers the card) and weren't written.
 fn store(
     card: &dyn CardWrite,
     home: &dyn Home,
     picked: &Expect,
     want: &Want,
     link: Option<&ServerLink>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let url_key = link.and_then(ServerLink::url_key);
+    let keyed = want.libraries.is_some() || !want.peers.is_empty() || want.budget_mb.is_some();
+    let all = url_key.is_some() || !keyed;
     let name = want.name.trim().to_string();
     let mut change = |state: &mut State| {
         if !name.is_empty() && state::label_fault(&name).is_none() {
@@ -2476,7 +2559,7 @@ fn store(
             }
         })?;
     }
-    Ok(())
+    Ok(all)
 }
 
 /// What a job changed of `cards.json` (`before` to `after`), made to what

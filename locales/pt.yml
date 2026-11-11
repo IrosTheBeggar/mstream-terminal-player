@@ -3133,6 +3133,8 @@ dev:
     plays_mine: "%{n} dos seus próprios ficheiros: contadas, não enviadas"
     plays_lost: "%{n} perdidas quando o registo estava cheio"
     plays_gift: "não enviadas: um cartão para outra pessoa"
+    worker_gone: "A transferência de cartões parou: feche o leitor e abra-o novamente para sincronizar cartões."
+    not_saved: "%{card}: as bibliotecas, o servidor e os pares não foram guardados: nenhum servidor guardado aqui corresponde a este cartão."
     plays_to_send: "%{n} a enviar a %{server}, a mais antiga de %{when}"
     fact_drive: "Unidade"
     fact_removes: "Remove"

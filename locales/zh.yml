@@ -3133,6 +3133,8 @@ dev:
     plays_mine: "%{n} 次来自你自己的文件：计数，不发送"
     plays_lost: "%{n} 次在日志已满时丢失"
     plays_gift: "不发送：给别人用的卡"
+    worker_gone: "卡传输已停止：退出并重新启动播放器即可同步卡。"
+    not_saved: "%{card}：媒体库、服务器和对等节点未保存：此处保存的服务器都不对应这张卡。"
     plays_to_send: "待发送到 %{server} %{n} 次，最早的在 %{when}"
     fact_drive: "驱动器"
     fact_removes: "移除"

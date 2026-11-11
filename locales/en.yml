@@ -3133,6 +3133,8 @@ dev:
     plays_mine: "%{n} of your own files: counted, not sent"
     plays_lost: "%{n} lost when the log was full"
     plays_gift: "not sent: a card for someone else"
+    worker_gone: "The card transfer has stopped: quit and start the player again to sync cards."
+    not_saved: "%{card}: the libraries, server and peers weren't saved: no server saved here answers this card."
     plays_to_send: "%{n} to send to %{server}, the oldest from %{when}"
     fact_drive: "Drive"
     fact_removes: "Removes"

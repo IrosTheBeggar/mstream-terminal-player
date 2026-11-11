@@ -769,3 +769,20 @@ fn a_new_cards_server_chosen_on_the_command_line_is_written_then_synced_from() {
     assert_eq!(code, 0, "{}", term.said());
     assert!(term.said().contains("server      Studio\n"), "{}", term.said());
 }
+
+/// The review's TU8: a worker gone under a sync makes the command stop with
+/// a line and exit 1, never spin.
+#[test]
+fn a_worker_gone_under_a_sync_ends_the_command_with_a_line() {
+    let (link, inbox) = Link::pair();
+    drop(inbox);
+    let (_, events) = std::sync::mpsc::channel::<worker::Event>();
+    let mut session = Session { link, events, fold: Fold::default(), told: Instant::now(), gone: false };
+    let mut term = Term::new();
+    let mut ask = |_: &str| None;
+    let ctrl_c = AtomicU8::new(0);
+    let mut io = Io { out: &mut term.out, err: &mut term.err, ask: &mut ask, ctrl_c: &ctrl_c };
+    let code = run(&mut session, "E:\\", Allow::default(), &Flags::default(), &mut io);
+    assert_eq!(code, 1);
+    assert!(term.said().contains("the card transfer stopped unexpectedly"), "{}", term.said());
+}

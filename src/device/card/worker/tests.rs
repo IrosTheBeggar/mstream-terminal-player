@@ -22,6 +22,8 @@ use crate::device::card::volume::{Bus, Clock, Disk, Fs, Serial, Table, Volume};
 pub(crate) struct Shelf {
     cards: Mutex<Vec<(Found, u32)>>,
     pub(crate) ejected: Mutex<Vec<String>>,
+    /// Opening a card breaks the thread that asks (a fault of the worker's).
+    breaks: AtomicBool,
 }
 
 impl Shelf {
@@ -49,6 +51,7 @@ impl Volumes for Shelf {
     }
 
     fn open(&self, found: &Found) -> Option<Box<dyn CardWrite>> {
+        assert!(!self.breaks.load(Ordering::SeqCst), "a test's fault in the worker");
         let cards = self.cards.lock().unwrap();
         let (_, serial) = cards.iter().find(|(f, _)| key_of(f) == key_of(found))?;
         let card = || Box::new(FatSim::new(&found.volume.path, *serial)) as Box<dyn CardWrite>;
@@ -1621,4 +1624,101 @@ fn a_job_on_a_card_another_now_writes_nothing() {
     let plays: Rc<dyn history::Store> = Rc::new(Outbox(Arc::default()));
     let stored = setup::store_as(&sim, &mine, &mut change, plays, &mut envs_from(4), &mut |_| {});
     assert_eq!(stored.map(|s| s.label).ok().as_deref(), Some("Changed"));
+}
+
+/// The review's TU3: a run whose last file failed is past its copying all
+/// the same, as one whose last file was written.
+#[test]
+fn a_run_whose_last_file_failed_moves_on_to_its_index() {
+    let scratch = Scratch::new("worker-last-failed");
+    let (mut worker, _shelf, key, _stop) = running_at(&scratch, Phase::Planning);
+    worker.progress(&key, RunEvent::Planned { files: 2, bytes: 20 });
+    worker.progress(&key, RunEvent::Wrote { path: "a.mp3".into(), bytes: 10 });
+    assert_eq!(worker.slots[0].view.run.as_ref().unwrap().phase, Phase::Copying);
+    worker.progress(&key, RunEvent::Failed { server_path: "Rock/b.mp3".into(), why: "gone".into() });
+    let run = worker.slots[0].view.run.clone().unwrap();
+    assert_eq!((run.phase, run.done_files, run.skipped, run.now), (Phase::Index, 2, 1, None));
+}
+
+/// The review's TU7 (clause 52): a sync paused for the sign-in goes on once
+/// the listener has signed in again, its server told with a new sign-in.
+#[test]
+fn a_sync_paused_for_the_sign_in_goes_on_once_signed_in() {
+    let scratch = Scratch::new("worker-sign-in");
+    let (mut rig, key, fake, _sim) = with_card(&scratch);
+    fake.lock().unwrap().signed_out = true;
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let wanted = key.clone();
+    rig.until("the pause", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.paused(), Some(Pause::SignIn)))
+    });
+    fake.lock().unwrap().signed_out = false;
+    let home = rig.card(&key).server.link().unwrap().clone();
+    rig.send(Cmd::Servers(vec![ServerLink { token: Some("tok-again".into()), ..home }]));
+    let wanted = key.clone();
+    rig.until("the sync gone on", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.ended, Some(Ended::Done { .. })))
+    });
+}
+
+/// The review's TU8: a sync's or a job's thread that breaks ends with why,
+/// never left running or busy for ever.
+#[test]
+fn a_sync_or_a_job_that_breaks_ends_with_why() {
+    let scratch = Scratch::new("worker-breaks");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    rig.shelf.breaks.store(true, Ordering::SeqCst);
+    rig.send(Cmd::Fit { key: key.clone(), want: Box::new(Want::of(&Facts::default(), None)), seq: 9 });
+    let wanted = key.clone();
+    rig.until("the fit's end", |f| {
+        f.cards.iter().any(|c| c.key == wanted && c.fit == Some((9, Next::Refused(BROKE.into()))))
+    });
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let wanted = key.clone();
+    rig.until("the sync's end", |f| {
+        f.cards.iter().any(|c| c.key == wanted && c.run.is_none() && c.ended.is_some())
+    });
+    assert_eq!(rig.card(&key).ended, Some(Ended::Failed(BROKE.into())));
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(Want::of(&Facts::default(), None)) });
+    rig.until("the job's end", |f| f.notes.iter().any(|n| *n == Note::Failed { why: BROKE.into() }));
+    let wanted = key.clone();
+    rig.until("not busy", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+}
+
+/// The review's smaller items: a read that failed lets what waited for it
+/// go (a sync queued behind it among them), and *Don't wait* spares a sync
+/// that started meanwhile.
+#[test]
+fn a_failed_read_lets_the_queue_go_and_dont_wait_spares_a_sync_under_way() {
+    let scratch = Scratch::new("worker-read-failed");
+    let (mut worker, _shelf, key, _stop) = running_at(&scratch, Phase::Copying);
+    // Don't wait, for a sync that started meanwhile: it runs on.
+    worker.cmd(Cmd::DontWait { key: key.clone() });
+    assert!(worker.slots[0].view.syncing());
+    // Its look failed while another card's sync waited its turn.
+    worker.running = None;
+    worker.slots[0].view.run = None;
+    worker.slots[0].view.busy = Some(Job::Look);
+    worker.slots[0].deferred.push(Cmd::Dismiss { key: key.clone() });
+    worker.queue.push(("elsewhere".into(), Allow::default()));
+    worker.done(&key, JobDone::Read(Err("a read fault".into())));
+    let slot = &worker.slots[0];
+    assert!(slot.view.busy.is_none() && slot.deferred.is_empty());
+    assert_eq!(slot.view.read, Read::Failed("a read fault".into()));
+    assert!(worker.queue.is_empty(), "the sync that waited went");
+}
+
+/// The review's smaller item: settings applied to a card no saved server
+/// answers say they were written but for its libraries, server and peers.
+#[test]
+fn settings_with_no_server_to_key_them_by_say_what_wasnt_saved() {
+    let scratch = Scratch::new("worker-unsaved");
+    let sim = card(&scratch);
+    let here = Here::default();
+    let facts = read(&sim, &Cards::default()).unwrap();
+    let mut want = Want::of(&facts, None);
+    want.name = "Renamed".into();
+    assert_eq!(store(&sim, &here, &Expect::default(), &want, None), Ok(true), "nothing keyed asked");
+    want.libraries = Some(vec!["Rock".into()]);
+    assert_eq!(store(&sim, &here, &Expect::default(), &want, None), Ok(false));
 }

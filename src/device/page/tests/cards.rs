@@ -1178,3 +1178,15 @@ fn a_card_taken_out_asks_nothing_of_the_worker_until_it_is_back() {
     let hint = page.hint();
     assert!(!hint.contains("settings") && !hint.contains("plays") && !hint.contains("eject"), "{hint}");
 }
+
+/// The review's TU8: a command the worker can't take (it is gone) says so on
+/// the busy line, never nothing.
+#[test]
+fn a_command_the_worker_cant_take_says_so() {
+    let _en = english();
+    let (mut page, _ends, inbox, _fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
+    drop(inbox);
+    press(&mut page, KeyCode::Enter);
+    let frame = window(&mut page);
+    assert!(frame.contains("The card transfer has stopped"), "{frame}");
+}

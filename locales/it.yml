@@ -3133,6 +3133,8 @@ dev:
     plays_mine: "%{n} dei tuoi file: contati, non inviati"
     plays_lost: "%{n} persi quando il registro era pieno"
     plays_gift: "non inviati: una scheda per qualcun altro"
+    worker_gone: "Il trasferimento delle schede si è fermato: chiudi il lettore e riavvialo per sincronizzare le schede."
+    not_saved: "%{card}: librerie, server e peer non sono stati salvati: nessun server salvato qui corrisponde a questa scheda."
     plays_to_send: "%{n} da inviare a %{server}, il più vecchio di %{when}"
     fact_drive: "Unità"
     fact_removes: "Toglie"

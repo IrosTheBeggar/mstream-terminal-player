@@ -3133,6 +3133,8 @@ dev:
     plays_mine: "%{n} deiner eigenen Dateien: gezählt, nicht gesendet"
     plays_lost: "%{n} verloren, als das Protokoll voll war"
     plays_gift: "nicht gesendet: eine Karte für jemand anderen"
+    worker_gone: "Die Kartenübertragung ist beendet: Beende den Player und starte ihn neu, um Karten zu synchronisieren."
+    not_saved: "%{card}: Bibliotheken, Server und Peers wurden nicht gespeichert: Kein hier gespeicherter Server passt zu dieser Karte."
     plays_to_send: "%{n} an %{server} zu senden, die älteste von %{when}"
     fact_drive: "Laufwerk"
     fact_removes: "Entfernt"

@@ -3133,6 +3133,8 @@ dev:
     plays_mine: "%{n} z twoich własnych plików: liczone, niewysłane"
     plays_lost: "%{n} utracone, gdy dziennik był pełny"
     plays_gift: "niewysłane: karta dla kogoś innego"
+    worker_gone: "Przesyłanie na karty zostało zatrzymane: zamknij odtwarzacz i uruchom go ponownie, aby synchronizować karty."
+    not_saved: "%{card}: biblioteki, serwer i peery nie zostały zapisane: żaden zapisany tu serwer nie odpowiada tej karcie."
     plays_to_send: "do wysłania do %{server}: %{n}, najstarsze z %{when}"
     fact_drive: "Dysk"
     fact_removes: "Usuwa"

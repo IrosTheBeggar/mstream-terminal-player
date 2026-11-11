@@ -3133,6 +3133,8 @@ dev:
     plays_mine: "%{n} de vos propres fichiers : comptées, non envoyées"
     plays_lost: "%{n} perdues quand le journal était plein"
     plays_gift: "non envoyées : une carte pour quelqu'un d'autre"
+    worker_gone: "Le transfert de cartes s'est arrêté : quittez le lecteur et relancez-le pour synchroniser les cartes."
+    not_saved: "%{card} : les bibliothèques, le serveur et les pairs n'ont pas été enregistrés : aucun serveur enregistré ici ne correspond à cette carte."
     plays_to_send: "%{n} à envoyer à %{server}, la plus ancienne de %{when}"
     fact_drive: "Volume"
     fact_removes: "Retire"
