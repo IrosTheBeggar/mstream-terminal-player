@@ -1714,7 +1714,9 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     }
     // Too small for the screens: the mini player — the cover, the
     // transport, and a line asking for room (mini-player contract).
-    if area.width < MIN_W || area.height < MIN_H {
+    let mini = area.width < MIN_W || area.height < MIN_H;
+    device::drawn_as_mini(gui, mini);
+    if mini {
         mini::draw(frame, gui, area);
         return;
     }

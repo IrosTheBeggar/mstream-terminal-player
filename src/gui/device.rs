@@ -218,6 +218,9 @@ pub(crate) struct DeviceUi {
     /// yes is given, since when the quit waits for the next save.
     pub(crate) quit_gate: bool,
     pub(crate) quit_since: Option<Instant>,
+    /// The last frame was drawn as the mini player: no room for the gate,
+    /// so a quit there stops the sync at its next save as Ctrl+C does.
+    mini: bool,
 }
 
 /// The page is writing (contract clause 9): the GUI cannot leave the tab.
@@ -381,11 +384,21 @@ pub(crate) fn unseen_line(gui: &Gui) -> Option<String> {
 /// runs and no firmware write does: the gold gate first. True when the
 /// gate took the quit.
 pub(crate) fn ask_before_quit(gui: &mut Gui) -> bool {
-    if writing(gui) || syncing(gui).is_none() || gui.device.quit_since.is_some() {
+    if writing(gui) || syncing(gui).is_none() || gui.device.quit_since.is_some() || gui.device.mini {
         return false;
     }
     gui.device.quit_gate = true;
     true
+}
+
+/// What the frame was drawn as: the mini player has no room for the gate,
+/// and a gate open as the window narrows to it is dropped — out of sight it
+/// would hold every key, and the player would look hung (clause 57).
+pub(crate) fn drawn_as_mini(gui: &mut Gui, mini: bool) {
+    gui.device.mini = mini;
+    if mini {
+        gui.device.quit_gate = false;
+    }
 }
 
 /// The quit gate is up.
@@ -583,6 +596,10 @@ pub(crate) struct Duties {
 /// (clause 55).
 pub(crate) fn frame(gui: &mut Gui) -> Duties {
     let news = pump_transfer(gui);
+    // A gate over a sync that has ended asks about nothing: it goes.
+    if gui.device.quit_gate && syncing(gui).is_none() {
+        gui.device.quit_gate = false;
+    }
     take_wants(gui);
     // A page a screen change left behind without passing through `close`
     // goes now; a writing one stays, and the screen change was refused.
@@ -1678,6 +1695,42 @@ mod tests {
         stopped(&tell);
         frame(&mut gui);
         assert!(quit_ready(&gui), "the sync saved and ended: the quit goes");
+    }
+
+    #[test]
+    fn in_the_mini_player_q_during_a_sync_raises_no_gate_it_cannot_draw() {
+        let _en = english();
+        let (mut gui, _worker) = syncing_gui();
+        // The window below the GUI's floor: the gate has no room, and a gate
+        // set out of sight would hold every key. The quit goes through the
+        // way out's wait for the next save, as Ctrl+C's does.
+        render_at(&mut gui, 90, 20);
+        let flow = key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(flow, super::super::Flow::Quit, "the quit, not a gate nobody sees");
+        assert!(!quit_gate_open(&gui));
+
+        // A gate open as the window narrows goes with the frame that hides it.
+        let (mut gui, (_inbox, tell)) = syncing_gui();
+        key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(quit_gate_open(&gui));
+        let text = all(&render_at(&mut gui, 90, 20));
+        assert!(!quit_gate_open(&gui), "dropped:
+{text}");
+        let flow = key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(flow, super::super::Flow::Quit);
+
+        // Grown back, a q asks again.
+        render_at(&mut gui, 100, 30);
+        let flow = key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(flow, super::super::Flow::Continue);
+        assert!(quit_gate_open(&gui));
+
+        // And a gate over a sync that has ended goes with it.
+        stopped(&tell);
+        frame(&mut gui);
+        assert!(!quit_gate_open(&gui), "nothing left to ask about");
+        let flow = key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(flow, super::super::Flow::Quit, "q is q again");
     }
 
     #[test]

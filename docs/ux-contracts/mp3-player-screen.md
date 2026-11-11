@@ -1358,6 +1358,11 @@ comes from the cache, or a download, beside them.
       its last save. The gate above is shown only when no write runs.
     - **`x` during a write** is still honoured on a card that syncs (clause
       9): the stop touches no board.
+    - **Below the screens' size** (the mini player) the gate has no room:
+      `q` stops the sync at its next save and quits as Ctrl+C does, saying
+      so on stderr. A gate open when the window narrows to the mini player
+      is dropped, and so is one whose sync ends meanwhile: out of sight, or
+      asking about nothing, it would only hold the keys.
 
 ### The gates
 
