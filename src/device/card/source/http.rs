@@ -63,7 +63,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::super::engine::{CARD_WRITE, Failed, Fetched, Fetcher, WantedFile};
 use super::super::names::Bytes;
@@ -263,8 +263,9 @@ fn make_once(
     let Some(_turn) = Turn::take(stopped, pace.limit) else { return Err(skip("stopped")) };
     let mut whole_before: Option<u64> = None;
     let mut why = String::new();
-    // The full queue's waits for this file, all its tries together.
-    let mut busy = Duration::ZERO;
+    // When the queue was first found full for this file, all its tries
+    // together.
+    let mut busy_since: Option<Instant> = None;
     for attempt in 1..=TRIES {
         if attempt > 1 {
             pause_while(attempt as u64 - 1, stopped);
@@ -278,19 +279,19 @@ fn make_once(
             let fetched = until_with(client.download_async(&fetch, &job.dest, &mut |_, _| {}), stopped);
             // The server's bulk queue is full (its words, not any 503's):
             // asked again when it says, for as long as it says so, and no
-            // try is spent — up to [`Pace::busy_max`] in all, then the run
-            // stops: a queue that never empties is no file's fault.
+            // try is spent — for [`Pace::busy_max`] from its first such
+            // answer (the time gone, not the waits it asked for), then the
+            // run stops: a queue that never empties is no file's fault.
             match &fetched {
                 Some(Err(f)) if job.bulk && !stopped() => match f.error {
                     FetchError::Busy(wait) => {
-                        let wait = busy_wait(wait);
-                        if busy + Duration::from_secs(wait) > pace.busy_max {
+                        let since = *busy_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= pace.busy_max {
                             let minutes = pace.busy_max.as_secs().div_ceil(60);
                             let why = format!("the server's conversion queue stayed full for {minutes} minutes");
                             return Err(stop(why));
                         }
-                        busy += Duration::from_secs(wait);
-                        pause_while(wait, stopped);
+                        pause_while(busy_wait(wait), stopped);
                     }
                     _ => break fetched,
                 },
@@ -1405,11 +1406,42 @@ mod tests {
         http.bulk(Some(1));
         http.busy_max = Duration::from_secs(2);
         let file = wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 1);
-        let started = std::time::Instant::now();
+        // The clock from the first request: not the wait for this process's
+        // conversion turn before it (other tests convert too).
+        let first = std::thread::spawn(move || {
+            let asked = seen.recv_timeout(Duration::from_secs(60)).is_ok();
+            (asked, Instant::now(), seen)
+        });
         let failed = http.fetch(&file, &mut Vec::new()).unwrap_err();
-        assert!(failed.stop && failed.why.contains("queue stayed full for 1 minutes"), "{failed:?}");
-        assert_eq!(seen.try_iter().count(), 3, "asked, waited a second twice, then stopped");
-        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        let ended = Instant::now();
+        let (asked, started, seen) = first.join().unwrap();
+        assert!(asked && failed.stop && failed.why.contains("queue stayed full for 1 minutes"), "{failed:?}");
+        assert_eq!(1 + seen.try_iter().count(), 3, "asked, waited a second twice, then stopped");
+        let took = ended.saturating_duration_since(started);
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+
+    /// The longest wait for a full queue is the time gone since its first
+    /// answer, not the Retry-After seconds added up: a server slow to say
+    /// so (1.5 s an answer, "1 s" each time) is waited out 2 s, not 2 s of
+    /// its own words.
+    #[test]
+    fn a_full_queues_longest_wait_is_the_time_gone() {
+        let (tx, seen) = mpsc::channel::<String>();
+        let tx = Mutex::new(tx);
+        let base = routed(move |asked| {
+            let _ = tx.lock().unwrap().send(asked.target.clone());
+            std::thread::sleep(Duration::from_millis(1500));
+            let words: &[u8] = br#"{"error":"too many bulk transcodes queued - retry later"}"#;
+            reply("503 Service Unavailable", &[("Retry-After", "1")], words)
+        });
+        let mut http = Http::new(Arc::new(Client::new(&base).unwrap()), 0, 2).unwrap();
+        http.bulk(Some(1));
+        http.busy_max = Duration::from_secs(2);
+        let file = wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 1);
+        let failed = http.fetch(&file, &mut Vec::new()).unwrap_err();
+        assert!(failed.stop && failed.why.contains("queue stayed full"), "{failed:?}");
+        assert_eq!(seen.try_iter().count(), 2, "asked, waited a second, asked, and 2.5 s had gone");
     }
 
     #[test]
