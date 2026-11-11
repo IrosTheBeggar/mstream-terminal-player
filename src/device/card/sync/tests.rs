@@ -1063,6 +1063,29 @@ fn dj_owed(sim: &FatSim) -> bool {
     State::of(&look(sim).state).unwrap().autodj_owed
 }
 
+/// Two identical runs in a row, the second reading the listing whole:
+/// everything the Auto DJ index was made from compares the same from one
+/// run to the next, so the index stays as it is, and nothing is owed (the
+/// last review's check).
+#[test]
+fn two_identical_runs_keep_the_index_and_owe_nothing() {
+    let scratch = Scratch::new("dj-twice");
+    let sim = card(&scratch);
+    let (base, _fake) = server();
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    let index = autodj_named(&sim);
+    assert!(index.is_some() && !dj_owed(&sim));
+    let whole = Ask { whole: true, ..Ask::default() };
+    for run in 1..=2 {
+        let again = sync_now(&sim, &base, &whole, &mut envs).0;
+        assert_eq!(again.summary.as_ref().unwrap().listed, Listed::Whole, "run {run}");
+        ran(&again);
+        assert_eq!(autodj_named(&sim), index, "run {run}: the index as it was");
+        assert!(!dj_owed(&sim), "run {run}: nothing owed");
+    }
+}
+
 #[test]
 fn an_index_kept_for_the_files_it_was_made_for_is_owed_nothing() {
     let scratch = Scratch::new("dj-held");
