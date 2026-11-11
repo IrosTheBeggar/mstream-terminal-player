@@ -629,6 +629,15 @@ impl Peer {
         self.wait("the day's budget for the peer is spent".into(), None)
     }
 
+    /// The listener's stop, once a wait it cut short is over: the file is
+    /// asked for no more (as [`super::http::Http`]'s are not).
+    fn going(&self) -> Result<(), Failed> {
+        match self.stop.load(Ordering::SeqCst) {
+            true => Err(skip("stopped")),
+            false => Ok(()),
+        }
+    }
+
     /// A 429: None when its wait is over and the file may be asked again.
     fn limited(&mut self, l: &Limited, streams: &mut u32) -> Option<Failed> {
         match limit(l, self.s.stream_wait) {
@@ -723,10 +732,11 @@ impl Peer {
             match &f.error {
                 FetchError::Limited(l) => match self.limited(l, &mut streams) {
                     Some(failed) => return Err(failed),
-                    None => continue,
+                    None => self.going()?,
                 },
                 e if passing(e) && attempt < TRIES => {
                     pause(attempt as u64, &self.stop);
+                    self.going()?;
                     attempt += 1;
                 }
                 _ => return Err(self.failed(f.error)),
@@ -757,10 +767,11 @@ impl Peer {
             match &f.error {
                 FetchError::Limited(l) => match self.limited(l, &mut streams) {
                     Some(failed) => return Err(failed),
-                    None => continue,
+                    None => self.going()?,
                 },
                 e if passing(e) && attempt < TRIES => {
                     pause(attempt as u64, &self.stop);
+                    self.going()?;
                     attempt += 1;
                 }
                 _ => return Err(self.failed(f.error)),

@@ -39,6 +39,8 @@ pub(super) struct PeerLib {
     sizeless: bool,
     /// The 429s its files' GETs are answered with, in turn.
     limits: VecDeque<Limit>,
+    /// The listener's stop, set as a 429 is answered.
+    stop_at_limit: Option<Arc<AtomicBool>>,
     /// Every request, as "via METHOD target": `direct`, or `parent` for one
     /// its parent's proxies forwarded.
     asked: Vec<String>,
@@ -181,6 +183,9 @@ fn peer_answer(fake: &PeerFake, asked: &Asked, via: &str) -> Vec<u8> {
             if track.is_some()
                 && let Some(limit) = lib.limits.pop_front()
             {
+                if let Some(stop) = &lib.stop_at_limit {
+                    stop.store(true, Ordering::SeqCst);
+                }
                 let body = json!({"error": limit.words}).to_string();
                 let after = limit.retry_after.map(|s| s.to_string());
                 let headers: Vec<(&str, &str)> =
@@ -902,6 +907,35 @@ fn a_peers_file_of_unknown_size_is_never_kept_in_a_partial() {
     assert_eq!(on_card, big(1));
     let seen = look(&sim);
     assert!(seen.pending.is_none() && seen.root.as_ref().unwrap().manifest.is_final());
+}
+
+/// The listener's Stop while a peer's file waits out its stream cap (a 429
+/// of 30 s): the wait ends at once, and the file is asked for no more; the
+/// run parks, the file in its plan.
+#[test]
+fn a_stop_while_a_peers_streams_are_busy_asks_it_nothing_more() {
+    let scratch = Scratch::new("peer-stop");
+    let sim = card(&scratch);
+    let (base, _fake, peer, dial) = world(true, false, folk());
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut lib = peer.lock().unwrap();
+        let busy = Limit { words: "Too many concurrent streams", retry_after: Some(30) };
+        lib.limits = VecDeque::from([busy]);
+        lib.stop_at_limit = Some(stop.clone());
+    }
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let ask = Ask { stop: Some(stop), ..rock_and_folk() };
+    let started = std::time::Instant::now();
+    let synced = sync_fed(&sim, &base, &ask, &fed, &mut envs);
+    assert!(started.elapsed() < Duration::from_secs(20), "the 30 s wasn't waited out");
+    let outcome = ran(&synced);
+    assert_eq!(outcome.parked.as_deref(), Some(STOPPED), "{:?}", outcome.report);
+    assert!(outcome.report.failed.is_empty(), "{:?}", outcome.report.failed);
+    assert_eq!(peer.lock().unwrap().purposes.len(), 1, "asked once");
+    assert!(look(&sim).pending.is_some(), "the peer's files stay in the plan on the card");
 }
 
 /// A peer's file the player can't play: with no ffmpeg on this computer it
