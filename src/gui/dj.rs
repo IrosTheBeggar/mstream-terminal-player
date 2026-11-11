@@ -1,75 +1,80 @@
 //! Auto DJ in the GUI shell (docs/ux-contracts/auto-dj.md): the room, a
-//! Library nav room under TOOLS (clauses 40–53), the empty-queue chooser as a kit
-//! modal (clause 2), the opening-song banner (clause 4), and the acts the
-//! queue panel's empty state sends (clause 16). The bar's `auto-dj` toggle
-//! and `A` ride the shared App's toggle (entry point 1); every edit here
-//! goes through the App's [`DjEdit`], so both shells change one model.
+//! Library nav room under TOOLS — one row per setting, each opening one
+//! sheet (clauses 40–58, re-laid 2026-11-10 from the record's rebuilt
+//! screen) — the opening question as a kit modal (clause 2), the
+//! opening-song banner (clause 4), the empty queue's openers (clause 16),
+//! and quick config over the bar. The bar's `auto-dj` toggle and `A` ride
+//! the shared App's toggle (entry point 1); every edit here goes through the
+//! App's [`DjEdit`], so both shells change one model.
+//!
+//! The room never scrolls. Start / Stop is the status; a row is a name, its
+//! value at one right edge — DIM for Any, Off and how the session runs, OK
+//! while it shapes the picks, GOLD with `!` when a running session had to
+//! drop it — and `▸` (a sheet) or `▾` (a list, where a pick applies at
+//! once). A setting the server can't do keeps its place, DIM, with its
+//! reason where the value would be. The sheets are [`sheets`]; the bar's
+//! split button opens [`quick`].
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent};
-use ratatui::layout::{Position, Rect};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::Block;
+use ratatui::text::Span;
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use rust_i18n::t;
-use tui_input::Input;
-use tui_input::backend::crossterm::EventHandler;
 
+use crate::api::types::MoodFilter;
 use crate::config;
-use crate::dj::{self, EmptyQueueStart, GenreMode, SonicAnchor};
+use crate::dj::{self, EmptyQueueStart, GenreMode};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{ListView, Surface, cursor_ring, dim, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_frame, wrap_words};
-use crate::tui::app::{Action, Capture, DjEdit, DjRow};
+use crate::kit::{ListView, cursor_ring, dim, width, wrap_whole};
+use crate::tui::app::{Action, Capture, DjEdit, DjGate};
+use crate::tui::worker::DjNote;
 
-use super::{Act, DJ_NAV, Gui, List, Screen, accent, bright_bold, put, sel, text_button};
+use super::{Act, DJ_NAV, Gui, Screen, accent, bright_bold, put, sel, text_button};
 
-/// The chooser's three rows: the two answers, then the remember box.
-const ROWS: usize = 3;
-/// The value column: where a row's control starts — a bar, the choices,
-/// the keyword field, a value in words — so the eye finds them in one
-/// place (the room's canvas, board E′, 2026-09-23).
-const VALUE_X: u16 = 28;
-/// A sub-row's indent: the strictness bar under its switch, the choices
-/// under their label.
-const SUB_X: u16 = 6;
-/// The bars' cells — the volume widget's ten.
-const CELLS: u16 = 10;
-/// The keyword field's width.
-const FIELD_W: u16 = 22;
-/// The help line under the body: a rule and two lines for the description
-/// of the row under the pointer, else the cursor's.
-const HELP_ROWS: u16 = 3;
+mod quick;
+mod sheets;
+
+pub(crate) use quick::QuickAct;
+pub(crate) use sheets::{Sheet, SheetAct, border_title_value};
+
+/// The rows' cells across: a name, its value ending two cells before the
+/// last, the chevron on the last — the room's width at a hundred columns
+/// with the queue open, as the canvas drew it. In a wider room the rows
+/// take up to a fifth more, and past that the block stands centred in the
+/// room rather than at its left (the owner's call, 2026-11-10).
+const ROW_W: u16 = 47;
+const ROW_W_MAX: u16 = ROW_W + ROW_W / 5;
+/// The opening question's cells across (the sheets' width).
+const CHOOSER_W: u16 = 66;
 
 // ── State ───────────────────────────────────────────────────────────────────
 
 /// The room's own state: what the App does not hold because only this shell
-/// needs it — the keyboard cursor over the room's controls, the scroll, the
-/// text fields, the pickers' cursors.
+/// needs it.
 #[derive(Debug, Default)]
 pub(crate) struct DjUi {
-    /// The keyboard cursor: None is stowed (the kit's resting state).
+    /// The keyboard's hand: `None` is stowed (the kit's resting state).
     pub cursor: Option<Item>,
-    /// The room's body: its first visible row, and whether the next draw
-    /// scrolls the cursor into view.
-    pub body: ListView,
-    /// The keyword field (clause 49).
-    pub keyword: Input,
-    /// The sub-cursor along a chips row.
-    pub chip: usize,
-    /// The genre picker's search line and cursor (clause 48).
-    pub filter: Input,
-    pub pick_row: usize,
-    pub genres: ListView,
-    /// The server picker (clause 41), when open: its cursor row.
-    pub server_pick: Option<usize>,
-    /// The body's window from the last draw, for the page keys.
-    visible: usize,
-    /// How many Preview picks the last draw saw: new ones scroll into view
-    /// under their row, which is the body's last.
-    samples_seen: usize,
-    /// The help line's text this frame: the row under the pointer's, and
-    /// the cursor's — the pointer wins.
-    help_hover: Option<String>,
-    help_focus: Option<String>,
+    /// First song's list, when it is down: the row its cursor is on, and
+    /// the row of the room it hangs from (set by the room's draw).
+    pub first: Option<usize>,
+    first_anchor: Option<Rect>,
+    /// The open sheet: its draft, and the keyboard's hand in it.
+    pub sheet: Option<sheets::Open>,
+    /// Quick config, when it is up over the bar.
+    pub quick: Option<quick::Quick>,
+    /// The empty queue's Recently played list, when it is down: its cursor
+    /// row, and where it hangs (set by the panel's draw).
+    pub recent: Option<usize>,
+    recent_anchor: Option<Rect>,
+    /// Whether this emptiness of the armed queue has asked for the songs
+    /// played last — once each time the queue runs out.
+    recent_asked: bool,
+    /// The open sheet's list window: Genres' genres, Play from's servers
+    /// and folders.
+    pub list: ListView,
 }
 
 impl DjUi {
@@ -78,145 +83,103 @@ impl DjUi {
     }
 }
 
-/// A control the keyboard cursor can rest on, in the room's order.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A row of the room, in its order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Row {
+    PlayFrom,
+    FirstSong,
+    Batch,
+    Sonic,
+    Smart,
+    Genres,
+    Rating,
+    Length,
+    Beat,
+    Harmonic,
+    SkipWords,
+    Cooldown,
+}
+
+/// How the session runs; then what every pick must match; then what the DJ
+/// leans towards and gives up when it must.
+const SESSION: [Row; 3] = [Row::PlayFrom, Row::FirstSong, Row::Batch];
+const MUST: [Row; 5] = [Row::Sonic, Row::Smart, Row::Genres, Row::Rating, Row::Length];
+const PREFER: [Row; 4] = [Row::Beat, Row::Harmonic, Row::SkipWords, Row::Cooldown];
+
+/// A control the keyboard's hand can rest on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Item {
+    /// `Preview picks ▸`, on the title row.
+    Preview,
     /// Start / Stop.
     Toggle,
-    /// The DJ's server (clause 41).
-    Server,
-    /// A shared row: a switch, a bar, or Preview.
-    Row(DjRow),
-    Anchor(SonicAnchor),
-    EmptyQueue(EmptyQueueStart),
-    GenreMode(GenreMode),
-    GenreChips,
-    PickGenres,
-    KeywordChips,
-    KeywordInput,
-    /// One of the DJ server's libraries (clause 42).
-    Source(usize),
+    Row(Row),
 }
 
-/// One line of the room's body, laid out from the App's rows: labels in
-/// a column, controls at [`VALUE_X`], no description beside a row — the
-/// row under the pointer or the cursor explains itself in the help line
-/// under the body (the room's canvas, board E′).
-enum L {
-    Section(String),
-    Blank,
-    /// A gold notice under a switch: the server's reason, a version gate.
-    Notice(String),
-    /// A dim hint under a switch, indented like the chips it stands for.
-    Hint(String),
-    /// The state, its detail, and Start / Stop at the right: three rows.
-    Status,
-    Server,
-    Switch(DjRow),
-    Bar(DjRow),
-    /// A sub-label and its `(•)` choices: on one row when they fit at the
-    /// value column, else the choices on the row below (`wrapped`).
-    /// `wrapped`: under the label rather than at the value column;
-    /// `stacked`: one option a row — none fit side by side.
-    Choice { label: Option<String>, options: Vec<(Item, String, String)>, wrapped: bool, stacked: bool },
-    Chips(Item),
-    PickGenres,
-    KeywordInput,
-    Source(usize, String, bool),
-    Preview,
-    Sample(String),
+/// How a value reads: for Any, Off or a session setting; while it shapes
+/// the picks; when a running session had to drop it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tone {
+    Neutral,
+    Active,
+    Warning,
 }
 
-impl L {
-    fn height(&self) -> usize {
+impl Tone {
+    pub(crate) fn style(self) -> Style {
         match self {
-            L::Status => 3,
-            // Stacked, one row per option under the label (or from the first
-            // row without one); side by side, the label's row and the one
-            // under it when wrapped.
-            L::Choice { label, options, wrapped, stacked } => {
-                if *stacked { usize::from(label.is_some()) + options.len() } else { 1 + usize::from(*wrapped) }
-            }
-            _ => 1,
-        }
-    }
-
-    /// The controls on the line, in order — a choice row carries several.
-    fn items(&self) -> Vec<Item> {
-        match self {
-            L::Status => vec![Item::Toggle],
-            L::Server => vec![Item::Server],
-            L::Switch(row) | L::Bar(row) => vec![Item::Row(*row)],
-            L::Choice { options, .. } => options.iter().map(|(item, ..)| *item).collect(),
-            L::Chips(item) => vec![*item],
-            L::PickGenres => vec![Item::PickGenres],
-            L::KeywordInput => vec![Item::KeywordInput],
-            L::Source(i, ..) => vec![Item::Source(*i)],
-            L::Preview => vec![Item::Row(DjRow::Sample)],
-            L::Section(_) | L::Blank | L::Notice(_) | L::Hint(_) | L::Sample(_) => Vec::new(),
+            Tone::Neutral => dim(),
+            Tone::Active => Style::default().fg(th().ok),
+            Tone::Warning => Style::default().fg(th().gold),
         }
     }
 }
 
-fn is_bar(row: DjRow) -> bool {
-    matches!(
-        row,
-        DjRow::SongsPerFetch
-            | DjRow::Strictness
-            | DjRow::Tolerance
-            | DjRow::Cooldown
-            | DjRow::Rating
-            | DjRow::Shortest
-            | DjRow::Longest
-    )
+/// What a press on a row does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// `▸`: its sheet.
+    Sheet,
+    /// `▾`: its list, where a pick applies at once.
+    List,
+    /// The one switch on the page.
+    Switch(bool),
+    /// Nothing: the server can't do it, and the value is the reason.
+    Gated,
 }
 
-/// The section a shared row sits under (clause 2's order).
-fn section_of(row: DjRow) -> Option<&'static str> {
-    match row {
-        DjRow::Armed | DjRow::Sample => None,
-        DjRow::SongsPerFetch => Some("queue"),
-        DjRow::Sonic
-        | DjRow::Strictness
-        | DjRow::Anchor
-        | DjRow::EmptyQueue
-        | DjRow::Bpm
-        | DjRow::Tolerance
-        | DjRow::Harmonic
-        | DjRow::Cooldown => Some("continuity"),
-        DjRow::Rating
-        | DjRow::Length
-        | DjRow::Shortest
-        | DjRow::Longest
-        | DjRow::UnknownLength
-        | DjRow::Genres
-        | DjRow::Keywords => Some("filters"),
-        DjRow::Sources => Some("sources"),
-    }
-}
-
-fn section_title(key: &str) -> String {
-    match key {
-        "queue" => t!("gui.dj.sec_queue"),
-        "continuity" => t!("gui.dj.sec_continuity"),
-        "filters" => t!("gui.dj.sec_filters"),
-        _ => t!("gui.dj.sec_sources"),
-    }
-    .to_string()
-}
-
-/// A saved server the picker offers (clause 41).
-struct PickServer {
-    id: String,
+/// A row as it stands right now.
+struct RowView {
     label: String,
-    peer: bool,
-    current: bool,
+    value: String,
+    tone: Tone,
+    kind: Kind,
+    /// The reason in a sentence, where the kit's tooltip has one to give.
+    tip: Option<String>,
 }
 
-/// Every selectable saved server, grouped — a peer under its parent, named
-/// through it — with the DJ's own marked.
-fn pickable_servers(gui: &Gui) -> Vec<PickServer> {
-    let dj = gui.app.dj_server.clone();
+// ── Servers ─────────────────────────────────────────────────────────────────
+
+/// A saved server Play from offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PickServer {
+    pub id: String,
+    pub label: String,
+    pub peer: bool,
+    /// The one the rows are about: the DJ's while it runs, else Start's.
+    pub current: bool,
+}
+
+/// A server's name without the scheme: "music.home.arpa",
+/// "laptop.local:3000". A peer's is already a name.
+pub(crate) fn short_name(name: &str) -> String {
+    name.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_string()
+}
+
+/// Every selectable saved server, grouped — a peer right under the parent
+/// it is reached through — with the rows' own marked.
+pub(crate) fn pickable_servers(gui: &Gui) -> Vec<PickServer> {
+    let target = gui.app.dj_library_target();
     let servers = &gui.config.servers;
     config::grouped_order(servers)
         .into_iter()
@@ -226,27 +189,44 @@ fn pickable_servers(gui: &Gui) -> Vec<PickServer> {
                 return None;
             }
             let label = match &entry.peer {
-                Some(peer) => {
-                    let parent = super::servers::parent_label(gui, &peer.parent);
-                    format!("{} · {}", peer.name, t!("gui.srv.via", parent = parent))
-                }
-                None => config::display_name(entry),
+                Some(peer) => peer.name.clone(),
+                None => short_name(&config::display_name(entry)),
             };
             Some(PickServer {
                 id: entry.url.clone(),
                 label,
                 peer: entry.peer.is_some(),
-                current: dj.as_deref().is_some_and(|d| config::same_server(d, &entry.url)),
+                current: target.as_deref().is_some_and(|t| config::same_server(t, &entry.url)),
             })
         })
         .collect()
+}
+
+/// The libraries of the server the rows are about, once it has said.
+pub(crate) fn libraries(gui: &Gui) -> Vec<String> {
+    gui.app.dj_info.as_ref().map(|info| info.libraries.clone()).unwrap_or_default()
+}
+
+/// The name of the server the rows are about.
+pub(crate) fn target_name(gui: &Gui) -> String {
+    match gui.app.dj_library_target() {
+        Some(id) => short_name(&gui.app.server_name_of(&id)),
+        None => String::new(),
+    }
+}
+
+/// Whether Play from has anything to choose: another server, or a second
+/// library of this one (the record's rule — the row is not drawn for a
+/// choice of one).
+fn shows_play_from(gui: &Gui) -> bool {
+    pickable_servers(gui).len() > 1 || libraries(gui).len() > 1
 }
 
 // ── Words ───────────────────────────────────────────────────────────────────
 
 /// "{n} songs" in the locale's plural form: the record's ICU plural, by
 /// hand, for the two languages here with more than one plural.
-fn songs_words(count: u32) -> String {
+pub(crate) fn songs_words(count: u32) -> String {
     let locale = rust_i18n::locale();
     let lang: &str = &locale;
     let few_many = |n: u32| (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100));
@@ -270,246 +250,277 @@ fn songs_words(count: u32) -> String {
     .to_string()
 }
 
-/// The length window's words (clause 47): a rail means unbounded, so a
-/// bare 0:00–20:00 never looks like a constraint.
-fn length_words(s: &dj::Settings) -> String {
-    match (s.min_seconds > 0, s.max_seconds < dj::LENGTH_RAIL_SECONDS) {
-        (false, false) => t!("gui.dj.length_any"),
-        (true, false) => t!("gui.dj.length_over", min = crate::api::types::fmt_duration(f64::from(s.min_seconds))),
-        (false, true) => t!("gui.dj.length_under", max = crate::api::types::fmt_duration(f64::from(s.max_seconds))),
-        (true, true) => t!("gui.dj.length_between", min = crate::api::types::fmt_duration(f64::from(s.min_seconds)), max = crate::api::types::fmt_duration(f64::from(s.max_seconds))),
+/// Why the server can't do a row, in the record's few words.
+pub(crate) fn gate_words(gate: DjGate) -> String {
+    match gate {
+        DjGate::NeedsServer(floor) => t!("gui.dj.needs_server", version = dj::floor_label(floor)),
+        DjGate::DiscoveryOff => t!("gui.dj.discovery_off"),
+        DjGate::StillScanning => t!("gui.dj.still_scanning"),
+        DjGate::NoMoodData => t!("gui.dj.no_mood_data"),
+        DjGate::NotOnPeers => t!("gui.dj.not_on_peers"),
     }
     .to_string()
 }
 
-fn sample_words(track: &crate::api::types::Track) -> String {
-    let title = track.title_or_file().to_string();
-    match track.metadata.artist.as_deref().filter(|a| !a.is_empty()) {
-        Some(artist) => format!("{title} — {artist}"),
-        None => title,
+fn any_words() -> String {
+    t!("gui.dj.any_value").to_string()
+}
+
+fn off_words() -> String {
+    t!("gui.dj.value_off").to_string()
+}
+
+pub(crate) fn first_words(choice: EmptyQueueStart) -> String {
+    match choice {
+        EmptyQueueStart::Ask => t!("gui.dj.ask"),
+        EmptyQueueStart::Random => t!("gui.dj.first_random"),
+        EmptyQueueStart::Pick => t!("gui.dj.first_choose"),
+        EmptyQueueStart::Recent => t!("gui.dj.first_recent"),
+    }
+    .to_string()
+}
+
+pub(crate) fn sonic_value(on: bool, pct: u32) -> (String, Tone) {
+    if on { (t!("gui.dj.percent", pct = pct).to_string(), Tone::Active) } else { (off_words(), Tone::Neutral) }
+}
+
+/// Why a running session is picking without the pool, in a few words.
+pub(crate) fn drop_words(note: &DjNote) -> Option<String> {
+    match note {
+        DjNote::SonicRange => Some(t!("gui.dj.too_strict").to_string()),
+        DjNote::SonicUnscanned => Some(t!("gui.dj.still_scanning").to_string()),
+        DjNote::PreviewFailed(_) => None,
+    }
+}
+
+/// The dropped pool of the running session, while there is one to name.
+pub(crate) fn sonic_drop(gui: &Gui) -> Option<String> {
+    let app = &gui.app;
+    app.lane.sonic_drop.as_ref().filter(|_| app.dj_armed() && app.dj.sonic).and_then(drop_words)
+}
+
+pub(crate) fn moods_value(filter: MoodFilter) -> (String, Tone) {
+    if filter.is_empty() {
+        return (any_words(), Tone::Neutral);
+    }
+    let words: String =
+        super::moods::strip_run(filter, &rust_i18n::locale()).into_iter().map(|(text, _)| text).collect();
+    (words, Tone::Active)
+}
+
+/// A genre rule in words — sorted, so the same genres read the same
+/// whatever order they were ticked in.
+pub(crate) fn genres_value(mode: GenreMode, genres: &[String]) -> (String, Tone) {
+    if genres.is_empty() {
+        return (any_words(), Tone::Neutral);
+    }
+    let mut sorted: Vec<&str> = genres.iter().map(String::as_str).collect();
+    sorted.sort_by_key(|g| g.to_lowercase());
+    let list = sorted.join(" · ");
+    let words = match mode {
+        GenreMode::Whitelist => list,
+        GenreMode::Blacklist => t!("gui.dj.genres_skip_value", genres = list).to_string(),
+    };
+    (words, Tone::Active)
+}
+
+/// A rating on the server's half-star 1–10 scale, in stars: 7 is "3.5★+".
+pub(crate) fn rating_value(rating: u32) -> (String, Tone) {
+    if rating == 0 {
+        return (any_words(), Tone::Neutral);
+    }
+    let stars = if rating % 2 == 0 { format!("{}", rating / 2) } else { format!("{:.1}", f64::from(rating) / 2.0) };
+    let words = t!("gui.dj.rating_value", stars = stars).to_string();
+    (if legacy_conhost() { words.replace('★', "*") } else { words }, Tone::Active)
+}
+
+pub(crate) fn length_value(min: Option<u32>, max: Option<u32>) -> (String, Tone) {
+    let words = match (min, max) {
+        (None, None) => return (any_words(), Tone::Neutral),
+        (Some(min), None) => t!("gui.dj.length_from", min = dj::fmt_length(min)),
+        (None, Some(max)) => t!("gui.dj.length_upto", max = dj::fmt_length(max)),
+        (Some(min), Some(max)) => t!("gui.dj.length_window", min = dj::fmt_length(min), max = dj::fmt_length(max)),
+    };
+    (words.to_string(), Tone::Active)
+}
+
+pub(crate) fn tempo_value(on: bool, tolerance: u32) -> (String, Tone) {
+    if on { (t!("gui.dj.tolerance_value", bpm = tolerance).to_string(), Tone::Active) } else { (off_words(), Tone::Neutral) }
+}
+
+pub(crate) fn words_value(words: &[String]) -> (String, Tone) {
+    if words.is_empty() { (off_words(), Tone::Neutral) } else { (words.join(" · "), Tone::Active) }
+}
+
+pub(crate) fn cooldown_value(artists: u32) -> (String, Tone) {
+    if artists == 0 {
+        (off_words(), Tone::Neutral)
+    } else {
+        (t!("gui.dj.cooldown_value", count = artists).to_string(), Tone::Active)
+    }
+}
+
+fn row_label(row: Row) -> String {
+    match row {
+        Row::PlayFrom => t!("gui.dj.play_from"),
+        Row::FirstSong => t!("gui.dj.first_song"),
+        Row::Batch => t!("gui.dj.batch"),
+        Row::Sonic => t!("gui.dj.sonic"),
+        Row::Smart => t!("gui.dj.smart"),
+        Row::Genres => t!("gui.dj.genres"),
+        Row::Rating => t!("gui.dj.rating_row"),
+        Row::Length => t!("gui.dj.length_row"),
+        Row::Beat => t!("gui.dj.beat"),
+        Row::Harmonic => t!("gui.dj.harmonic"),
+        Row::SkipWords => t!("gui.dj.skip_words"),
+        Row::Cooldown => t!("gui.dj.cooldown"),
+    }
+    .to_string()
+}
+
+/// A row as it stands: its value in its tone, or the reason the server
+/// can't do it (the version gates, the peer's missing stars, the sonic
+/// row's three reasons — clauses 36, 43, 46, 50).
+fn row_view(gui: &Gui, row: Row) -> RowView {
+    let app = &gui.app;
+    let s = &app.dj;
+    let label = row_label(row);
+    let sheet = |(value, tone): (String, Tone)| RowView { label: label.clone(), value, tone, kind: Kind::Sheet, tip: None };
+    let gated = |gate: DjGate, tip: Option<String>| RowView {
+        label: label.clone(),
+        value: gate_words(gate),
+        tone: Tone::Neutral,
+        kind: Kind::Gated,
+        tip,
+    };
+    match row {
+        Row::PlayFrom => sheet((target_name(gui), Tone::Neutral)),
+        Row::FirstSong => RowView { kind: Kind::List, ..sheet((first_words(s.empty_queue), Tone::Neutral)) },
+        Row::Batch => match app.dj_floor_gate(dj::FLOOR_BATCH) {
+            Some(gate) => gated(gate, None),
+            None => sheet((songs_words(s.songs_per_fetch), Tone::Neutral)),
+        },
+        Row::Sonic => {
+            if let Some(gate) = app.dj_sonic_gate() {
+                return gated(gate, app.dj_sonic_reason());
+            }
+            match sonic_drop(gui) {
+                Some(why) => sheet((why, Tone::Warning)),
+                None => sheet(sonic_value(s.sonic, (s.sonic_min_similarity * 100.0).round() as u32)),
+            }
+        }
+        Row::Smart => match app.dj_mood_gate() {
+            Some(gate) => gated(gate, None),
+            None => sheet(moods_value(s.moods)),
+        },
+        Row::Genres => match app.dj_floor_gate(dj::FLOOR_FILTERS) {
+            Some(gate) => gated(gate, None),
+            None => {
+                let library = app.dj_library();
+                let none = Vec::new();
+                sheet(genres_value(library.genre_mode, if library.genre_filter { &library.genres } else { &none }))
+            }
+        },
+        Row::Rating => {
+            if app.dj_target_is_peer() {
+                return gated(DjGate::NotOnPeers, None);
+            }
+            sheet(rating_value(app.dj_library().min_rating))
+        }
+        Row::Length => match app.dj_floor_gate(dj::FLOOR_LENGTH) {
+            Some(gate) => gated(gate, None),
+            None => {
+                let (min, max) = s.length_bounds().unwrap_or((None, None));
+                sheet(length_value(min, max))
+            }
+        },
+        Row::Beat => match app.dj_floor_gate(dj::FLOOR_FILTERS) {
+            Some(gate) => gated(gate, None),
+            None => sheet(tempo_value(s.bpm, s.bpm_tolerance)),
+        },
+        Row::Harmonic => match app.dj_floor_gate(dj::FLOOR_FILTERS) {
+            Some(gate) => gated(gate, None),
+            None => RowView { kind: Kind::Switch(s.harmonic), ..sheet((String::new(), Tone::Neutral)) },
+        },
+        Row::SkipWords => {
+            let none = Vec::new();
+            sheet(words_value(if s.keyword_filter { &s.keywords } else { &none }))
+        }
+        Row::Cooldown => sheet(cooldown_value(s.artist_cooldown)),
     }
 }
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 
-/// The room's body, line by line, from the App's rows (which already carry
-/// the version gates, the peer's missing rating row and the sources row —
-/// clauses 42–50): the status head, then QUEUE · CONTINUITY · FILTERS ·
-/// SOURCES with a blank row between settings, then Preview. Descriptions
-/// are not laid out here: the help line shows the one that matters.
-fn lines(gui: &Gui, width: usize) -> Vec<L> {
-    let app = &gui.app;
-    let s = &app.dj;
-    let library = app.dj_library();
-    let armed = app.dj_armed();
-    let mut v = vec![L::Status];
-    if armed && pickable_servers(gui).len() > 1 {
-        v.push(L::Blank);
-        v.push(L::Server);
-    }
-    let version = app.dj_info.as_ref().and_then(|i| i.version.as_deref());
-    let gated = dj::known_older(version, dj::FLOOR_FILTERS);
-    // A sub-label's choices sit at the value column when they fit the
-    // body, else on the row below the label.
-    let choice = |label: Option<String>, options: Vec<(Item, String, String)>| -> L {
-        let w: usize = options.iter().map(|(_, name, _)| crate::kit::width(name) + 4).sum::<usize>()
-            + 2 * options.len().saturating_sub(1);
-        let wrapped = label.is_some() && VALUE_X as usize + w > width;
-        // Options that fit on no single row stack one per row: an option
-        // the column cannot show is an option nobody can click (the
-        // default layout, the queue open at a hundred columns, lost one).
-        let avail = if label.is_some() && !wrapped {
-            width.saturating_sub(VALUE_X as usize)
-        } else {
-            width.saturating_sub(SUB_X as usize)
-        };
-        let stacked = w > avail;
-        L::Choice { label, options, wrapped, stacked }
-    };
-    let mut section: Option<&str> = None;
-    let mut first = true;
-    for row in app.dj_panel.rows.clone() {
-        let here = section_of(row);
-        if here != section {
-            // A server known to predate the filters says so where they
-            // would have been (clause 50).
-            if section == Some("continuity") && gated {
-                v.push(L::Notice(t!("gui.dj.needs_newer").to_string()));
-            }
-            if let Some(key) = here {
-                v.push(L::Blank);
-                v.push(L::Section(section_title(key)));
-            }
-            section = here;
-            first = true;
-        }
-        // Air between settings: a blank row before each top-level one
-        // after its section's first. The sub-rows stay with their switch.
-        let sub_row = matches!(
-            row,
-            DjRow::Armed
-                | DjRow::Sample
-                | DjRow::Strictness
-                | DjRow::Anchor
-                | DjRow::EmptyQueue
-                | DjRow::Tolerance
-                | DjRow::Shortest
-                | DjRow::Longest
-                | DjRow::UnknownLength
-        );
-        if !sub_row {
-            if !first {
-                v.push(L::Blank);
-            }
-            first = false;
-        }
-        match row {
-            DjRow::Armed => {}
-            DjRow::SongsPerFetch
-            | DjRow::Strictness
-            | DjRow::Tolerance
-            | DjRow::Cooldown
-            | DjRow::Rating
-            | DjRow::Shortest
-            | DjRow::Longest => v.push(L::Bar(row)),
-            DjRow::Sonic => {
-                v.push(L::Switch(row));
-                // The server's reason it cannot honour the switch (clause 43).
-                if let Some(reason) = app.dj_sonic_reason() {
-                    v.push(L::Notice(reason));
-                }
-            }
-            DjRow::Bpm | DjRow::Harmonic | DjRow::Length | DjRow::UnknownLength => v.push(L::Switch(row)),
-            DjRow::Anchor => v.push(choice(
-                Some(t!("gui.dj.anchor").to_string()),
-                vec![
-                    (
-                        Item::Anchor(SonicAnchor::Rolling),
-                        t!("gui.dj.anchor_rolling").to_string(),
-                        t!("gui.dj.anchor_rolling_sub").to_string(),
-                    ),
-                    (
-                        Item::Anchor(SonicAnchor::Locked),
-                        t!("gui.dj.anchor_locked").to_string(),
-                        t!("gui.dj.anchor_locked_sub").to_string(),
-                    ),
-                ],
-            )),
-            DjRow::EmptyQueue => v.push(choice(
-                Some(t!("gui.dj.empty_queue").to_string()),
-                vec![
-                    (
-                        Item::EmptyQueue(EmptyQueueStart::Ask),
-                        t!("gui.dj.ask").to_string(),
-                        t!("gui.dj.empty_queue_sub").to_string(),
-                    ),
-                    (
-                        Item::EmptyQueue(EmptyQueueStart::Random),
-                        t!("gui.dj.surprise").to_string(),
-                        t!("gui.dj.surprise_sub").to_string(),
-                    ),
-                    (
-                        Item::EmptyQueue(EmptyQueueStart::Pick),
-                        t!("gui.dj.pick").to_string(),
-                        t!("gui.dj.pick_sub").to_string(),
-                    ),
-                ],
-            )),
-            DjRow::Genres => {
-                v.push(L::Switch(row));
-                if library.genre_filter {
-                    v.push(choice(
-                        None,
-                        vec![
-                            (
-                                Item::GenreMode(GenreMode::Whitelist),
-                                t!("gui.dj.whitelist").to_string(),
-                                t!("gui.dj.whitelist_sub").to_string(),
-                            ),
-                            (
-                                Item::GenreMode(GenreMode::Blacklist),
-                                t!("gui.dj.blacklist").to_string(),
-                                t!("gui.dj.blacklist_sub").to_string(),
-                            ),
-                        ],
-                    ));
-                    if library.genres.is_empty() {
-                        v.push(L::Hint(t!("gui.dj.no_genres_selected").to_string()));
-                    } else {
-                        v.push(L::Chips(Item::GenreChips));
-                    }
-                    v.push(L::PickGenres);
-                }
-            }
-            DjRow::Keywords => {
-                v.push(L::Switch(row));
-                if s.keyword_filter {
-                    if s.keywords.is_empty() {
-                        v.push(L::Hint(t!("gui.dj.no_keywords").to_string()));
-                    } else {
-                        v.push(L::Chips(Item::KeywordChips));
-                    }
-                    v.push(L::KeywordInput);
-                }
-            }
-            DjRow::Sources => {
-                let off = app.dj_sources_off();
-                let libraries = app.dj_info.as_ref().map(|i| i.libraries.clone()).unwrap_or_default();
-                for (i, name) in libraries.into_iter().enumerate() {
-                    let on = !off.contains(&name);
-                    v.push(L::Source(i, name, on));
-                }
-            }
-            DjRow::Sample => {
-                v.push(L::Blank);
-                v.push(L::Preview);
-                for track in &app.dj_panel.sample {
-                    v.push(L::Sample(sample_words(track)));
-                }
-            }
-        }
-    }
-    // A sentence wraps to the body rather than clipping mid-thought.
-    let inner = width.saturating_sub(SUB_X as usize).max(16);
-    let mut wrapped = Vec::with_capacity(v.len());
-    for line in v {
-        match line {
-            L::Notice(text) => {
-                for part in wrap_words(&text, inner) {
-                    wrapped.push(L::Notice(part));
-                }
-            }
-            L::Hint(text) => {
-                for part in wrap_words(&text, inner) {
-                    wrapped.push(L::Hint(part));
-                }
-            }
-            other => wrapped.push(other),
-        }
-    }
-    wrapped
+/// What the room's height affords beyond its rows (the canvas's "The
+/// floor"): the two blank rows between the groups first; then Start / Stop
+/// as the 3-row frame, with the air around it as the rows allow; then
+/// Harmonic's line. Without the frame, Start is the kit's one-row slab on
+/// the title row. Nothing ever scrolls.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Layout {
+    tall: bool,
+    blank_title: bool,
+    blank_button: bool,
+    hint: bool,
+    gap_must: bool,
+    gap_prefer: bool,
 }
 
-/// The controls in the room's order — what ↑↓ walk.
+fn layout(rows: u16, play_from: bool) -> Layout {
+    // The title, the session rows, two headers, five and four rows.
+    let base = 14 + u16::from(play_from);
+    let spare = rows.saturating_sub(base);
+    let mut l = Layout { gap_must: spare >= 1, gap_prefer: spare >= 2, ..Layout::default() };
+    match spare.saturating_sub(2) {
+        0 => {}
+        1 | 2 => l.hint = true,
+        3 => l.tall = true,
+        4 => (l.tall, l.blank_button) = (true, true),
+        5 => (l.tall, l.blank_button, l.blank_title) = (true, true, true),
+        _ => (l.tall, l.blank_button, l.blank_title, l.hint) = (true, true, true, true),
+    }
+    l
+}
+
+/// The controls the keyboard walks: the title row's, Start / Stop, and the
+/// rows drawn that the server can do.
 fn items(gui: &Gui) -> Vec<Item> {
-    lines(gui, usize::MAX).iter().flat_map(L::items).collect()
+    let play_from = shows_play_from(gui);
+    let mut out = vec![Item::Preview, Item::Toggle];
+    for row in SESSION.into_iter().chain(MUST).chain(PREFER) {
+        if row == Row::PlayFrom && !play_from {
+            continue;
+        }
+        if row_view(gui, row).kind != Kind::Gated {
+            out.push(Item::Row(row));
+        }
+    }
+    out
 }
 
 // ── The room ────────────────────────────────────────────────────────────────
 
 /// The nav's Auto DJ row (entry point 2): the room opens with its cursor
-/// stowed and, with the DJ off, asks the session's server what it offers so
+/// stowed and, with the DJ off, asks Play from's server what it offers so
 /// the rows fit it (clause 50). The hub calls this from `Act::Nav`.
 pub(crate) fn open_room(gui: &mut Gui) {
     gui.dj.cursor = None;
-    gui.dj.body.scroll = 0;
+    gui.dj.first = None;
     let effects = gui.app.dj_room_opened();
     gui.pend(effects);
 }
 
-/// Whether one of the DJ's modals owns the pointer and keyboard.
+/// Whether one of the DJ's layers owns the pointer and keyboard: the
+/// opening question, a sheet, First song's list, quick config, or the
+/// empty queue's list.
 pub(crate) fn modal_open(gui: &Gui) -> bool {
-    gui.app.dj_chooser.is_some() || gui.app.dj_panel.genres.is_some() || gui.dj.server_pick.is_some()
+    gui.app.dj_chooser.is_some()
+        || gui.dj.sheet.is_some()
+        || gui.dj.first.is_some()
+        || gui.dj.quick.is_some()
+        || gui.dj.recent.is_some()
+        || super::moods::dj_open(gui)
 }
 
 /// Whether the room is the Library's active one — a nav room, so the
@@ -518,890 +529,485 @@ fn in_room(gui: &Gui) -> bool {
     gui.screen == Screen::Library && gui.active == DJ_NAV
 }
 
-/// A row's label: the accent while the keyboard cursor is on it, bright
-/// under the pointer (the Settings rows' grammar).
-fn row_style(focused: bool, hover: bool) -> Style {
-    match (focused, hover) {
-        (true, _) => accent().add_modifier(Modifier::BOLD),
-        (false, true) => bright_bold(),
-        (false, false) => Style::default(),
+fn down_glyph() -> &'static str {
+    if legacy_conhost() { "v" } else { "▾" }
+}
+
+/// The room (clauses 40–53): the name, `Preview picks ▸` at the right;
+/// Start / Stop; then the session's rows, what every pick must match, and
+/// what the DJ prefers. A nav room has no way back — the nav column is
+/// right there.
+pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    // The block: the room's width up to the rows' most, centred in what
+    // is left over.
+    let w = content.width.min(ROW_W_MAX);
+    let x = content.x + (content.width - w) / 2;
+    let (right, bottom) = (x + w, content.bottom());
+    let play_from = shows_play_from(gui);
+    let lay = layout(content.height, play_from);
+    let mut y = content.y;
+    gui.dj.first_anchor = None;
+
+    put(frame, x, y, &t!("gui.dj.title"), Style::default().add_modifier(Modifier::BOLD));
+    let preview_end = if lay.tall { right } else { draw_slab(frame, gui, right, y).saturating_sub(2) };
+    draw_preview(frame, gui, preview_end, y);
+    y += 1;
+    if lay.tall {
+        y += u16::from(lay.blank_title);
+        draw_button(frame, gui, Rect { x, y, width: w, height: 3 });
+        y += 3 + u16::from(lay.blank_button);
+    }
+    let groups: [(Option<String>, bool, &[Row]); 3] = [
+        (None, false, &SESSION),
+        (Some(t!("gui.dj.must_match").to_uppercase()), lay.gap_must, &MUST),
+        (Some(t!("gui.dj.prefer").to_uppercase()), lay.gap_prefer, &PREFER),
+    ];
+    for (header, gap, rows) in groups {
+        y += u16::from(gap);
+        if let Some(header) = header {
+            if y >= bottom {
+                return;
+            }
+            put(frame, x, y, &super::bar::clip(&header, w as usize), dim());
+            y += 1;
+        }
+        for &row in rows {
+            if row == Row::PlayFrom && !play_from {
+                continue;
+            }
+            if y >= bottom {
+                return;
+            }
+            let rect = Rect { x, y, width: w, height: 1 };
+            draw_row(frame, gui, rect, row);
+            if row == Row::FirstSong {
+                gui.dj.first_anchor = Some(rect);
+            }
+            y += 1;
+            if row == Row::Harmonic && lay.hint && y < bottom {
+                let hint = t!("gui.dj.harmonic_hint");
+                put(frame, x + 2, y, &super::bar::clip(&hint, w.saturating_sub(2) as usize), dim());
+                y += 1;
+            }
+        }
     }
 }
 
-/// Offer a row's description to the help line: the row under the pointer
-/// wins over the cursor's.
-fn help_for(gui: &mut Gui, focused: bool, hover: bool, text: String) {
-    if text.is_empty() {
+/// `Preview picks ▸`, ending at `end` on the title row (clause 53): a text
+/// button; the word that says it is asking while the picks are out.
+fn draw_preview(frame: &mut Frame, gui: &mut Gui, end: u16, y: u16) {
+    if gui.app.dj_panel.sample_pending && gui.dj.sheet.is_none() {
+        let words = t!("gui.dj.picking");
+        put(frame, end.saturating_sub(width(&words) as u16), y, &words, accent());
         return;
     }
-    if hover {
-        gui.dj.help_hover = Some(text);
-    } else if focused {
-        gui.dj.help_focus = Some(text);
-    }
-}
-
-/// The room (clauses 40–53): the name, the state at the right; then the
-/// body, scrolled, with the kit's scrollbar on overflow; under it the help
-/// line — the row under the pointer, else the cursor's, explained. A nav
-/// room has no way back — the nav column is right there.
-pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    put(frame, content.x, content.y, &t!("gui.dj.title"), Style::default().add_modifier(Modifier::BOLD));
-    let bullet = super::bullet_glyph();
-    let (state, style) = if gui.app.dj_armed() {
-        (format!("{bullet} {}", t!("gui.dj.state_on", server = gui.app.dj_server_name())), Style::default().fg(th().ok))
+    let label = format!("{} {}", t!("gui.dj.preview"), super::forward_glyph());
+    let lw = width(&label) as u16;
+    let x = end.saturating_sub(lw);
+    if gui.dj.cursor == Some(Item::Preview) {
+        let rect = Rect { x, y, width: lw, height: 1 };
+        put(frame, x, y, &label, accent().add_modifier(Modifier::BOLD));
+        gui.ui.click(rect, Act::DjPreview);
     } else {
-        (format!("{bullet} {}", t!("gui.dj.state_off")), dim())
-    };
-    let shown = super::bar::clip(&state, content.width.saturating_sub(14) as usize);
-    put(frame, content.right().saturating_sub(shown.chars().count() as u16), content.y, &shown, style);
-    gui.dj.help_hover = None;
-    gui.dj.help_focus = None;
-
-    let region = Rect {
-        x: content.x,
-        y: content.y + 2,
-        width: content.width,
-        height: content.height.saturating_sub(2 + HELP_ROWS),
-    };
-    // Laid out for the narrower body; a room that fits without a scrollbar
-    // wraps a cell or two early, which nobody sees.
-    let lines = lines(gui, region.width.saturating_sub(2) as usize);
-    let mut tops = Vec::with_capacity(lines.len());
-    let mut total = 0usize;
-    for line in &lines {
-        tops.push(total);
-        total += line.height();
-    }
-    let visible = region.height as usize;
-    // Preview's picks land after the click, under the body's last row:
-    // they come into view on their own while the cursor is on the row.
-    let samples = gui.app.dj_panel.sample.len();
-    if samples != gui.dj.samples_seen {
-        gui.dj.samples_seen = samples;
-        if gui.dj.cursor == Some(Item::Row(DjRow::Sample)) {
-            gui.dj.body.reveal = true;
-        }
-    }
-    if std::mem::take(&mut gui.dj.body.reveal)
-        && let Some(cursor) = gui.dj.cursor
-        && let Some(i) = lines.iter().position(|l| l.items().contains(&cursor))
-    {
-        let (top, mut h) = (tops[i], lines[i].height());
-        if matches!(lines[i], L::Preview) {
-            h += lines[i + 1..].iter().take_while(|l| matches!(l, L::Sample(_))).count();
-        }
-        if top < gui.dj.body.scroll {
-            gui.dj.body.scroll = top;
-        } else if top + h > gui.dj.body.scroll + visible {
-            gui.dj.body.scroll = (top + h).saturating_sub(visible);
-        }
-    }
-    gui.dj.body.scroll = gui.dj.body.scroll.min(total.saturating_sub(visible));
-    gui.dj.visible = visible;
-    let overflow = total > visible;
-    let body = Rect {
-        x: region.x,
-        y: region.y,
-        width: if overflow { region.width.saturating_sub(2) } else { region.width },
-        height: region.height,
-    };
-    let scroll = gui.dj.body.scroll;
-    for (i, line) in lines.iter().enumerate() {
-        let (top, h) = (tops[i], line.height());
-        if top + h <= scroll {
-            continue;
-        }
-        if top >= scroll + visible {
-            break;
-        }
-        // A tall control half off the window waits for the scroll.
-        if top < scroll || top + h > scroll + visible {
-            continue;
-        }
-        let y = body.y + (top - scroll) as u16;
-        draw_line(frame, gui, body, y, line);
-    }
-    if overflow {
-        let bar = Rect { x: region.right().saturating_sub(1), y: region.y, width: 1, height: region.height };
-        scroll_list(frame, &mut gui.ui, bar, total, visible, scroll, Act::ScrollBy(List::DjRoom, -1), Act::ScrollBy(List::DjRoom, 1), |first| Act::ScrollTo(List::DjRoom, first));
-    }
-    // The help line: the row under the pointer, else the cursor's, explained
-    // under the body — where the descriptions live now, whole, instead of
-    // clipped beside every row.
-    if let Some(text) = gui.dj.help_hover.take().or_else(|| gui.dj.help_focus.take()) {
-        let hy = content.bottom().saturating_sub(HELP_ROWS);
-        put(frame, content.x, hy, &"─".repeat(content.width as usize), dim());
-        for (i, part) in wrap_words(&text, content.width as usize).into_iter().take(2).enumerate() {
-            put(frame, content.x, hy + 1 + i as u16, &part, dim());
-        }
+        text_button(frame, gui, x, y, &label, false, Act::DjPreview);
     }
 }
 
-fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
-    let (x, w) = (body.x, body.width);
-    let forward = super::forward_glyph();
-    let (check_on, check_off) = super::check_glyphs();
-    let inner = w.saturating_sub(SUB_X) as usize;
-    match line {
-        L::Section(text) => put(frame, x, y, text, dim()),
-        L::Blank => {}
-        L::Hint(text) => put(frame, x + SUB_X, y, &super::bar::clip(text, inner), dim()),
-        L::Notice(text) => put(frame, x + SUB_X, y, &super::bar::clip(text, inner), Style::default().fg(th().gold)),
-        L::Status => draw_status(frame, gui, x, y, w, forward),
-        L::Server => {
-            let rect = Rect { x, y, width: w, height: 1 };
-            let focused = gui.dj.cursor == Some(Item::Server);
-            let hover = gui.ui.hovers(rect);
-            put(frame, x + 4, y, &t!("gui.dj.server"), row_style(focused, hover));
-            let name = format!("{} {forward}", gui.app.dj_server_name());
-            let shown = super::bar::clip(&name, w.saturating_sub(VALUE_X) as usize);
-            let style = if hover { bright_bold() } else { Style::default().add_modifier(Modifier::BOLD) };
-            put(frame, x + VALUE_X, y, &shown, style);
-            gui.ui.click(rect, Act::DjServerPick);
-            help_for(gui, focused, hover, t!("gui.dj.server_tip").to_string());
-        }
-        L::Switch(row) => draw_switch(frame, gui, x, y, w, *row, check_on, check_off),
-        L::Bar(row) => draw_bar(frame, gui, x, y, w, *row),
-        L::Choice { label, options, wrapped, stacked } => {
-            draw_choice(frame, gui, x, y, w, label.as_deref(), options, *wrapped, *stacked)
-        }
-        L::Chips(item) => draw_chips(frame, gui, x + SUB_X, y, w.saturating_sub(SUB_X), *item),
-        L::PickGenres => {
-            let label = format!("{} {forward}", t!("gui.dj.pick_genres"));
-            let rect = Rect { x: x + SUB_X, y, width: label.chars().count() as u16, height: 1 };
-            let focused = gui.dj.cursor == Some(Item::PickGenres);
-            let hover = gui.ui.hovers(rect);
-            let style = match (focused, hover) {
-                (true, _) => accent().add_modifier(Modifier::BOLD),
-                (false, true) => bright_bold(),
-                (false, false) => accent(),
-            };
-            put(frame, rect.x, y, &label, style);
-            gui.ui.click(rect, Act::DjPickGenres);
-        }
-        L::KeywordInput => draw_keyword_input(frame, gui, x, y, w, forward),
-        L::Source(i, name, on) => {
-            let rect = Rect { x, y, width: w, height: 1 };
-            let focused = gui.dj.cursor == Some(Item::Source(*i));
-            let hover = gui.ui.hovers(rect);
-            put(frame, x, y, if *on { check_on } else { check_off }, if *on { Style::default().fg(th().ok) } else { dim() });
-            put(frame, x + 4, y, &super::bar::clip(name, w.saturating_sub(4) as usize), row_style(focused, hover));
-            gui.ui.click(rect, Act::DjSource(name.clone()));
-        }
-        L::Preview => {
-            let focused = gui.dj.cursor == Some(Item::Row(DjRow::Sample));
-            if gui.app.dj_panel.sample_pending {
-                put(frame, x, y, &t!("gui.dj.picking"), accent());
-            } else {
-                let label = format!("{} {forward}", t!("gui.dj.preview"));
-                let rect = Rect { x, y, width: label.chars().count() as u16, height: 1 };
-                let hover = gui.ui.hovers(rect);
-                let style = match (focused, hover) {
-                    (true, _) => accent().add_modifier(Modifier::BOLD),
-                    (false, true) => bright_bold(),
-                    (false, false) => accent(),
-                };
-                put(frame, x, y, &label, style);
-                gui.ui.click(rect, Act::DjPreview);
-            }
-            if let Some(pool) = &gui.app.dj_panel.pool {
-                let words = t!("gui.dj.pool", n = pool.pool_size).to_string();
-                let avail = w.saturating_sub(VALUE_X) as usize;
-                if avail >= 10 {
-                    put(frame, x + VALUE_X, y, &super::bar::clip(&words, avail), dim());
-                }
-            }
-        }
-        L::Sample(text) => put(frame, x + 2, y, &super::bar::clip(text, w.saturating_sub(2) as usize), Style::default()),
+fn start_label(armed: bool) -> String {
+    if armed {
+        t!("gui.dj.stop_short").to_string()
+    } else {
+        format!("{} {}", t!("gui.dj.start_short"), super::forward_glyph())
     }
 }
 
-/// The room's head (clause 40): the state with its detail, and Start /
-/// Stop at the right — through the same toggle every entry point uses.
-fn draw_status(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, forward: &str) {
+/// Start, or the lit Stop (clause 40): the button is the status. A 3-row
+/// frame the rows' width — the accent while off, the OK colour while the
+/// DJ runs, never the destructive one — through the same toggle every
+/// entry point uses.
+fn draw_button(frame: &mut Frame, gui: &mut Gui, rect: Rect) {
     let armed = gui.app.dj_armed();
-    let label = if armed { t!("gui.dj.stop").to_string() } else { format!("{} {forward}", t!("gui.dj.start")) };
-    let bw = crate::kit::tall_width(&label);
-    let at = Rect { x: (x + w).saturating_sub(bw), y, width: bw, height: 3 };
-    let rect = if armed {
-        tall_danger(frame, &mut gui.ui, at, &label, Act::DjStartStop)
-    } else {
-        tall_button(frame, &mut gui.ui, at, &label, true, Act::DjStartStop)
+    let hover = gui.ui.hovers(rect);
+    let color = match (hover, armed) {
+        (true, _) => th().bright,
+        (false, true) => th().ok,
+        (false, false) => th().accent,
     };
-    if gui.dj.cursor == Some(Item::Toggle) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let label = Span::styled(start_label(armed), Style::default().fg(color).add_modifier(Modifier::BOLD));
+    frame.render_widget(Paragraph::new(label).alignment(Alignment::Center), inner);
+    gui.ui.click(rect, Act::DjStartStop);
+    if gui.dj.cursor == Some(Item::Toggle) && !hover {
         cursor_ring(frame, rect, Style::default().fg(th().bright).add_modifier(Modifier::BOLD));
     }
-    let (dot, state, detail) = if armed {
-        (
-            Style::default().fg(th().ok),
-            t!("gui.dj.status_on").to_string(),
-            t!("gui.dj.status_on_detail", server = gui.app.dj_server_name()).to_string(),
-        )
-    } else {
-        (dim(), t!("gui.dj.status_off").to_string(), t!("gui.dj.status_off_detail").to_string())
+}
+
+/// The same button where the room is short: the kit's one-row slab ending
+/// at `right` on the title row. Returns its first cell.
+fn draw_slab(frame: &mut Frame, gui: &mut Gui, right: u16, y: u16) -> u16 {
+    let armed = gui.app.dj_armed();
+    let label = format!(" {} ", start_label(armed));
+    let lw = width(&label) as u16;
+    let rect = Rect { x: right.saturating_sub(lw), y, width: lw, height: 1 };
+    let lit = gui.ui.hovers(rect) || gui.dj.cursor == Some(Item::Toggle);
+    let ground = match (lit, armed) {
+        (true, _) => th().bright,
+        (false, true) => th().ok,
+        (false, false) => th().accent,
     };
-    put(frame, x, y, if legacy_conhost() { "*" } else { "●" }, dot);
-    put(frame, x + 2, y, &state, Style::default().add_modifier(Modifier::BOLD));
-    let text_w = at.x.saturating_sub(x + 4) as usize;
-    for (i, part) in wrap_words(&detail, text_w.max(16)).into_iter().take(2).enumerate() {
-        put(frame, x + 2, y + 1 + i as u16, &part, dim());
-    }
+    put(frame, rect.x, y, &label, Style::default().bg(ground).fg(th().on_accent).add_modifier(Modifier::BOLD));
+    gui.ui.click(rect, Act::DjStartStop);
+    rect.x
 }
 
-/// A sub-label's `(•)` choices on one row (clauses 43, 48): at the value
-/// column when they fit, else under the label; a click chooses, ←→ walk
-/// them, the option's hint goes to the help line.
-#[allow(clippy::too_many_arguments)]
-fn draw_choice(
-    frame: &mut Frame,
-    gui: &mut Gui,
-    x: u16,
-    y: u16,
-    w: u16,
-    label: Option<&str>,
-    options: &[(Item, String, String)],
-    wrapped: bool,
-    stacked: bool,
-) {
-    let (mut cx, mut cy) = (x + SUB_X, y);
-    if let Some(label) = label {
-        put(frame, x + SUB_X, y, label, Style::default());
-        if wrapped || stacked {
-            cy = y + 1;
-        } else {
-            cx = x + VALUE_X;
+/// One row: its name, its value in its tone ending two cells before the
+/// chevron, and `▸` or `▾`; the keyboard's hand as the accent slab; the
+/// pointer brightening the name and the chevron. A row the server can't do
+/// is DIM whole, takes no click, and says why where the value would be.
+fn draw_row(frame: &mut Frame, gui: &mut Gui, rect: Rect, row: Row) {
+    let view = row_view(gui, row);
+    let gated = view.kind == Kind::Gated;
+    let held = !gated && (gui.dj.cursor == Some(Item::Row(row)) || (row == Row::FirstSong && gui.dj.first.is_some()));
+    let hover = !gated && !held && gui.ui.hovers(rect);
+    if held {
+        frame.render_widget(Block::default().style(sel()), rect);
+    }
+    let value_end = rect.right().saturating_sub(2);
+    // A reason never loses its words: where the two do not fit, the name
+    // gives way — its row has not moved, so it is still found.
+    let reason_w = if gated { width(&view.value) } else { 0 };
+    let label_room = (rect.width as usize).saturating_sub(if gated { reason_w + 4 } else { 4 });
+    let label_w = width(&view.label).min(label_room);
+    match view.kind {
+        Kind::Switch(on) => {
+            let (check_on, check_off) = super::check_glyphs();
+            let style = match (held, on) {
+                (true, _) => sel(),
+                (false, true) => Style::default().fg(th().ok),
+                (false, false) => dim(),
+            };
+            put(frame, value_end.saturating_sub(3), rect.y, if on { check_on } else { check_off }, style);
         }
-    }
-    let start = cx;
-    let on_glyph = if legacy_conhost() { "(*)" } else { "(•)" };
-    for (item, name, hint) in options {
-        let on = radio_on(gui, *item);
-        let width = crate::kit::width(name) as u16 + 4;
-        if cx + width > x + w {
-            break;
-        }
-        let rect = Rect { x: cx, y: cy, width, height: 1 };
-        let focused = gui.dj.cursor == Some(*item);
-        let hover = gui.ui.hovers(rect);
-        put(frame, cx, cy, if on { on_glyph } else { "( )" }, if on { Style::default().fg(th().ok) } else { dim() });
-        let style = match (focused, hover, on) {
-            (true, _, _) => accent().add_modifier(Modifier::BOLD),
-            (false, true, _) => bright_bold(),
-            (false, false, true) => Style::default().add_modifier(Modifier::BOLD),
-            (false, false, false) => Style::default(),
-        };
-        put(frame, cx + 4, cy, name, style);
-        gui.ui.click(rect, radio_act(*item));
-        help_for(gui, focused, hover, hint.clone());
-        if stacked {
-            cy += 1;
-            cx = start;
-        } else {
-            cx += width + 2;
-        }
-    }
-}
-
-fn radio_on(gui: &Gui, item: Item) -> bool {
-    match item {
-        Item::Anchor(anchor) => gui.app.dj.sonic_anchor == anchor,
-        Item::EmptyQueue(choice) => gui.app.dj.empty_queue == choice,
-        Item::GenreMode(mode) => gui.app.dj_library().genre_mode == mode,
-        _ => false,
-    }
-}
-
-fn radio_act(item: Item) -> Act {
-    match item {
-        Item::Anchor(anchor) => Act::DjAnchor(anchor),
-        Item::EmptyQueue(choice) => Act::DjEmpty(choice),
-        Item::GenreMode(mode) => Act::DjGenreMode(mode),
-        other => Act::DjFocus(other),
-    }
-}
-
-/// A `[✓]` row (clauses 43–49): the glyph, the label, a value in words at
-/// the value column where the row has one; the description goes to the
-/// help line. A sonic row the server cannot honour dims its glyph and
-/// says why on the notice under it. The switch stays live either way: a
-/// default-on setting that could not be switched off would be a trap.
-#[allow(clippy::too_many_arguments)]
-fn draw_switch(
-    frame: &mut Frame,
-    gui: &mut Gui,
-    x: u16,
-    y: u16,
-    w: u16,
-    row: DjRow,
-    check_on: &str,
-    check_off: &str,
-) {
-    let s = &gui.app.dj;
-    let (on, label, help, value): (bool, String, String, Option<String>) = match row {
-        DjRow::Sonic => (s.sonic, t!("gui.dj.sonic").to_string(), t!("gui.dj.sonic_sub").to_string(), None),
-        DjRow::Bpm => (s.bpm, t!("gui.dj.bpm").to_string(), t!("gui.dj.bpm_sub").to_string(), None),
-        DjRow::Harmonic => {
-            let anchored = gui.app.lane.camelot_anchor.as_ref().filter(|_| s.harmonic);
-            let value = anchored.map(|anchor| t!("gui.dj.anchored_on", key = anchor).to_string());
-            (s.harmonic, t!("gui.dj.harmonic").to_string(), t!("gui.dj.harmonic_sub").to_string(), value)
-        }
-        DjRow::Length => (s.length, t!("gui.dj.length").to_string(), t!("gui.dj.length_sub").to_string(), Some(length_words(s))),
-        DjRow::UnknownLength => (
-            s.allow_unknown_length,
-            t!("gui.dj.unknown_length").to_string(),
-            t!("gui.dj.unknown_length_sub").to_string(),
-            None,
-        ),
-        DjRow::Genres => (gui.app.dj_library().genre_filter, t!("gui.dj.genre").to_string(), t!("gui.dj.genre_sub").to_string(), None),
-        DjRow::Keywords => (s.keyword_filter, t!("gui.dj.keyword").to_string(), t!("gui.dj.keyword_sub").to_string(), None),
-        _ => return,
-    };
-    let honoured = row != DjRow::Sonic || gui.app.dj_sonic_reason().is_none();
-    // A sub-switch (the unknown-length one under Track length) steps in.
-    let gx = if row == DjRow::UnknownLength { x + 2 } else { x };
-    let rect = Rect { x, y, width: w, height: 1 };
-    let focused = gui.dj.cursor == Some(Item::Row(row));
-    let hover = gui.ui.hovers(rect);
-    let glyph_style = if on && honoured { Style::default().fg(th().ok) } else { dim() };
-    put(frame, gx, y, if on { check_on } else { check_off }, glyph_style);
-    // A label stops short of the value column only when a value stands
-    // there; a long one with none (the unknown-length switch) runs on.
-    let label_w = if value.is_some() { (x + VALUE_X).saturating_sub(gx + 5) } else { (x + w).saturating_sub(gx + 4) };
-    put(frame, gx + 4, y, &super::bar::clip(&label, label_w as usize), row_style(focused, hover));
-    if let Some(value) = value {
-        let avail = w.saturating_sub(VALUE_X) as usize;
-        if avail >= 6 {
-            put(frame, x + VALUE_X, y, &super::bar::clip(&value, avail), dim());
-        }
-    }
-    gui.ui.click(rect, Act::DjStep(row, 1));
-    help_for(gui, focused, hover, help);
-}
-
-/// What a bar row shows and moves within.
-struct BarSpec {
-    label: String,
-    lo: u32,
-    hi: u32,
-    value: u32,
-    words: String,
-    note: String,
-    tip: String,
-    /// Seconds snap to the length window's step.
-    seconds: bool,
-}
-
-fn bar_spec(gui: &Gui, row: DjRow) -> Option<BarSpec> {
-    let s = &gui.app.dj;
-    let spec = match row {
-        DjRow::SongsPerFetch => BarSpec {
-            label: t!("gui.dj.songs_per_fetch").to_string(),
-            lo: 1,
-            hi: dj::SONGS_PER_FETCH_MAX,
-            value: s.songs_per_fetch,
-            words: songs_words(s.songs_per_fetch),
-            note: String::new(),
-            tip: t!("gui.dj.songs_per_fetch_sub").to_string(),
-            seconds: false,
-        },
-        DjRow::Strictness => {
-            let pct = (s.sonic_min_similarity * 100.0).round() as u32;
-            let mut note = t!("gui.dj.cosine", value = format!("{:.2}", s.sonic_min_similarity)).to_string();
-            if let Some(pool) = &gui.app.dj_panel.pool {
-                note = format!("{note} · {}", t!("gui.dj.pool_short", n = pool.pool_size));
-            }
-            BarSpec {
-                label: t!("gui.dj.strictness").to_string(),
-                lo: (dj::SONIC_MIN_SIMILARITY * 100.0).round() as u32,
-                hi: (dj::SONIC_MAX_SIMILARITY * 100.0).round() as u32,
-                value: pct,
-                words: t!("gui.dj.strictness_value", pct = pct).to_string(),
-                note,
-                tip: t!("gui.dj.sonic_sub").to_string(),
-                seconds: false,
+        _ => {
+            let room = (rect.width as usize).saturating_sub(label_w + 2 + 2);
+            let words = if view.tone == Tone::Warning { format!("! {}", view.value) } else { view.value.clone() };
+            let shown = super::bar::clip(&words, room);
+            let style = if held { sel() } else { view.tone.style() };
+            put(frame, value_end.saturating_sub(width(&shown) as u16), rect.y, &shown, style);
+            // A value that did not fit says itself whole on a dwell.
+            if width(&words) > room && !gated {
+                gui.ui.tip(rect, words);
             }
         }
-        DjRow::Tolerance => BarSpec {
-            label: t!("gui.dj.tolerance").to_string(),
-            lo: dj::BPM_TOLERANCE_MIN,
-            hi: dj::BPM_TOLERANCE_MAX,
-            value: s.bpm_tolerance,
-            words: t!("gui.dj.tolerance_value", bpm = s.bpm_tolerance).to_string(),
-            note: t!("gui.dj.tolerance_wide", bpm = s.bpm_tolerance + dj::BPM_WIDE_EXTRA).to_string(),
-            tip: t!("gui.dj.bpm_sub").to_string(),
-            seconds: false,
-        },
-        DjRow::Cooldown => BarSpec {
-            label: t!("gui.dj.cooldown").to_string(),
-            lo: 0,
-            hi: dj::ARTIST_COOLDOWN_MAX,
-            value: s.artist_cooldown,
-            words: if s.artist_cooldown == 0 {
-                t!("gui.dj.cooldown_off").to_string()
-            } else {
-                t!("gui.dj.cooldown_value", count = s.artist_cooldown).to_string()
-            },
-            note: String::new(),
-            tip: t!("gui.dj.cooldown_sub").to_string(),
-            seconds: false,
-        },
-        DjRow::Rating => {
-            let rating = gui.app.dj_library().min_rating;
-            BarSpec {
-                label: t!("gui.dj.rating").to_string(),
-                lo: 0,
-                hi: dj::RATING_MAX,
-                value: rating,
-                words: if rating == 0 {
-                    t!("gui.dj.rating_any").to_string()
-                } else {
-                    format!("{:.1} {}", f64::from(rating) / 2.0, super::star_glyph())
-                },
-                note: String::new(),
-                tip: t!("gui.dj.rating_sub").to_string(),
-                seconds: false,
-            }
-        }
-        DjRow::Shortest => BarSpec {
-            label: t!("gui.dj.shortest").to_string(),
-            lo: 0,
-            hi: dj::LENGTH_RAIL_SECONDS,
-            value: s.min_seconds,
-            words: if s.min_seconds == 0 { t!("gui.dj.any").to_string() } else { crate::api::types::fmt_duration(f64::from(s.min_seconds)) },
-            note: String::new(),
-            tip: t!("gui.dj.length_sub").to_string(),
-            seconds: true,
-        },
-        DjRow::Longest => BarSpec {
-            label: t!("gui.dj.longest").to_string(),
-            lo: 0,
-            hi: dj::LENGTH_RAIL_SECONDS,
-            value: s.max_seconds,
-            words: if s.max_seconds >= dj::LENGTH_RAIL_SECONDS {
-                t!("gui.dj.any").to_string()
-            } else {
-                crate::api::types::fmt_duration(f64::from(s.max_seconds))
-            },
-            note: String::new(),
-            tip: t!("gui.dj.length_sub").to_string(),
-            seconds: true,
-        },
-        _ => return None,
-    };
-    Some(spec)
-}
-
-/// The value a click on cell `k` sets: the bar's range spread over its
-/// cells, snapped to the step where the row has one.
-fn cell_value(spec: &BarSpec, k: u16) -> u32 {
-    let span = (spec.hi - spec.lo) as f64;
-    let raw = spec.lo + ((f64::from(k) / f64::from(CELLS - 1)) * span).round() as u32;
-    if spec.seconds {
-        let step = f64::from(dj::LENGTH_STEP_SECONDS);
-        return ((f64::from(raw) / step).round() * step) as u32;
     }
-    raw
-}
-
-fn filled_cells(spec: &BarSpec) -> u16 {
-    let span = (spec.hi - spec.lo).max(1) as f64;
-    let part = spec.value.saturating_sub(spec.lo) as f64 / span;
-    ((part * f64::from(CELLS)).round() as u16).min(CELLS)
-}
-
-/// A bar row (clauses 44, 46, 47, 52 and the sonic strictness) in the
-/// volume widget's grammar at the value column: `-`, ten cells, `+`, the
-/// value in words. A click on `-` / `+` steps, a click on a cell sets, ←→
-/// step too; the note (the raw cosine, the wide set) goes to the help line
-/// with the description.
-fn draw_bar(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, row: DjRow) {
-    let Some(spec) = bar_spec(gui, row) else { return };
-    let sub = matches!(row, DjRow::Strictness | DjRow::Tolerance | DjRow::Shortest | DjRow::Longest);
-    let lx = x + if sub { SUB_X } else { 4 };
-    let rect = Rect { x, y, width: w, height: 1 };
-    let focused = gui.dj.cursor == Some(Item::Row(row));
-    let hover = gui.ui.hovers(rect);
-    put(frame, lx, y, &super::bar::clip(&spec.label, (x + VALUE_X).saturating_sub(lx + 1) as usize), row_style(focused, hover));
-    let bx = x + VALUE_X;
-    let (full, empty) = if legacy_conhost() { ("■", "·") } else { ("▰", "▱") };
-    let minus = Rect { x: bx, y, width: 1, height: 1 };
-    put(frame, bx, y, "-", if gui.ui.hovers(minus) { bright_bold() } else { dim() });
-    gui.ui.click(minus, Act::DjStep(row, -1));
-    let filled = filled_cells(&spec);
-    let cells = Rect { x: bx + 2, y, width: CELLS, height: 1 };
-    let cells_hover = gui.ui.hovers(cells);
-    for k in 0..CELLS {
-        let cell = Rect { x: bx + 2 + k, y, width: 1, height: 1 };
-        let on = k < filled;
-        let style = if on { Style::default().fg(if cells_hover { th().bright } else { th().accent }) } else { dim() };
-        put(frame, cell.x, y, if on { full } else { empty }, style);
-        gui.ui.click(cell, Act::DjSet(row, cell_value(&spec, k)));
-    }
-    let plus = Rect { x: bx + 3 + CELLS, y, width: 1, height: 1 };
-    put(frame, plus.x, y, "+", if gui.ui.hovers(plus) { bright_bold() } else { dim() });
-    gui.ui.click(plus, Act::DjStep(row, 1));
-    let vx = bx + 6 + CELLS;
-    put(frame, vx, y, &super::bar::clip(&spec.words, (x + w).saturating_sub(vx) as usize), Style::default());
-    gui.ui.click(Rect { x, y, width: VALUE_X, height: 1 }, Act::DjFocus(Item::Row(row)));
-    let help = [spec.note, spec.tip].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" · ");
-    help_for(gui, focused, hover, help);
-}
-
-/// The chosen genres or keywords as an inline list, each with its remove
-/// (clauses 48, 49): a click on a chip removes it; on the keyboard ←→ walk
-/// the chips and x removes the one under the cursor.
-fn draw_chips(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, item: Item) {
-    let names: Vec<String> = match item {
-        Item::GenreChips => gui.app.dj_library().genres,
-        Item::KeywordChips => gui.app.dj.keywords.clone(),
-        _ => return,
+    let label_style = match (gated, held, hover) {
+        (true, _, _) => dim(),
+        (false, true, _) => sel().add_modifier(Modifier::BOLD),
+        (false, false, true) => bright_bold(),
+        (false, false, false) => Style::default(),
     };
-    let focused = gui.dj.cursor == Some(item);
-    let sub = gui.dj.chip.min(names.len().saturating_sub(1));
-    let mut cx = x;
-    let end = x + w;
-    for (i, name) in names.iter().enumerate() {
-        let name_w = name.chars().count() as u16;
-        let width = name_w + 4;
-        if cx + width > end {
-            if cx < end {
-                put(frame, cx, y, "…", dim());
-            }
-            break;
-        }
-        let rect = Rect { x: cx, y, width, height: 1 };
-        let hover = gui.ui.hovers(rect);
-        let selected = focused && i == sub;
-        let style = match (selected, hover) {
-            (true, _) => accent().add_modifier(Modifier::BOLD),
+    put(frame, rect.x, rect.y, &super::bar::clip(&view.label, label_room), label_style);
+    let chevron = match view.kind {
+        Kind::Sheet => Some(super::forward_glyph()),
+        Kind::List => Some(down_glyph()),
+        Kind::Switch(_) | Kind::Gated => None,
+    };
+    if let Some(chevron) = chevron {
+        let style = match (held, hover) {
+            (true, _) => sel(),
             (false, true) => bright_bold(),
-            (false, false) => Style::default(),
+            (false, false) => dim(),
         };
-        put(frame, cx, y, name, style);
-        let x_style = if hover || selected {
-            Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
-        } else {
-            dim()
-        };
-        put(frame, cx + name_w + 1, y, "[x]", x_style);
-        let act = match item {
-            Item::GenreChips => Act::DjGenre(name.clone()),
-            _ => Act::DjKeywordRemove(name.clone()),
-        };
-        gui.ui.click(rect, act);
-        gui.ui.tip(rect, t!("gui.dj.remove_tip").to_string());
-        cx += width;
-        if i + 1 < names.len() && cx + 3 <= end {
-            put(frame, cx, y, " · ", dim());
-            cx += 3;
-        }
+        put(frame, rect.right().saturating_sub(1), rect.y, chevron, style);
+    }
+    if !gated {
+        gui.ui.click(rect, Act::DjRow(row));
+    }
+    if let Some(tip) = view.tip {
+        gui.ui.tip(rect, tip);
     }
 }
 
-/// The keyword field and its Add (clause 49): the label as a sub-row, the
-/// kit's line editor at the value column, Enter adds, the hint while empty.
-fn draw_keyword_input(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, forward: &str) {
-    let focused = gui.dj.cursor == Some(Item::KeywordInput);
-    let row = Rect { x, y, width: w, height: 1 };
-    let hover = gui.ui.hovers(row);
-    put(frame, x + SUB_X, y, &super::bar::clip(&t!("gui.dj.add_keyword"), (VALUE_X - SUB_X - 1) as usize), row_style(focused, hover));
-    let fx = x + VALUE_X;
-    let fw = FIELD_W.min(w.saturating_sub(VALUE_X + 8)).max(8);
-    let field = Rect { x: fx, y, width: fw, height: 1 };
-    let value = gui.dj.keyword.value().to_string();
-    let cursor = gui.dj.keyword.cursor();
-    // The field reads as one: underlined for its whole width.
-    let under = Style::default().add_modifier(Modifier::UNDERLINED);
-    put(frame, fx, y, &" ".repeat(fw as usize), under);
-    if focused {
-        super::text_field(frame, &mut gui.ui, fx, y, &value, cursor, fw, under);
-    } else if value.is_empty() {
-        put(frame, fx, y, &super::bar::clip(&t!("gui.dj.keyword_hint"), fw as usize), dim().add_modifier(Modifier::UNDERLINED));
-    } else {
-        put(frame, fx, y, &super::bar::clip(&value, fw as usize), under);
-    }
-    gui.ui.click(field, Act::DjKeywordFocus);
-    let add = format!("{} {forward}", t!("gui.dj.add"));
-    let ready = !value.trim().is_empty();
-    text_button(frame, gui, fx + fw + 2, y, &add, ready, Act::DjKeywordAdd);
-    help_for(gui, focused, hover, t!("gui.dj.keyword_sub").to_string());
-}
+// ── Layers ──────────────────────────────────────────────────────────────────
 
-/// The destructive tall button (Stop Auto DJ): the kit's primary frame in
-/// the danger colour, bright under the pointer.
-fn tall_danger(frame: &mut Frame, ui: &mut Surface<Act>, at: Rect, label: &str, act: Act) -> Rect {
-    tall_frame(frame, ui, at, label, 2, |hovered| (if hovered { th().bright } else { th().danger }, true), Some(act))
-}
-
-// ── Modals ──────────────────────────────────────────────────────────────────
-
-/// The DJ's modals, in the order they stack: the opening question, the genre
-/// picker, the server picker.
+/// The DJ's layers, in the order they stack: First song's list, the empty
+/// queue's list, quick config, the sheet, the opening question.
 pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    draw_first_list(frame, gui, area);
+    draw_recent_list(frame, gui, area);
+    quick::draw(frame, gui, area);
+    sheets::draw(frame, gui, area);
     draw_chooser(frame, gui, area);
-    draw_genre_picker(frame, gui, area);
-    draw_server_picker(frame, gui, area);
 }
 
-/// "Start Auto DJ with what?" (clause 2): a kit modal over everything — the
-/// two answers with their descriptions, the remember box, Esc to leave the
-/// DJ off. The App holds the row and the box; the shell draws and relays.
+const FIRST: [EmptyQueueStart; 4] =
+    [EmptyQueueStart::Ask, EmptyQueueStart::Random, EmptyQueueStart::Pick, EmptyQueueStart::Recent];
+
+/// First song's list (the kit's Dropdown): hanging under its row, its last
+/// cell under the chevron's; the current answer wears `•`, the keyboard's
+/// cursor the accent slab; a pick applies and closes, and a click anywhere
+/// else closes and keeps.
+fn draw_first_list(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    let Some(cursor) = gui.dj.first else { return };
+    let Some(anchor) = gui.dj.first_anchor.filter(|_| in_room(gui)) else {
+        gui.dj.first = None;
+        return;
+    };
+    gui.ui.click(area, Act::DjFirstClose);
+    let words: Vec<String> = FIRST.iter().map(|choice| first_words(*choice)).collect();
+    let inner_w = words.iter().map(|w| width(w)).max().unwrap_or(0) as u16 + 4;
+    let w = (inner_w + 2).min(area.width);
+    let h = FIRST.len() as u16 + 2;
+    let rect = Rect {
+        x: (anchor.right() + 1).saturating_sub(w).min(area.width.saturating_sub(w)),
+        y: (anchor.y + 1).min(area.height.saturating_sub(h)),
+        width: w,
+        height: h,
+    };
+    gui.ui.overlay(rect);
+    let inner = crate::kit::frame_at(frame, rect, th().accent);
+    gui.ui.click(rect, Act::Guard);
+    let now = gui.app.dj.empty_queue;
+    for (i, (choice, word)) in FIRST.iter().zip(&words).enumerate() {
+        let row = Rect { x: inner.x, y: inner.y + i as u16, width: inner.width, height: 1 };
+        let held = i == cursor;
+        let hover = gui.ui.hovers(row);
+        if held {
+            frame.render_widget(Block::default().style(sel()), row);
+        }
+        if *choice == now {
+            put(frame, row.x + 1, row.y, super::bullet_glyph(), if held { sel() } else { accent() });
+        }
+        let style = match (held, hover) {
+            (true, _) => sel().add_modifier(Modifier::BOLD),
+            (false, true) => bright_bold(),
+            (false, false) => Style::default(),
+        };
+        put(frame, row.x + 3, row.y, word, style);
+        gui.ui.click(row, Act::DjFirst(*choice));
+    }
+}
+
+/// A song as Recently played names it: the title, then the artist DIM.
+fn song_words(track: &crate::api::types::Track) -> (String, Option<String>) {
+    let title = track.title_or_file().to_string();
+    let artist = track.metadata.artist.clone().filter(|a| !a.trim().is_empty());
+    (title, artist)
+}
+
+/// One row of a Recently played list, in `rect`: the keyboard's cursor the
+/// accent slab, the pointer BRIGHT.
+fn draw_song_row(
+    frame: &mut Frame,
+    gui: &mut Gui,
+    rect: Rect,
+    track: &crate::api::types::Track,
+    held: bool,
+    act: Act,
+) {
+    let hover = gui.ui.hovers(rect);
+    if held {
+        frame.render_widget(Block::default().style(sel()), rect);
+    }
+    let (title, artist) = song_words(track);
+    let room = rect.width.saturating_sub(2) as usize;
+    let shown = super::bar::clip(&title, room);
+    let style = match (held, hover) {
+        (true, _) => sel().add_modifier(Modifier::BOLD),
+        (false, true) => bright_bold(),
+        (false, false) => Style::default(),
+    };
+    put(frame, rect.x + 1, rect.y, &shown, style);
+    let used = width(&shown);
+    if let Some(artist) = artist
+        && used + 4 < room
+    {
+        let tail = format!(" · {artist}");
+        let tail = super::bar::clip(&tail, room - used);
+        put(frame, rect.x + 1 + used as u16, rect.y, &tail, if held { sel() } else { dim() });
+    }
+    gui.ui.click(rect, act);
+}
+
+/// A Recently played list in `rect` (a frame around its rows): `cursor`
+/// kept in the window, a song a row.
+fn draw_songs(frame: &mut Frame, gui: &mut Gui, rect: Rect, cursor: usize) {
+    gui.ui.overlay(rect);
+    let inner = crate::kit::frame_at(frame, rect, th().accent);
+    gui.ui.click(rect, Act::Guard);
+    let songs = gui.app.dj_recent_songs().to_vec();
+    let visible = inner.height as usize;
+    let first = cursor.saturating_sub(visible.saturating_sub(1)).min(songs.len().saturating_sub(visible));
+    for (i, track) in songs.iter().enumerate().skip(first).take(visible) {
+        let row = Rect { x: inner.x, y: inner.y + (i - first) as u16, width: inner.width, height: 1 };
+        draw_song_row(frame, gui, row, track, i == cursor, Act::DjRecentPick(i));
+    }
+}
+
+/// The empty queue's Recently played list (clause 16): under its opener,
+/// the panel's width.
+fn draw_recent_list(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    let Some(cursor) = gui.dj.recent else { return };
+    let songs = gui.app.dj_recent_songs().len();
+    let anchor = gui.dj.recent_anchor.take();
+    let standing = songs > 0 && gui.app.dj_armed() && gui.app.queue.items.is_empty();
+    let (Some(anchor), true) = (anchor, standing) else {
+        gui.dj.recent = None;
+        return;
+    };
+    gui.ui.click(area, Act::DjRecentClose);
+    let bottom = super::bar::top(area, gui.footer());
+    let h = (songs as u16 + 2).min(bottom.saturating_sub(anchor.y + 1)).max(3);
+    let rect = Rect {
+        x: anchor.x,
+        y: anchor.y + 1,
+        width: anchor.width.min(area.width.saturating_sub(anchor.x)),
+        height: h,
+    };
+    draw_songs(frame, gui, rect, cursor.min(songs - 1));
+}
+
+/// Whether the opening question offers Recently played: the songs are in
+/// hand and there is one to offer (it is left out otherwise).
+fn chooser_offers_recent(gui: &Gui) -> bool {
+    !gui.app.dj_recent_songs().is_empty()
+}
+
+/// The opening question (clause 2), under the row's own name: Random,
+/// Choose, Recently played with its list, and Remember — the kit's modal
+/// with its title on the top border; Esc leaves the DJ off. The App holds
+/// the row and the box; the shell draws and relays.
 fn draw_chooser(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let Some(chooser) = gui.app.dj_chooser.clone() else { return };
-    // A click anywhere else dismisses — the DJ stays off.
+    let recent = chooser_offers_recent(gui);
+    let Some(chooser) = gui.app.dj_chooser.as_mut() else { return };
+    // The rows: the two answers, Recently played where it has songs, a
+    // blank, and the box.
+    let remember_row = 2 + usize::from(recent);
+    // Remembered as the way to start, the list comes down on its own once
+    // its songs are in hand — the hand on its row.
+    if chooser.recent_open && recent && !chooser.recent_seated {
+        chooser.row = 2;
+        chooser.recent_seated = true;
+    }
+    chooser.row = chooser.row.min(remember_row);
+    let chooser = chooser.clone();
+    let open = chooser.recent_open && recent;
+
+    // The screen beneath is inert; a click anywhere else dismisses — the
+    // DJ stays off.
+    gui.ui.clear_registries();
     gui.ui.click(area, Act::DjCancel);
-    let width: u16 = 74.min(area.width.saturating_sub(2)).max(40);
-    let text_w = width as usize - 4;
-    let subtitle = wrap_words(&t!("gui.dj.start_subtitle"), text_w);
+    let h = (remember_row as u16 + 2) + 2;
+    let rect = crate::kit::modal_rect(area, CHOOSER_W, h, h);
+    gui.ui.overlay(rect);
+    gui.ui.modal_over();
+    super::keep::modal_box(frame, rect);
+    gui.ui.click(rect, Act::Guard);
+    super::keep::border_title(frame, rect, &t!("gui.dj.first_song"));
+    let (x0, top) = (rect.x + 2, rect.y + 1);
+    let row_w = rect.width.saturating_sub(4);
     let (check_on, check_off) = super::check_glyphs();
-    let rows: [(String, Vec<String>, Act); ROWS] = [
-        (
-            t!("gui.dj.surprise").to_string(),
-            wrap_words(&t!("gui.dj.surprise_sub"), text_w - 2),
-            Act::DjChoose(0),
-        ),
-        (t!("gui.dj.pick").to_string(), wrap_words(&t!("gui.dj.pick_sub"), text_w - 2), Act::DjChoose(1)),
-        (
-            format!("{} {}", if chooser.remember { check_on } else { check_off }, t!("gui.dj.remember")),
-            wrap_words(&t!("gui.dj.remember_sub"), text_w - 2),
-            Act::DjRemember,
-        ),
+    let mut labels: Vec<(String, Act)> = vec![
+        (t!("gui.dj.first_random").to_string(), Act::DjChoose(0)),
+        (t!("gui.dj.first_choose").to_string(), Act::DjChoose(1)),
     ];
-    // Title, subtitle, a gap, the rows (label + detail lines), trailing gap.
-    let rows_h: usize = rows.iter().map(|(_, detail, _)| 1 + detail.len()).sum();
-    let height = (1 + subtitle.len() + 1 + rows_h + 1) as u16 + 2;
-    let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
-    put(frame, inner.x + 1, inner.y, &t!("gui.dj.start_title"), accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::DjCancel);
-    let mut y = inner.y + 1;
-    for line in &subtitle {
-        put(frame, inner.x + 1, y, line, dim());
-        y += 1;
+    if recent {
+        labels.push((format!("{} {}", t!("gui.dj.first_recent"), down_glyph()), Act::DjRecentToggle));
     }
-    y += 1;
-    for (i, (label, detail, act)) in rows.into_iter().enumerate() {
-        let rect = Rect { x: inner.x, y, width: inner.width, height: 1 + detail.len() as u16 };
-        let hover = gui.ui.hovers(rect);
-        let is_sel = chooser.row == i;
-        if is_sel {
-            let line = Rect { x: inner.x, y, width: inner.width, height: 1 };
-            frame.render_widget(Block::default().style(sel()), line);
+    for (i, (label, act)) in labels.into_iter().enumerate() {
+        let row = Rect { x: x0, y: top + i as u16, width: row_w, height: 1 };
+        let held = chooser.row == i && !open;
+        let lit = i == 2 && open;
+        let hover = gui.ui.hovers(row);
+        if held {
+            frame.render_widget(Block::default().style(sel()), row);
         }
-        let style = match (is_sel, hover) {
-            (true, _) => sel().add_modifier(Modifier::BOLD),
-            (false, true) => bright_bold(),
-            (false, false) => Style::default(),
-        };
-        put(frame, inner.x + 1, y, &label, style);
-        for line in &detail {
-            y += 1;
-            put(frame, inner.x + 3, y, line, dim());
-        }
-        y += 1;
-        gui.ui.click(rect, act);
-    }
-}
-
-/// The genres the picker shows for the search line — borrowed from the
-/// server's list, which can run to thousands; the picker shows fourteen.
-fn filtered_genres<'a>(all: &'a [String], query: &str) -> Vec<&'a str> {
-    let query = query.trim().to_lowercase();
-    all.iter().filter(|g| query.is_empty() || g.to_lowercase().contains(&query)).map(String::as_str).collect()
-}
-
-/// The genre under the picker's cursor.
-fn picked_genre(gui: &Gui) -> Option<String> {
-    let picker = gui.app.dj_panel.genres.as_ref()?;
-    let names = filtered_genres(&picker.all, gui.dj.filter.value());
-    names.get(gui.dj.pick_row.min(names.len().saturating_sub(1))).map(|name| name.to_string())
-}
-
-/// The genre picker (clause 48): a kit modal list with a search line,
-/// "{count} selected" in the title, checkboxes toggling live; Space toggles,
-/// Enter and Esc close.
-fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    // Drawn through the Gui's own fields, not from a copy of the picker
-    // made every frame: its list is every genre the server knows
-    // (performance audit #110).
-    let Gui { app, dj, ui, .. } = gui;
-    let Some(picker) = app.dj_panel.genres.as_ref() else { return };
-    ui.click(area, Act::DjGenresClose);
-    let library = app.dj_library();
-    let width = 60.min(area.width.saturating_sub(2)).max(30);
-    let height = 20.min(area.height.saturating_sub(2)).max(8);
-    let inner = modal_frame_on(frame, ui, area, width, height, th().accent);
-    let title = format!("{} · {}", t!("gui.dj.pick_genres"), t!("gui.dj.selected_count", count = library.genres.len()));
-    put(frame, inner.x + 1, inner.y, &title, accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, ui, inner, Act::DjGenresClose);
-
-    let query = dj.filter.value().to_string();
-    let fy = inner.y + 2;
-    let field_w = inner.width.saturating_sub(2);
-    // Empty, the filter shows its placeholder and no caret, yet every
-    // key the modal does not claim is the filter's: it says it has the
-    // keyboard all the same, so the window's input method and paste are
-    // on for its first key. A composition draws through the field.
-    if query.is_empty() && ui.composition().is_empty() {
-        put(frame, inner.x + 1, fy, &super::bar::clip(&t!("gui.dj.search_genres"), field_w as usize), dim());
-        ui.note_caret(Position { x: inner.x + 1, y: fy });
-    } else {
-        let cursor = dj.filter.cursor();
-        super::text_field(frame, ui, inner.x + 1, fy, &query, cursor, field_w, Style::default());
-    }
-
-    let list_y = fy + 2;
-    let list_h = inner.bottom().saturating_sub(list_y) as usize;
-    let (check_on, check_off) = super::check_glyphs();
-    if picker.loading {
-        put(frame, inner.x + 1, list_y, &t!("gui.dj.genres_loading"), dim());
-        return;
-    }
-    if let Some(err) = &picker.failed {
-        put(frame, inner.x + 1, list_y, &t!("gui.dj.genres_failed"), Style::default().fg(th().gold));
-        put(frame, inner.x + 1, list_y + 1, &super::bar::clip(err, field_w as usize), dim());
-        return;
-    }
-    if picker.all.is_empty() {
-        put(frame, inner.x + 1, list_y, &t!("gui.dj.no_genres"), dim());
-        return;
-    }
-    let names = filtered_genres(&picker.all, &query);
-    if names.is_empty() {
-        let words = t!("gui.dj.no_genre_match", query = query.trim()).to_string();
-        put(frame, inner.x + 1, list_y, &super::bar::clip(&words, field_w as usize), dim());
-        return;
-    }
-    let row = dj.pick_row.min(names.len() - 1);
-    dj.pick_row = row;
-    let (scroll, _) = table_view(names.len(), Some(row), dj.genres.scroll, list_h);
-    dj.genres.scroll = scroll;
-    let overflow = names.len() > list_h;
-    let row_w = if overflow { inner.width.saturating_sub(1) } else { inner.width };
-    for (i, name) in names.iter().enumerate().skip(scroll).take(list_h) {
-        let y = list_y + (i - scroll) as u16;
-        let rect = Rect { x: inner.x, y, width: row_w, height: 1 };
-        let on = library.genres.iter().any(|g| g == name);
-        let is_sel = i == row;
-        let hover = ui.hovers(rect);
-        if is_sel {
-            frame.render_widget(Block::default().style(sel()), rect);
-        }
-        let glyph_style = if is_sel {
-            sel()
-        } else if on {
-            Style::default().fg(th().ok)
-        } else {
-            dim()
-        };
-        put(frame, inner.x + 1, y, if on { check_on } else { check_off }, glyph_style);
-        let style = match (is_sel, hover) {
-            (true, _) => sel().add_modifier(Modifier::BOLD),
-            (false, true) => bright_bold(),
-            (false, false) => Style::default(),
-        };
-        put(frame, inner.x + 5, y, &super::bar::clip(name, row_w.saturating_sub(6) as usize), style);
-        ui.click(rect, Act::DjGenre(name.to_string()));
-    }
-    if overflow {
-        let bar = Rect { x: inner.right().saturating_sub(1), y: list_y, width: 1, height: list_h as u16 };
-        scroll_list(
-            frame,
-            ui,
-            bar,
-            names.len(),
-            list_h,
-            scroll,
-            Act::ScrollBy(List::DjGenres, -1),
-            Act::ScrollBy(List::DjGenres, 1),
-            |first| Act::ScrollTo(List::DjGenres, first),
-        );
-    }
-}
-
-/// The server picker (clause 41): every selectable saved server, peers under
-/// their parent; the DJ's own marked; Enter or a click moves the DJ.
-fn draw_server_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let Some(cursor) = gui.dj.server_pick else { return };
-    gui.ui.click(area, Act::DjServerClose);
-    let servers = pickable_servers(gui);
-    let width = 56.min(area.width.saturating_sub(2)).max(30);
-    let height = (servers.len() as u16 + 5).min(area.height.saturating_sub(2)).max(6);
-    let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
-    put(frame, inner.x + 1, inner.y, &t!("gui.dj.server_title"), accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::DjServerClose);
-    let marker = super::forward_glyph();
-    let branch = if legacy_conhost() { "+" } else { "└" };
-    for (i, server) in servers.iter().enumerate() {
-        let y = inner.y + 2 + i as u16;
-        if y + 1 >= inner.bottom() {
-            break;
-        }
-        let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
-        let is_sel = i == cursor;
-        let hover = gui.ui.hovers(rect);
-        if is_sel {
-            frame.render_widget(Block::default().style(sel()), rect);
-        }
-        if server.current {
-            let mstyle = if is_sel { sel() } else { accent() };
-            put(frame, inner.x + 1, y, marker, mstyle.add_modifier(Modifier::BOLD));
-        }
-        let label = if server.peer { format!("{branch} {}", server.label) } else { server.label.clone() };
-        let style = match (is_sel, server.current, hover) {
+        let style = match (held, lit, hover) {
             (true, _, _) => sel().add_modifier(Modifier::BOLD),
             (false, true, _) => accent().add_modifier(Modifier::BOLD),
             (false, false, true) => bright_bold(),
             (false, false, false) => Style::default(),
         };
-        put(frame, inner.x + 3, y, &super::bar::clip(&label, inner.width.saturating_sub(4) as usize), style);
-        gui.ui.click(rect, Act::DjServer(i));
+        put(frame, x0, row.y, &label, style);
+        gui.ui.click(row, act);
+    }
+    let y = top + remember_row as u16 + 1;
+    let row = Rect { x: x0, y, width: row_w, height: 1 };
+    let held = chooser.row == remember_row && !open;
+    let hover = gui.ui.hovers(row);
+    if held {
+        frame.render_widget(Block::default().style(sel()), row);
+    }
+    let glyph_style = match (held, chooser.remember) {
+        (true, _) => sel(),
+        (false, true) => Style::default().fg(th().ok),
+        (false, false) => dim(),
+    };
+    put(frame, x0, y, if chooser.remember { check_on } else { check_off }, glyph_style);
+    let style = match (held, hover) {
+        (true, _) => sel().add_modifier(Modifier::BOLD),
+        (false, true) => bright_bold(),
+        (false, false) => Style::default(),
+    };
+    put(frame, x0 + 4, y, &t!("gui.dj.remember_short"), style);
+    gui.ui.click(row, Act::DjRemember);
+
+    if open {
+        // The list hangs from its row, twenty cells in, to the modal's
+        // last column of text — over the box's row and past the frame.
+        let songs = gui.app.dj_recent_songs().len() as u16;
+        let ly = top + 3;
+        let lx = rect.x + 20;
+        let lh = (songs + 2).min(area.height.saturating_sub(ly + 1)).max(3);
+        let list = Rect { x: lx, y: ly, width: rect.right().saturating_sub(lx + 2), height: lh };
+        draw_songs(frame, gui, list, chooser.recent_row.min(songs.saturating_sub(1) as usize));
     }
 }
 
 // ── Keys ────────────────────────────────────────────────────────────────────
 
-/// The DJ's keys: its modals outrank everything; Esc leaves the
-/// opening-song road; then the room's own. `None` when none of them is up.
+/// The DJ's keys: its layers outrank everything, the top one first; Esc
+/// leaves the opening-song road; then the room's own. `None` when none of
+/// them is up.
 pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if gui.app.dj_chooser.is_some() {
+        chooser_key(gui, key);
+        return Some(false);
+    }
+    // Smart filters is the mood modal, whatever room it was opened over.
+    if super::moods::dj_open(gui) {
+        return super::moods::handle_key(gui, key);
+    }
+    if let Some(quit) = sheets::handle_key(gui, key) {
+        return Some(quit);
+    }
+    if let Some(quit) = quick::handle_key(gui, key) {
+        return Some(quit);
+    }
+    if let Some(row) = gui.dj.first {
         match key.code {
-            KeyCode::Esc => gui.forward(Action::Cancel),
-            KeyCode::Up => gui.forward(Action::Up),
-            KeyCode::Down => gui.forward(Action::Down),
-            KeyCode::Enter => gui.forward(Action::Activate),
-            KeyCode::Char(' ') => gui.forward(Action::PlayPause),
+            KeyCode::Esc => gui.dj.first = None,
+            KeyCode::Up => gui.dj.first = Some(row.saturating_sub(1)),
+            KeyCode::Down => gui.dj.first = Some((row + 1).min(FIRST.len() - 1)),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                return Some(gui.act(Act::DjFirst(FIRST[row.min(FIRST.len() - 1)])));
+            }
             _ => {}
         }
         return Some(false);
     }
-    if gui.app.dj_panel.genres.is_some() {
+    if let Some(row) = gui.dj.recent {
+        let last = gui.app.dj_recent_songs().len().saturating_sub(1);
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => return Some(gui.act(Act::DjGenresClose)),
-            KeyCode::Up => gui.dj.pick_row = gui.dj.pick_row.saturating_sub(1),
-            KeyCode::Down => gui.dj.pick_row += 1,
-            KeyCode::Char(' ') => {
-                if let Some(name) = picked_genre(gui) {
-                    return Some(gui.act(Act::DjGenre(name)));
-                }
-            }
-            _ => {
-                let changed = gui.dj.filter.handle_event(&TermEvent::Key(key)).is_some_and(|change| change.value);
-                if changed {
-                    gui.dj.pick_row = 0;
-                    gui.dj.genres.scroll = 0;
-                }
-            }
-        }
-        return Some(false);
-    }
-    if let Some(row) = gui.dj.server_pick {
-        let last = pickable_servers(gui).len().saturating_sub(1);
-        match key.code {
-            KeyCode::Esc => gui.dj.server_pick = None,
-            KeyCode::Up => gui.dj.server_pick = Some(row.saturating_sub(1)),
-            KeyCode::Down => gui.dj.server_pick = Some((row + 1).min(last)),
-            KeyCode::Enter => return Some(gui.act(Act::DjServer(row))),
+            KeyCode::Esc => gui.dj.recent = None,
+            KeyCode::Up => gui.dj.recent = Some(row.saturating_sub(1)),
+            KeyCode::Down => gui.dj.recent = Some((row + 1).min(last)),
+            KeyCode::Enter => return Some(gui.act(Act::DjRecentPick(row.min(last)))),
             _ => {}
         }
         return Some(false);
@@ -1421,105 +1027,82 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     room_key(gui, key)
 }
 
-/// Move the keyboard cursor along the controls that exist right now.
-fn move_cursor(gui: &mut Gui, delta: i32) {
-    let items = items(gui);
-    if items.is_empty() {
-        gui.dj.cursor = None;
+/// The opening question's keys: ↑↓ walk its rows, Enter answers — on
+/// Recently played it lets the list down, and inside the list picks the
+/// song — Space ticks Remember from anywhere, Esc folds the list, then
+/// leaves the DJ off.
+fn chooser_key(gui: &mut Gui, key: KeyEvent) {
+    let songs = gui.app.dj_recent_songs().len();
+    let Some(chooser) = gui.app.dj_chooser.as_mut() else { return };
+    let recent = songs > 0;
+    let remember_row = 2 + usize::from(recent);
+    if chooser.recent_open && recent {
+        match key.code {
+            KeyCode::Up => chooser.recent_row = chooser.recent_row.saturating_sub(1),
+            KeyCode::Down => chooser.recent_row = (chooser.recent_row + 1).min(songs - 1),
+            KeyCode::Esc | KeyCode::Left => chooser.recent_open = false,
+            KeyCode::Char(' ') => chooser.remember = !chooser.remember,
+            KeyCode::Enter => {
+                let row = chooser.recent_row.min(songs - 1);
+                gui.act(Act::DjRecentPick(row));
+            }
+            _ => {}
+        }
         return;
     }
+    match key.code {
+        KeyCode::Esc => {
+            gui.act(Act::DjCancel);
+        }
+        KeyCode::Up => chooser.row = chooser.row.saturating_sub(1),
+        KeyCode::Down => chooser.row = (chooser.row + 1).min(remember_row),
+        KeyCode::Char(' ') => chooser.remember = !chooser.remember,
+        KeyCode::Enter | KeyCode::Right => {
+            let act = match chooser.row {
+                0 => Act::DjChoose(0),
+                1 => Act::DjChoose(1),
+                row if row == remember_row => Act::DjRemember,
+                _ => Act::DjRecentToggle,
+            };
+            // → only lets the list down; Enter answers.
+            if key.code == KeyCode::Enter || act == Act::DjRecentToggle {
+                gui.act(act);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Move the keyboard's hand along the controls that exist right now.
+fn move_cursor(gui: &mut Gui, delta: i32) {
+    let items = items(gui);
     let at = gui.dj.cursor.and_then(|c| items.iter().position(|i| *i == c));
     let next = match at {
         Some(i) => (i as i32 + delta).clamp(0, items.len() as i32 - 1) as usize,
+        // From rest: ↓ takes Start / Stop, ↑ the last row.
         None if delta < 0 => items.len() - 1,
-        None => 0,
+        None => 1,
     };
-    if gui.dj.cursor != Some(items[next]) {
-        gui.dj.chip = 0;
-    }
     gui.dj.cursor = Some(items[next]);
-    gui.dj.body.reveal = true;
-}
-
-/// The chips row's names, for the sub-cursor.
-fn chips_of(gui: &Gui, item: Item) -> Vec<String> {
-    match item {
-        Item::GenreChips => gui.app.dj_library().genres,
-        Item::KeywordChips => gui.app.dj.keywords.clone(),
-        _ => Vec::new(),
-    }
 }
 
 fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
-    let page = gui.dj.visible.max(1) as i32 - 1;
     match gui.dj.cursor {
         None => match key.code {
             KeyCode::Down => move_cursor(gui, 1),
             KeyCode::Up => move_cursor(gui, -1),
-            KeyCode::PageDown => return Some(gui.act(Act::ScrollBy(List::DjRoom, page))),
-            KeyCode::PageUp => return Some(gui.act(Act::ScrollBy(List::DjRoom, -page))),
             _ => return None,
-        },
-        Some(Item::KeywordInput) => match key.code {
-            KeyCode::Up | KeyCode::BackTab => move_cursor(gui, -1),
-            KeyCode::Down | KeyCode::Tab => move_cursor(gui, 1),
-            KeyCode::Esc => gui.dj.cursor = None,
-            KeyCode::Enter => return Some(gui.act(Act::DjKeywordAdd)),
-            _ => {
-                // The line editor owns the rest: chars, Backspace, Delete,
-                // ←/→, Home/End, the ctrl word ops.
-                gui.dj.keyword.handle_event(&TermEvent::Key(key));
-            }
         },
         Some(item) => match key.code {
             KeyCode::Up | KeyCode::BackTab => move_cursor(gui, -1),
             KeyCode::Down | KeyCode::Tab => move_cursor(gui, 1),
             KeyCode::Esc => gui.dj.cursor = None,
-            KeyCode::PageDown => return Some(gui.act(Act::ScrollBy(List::DjRoom, page))),
-            KeyCode::PageUp => return Some(gui.act(Act::ScrollBy(List::DjRoom, -page))),
-            KeyCode::Left | KeyCode::Right => {
-                let delta = if key.code == KeyCode::Left { -1 } else { 1 };
-                match item {
-                    Item::Row(row) if is_bar(row) => return Some(gui.act(Act::DjStep(row, delta))),
-                    Item::GenreChips | Item::KeywordChips => {
-                        let last = chips_of(gui, item).len().saturating_sub(1) as i32;
-                        gui.dj.chip = (gui.dj.chip as i32 + delta).clamp(0, last) as usize;
-                    }
-                    // The choices stand side by side: ←→ walk them.
-                    Item::Anchor(_) | Item::EmptyQueue(_) | Item::GenreMode(_) => move_cursor(gui, delta),
-                    _ => return None,
-                }
-            }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 let act = match item {
+                    Item::Preview => Act::DjPreview,
                     Item::Toggle => Act::DjStartStop,
-                    Item::Server => Act::DjServerPick,
-                    Item::Row(DjRow::Sample) => Act::DjPreview,
-                    Item::Row(row) => Act::DjStep(row, 1),
-                    Item::Anchor(anchor) => Act::DjAnchor(anchor),
-                    Item::EmptyQueue(choice) => Act::DjEmpty(choice),
-                    Item::GenreMode(mode) => Act::DjGenreMode(mode),
-                    Item::GenreChips | Item::PickGenres => Act::DjPickGenres,
-                    Item::KeywordChips | Item::KeywordInput => Act::DjKeywordFocus,
-                    Item::Source(i) => {
-                        let name = gui.app.dj_info.as_ref().and_then(|info| info.libraries.get(i).cloned());
-                        match name {
-                            Some(name) => Act::DjSource(name),
-                            None => return Some(false),
-                        }
-                    }
+                    Item::Row(row) => Act::DjRowKey(row),
                 };
-                return Some(gui.act(act));
-            }
-            KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace
-                if matches!(item, Item::GenreChips | Item::KeywordChips) =>
-            {
-                let names = chips_of(gui, item);
-                let Some(name) = names.get(gui.dj.chip.min(names.len().saturating_sub(1))).cloned() else {
-                    return Some(false);
-                };
-                let act = if item == Item::GenreChips { Act::DjGenre(name) } else { Act::DjKeywordRemove(name) };
-                gui.dj.chip = gui.dj.chip.min(names.len().saturating_sub(2));
                 return Some(gui.act(act));
             }
             _ => return None,
@@ -1536,10 +1119,53 @@ fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
 /// audit #86) — and a per-library rule comes back as its own effect,
 /// written at once (clause 51): the book of servers is rebuilt from the
 /// file on every reload, and a rule still waiting would be undone by one.
-fn edit(gui: &mut Gui, edit: DjEdit) {
+pub(crate) fn edit(gui: &mut Gui, edit: DjEdit) {
     let effects = gui.app.dj_edit(edit);
     gui.pend(effects);
     gui.save_soon();
+}
+
+/// A row pressed: its sheet, its list, or — Harmonic mixing — its switch.
+/// `key` says the keyboard pressed it, so the layer opens with its hand up.
+fn press_row(gui: &mut Gui, row: Row, key: bool) {
+    if row_view(gui, row).kind == Kind::Gated {
+        return;
+    }
+    // A click seats the hand only where the keyboard already had it up.
+    if key || gui.dj.cursor.is_some() {
+        gui.dj.cursor = Some(Item::Row(row));
+    }
+    match row {
+        Row::FirstSong => {
+            let now = gui.app.dj.empty_queue;
+            gui.dj.first = Some(FIRST.iter().position(|c| *c == now).unwrap_or(0));
+        }
+        Row::Harmonic => edit(gui, DjEdit::Step(crate::tui::app::DjRow::Harmonic, 1)),
+        Row::Smart => super::moods::open_for_dj(gui, key),
+        Row::PlayFrom => sheets::open(gui, Sheet::PlayFrom, key),
+        Row::Batch => sheets::open(gui, Sheet::Batch, key),
+        Row::Sonic => sheets::open(gui, Sheet::Sonic, key),
+        Row::Genres => sheets::open(gui, Sheet::Genres, key),
+        Row::Rating => sheets::open(gui, Sheet::Rating, key),
+        Row::Length => sheets::open(gui, Sheet::Length, key),
+        Row::Beat => sheets::open(gui, Sheet::Tempo, key),
+        Row::SkipWords => sheets::open(gui, Sheet::SkipWords, key),
+        Row::Cooldown => sheets::open(gui, Sheet::Cooldown, key),
+    }
+}
+
+/// Start through the shared toggle (the opening question, the seed rule),
+/// Stop wherever the DJ is armed — one button, one meaning.
+pub(crate) fn start_stop(gui: &mut Gui) {
+    if gui.app.dj_armed() {
+        let mut effects = gui.app.disarm_dj();
+        // Off, the rows describe Play from's server again.
+        effects.extend(gui.app.dj_room_opened());
+        gui.pend(effects);
+    } else {
+        gui.forward(Action::ToggleAutoDj);
+    }
+    gui.save_now();
 }
 
 /// The DJ's side of [`Gui::act`]. True when the act was one of ours.
@@ -1550,6 +1176,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             let choice = if row == 0 { EmptyQueueStart::Random } else { EmptyQueueStart::Pick };
             let effects = gui.app.answer_dj_start(choice, remember);
             gui.pend(effects);
+            gui.save_soon();
         }
         Act::DjRemember => {
             if let Some(chooser) = gui.app.dj_chooser.as_mut() {
@@ -1557,110 +1184,97 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             }
         }
         Act::DjCancel => gui.forward(Action::Cancel),
+        Act::DjRecentToggle => {
+            if let Some(chooser) = gui.app.dj_chooser.as_mut() {
+                chooser.recent_open = !chooser.recent_open;
+                chooser.recent_seated = true;
+                chooser.recent_row = 0;
+                chooser.row = 2;
+            }
+        }
+        // One of Recently played's songs: the opening question's list, or
+        // the armed empty queue's.
+        Act::DjRecentPick(index) => {
+            let remember = gui.app.dj_chooser.as_ref().is_some_and(|c| c.remember);
+            gui.dj.recent = None;
+            let effects = gui.app.answer_dj_start_recent(index, remember);
+            gui.pend(effects);
+            gui.save_now();
+        }
         // The empty queue's openers (clause 16).
         Act::DjSurprise => gui.forward(Action::DjSurprise),
         Act::DjPick => gui.forward(Action::DjPick),
-        // The room. Start rides the toggle (the opening question, the seed rule);
-        // Stop stops wherever the DJ is armed — the toggle's "on elsewhere
-        // → move here" is the bar's rule, not a Stop button's.
+        Act::DjRecentOpen => gui.dj.recent = Some(0),
+        Act::DjRecentClose => gui.dj.recent = None,
         Act::DjStartStop => {
-            gui.dj.cursor = Some(Item::Toggle);
-            if gui.app.dj_armed() {
-                let mut effects = gui.app.disarm_dj();
-                // Off, the room describes the session's server again.
-                effects.extend(gui.app.dj_room_opened());
-                gui.pend(effects);
-                gui.save_now();
-            } else {
-                gui.forward(Action::ToggleAutoDj);
+            if gui.dj.cursor.is_some() {
+                gui.dj.cursor = Some(Item::Toggle);
             }
+            start_stop(gui);
         }
-        Act::DjFocus(item) => {
-            gui.dj.cursor = Some(item);
-            gui.dj.body.reveal = true;
-        }
-        Act::DjStep(row, delta) => {
-            gui.dj.cursor = Some(Item::Row(row));
-            edit(gui, DjEdit::Step(row, delta));
-        }
-        Act::DjSet(row, value) => {
-            gui.dj.cursor = Some(Item::Row(row));
-            edit(gui, DjEdit::Set(row, value));
-        }
-        Act::DjAnchor(anchor) => {
-            gui.dj.cursor = Some(Item::Anchor(anchor));
-            edit(gui, DjEdit::Anchor(anchor));
-        }
-        Act::DjEmpty(choice) => {
-            gui.dj.cursor = Some(Item::EmptyQueue(choice));
-            edit(gui, DjEdit::EmptyQueue(choice));
-        }
-        Act::DjGenreMode(mode) => {
-            gui.dj.cursor = Some(Item::GenreMode(mode));
-            edit(gui, DjEdit::GenreMode(mode));
-        }
-        Act::DjGenre(name) => edit(gui, DjEdit::Genre(name)),
-        Act::DjPickGenres => {
-            gui.dj.filter = Input::default();
-            gui.dj.pick_row = 0;
-            gui.dj.genres.scroll = 0;
-            let effects = gui.app.open_genre_picker();
-            gui.pend(effects);
-        }
-        Act::DjGenresClose => gui.app.close_dj_picker(),
-        Act::DjKeywordFocus => {
-            gui.dj.cursor = Some(Item::KeywordInput);
-            gui.dj.body.reveal = true;
-        }
-        Act::DjKeywordAdd => {
-            let word = gui.dj.keyword.value().trim().to_string();
-            if !word.is_empty() {
-                edit(gui, DjEdit::AddKeyword(word));
-                gui.dj.keyword = Input::default();
-            }
-            gui.dj.cursor = Some(Item::KeywordInput);
-        }
-        Act::DjKeywordRemove(word) => edit(gui, DjEdit::RemoveKeyword(word)),
-        Act::DjSource(name) => {
-            let effects = gui.app.toggle_dj_source(&name);
-            gui.pend(effects);
-        }
+        Act::DjRow(row) => press_row(gui, row, false),
+        Act::DjRowKey(row) => press_row(gui, row, true),
         Act::DjPreview => {
-            gui.dj.cursor = Some(Item::Row(DjRow::Sample));
+            if gui.dj.cursor.is_some() {
+                gui.dj.cursor = Some(Item::Preview);
+            }
+            sheets::open(gui, Sheet::Preview, false);
             let effects = gui.app.sample_dj();
             gui.pend(effects);
         }
-        Act::DjServerPick => {
-            let current = pickable_servers(gui).iter().position(|s| s.current).unwrap_or(0);
-            gui.dj.server_pick = Some(current);
+        Act::DjFirst(choice) => {
+            gui.dj.first = None;
+            edit(gui, DjEdit::EmptyQueue(choice));
         }
-        Act::DjServer(i) => {
-            gui.dj.server_pick = None;
-            if let Some(server) = pickable_servers(gui).get(i) {
-                let id = server.id.clone();
-                let effects = gui.app.dj_move_to(id);
-                gui.pend(effects);
-                gui.save_now();
-            }
-        }
-        Act::DjServerClose => gui.dj.server_pick = None,
+        Act::DjFirstClose => gui.dj.first = None,
+        Act::DjSheet(sheet_act) => sheets::act(gui, sheet_act),
+        Act::DjQuick(quick_act) => quick::act(gui, quick_act),
         _ => return false,
     }
     true
 }
 
-/// The wheel over Settings: the genre picker's list, else the room's body.
-/// False when neither is up.
+/// The wheel over the DJ's surfaces: a sheet's list, and a Recently played
+/// list — which walks under it, its window following the cursor, so every
+/// song of the twenty is the pointer's to reach. True when a layer of the
+/// DJ's is up or the room is — the room itself has nothing to scroll.
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) -> bool {
-    if gui.app.dj_panel.genres.is_some() {
-        gui.act(Act::ScrollBy(List::DjGenres, delta));
+    if sheets::wheel(gui, delta) {
         return true;
     }
-    if in_room(gui) {
-        gui.act(Act::ScrollBy(List::DjRoom, delta));
+    let last = gui.app.dj_recent_songs().len().saturating_sub(1);
+    let step = |row: usize| row.saturating_add_signed(delta as isize).min(last);
+    if let Some(chooser) = gui.app.dj_chooser.as_mut() {
+        if chooser.recent_open {
+            chooser.recent_row = step(chooser.recent_row);
+        }
         return true;
     }
-    false
+    if let Some(row) = gui.dj.recent {
+        gui.dj.recent = Some(step(row));
+        return true;
+    }
+    modal_open(gui) || in_room(gui)
+}
+
+/// What every batch of the App's is followed by ([`Gui::pend`]): an armed
+/// DJ whose queue has run out asks, once, for the songs played last on its
+/// server — the empty state's third opener (clause 16).
+pub(crate) fn follow(gui: &mut Gui) {
+    let empty = gui.app.dj_armed() && gui.app.queue.items.is_empty();
+    if !empty {
+        gui.dj.recent_asked = false;
+        gui.dj.recent = None;
+        return;
+    }
+    if std::mem::replace(&mut gui.dj.recent_asked, true) {
+        return;
+    }
+    if let Some(identity) = gui.app.dj_server.clone() {
+        let effects = gui.app.dj_want_recent(&identity);
+        gui.app.note_pending(&effects);
+        gui.pending.extend(effects);
+    }
 }
 
 /// The tips line for the DJ's surfaces, when one is up.
@@ -1668,11 +1282,14 @@ pub(crate) fn tips(gui: &Gui) -> Option<String> {
     if gui.app.dj_chooser.is_some() {
         return Some(t!("gui.dj.start_keys").to_string());
     }
-    if gui.app.dj_panel.genres.is_some() {
-        return Some(t!("gui.tips.dj_genres").to_string());
+    if let Some(tip) = sheets::tips(gui) {
+        return Some(tip);
     }
-    if gui.dj.server_pick.is_some() {
-        return Some(t!("gui.tips.dj_servers").to_string());
+    if gui.dj.quick.is_some() {
+        return Some(t!("gui.tips.dj_quick").to_string());
+    }
+    if gui.dj.first.is_some() || gui.dj.recent.is_some() {
+        return Some(t!("gui.tips.dj_list").to_string());
     }
     if gui.app.capture == Some(Capture::DjSeed) {
         return Some(t!("gui.tips.dj_pick").to_string());
@@ -1682,14 +1299,9 @@ pub(crate) fn tips(gui: &Gui) -> Option<String> {
     }
     let tip = match gui.dj.cursor {
         None => t!("gui.tips.dj_room"),
-        Some(Item::Toggle | Item::PickGenres) => t!("gui.tips.dj_button"),
-        Some(Item::Server) => t!("gui.tips.dj_server"),
-        Some(Item::Row(DjRow::Sample)) => t!("gui.tips.dj_preview"),
-        Some(Item::Row(row)) if is_bar(row) => t!("gui.tips.dj_bar"),
-        Some(Item::Row(_) | Item::Source(_)) => t!("gui.tips.dj_switch"),
-        Some(Item::Anchor(_) | Item::EmptyQueue(_) | Item::GenreMode(_)) => t!("gui.tips.dj_radio"),
-        Some(Item::GenreChips | Item::KeywordChips) => t!("gui.tips.dj_chips"),
-        Some(Item::KeywordInput) => t!("gui.tips.dj_input"),
+        Some(Item::Toggle | Item::Preview) => t!("gui.tips.dj_button"),
+        Some(Item::Row(Row::Harmonic)) => t!("gui.tips.dj_switch"),
+        Some(Item::Row(_)) => t!("gui.tips.dj_row"),
     };
     Some(tip.to_string())
 }
@@ -1700,15 +1312,18 @@ pub(crate) fn banner(gui: &Gui) -> Option<String> {
 }
 
 /// The empty queue panel's openers (clause 16): while the DJ is armed, the
-/// hint and the two ways to give it an opening song, under the label.
+/// hint and the ways to give it an opening song, under the label — a random
+/// one, one from the library, and, where the server has some, one of the
+/// songs played last.
 pub(crate) fn draw_empty_queue(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, width: usize) {
+    gui.dj.recent_anchor = None;
     if !gui.app.dj_armed() {
         return;
     }
     let forward = super::forward_glyph();
     // The hint wraps in the narrow panel; the buttons follow it.
     let mut y = y + 1;
-    for line in wrap_words(&t!("gui.queue.empty_dj_hint"), width).into_iter().take(3) {
+    for line in wrap_whole(&t!("gui.queue.empty_dj_hint"), width).into_iter().take(3) {
         put(frame, x, y, &line, dim());
         y += 1;
     }
@@ -1716,652 +1331,16 @@ pub(crate) fn draw_empty_queue(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16,
     let choose = format!("{} {forward}", t!("gui.queue.empty_dj_choose"));
     text_button(frame, gui, x, y + 1, &random, true, Act::DjSurprise);
     text_button(frame, gui, x, y + 2, &choose, false, Act::DjPick);
+    if !gui.app.dj_recent_songs().is_empty() {
+        let recent = format!("{} {}", t!("gui.dj.first_recent"), down_glyph());
+        if gui.dj.recent.is_some() {
+            put(frame, x, y + 3, &recent, accent().add_modifier(Modifier::BOLD));
+        } else {
+            text_button(frame, gui, x, y + 3, &recent, false, Act::DjRecentOpen);
+        }
+        gui.dj.recent_anchor = Some(Rect { x, y: y + 3, width: width as u16, height: 1 });
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::layout::Position;
-
-    use super::super::{Act, DJ_NAV, FILES_NAV, Gui, Screen, render};
-    use super::Item;
-    use crate::api::types::{Genre, Track};
-    use crate::config::{self, Config};
-    use crate::dj::{EmptyQueueStart, GenreMode, SonicAnchor};
-    use crate::tui::app::{App, Capture, DjMark, DjRow, Effect, KnownServer, Origin, Queued};
-    use crate::tui::worker::{ApiCmd, DjServerInfo, Event};
-
-    const HOST: &str = "http://host:3000";
-    const ATTIC: &str = "http://attic:3000";
-
-    /// English words under assertion: the locale lock, and English pinned —
-    /// the locale is process-wide, and the tests that switch it hold the
-    /// lock while they draw in another language.
-    fn english() -> std::sync::RwLockReadGuard<'static, ()> {
-        let guard = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
-        rust_i18n::set_locale("en");
-        guard
-    }
-
-    /// A connected session with a server to arm the DJ for.
-    fn session_gui() -> Gui {
-        let mut gui = Gui::new(Config::default(), false, App::new(Some(HOST.into()), None, None));
-        gui.app.connected = true;
-        gui.app.session.server = HOST.into();
-        gui.app.session.server_id = HOST.into();
-        gui
-    }
-
-    fn known(id: &str, name: &str) -> KnownServer {
-        KnownServer {
-            id: id.into(),
-            name: name.into(),
-            token: None,
-            username: None,
-            self_signed: false,
-            peer: None,
-            pairing: None,
-            dj: Default::default(),
-        }
-    }
-
-    fn track(path: &str) -> Track {
-        Track { filepath: path.into(), metadata: Default::default() }
-    }
-
-    fn queued(path: &str, dj: Option<DjMark>) -> Queued {
-        Queued { origin: Origin { server: HOST.into(), peer: None }, dj, track: track(path) }
-    }
-
-    /// The session, with the room open.
-    fn room_gui() -> Gui {
-        let mut gui = session_gui();
-        gui.act(Act::Nav(DJ_NAV));
-        assert_eq!(gui.active, DJ_NAV, "the nav row opens the room");
-        gui
-    }
-
-    fn draw_sized(gui: &mut Gui, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(frame, gui)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let area = *buffer.area();
-        (0..area.height)
-            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
-            .collect()
-    }
-
-    fn draw(gui: &mut Gui) -> Vec<String> {
-        draw_sized(gui, 100, 30)
-    }
-
-    /// The room needs the height: the body is long and scrolls.
-    fn draw_tall(gui: &mut Gui) -> Vec<String> {
-        draw_sized(gui, 110, 70)
-    }
-
-    /// The act under the first cell of `needle` on the drawn screen.
-    fn hit_text(gui: &Gui, rows: &[String], needle: &str) -> Option<Act> {
-        let y = rows.iter().position(|r| r.contains(needle))?;
-        let x = rows[y].char_indices().position(|(i, _)| rows[y][i..].starts_with(needle))? as u16;
-        gui.ui.hit(Position { x, y: y as u16 })
-    }
-
-    fn key(gui: &mut Gui, code: KeyCode) {
-        super::super::handle_key(gui, KeyEvent::new(code, KeyModifiers::NONE));
-    }
-
-    fn opener_asked(gui: &Gui) -> bool {
-        gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AutoDj(request)) if request.ask.opener))
-    }
-
-    #[test]
-    fn the_toggle_on_an_empty_queue_draws_the_chooser_and_a_click_answers_it() {
-        let _en = english();
-        let mut gui = session_gui();
-        gui.act(Act::AutoDj);
-        assert!(gui.app.dj_chooser.is_some(), "the opening question");
-        let rows = draw(&mut gui);
-        let all = rows.join("\n");
-        assert!(all.contains("Start Auto DJ with what?"), "{all}");
-        assert!(all.contains("Surprise me") && all.contains("Let me choose") && all.contains("Remember this"));
-
-        // Esc leaves the DJ off.
-        key(&mut gui, KeyCode::Esc);
-        assert!(gui.app.dj_chooser.is_none() && !gui.app.dj_armed());
-
-        // Back again; the remember box by click, then the first answer.
-        gui.act(Act::AutoDj);
-        let rows = draw(&mut gui);
-        assert_eq!(hit_text(&gui, &rows, "Remember this"), Some(Act::DjRemember));
-        gui.act(Act::DjRemember);
-        assert!(gui.app.dj_chooser.as_ref().unwrap().remember);
-        assert_eq!(hit_text(&gui, &rows, "Surprise me"), Some(Act::DjChoose(0)));
-        gui.act(Act::DjChoose(0));
-        assert!(gui.app.dj_chooser.is_none());
-        assert!(opener_asked(&gui), "the filtered opener goes out: {:?}", gui.pending);
-        assert_eq!(gui.app.dj.empty_queue, EmptyQueueStart::Random, "remembered");
-    }
-
-    #[test]
-    fn the_keyboard_belongs_to_a_field_in_the_top_layer_only() {
-        let _en = english();
-        // The search box has it while it takes text...
-        let mut gui = session_gui();
-        gui.act(Act::Nav(super::super::SEARCH_NAV));
-        for c in "a b".chars() {
-            key(&mut gui, KeyCode::Char(c));
-        }
-        let rows = draw(&mut gui);
-        let at = gui.ui.caret_at().expect("the focused search box has the keyboard");
-        assert!(rows[at.y as usize].contains("a b"), "{}", rows.join("\n"));
-        // ...and not under the chooser, whose keys are its own (Space plays):
-        // the window's paste and input method stand down for it.
-        gui.act(Act::AutoDj);
-        let all = draw(&mut gui).join("\n");
-        assert!(gui.app.dj_chooser.is_some() && all.contains("Start Auto DJ with what?"), "{all}");
-        assert_eq!(gui.ui.caret_at(), None);
-    }
-
-    #[test]
-    fn the_empty_genre_filter_has_the_keyboard_behind_its_placeholder() {
-        let _en = english();
-        let mut gui = room_gui();
-        gui.app.servers.push(known(HOST, "host"));
-        gui.app.queue.items = vec![queued("a.mp3", None)];
-        gui.act(Act::AutoDj);
-        gui.act(Act::DjPickGenres);
-        let effects = gui.app.apply_event(Event::Genres(vec![Genre { name: "Techno".into(), track_count: Some(9) }]));
-        gui.pend(effects);
-        let rows = draw_tall(&mut gui);
-        let at = gui.ui.caret_at().expect("the empty filter takes the first key");
-        let placeholder = rust_i18n::t!("gui.dj.search_genres").to_string();
-        assert!(rows[at.y as usize].contains(&placeholder), "{}", rows.join("\n"));
-        assert!(!rows[at.y as usize].contains('▏'), "the placeholder shows as it did, no caret");
-        // A composition draws in the field from the first key.
-        gui.ui.set_composition("て");
-        let rows = draw_tall(&mut gui);
-        let line = &rows[at.y as usize];
-        assert!(line.contains('て') && line.contains('▏') && !line.contains(&placeholder), "{line}");
-        assert_eq!(gui.ui.caret_at(), Some(Position { x: at.x + 2, y: at.y }));
-    }
-
-    /// `cargo test dump_dj -- --ignored --nocapture` to eyeball the chooser,
-    /// the armed empty queue, and the room in both states.
-    #[test]
-    #[ignore]
-    fn dump_dj() {
-        let mut gui = session_gui();
-        gui.act(Act::AutoDj);
-        println!("{}", draw(&mut gui).join("\n"));
-        gui.forward(crate::tui::app::Action::Cancel);
-        gui.app.dj_server = Some(HOST.into());
-        println!("{}", draw(&mut gui).join("\n"));
-        gui.app.dj_server = None;
-        println!("{}", draw(&mut gui).join("\n"));
-        gui.act(Act::Nav(DJ_NAV));
-        println!("{}", draw_tall(&mut gui).join("\n"));
-        gui.app.queue.items = vec![queued("a.mp3", None)];
-        gui.app.servers.push(known(HOST, "host"));
-        gui.act(Act::AutoDj);
-        gui.act(Act::DjStep(DjRow::Keywords, 1));
-        gui.act(Act::DjGenreMode(GenreMode::Whitelist));
-        gui.act(Act::DjGenre("Ambient".into()));
-        println!("{}", draw_tall(&mut gui).join("\n"));
-    }
-
-    #[test]
-    fn the_empty_queue_offers_the_openers_only_while_the_dj_is_armed() {
-        let _en = english();
-        let mut gui = session_gui();
-        let all = draw(&mut gui).join("\n");
-        assert!(!all.contains("Pick a random song"), "off: just the label");
-
-        gui.app.dj_server = Some(HOST.into());
-        let rows = draw(&mut gui);
-        let all = rows.join("\n");
-        assert!(all.contains("Auto DJ is on and needs an") && all.contains("opening song."), "wrapped hint: {all}");
-        assert!(all.contains("Pick a random song") && all.contains("Choose a song"));
-        assert_eq!(hit_text(&gui, &rows, "Pick a random"), Some(Act::DjSurprise));
-        gui.act(Act::DjSurprise);
-        assert!(opener_asked(&gui), "the button asks the opener of the armed DJ");
-    }
-
-    #[test]
-    fn dj_picked_rows_wear_the_badge_and_the_road_wears_its_banner() {
-        let _en = english();
-        let mut gui = session_gui();
-        gui.app.queue.items = vec![
-            queued("mine.mp3", None),
-            queued("random.mp3", Some(DjMark { sonic: false })),
-            queued("sonic.mp3", Some(DjMark { sonic: true })),
-        ];
-        let rows = draw(&mut gui);
-        let title_at = |name: &str| rows.iter().find(|r| r.contains(name)).unwrap().clone();
-        assert!(title_at("mine.mp3").contains(" mine.mp3"), "no badge on the user's row");
-        assert!(title_at("random.mp3").contains("∞ random.mp3"), "{}", title_at("random.mp3"));
-        assert!(title_at("sonic.mp3").contains("≈ sonic.mp3"), "{}", title_at("sonic.mp3"));
-
-        gui.app.capture = Some(Capture::DjSeed);
-        let all = draw(&mut gui).join("\n");
-        assert!(all.contains("Pick the opening song"), "{all}");
-    }
-
-    // ── The room ────────────────────────────────────────────────────────
-
-    #[test]
-    fn the_nav_row_opens_the_room_and_esc_only_stows_the_cursor() {
-        let _en = english();
-        let mut gui = session_gui();
-        let rows = draw(&mut gui);
-        // The TOOLS group under the play lists (row 14 since the Rated
-        // room joined LIBRARY): Auto DJ, then the sonic room's slot.
-        assert!(rows[14].contains("TOOLS"), "the group:\n{}", rows[14]);
-        assert_eq!(hit_text(&gui, &rows, "Auto DJ"), Some(Act::Nav(DJ_NAV)));
-        let nav = |r: &String| r.chars().take(15).collect::<String>();
-        assert!(!nav(&rows[15]).contains('•'), "off: the row wears no state dot:\n{}", rows[15]);
-        assert!(!rows.iter().any(|r| r.contains("LISTEN")), "Settings has no doorway any more");
-        gui.act(Act::Nav(DJ_NAV));
-        assert_eq!(gui.active, DJ_NAV);
-        let rows = draw(&mut gui);
-        let all = rows.join("\n");
-        assert!(rows[2].starts_with(" ".repeat(17).as_str()) || !rows[2].contains('◂'), "no way back:\n{}", rows[2]);
-        assert!(all.contains("• off") && all.contains("Auto DJ is off"), "{all}");
-        assert!(all.contains("Start Auto DJ ▸"), "{all}");
-        assert!(all.contains("CONTINUITY") && all.contains("Sonic similarity"), "{all}");
-
-        key(&mut gui, KeyCode::Down);
-        assert_eq!(gui.dj.cursor, Some(Item::Toggle), "↓ picks the cursor up on the button");
-        key(&mut gui, KeyCode::Esc);
-        assert_eq!(gui.dj.cursor, None, "Esc stows it");
-        key(&mut gui, KeyCode::Esc);
-        assert_eq!(gui.active, DJ_NAV, "and the room stays: a nav room has no back");
-    }
-
-    #[test]
-    fn d_opens_the_room_from_anywhere_and_the_nav_row_wears_the_armed_dot() {
-        let _en = english();
-        let mut gui = session_gui();
-        gui.app.servers.push(known(HOST, "host"));
-        gui.act(Act::Screen(Screen::NowPlaying));
-        key(&mut gui, KeyCode::Char('D'));
-        assert_eq!((gui.screen, gui.active), (Screen::Library, DJ_NAV), "the tenth room's key");
-        // Armed with a queue (no opening question), the nav row says so.
-        gui.app.queue.items = vec![queued("a.mp3", None)];
-        gui.act(Act::DjStartStop);
-        assert!(gui.app.dj_armed());
-        gui.act(Act::Nav(FILES_NAV));
-        let rows = draw(&mut gui);
-        assert!(rows[15].contains("Auto DJ •"), "the dot while armed:\n{}", rows[15]);
-        assert_eq!(hit_text(&gui, &rows, "Auto DJ •"), Some(Act::Nav(DJ_NAV)), "one click target with its dot");
-        gui.act(Act::Nav(DJ_NAV));
-        gui.act(Act::DjStartStop);
-        let rows = draw(&mut gui);
-        let nav = |r: &String| r.chars().take(15).collect::<String>();
-        assert!(!nav(&rows[15]).contains('•'), "off again, no dot:\n{}", rows[15]);
-    }
-
-    #[test]
-    fn the_button_starts_and_stops_through_the_shared_toggle() {
-        let _en = english();
-        let mut gui = room_gui();
-        gui.app.servers.push(known(HOST, "host"));
-        gui.app.queue.items = vec![queued("a.mp3", None)];
-        let rows = draw(&mut gui);
-        assert_eq!(hit_text(&gui, &rows, "Start Auto DJ"), Some(Act::DjStartStop));
-        gui.act(Act::DjStartStop);
-        assert!(gui.app.dj_armed());
-        let rows = draw(&mut gui);
-        let all = rows.join("\n");
-        assert!(all.contains("• on · picking from host"), "{all}");
-        assert!(all.contains("Auto DJ is on") && all.contains("Stop Auto DJ"), "{all}");
-        assert_eq!(hit_text(&gui, &rows, "Stop Auto DJ"), Some(Act::DjStartStop));
-        // Armed elsewhere, Stop still stops (the bar's toggle would move it).
-        gui.app.servers.push(known(ATTIC, "attic"));
-        let effects = gui.app.dj_move_to(ATTIC.into());
-        gui.pend(effects);
-        assert_eq!(gui.app.dj_server.as_deref(), Some(ATTIC));
-        gui.act(Act::DjStartStop);
-        assert!(!gui.app.dj_armed(), "off, not moved");
-    }
-
-    #[test]
-    fn switches_bars_and_radios_edit_the_running_settings() {
-        let _en = english();
-        let mut gui = room_gui();
-        let rows = draw_tall(&mut gui);
-        // The strictness bar: a click on a cell sets, ←→ step by .05.
-        let y = rows.iter().position(|r| r.contains("Match strictness")).unwrap();
-        let bx = rows[y].chars().position(|c| c == '▰' || c == '▱').unwrap() as u16;
-        let last_cell = gui.ui.hit(Position { x: bx + 9, y: y as u16 });
-        assert_eq!(last_cell, Some(Act::DjSet(DjRow::Strictness, 80)), "the last cell is the top of the band");
-        gui.act(Act::DjSet(DjRow::Strictness, 80));
-        assert!((gui.app.dj.sonic_min_similarity - 0.80).abs() < 1e-9);
-        key(&mut gui, KeyCode::Left);
-        assert!((gui.app.dj.sonic_min_similarity - 0.75).abs() < 1e-9, "← steps down");
-
-        // Radios choose.
-        assert_eq!(hit_text(&gui, &rows, "Stay on seed"), Some(Act::DjAnchor(SonicAnchor::Locked)));
-        gui.act(Act::DjAnchor(SonicAnchor::Locked));
-        assert_eq!(gui.app.dj.sonic_anchor, SonicAnchor::Locked);
-        assert_eq!(hit_text(&gui, &rows, "Let me choose"), Some(Act::DjEmpty(EmptyQueueStart::Pick)));
-        gui.act(Act::DjEmpty(EmptyQueueStart::Pick));
-        assert_eq!(gui.app.dj.empty_queue, EmptyQueueStart::Pick);
-
-        // A switch toggles by click and by Space; its detail rows follow.
-        assert_eq!(hit_text(&gui, &rows, "Sonic similarity"), Some(Act::DjStep(DjRow::Sonic, 1)));
-        gui.act(Act::DjStep(DjRow::Sonic, 1));
-        assert!(!gui.app.dj.sonic);
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(!all.contains("Match strictness"), "off: the band and the anchor fold away");
-        key(&mut gui, KeyCode::Char(' '));
-        assert!(gui.app.dj.sonic, "Space on the focused switch");
-
-        // The length window: on, then the shortest bound reads in words.
-        gui.act(Act::DjStep(DjRow::Length, 1));
-        gui.act(Act::DjSet(DjRow::Shortest, 90));
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("Over 1:30"), "{all}");
-        assert!(all.contains("Include tracks of unknown length"), "a real bound reveals the checkbox");
-    }
-
-    /// A held key on a bar is a step per repeat: each lands in the App at
-    /// once, and the file is written once the steps rest (performance audit
-    /// #86).
-    #[test]
-    fn a_held_bar_is_written_once_its_steps_rest() {
-        let scratch = crate::config::testing::Scratch::new("dj-steps-rest");
-        let mut gui = room_gui();
-        gui.config_ok = true;
-        config::save(&gui.config).unwrap();
-        let file = scratch.dir.join("config.toml");
-        let before = std::fs::read_to_string(&file).unwrap();
-        gui.act(Act::DjStep(DjRow::Length, 1));
-        for _ in 0..12 {
-            gui.act(Act::DjStep(DjRow::Shortest, 1));
-        }
-        let shortest = gui.app.dj.min_seconds;
-        assert!(shortest > 0, "the steps landed: {shortest}");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "not one write while the key is held");
-        gui.prefs_unsaved = gui.prefs_unsaved.map(|since| since - super::super::PREFS_REST);
-        gui.save_rested();
-        assert_ne!(std::fs::read_to_string(&file).unwrap(), before, "written once they rest");
-        assert_eq!(config::load().unwrap().player.dj.min_seconds, shortest);
-    }
-
-    #[test]
-    fn the_rows_line_up_at_the_value_column_and_the_help_line_explains_the_row_in_hand() {
-        let _en = english();
-        let mut gui = room_gui();
-        let rows = draw_tall(&mut gui);
-        let cells = |r: &String| r.chars().collect::<Vec<char>>();
-        // The volume widget's grammar: `-`, ten cells, `+`, the words.
-        let y = rows.iter().position(|r| r.contains("Match strictness")).unwrap();
-        let row = cells(&rows[y]);
-        let bx = row.iter().position(|c| *c == '▰' || *c == '▱').unwrap();
-        assert_eq!((row[bx - 2], row[bx + 11]), ('-', '+'), "{}", rows[y]);
-        assert!(rows[y].contains("+  55% or closer"), "{}", rows[y]);
-        assert_eq!(gui.ui.hit(Position { x: bx as u16 - 2, y: y as u16 }), Some(Act::DjStep(DjRow::Strictness, -1)), "- steps down");
-        assert_eq!(gui.ui.hit(Position { x: bx as u16 + 11, y: y as u16 }), Some(Act::DjStep(DjRow::Strictness, 1)), "+ steps up");
-        // One value column for every control.
-        let songs = rows.iter().position(|r| r.contains("Songs per fetch")).unwrap();
-        assert_eq!(cells(&rows[songs]).iter().position(|c| *c == '-'), Some(bx - 2), "{}", rows[songs]);
-        let anchor = rows.iter().position(|r| r.contains("(•) Follow the vibe")).unwrap();
-        assert!(rows[anchor].contains("( ) Stay on seed"), "the choices on one row: {}", rows[anchor]);
-        // Air: a blank row between settings, none inside one.
-        let bpm = rows.iter().position(|r| r.contains("BPM continuity")).unwrap();
-        let column = |r: &String| r.chars().skip(17).take(59).collect::<String>();
-        assert!(column(&rows[bpm + 1]).trim().is_empty(), "{}", rows[bpm + 1]);
-        assert!(column(&rows[bpm - 1]).trim().is_empty(), "{}", rows[bpm - 1]);
-        // No description beside a row; the row under the pointer explains
-        // itself in the help line under the body.
-        let all = rows.join("\n");
-        assert!(!all.contains("Only pick songs"), "{all}");
-        let sonic = rows.iter().position(|r| r.contains("[✓] Sonic similarity")).unwrap();
-        gui.ui.pointer = Some(Position { x: 22, y: sonic as u16 });
-        let rows = draw_tall(&mut gui);
-        let help = rows.iter().position(|r| r.contains("Only pick songs that sound like the session")).expect("the help line");
-        assert!(help > rows.iter().position(|r| r.contains("Preview picks")).unwrap(), "under the body");
-        // The pointer away: the cursor's row explains itself instead.
-        gui.ui.pointer = None;
-        key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Down);
-        assert_eq!(gui.dj.cursor, Some(Item::Row(DjRow::SongsPerFetch)));
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("How many songs Auto DJ queues"), "{all}");
-        assert!(!all.contains("Only pick songs"), "{all}");
-    }
-
-    #[test]
-    fn keywords_are_added_by_typing_and_removed_by_their_chip() {
-        let _en = english();
-        let mut gui = room_gui();
-        gui.act(Act::DjStep(DjRow::Keywords, 1));
-        assert!(gui.app.dj.keyword_filter);
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("No keywords. Add words below"), "{all}");
-        gui.act(Act::DjKeywordFocus);
-        for c in "live".chars() {
-            key(&mut gui, KeyCode::Char(c));
-        }
-        key(&mut gui, KeyCode::Enter);
-        assert_eq!(gui.app.dj.keywords, vec!["live"]);
-        assert!(gui.dj.keyword.value().is_empty(), "the field clears for the next word");
-        let rows = draw_tall(&mut gui);
-        assert_eq!(hit_text(&gui, &rows, "live [x]"), Some(Act::DjKeywordRemove("live".into())));
-        gui.act(Act::DjKeywordRemove("live".into()));
-        assert!(gui.app.dj.keywords.is_empty());
-    }
-
-    #[test]
-    fn genres_are_picked_in_the_modal_and_written_to_the_dj_servers_entry() {
-        let _en = english();
-        let mut gui = room_gui();
-        gui.app.servers.push(known(HOST, "host"));
-        gui.app.queue.items = vec![queued("a.mp3", None)];
-        gui.act(Act::AutoDj);
-        gui.pending.clear();
-        gui.act(Act::DjPickGenres);
-        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Genres { .. }))), "the list is asked for");
-        let effects = gui.app.apply_event(Event::Genres(vec![
-            Genre { name: "Ambient".into(), track_count: Some(4) },
-            Genre { name: "Techno".into(), track_count: Some(9) },
-        ]));
-        gui.pend(effects);
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("Pick genres · 0 selected") && all.contains("Ambient") && all.contains("Techno"), "{all}");
-        for c in "tec".chars() {
-            key(&mut gui, KeyCode::Char(c));
-        }
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("Techno") && !all.contains("Ambient"), "the search line narrows: {all}");
-        gui.pending.clear();
-        key(&mut gui, KeyCode::Char(' '));
-        let entry = &gui.app.servers[0].dj;
-        assert_eq!(entry.genres.as_deref(), Some(&["Techno".to_string()][..]), "written to the server's entry");
-        assert_eq!((entry.genre_filter, entry.genre_mode.as_deref()), (Some(true), Some("whitelist")), "choosing switches the filter on");
-        assert!(gui.pending.iter().any(|e| matches!(e, Effect::SaveDjLibrary { .. })), "and saved");
-        key(&mut gui, KeyCode::Esc);
-        assert!(gui.app.dj_panel.genres.is_none());
-        let rows = draw_tall(&mut gui);
-        let all = rows.join("\n");
-        assert!(all.contains("(•) Whitelist") && all.contains("Techno [x]"), "{all}");
-        assert_eq!(hit_text(&gui, &rows, "Techno [x]"), Some(Act::DjGenre("Techno".into())));
-    }
-
-    #[test]
-    fn the_genre_switch_and_the_mode_are_two_controls() {
-        let _en = english();
-        let mut gui = room_gui();
-        gui.app.servers.push(known(HOST, "host"));
-        let rows = draw_tall(&mut gui);
-        assert!(!rows.join("\n").contains("(•) Whitelist"), "off: no radios");
-        assert_eq!(hit_text(&gui, &rows, "Genre filter"), Some(Act::DjStep(DjRow::Genres, 1)), "the switch row");
-        gui.act(Act::DjStep(DjRow::Genres, 1));
-        assert!(gui.app.dj_library().genre_filter);
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("[✓] Genre filter") && all.contains("(•) Whitelist"), "on, whitelist by default: {all}");
-        // Blacklist chosen, then ONE click on the switch: off, and the
-        // choice is kept for the next switch on. (It used to step the
-        // mode first, so a checked whitelist landed on blacklist.)
-        gui.act(Act::DjGenreMode(GenreMode::Blacklist));
-        assert_eq!(gui.app.dj_library().genre_mode, GenreMode::Blacklist);
-        gui.act(Act::DjStep(DjRow::Genres, 1));
-        assert!(!gui.app.dj_library().genre_filter, "one click switches off");
-        assert_eq!(gui.app.dj_library().genre_mode, GenreMode::Blacklist, "the mode is kept while off");
-        let entry = &gui.app.servers[0].dj;
-        assert_eq!((entry.genre_filter, entry.genre_mode.as_deref()), (Some(false), Some("blacklist")), "two fields");
-        gui.act(Act::DjStep(DjRow::Genres, 1));
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("(•) Blacklist"), "on again as blacklist: {all}");
-    }
-
-    #[test]
-    fn a_failed_genres_load_says_so_in_the_picker_instead_of_loading_forever() {
-        // It reads English: hold the locale against the tests that switch it.
-        let _locale = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
-        rust_i18n::set_locale("en");
-        let mut gui = room_gui();
-        gui.act(Act::DjPickGenres);
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("loading genres…"), "{all}");
-        let effects = gui.app.apply_event(Event::GenresFailed("boom".into()));
-        gui.pend(effects);
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("Could not load genres") && all.contains("boom"), "{all}");
-        assert!(!all.contains("loading genres…"));
-        key(&mut gui, KeyCode::Esc);
-        assert!(gui.app.dj_panel.genres.is_none());
-        // A fresh open asks again, clean.
-        gui.act(Act::DjPickGenres);
-        assert!(gui.app.dj_panel.genres.as_ref().is_some_and(|p| p.loading && p.failed.is_none()));
-    }
-
-    #[test]
-    fn the_server_picker_moves_the_dj_and_reselecting_is_a_no_op() {
-        let _en = english();
-        let mut gui = room_gui();
-        gui.config.servers.push(config::ServerEntry { url: HOST.into(), ..Default::default() });
-        gui.config.servers.push(config::ServerEntry { url: ATTIC.into(), ..Default::default() });
-        gui.app.servers.push(known(HOST, "host"));
-        gui.app.servers.push(known(ATTIC, "attic"));
-        gui.app.queue.items = vec![queued("a.mp3", None)];
-        gui.act(Act::AutoDj);
-        let rows = draw_tall(&mut gui);
-        assert_eq!(hit_text(&gui, &rows, "host ▸"), Some(Act::DjServerPick), "the server row, several servers, while on");
-        gui.act(Act::DjServerPick);
-        assert_eq!(gui.dj.server_pick, Some(0), "opens on the DJ's own");
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("Auto DJ picks from") && all.contains("attic"), "{all}");
-        let epoch = gui.app.lane.epoch;
-        gui.act(Act::DjServer(0));
-        assert_eq!(gui.app.lane.epoch, epoch, "re-selecting is a no-op");
-        gui.act(Act::DjServerPick);
-        key(&mut gui, KeyCode::Down);
-        key(&mut gui, KeyCode::Enter);
-        assert_eq!(gui.app.dj_server.as_deref(), Some(ATTIC), "moved");
-        assert_ne!(gui.app.lane.epoch, epoch, "a new lane");
-        assert!(gui.dj.server_pick.is_none());
-    }
-
-    #[test]
-    fn a_server_known_to_predate_the_filters_hides_them_and_says_why() {
-        let _en = english();
-        let mut gui = room_gui();
-        gui.app.servers.push(known(HOST, "host"));
-        gui.app.queue.items = vec![queued("a.mp3", None)];
-        gui.act(Act::AutoDj);
-        let effects = gui.app.apply_event(Event::DjProbed {
-            identity: HOST.into(),
-            info: Some(DjServerInfo {
-                version: Some("6.5.0".into()),
-                discovery: false,
-                discovery_ready: None,
-                libraries: vec!["Music".into(), "Pods".into()],
-            }),
-        });
-        gui.pend(effects);
-        let rows = draw_tall(&mut gui);
-        let all = rows.join("\n");
-        // The rows go (the gate sentence still names them).
-        assert!(!all.contains("] BPM continuity") && !all.contains("] Genre filter") && !all.contains("Track length"), "{all}");
-        assert!(all.contains("Update to get them."), "the gate sentence, wrapped to the body: {all}");
-        assert!(all.contains("Needs server 6.15.2 or newer"), "the sonic row says why: {all}");
-        assert!(all.contains("SOURCES") && all.contains("Pods"), "{all}");
-        // Sources: one off is fine, the last one is refused.
-        assert_eq!(hit_text(&gui, &rows, "Pods"), Some(Act::DjSource("Pods".into())));
-        gui.pending.clear();
-        gui.act(Act::DjSource("Pods".into()));
-        assert_eq!(gui.app.dj_sources_off(), vec!["Pods"]);
-        assert!(gui.pending.iter().any(|e| matches!(e, Effect::SaveDjLibrary { .. })));
-        gui.act(Act::DjSource("Music".into()));
-        assert_eq!(gui.app.dj_sources_off(), vec!["Pods"], "refused");
-        assert_eq!(gui.app.message.as_ref().map(|m| m.text.as_str()), Some("At least one source is required."));
-    }
-
-    #[test]
-    fn preview_asks_three_picks_without_queueing() {
-        let _en = english();
-        let mut gui = room_gui();
-        gui.pending.clear();
-        gui.act(Act::DjPreview);
-        assert!(
-            gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AutoDjSample { count: 3, .. }))),
-            "{:?}",
-            gui.pending
-        );
-        let all = draw_tall(&mut gui).join("\n");
-        assert!(all.contains("picking…"), "{all}");
-        assert!(gui.app.queue.items.is_empty());
-    }
-
-    #[test]
-    fn a_long_genre_list_draws_its_window_and_picks_from_it() {
-        // The picker draws from the server's list where it lives, not from
-        // a copy made every frame (performance audit #110): deep in two
-        // thousand genres, the rows on screen and the pick are the cursor's.
-        let mut gui = room_gui();
-        gui.app.servers.push(known(HOST, "host"));
-        gui.app.queue.items = vec![queued("a.mp3", None)];
-        gui.act(Act::AutoDj);
-        gui.pending.clear();
-        gui.act(Act::DjPickGenres);
-        let effects = gui.app.apply_event(Event::Genres(
-            (0..2_000).map(|i| Genre { name: format!("Genre {i:04}"), track_count: Some(1) }).collect(),
-        ));
-        gui.pend(effects);
-        for _ in 0..1_500 {
-            key(&mut gui, KeyCode::Down);
-        }
-        let rows = draw_tall(&mut gui);
-        let all = rows.join("\n");
-        assert!(all.contains("Genre 1500") && !all.contains("Genre 0000"), "{all}");
-        assert_eq!(hit_text(&gui, &rows, "Genre 1500"), Some(Act::DjGenre("Genre 1500".into())));
-        assert_eq!(gui.app.dj_panel.genres.as_ref().map(|p| p.all.len()), Some(2_000));
-        key(&mut gui, KeyCode::Char(' '));
-        assert_eq!(gui.app.servers[0].dj.genres.as_deref(), Some(&["Genre 1500".to_string()][..]));
-    }
-
-    /// `cargo test --release genre_picker_frame_cost -- --ignored --nocapture`
-    #[test]
-    #[ignore = "a measurement, not a check; run --release with --nocapture"]
-    fn genre_picker_frame_cost() {
-        let mut gui = room_gui();
-        gui.app.servers.push(known(HOST, "host"));
-        gui.act(Act::DjPickGenres);
-        let effects = gui.app.apply_event(Event::Genres(
-            (0..2_000).map(|i| Genre { name: format!("Genre {i:04}"), track_count: Some(1) }).collect(),
-        ));
-        gui.pend(effects);
-        let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
-        let frames = 200;
-        let started = std::time::Instant::now();
-        for _ in 0..frames {
-            terminal.draw(|frame| render(frame, &mut gui)).unwrap();
-        }
-        let per = started.elapsed().as_secs_f64() * 1000.0 / frames as f64;
-        println!("dj genre picker, 2,000 genres: {per:.3} ms a frame");
-    }
-}
+mod tests;

@@ -3122,8 +3122,8 @@ fn draw_dest(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 // — from the chosen one behind `…` where they would not all
                 // fit (the mark steps to the one before), the last that has
                 // room for a dot, a space and a cell of its name clipped at
-                // the right, the rest reached by ← → alone (gui/dj.rs's
-                // rule: never over the border).
+                // the right, the rest reached by ← → alone (the kit's rule
+                // for choices side by side: never over the border).
                 let cells = |name: &str| 4 + width(name) as u16;
                 let total: u16 = chips.iter().map(|name| cells(name) + 3).sum::<u16>().saturating_sub(3);
                 let at = chips.iter().position(|name| *name == ui.vpath).unwrap_or(0);

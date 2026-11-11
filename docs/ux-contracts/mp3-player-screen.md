@@ -3,9 +3,10 @@
 | | |
 |---|---|
 | **Design of record** | mStream `docs/designs/mp3-tab`, alternate **A · One card** (card 02) and its several-boards frames (card 05), with the grafts the set's README recommends — chosen by Paul on 2026-10-09 ("Go with alternate A, build it"); and for the Advanced options, alternate **A · An options sheet** (card 07) with the grafts of cards 08 and 09 the set's README recommends — chosen by Paul on 2026-10-10 ("Go with alternate A, build it"). This repo's page draws it: `src/device/page.rs` over the desk worker (`src/device/desk.rs`, `board.rs`, `listen.rs`), the same page `mstream-player device flash` opens and the GUI's MP3 Player tab hosts whole. The GUI adds only the tab, the way back, and the rules that keep a write from being left and a board from being left in its bootloader. |
-| **Server API** | None. No mStream session is involved: each board is a USB serial port, asked over it with no reset (the firmware repo's `docs/HOST-STATUS.md`: `@status`, `@count`, `@identify`, and the console's `L` for firmware older than them), and the firmware written is the release this player pins — or, for one write, what the Advanced options sheet chose: the pin's other build, another release (GitHub's releases API, asked only when the sheet lists them), or a local build. |
-| **Already in this repo** | The page, live as its own command on the admin hub's terminal session; the GUI's Stats tab, which showed how a hub page lives under the top bar (the stats-screen contract), and the hub's `HostedRoom`, whose per-frame call this screen uses. The kit's gold warning modal (the libraries room's remove gate), its tab row (the Discovery room), its scan widget and its tall buttons. |
-| **Status** | Implemented 2026-10-04 (the tenth set's alternate A: the step line, the question, the erase box); **redrawn as alternate A of the eleventh set 2026-10-10** — this document first, then the page, the tab and the command line (Deviations log); **Advanced options (card 07) 2026-10-10** — the worker and the command line first, then this document's clauses 33–43, then the sheet. |
+| **Design of record, the SD card transfer** | **The card-transfer design set (twelfth set), alternates per the user's picks of 2026-10-19.** **Provisional, with no commit pinned:** it is in no repo yet and will live in mStream `docs/designs/card-transfer`; its commit is pinned here once it lands there, in a commit of its own touching this header (the README's re-extraction rule). Until then the citations below ("card 07 §7, choice 6" and the like) can't be followed from a repo. It draws the placement chosen on 2026-10-18 (Q2, one tab row per subject) whole in its card 02, with the Card view's states (card 03), the sync (card 04), the card's Settings (card 05, alternate **A**, two tabs), the gates and formatting in the Core2 (card 06, the player's second step as alternate **B**, the hold), and play history, sets and the command line (card 07, whose section 7 holds the twelve choices and the picks). This repo's page is to draw it beside the board card (`src/device/page/card.rs`), over a transfer worker that lives at the GUI level (`src/device/card/worker.rs`; part B4). |
+| **Server API** | **For a board, none.** No mStream session is involved: each board is a USB serial port, asked over it with no reset (the firmware repo's `docs/HOST-STATUS.md`: `@status` with `cid=` and `clock=`, `@count`, `@identify`, `@time`, `@format`, and the console's `L` for firmware older than them), and the firmware written is the release this player pins — or, for one write, what the Advanced options sheet chose: the pin's other build, another release (GitHub's releases API, asked only when the sheet lists them), or a local build. **For a card in a reader, its own server**: the one the card names (its URL key and nickname in `/.mstream/state.json`), reached through this computer's saved sign-in for it, never necessarily the GUI's session; a peer's library through its parent (the multi-server contract). The calls: `GET /api/` (the server's `instanceId`, mStream B11, and `features.federationProxy`, whether its peer stream proxy forwards the copy header); `POST /api/v1/sync/manifest` (paged, ETag/304) and `POST /api/v1/db/metadata/batch`; `GET /media/…` with Range, and `GET /transcode/…`; `/album-art/…` and `discovery/local/embeddings`; `POST /api/v1/stats/plays`; for peers, `federation/peers`, `…/peers/:id/access` and `file-explorer/recursive`, and the key's limits where the server offers them (mStream B10); beside the server on this computer, `admin/directories` and `admin/transcode`, to read its folders from disk (part A9). |
+| **Already in this repo** | The page, live as its own command on the admin hub's terminal session; the GUI's Stats tab, which showed how a hub page lives under the top bar (the stats-screen contract), and the hub's `HostedRoom`, whose per-frame call this screen uses. The kit's gold warning modal (the libraries room's remove gate), its tab row (the Discovery room), its scan widget and its tall buttons. For the SD card transfer: the card contract's kit, names, tag reader and Auto DJ writer (`src/device/card/{contract,names.rs,tags.rs,autodj.rs}`); cards in readers held to the drive-safety rule (`card/volume/`); set-up, the card's state file and this computer's `cards.json` (`setup.rs`, `state.rs`, `cards.rs`); the sync engine with its plan, covers, dry run, the peers' budget and sets (`engine/`, `sync.rs`, `plan.rs`, `covers.rs`, `dry.rs`, `budget.rs`, `span.rs`); the play log read and posted (`history.rs`); the transfer client (`src/api/transfer.rs`); `cid=`, `clock=` and `@time` in `listen.rs`; the hidden commands that drive them for the real-card checks (`device card-probe`, `card-setup`, `card-sync`, `card-set`, `card-plays`), and `device time` for a board's clock (clause 66a). The play outbox and `report_plays_async` (the play-reporting contract), and `session_reach`/`reach_client` (`src/gui/stats.rs`). |
+| **Status** | Implemented 2026-10-04 (the tenth set's alternate A: the step line, the question, the erase box); **redrawn as alternate A of the eleventh set 2026-10-10** — this document first, then the page, the tab and the command line (Deviations log); **Advanced options (card 07) 2026-10-10** — the worker and the command line first, then this document's clauses 33–43, then the sheet; **the SD card transfer (the twelfth set) 2026-10-19** — this document's clauses 3a, 20a, 25a and 44–67 with the user's picks (Deviations log); the card's engine, set-up, sync, sets, peers and plays are built behind hidden commands (parts A2–A9, A12, A13, B1, B2, B7, B9, B15); the transfer worker, the Card view and the public commands (B4), the Format route with `device format` (B6), and the tab's half of the clock (clause 5, B13), are built (Deviations log). |
 
 ## Intent
 
@@ -17,6 +18,16 @@ choice about what is written — the flash mode, another release, a local
 build — behind one *Advanced…* sheet. The same page is `mstream-player
 device flash`, so a terminal gets it too.
 
+The tab also holds the SD card itself, when it sits in this computer's
+card reader. Put the card in and see at once what it holds, how full it
+is, when it was last synced and what the next sync would do. One key fills
+it from your mStream server and keeps it in step. Every change that
+removes music or rewrites the card passes a gold gate first; a format is
+started here and confirmed on the player. The sync belongs to the whole
+app, not to the tab, so leaving the tab or listening to music meanwhile
+never stops it. The same is `mstream-player device card …`, so a
+terminal gets it too.
+
 ## Entry points
 
 1. The top bar's **MP3 Player** tab, fourth after Library, Stats and Admin,
@@ -27,7 +38,11 @@ device flash`, so a terminal gets it too.
    room of the Library, `0` for Now Playing, `V` for the visualizer — but
    never while the page writes (clause 9).
 4. **`mstream-player device flash`**, on its own (clause 31), and its line
-   mode `--yes` (clause 32).
+   mode `--yes` (clause 32); **`device list`**, **`device format`** and
+   **`device time`** (clauses 32, 66, 66a).
+5. **`mstream-player device cards`** and **`device card <drive>
+   status|setup|sync|plays|eject [--yes]`**, the cards' line mode (clauses
+   64–67).
 
 ## States & flows
 
@@ -55,28 +70,67 @@ comes from the cache, or a download, beside them.
   worker may still have a port is kept aside until it has (clause 8).
 - **Coming back** builds a fresh page: every board is asked again, the
   image comes from the cache.
-- **The session** has nothing to do with the screen: with no server
-  configured the tab works the same, and a server switch or a reconnect
-  leaves the page alone.
+- **The session** has nothing to do with a board: with no server
+  configured the board side works the same, and a server switch or a
+  reconnect leaves it alone. **A card uses its own server** (clause 3a):
+  it reads the same whichever server the Library is on, and a card whose
+  server isn't saved here says so.
+- **A card in a reader** is a subject like a board. It has a tab on the
+  same row (clause 25) and its own view under it, the **Card view** (clause
+  44). Its tab appears when the computer mounts it, with nothing written,
+  and goes when the card is taken out, except during its sync (clause 53).
+- **A sync** runs on the transfer worker, which the GUI owns (clause 55).
+  It starts from the Card view's Sync, after any gate the plan needs
+  (clause 58). The Card view follows it; leaving the tab, another subject
+  or another screen never stops it; Done is the Card view again (clause
+  54).
+- **Formatting** is the board's. A card the player can't read is offered
+  Format on the board's SD row, and a card it reads in Details (clause 59).
+  The tab asks; the player confirms on its own screen and formats; the PC
+  never writes the card's file system.
 
 ## Behavior contract
 
 ### The screen
 
-1. **It is the firmware page, whole** — `mstream-player device flash` with
-   no flags: the firmware this player pins, every Core2-shaped port watched,
-   the erase decided in the gate. It is drawn under the top bar in the rows
-   the page spends on its own header: its first row blank under the bar, no
-   header of its own (the top bar is the screen's heading; the firmware's
-   version and origin are in Details), no tips row of its own (the GUI's
-   footer carries the page's hint, clause 15), the busy and note line on the
-   page's last row. The page's worker, keys, buttons and words are the
-   command's.
+1. **It is the firmware page, whole, and the cards' view beside it** —
+   `mstream-player device flash` with no flags (the firmware this player
+   pins, every Core2-shaped port watched, the erase decided in the gate),
+   plus every card in this computer's readers (clauses 44–63). It is
+   drawn under the top bar in the rows the page spends on its own header:
+   its first row blank under the bar, no header of its own (the top bar is
+   the screen's heading; the firmware's version and origin are in
+   Details), no tips row of its own (the GUI's footer carries the page's
+   hint, clause 15), the busy and note line on the page's last row. The
+   page's worker, keys, buttons and words are the command's; the cards'
+   are the GUI's alone (clause 31).
 2. **The GUI's queue panel, bar and note row stand down**, as on Stats.
    The top bar stays.
-3. **No session is involved.** The tab works with no server saved; a
-   server switch, a reconnect or a session that drops does nothing to the
-   page, and the page is never rebuilt for one.
+3. **No session is involved for a board.** The board side works with no
+   server saved. A server switch, a reconnect or a session that drops does
+   nothing to a board's card, and the page is never rebuilt for one.
+
+3a. **A card uses its own server.** A card in a reader names the server
+   that filled it: a URL key and a nickname in its `state.json`, never an
+   address, token or username.
+   - The Card view reaches that server through this computer's saved
+     sign-in for the saved server with that key, whatever the GUI's
+     session is on. A peer's rows go through its parent.
+   - No saved server has that key: the card says so and offers to add one
+     (clause 45).
+   - A saved sign-in that no longer works: the card offers to sign in
+     again, to that server only, and the Library stays where it is.
+   - A new card takes the session's server, changeable in its Settings
+     (clause 48).
+   - With no server saved on this computer at all, set-up still works
+     (clause 50): it writes the structure, the first commit and the name,
+     and leaves the card's server empty. The Card view then says "No server
+     saved on this computer yet" with *Add the server ▸* (the GUI's
+     add-server form, `[+]`), and the card takes the first server saved,
+     changeable in Settings. Nothing is synced until it has one.
+   - A server switch in the GUI changes nothing on a card's view or its
+     sync.
+
 4. **It fits the GUI's floor.** At 100×24 the page has 22 rows — the
    footer is always drawn on this tab (clause 15) — and in every locale the
    tallest card (an action, Details closed, the port tabs and the identity
@@ -91,6 +145,24 @@ comes from the cache, or a download, beside them.
    click there (clauses 12 and 14); while it writes, the mini player's line
    says so — that unplugging the board or quitting would leave it half
    written — in place of asking for room.
+
+   With cards, every Card view at rest is still drawn whole at 100×24 in
+   every locale, its primary included. With the tab row the card has 16
+   rows inside its border, and the tallest states take all 16 in German: a
+   card with no `device.txt` yet (its assumed player wraps to two lines)
+   and a card whose server isn't saved here (the set's card 03 §8, which
+   draws them with the third tallest, new with music of its own, 15). A
+   set's card takes 15, the board card with its card line (clause 20a) 15,
+   the ready card 14. The tallest run state, Done with skipped files and a
+   refused source, takes 14 (card 04).
+
+   Should a locale run longer, the Card view gives way in this order: its
+   dim explanation lines, the last first; then the Converts row; never the
+   head, Holds, Space or the bottom row with its primary. The board card's
+   card line (clause 20a) gives way before any of the board's own rows. The
+   card's Settings sheet fits the floor whole with a one-line fit (clause
+   49); a longer fit line gives way the help first, then blank lines. Every
+   gate fits with its buttons, its blank lines going first.
 
 ### The boards
 
@@ -122,6 +194,51 @@ comes from the cache, or a download, beside them.
    waits for it — the tab says "letting the USB ports go…", or "restarting
    the board…" when a read was under way — and starts its worker once
    every port is free: a new worker never meets the old one's port in use.
+
+   **The one write a listen makes is the clock** (the firmware repo's
+   `docs/HOST-STATUS.md`, "@time", as at its commits 09874f5 and 79a7438).
+   `@status` says only whether the board has a time (`clock=ok` or
+   `clock=unset`); the time itself is asked by a bare `@time`, answered
+   `@time <unix-ms>` or `@time unset`, at once and changing nothing.
+   - A board whose `@status` has a `clock=` key is asked a bare `@time`
+     once per listen, after its status, on the port the listen holds; a
+     clock set is not read back. This computer's time is taken halfway
+     between the question and its answer.
+   - When the answer is `@time unset`, or a time more than 2 s from this
+     computer's (`listen::CLOCK_SLACK`: a restart alone leaves the board's
+     clock within 1.5 s of the time set), it is sent one `@time <unix-ms>`
+     (this computer's `SystemTime::now()`, in ms since 1970, UTC), and the
+     firmware answers `@time ok`. The log says "the player's clock was
+     unset: set it (@time)" or "the player's clock was 3.2 s off: set it
+     (@time)", and Details' *Clock* fact says when (clause 61).
+   - This computer's own clock outside 2026–2099 (the range the board
+     takes) sends nothing; `@err 5 time`, and `@err 4 time rtc` (the
+     board's clock chip didn't take it), leave the board as it was. The
+     log says so once, in gold, and the listen goes on; the next listen
+     tries again. So does a board that answers no `@time` within the
+     reply's wait ("the player didn't answer @time"), and any other
+     answer, word for word.
+   - The page's listens do this, the tab's and `device flash`'s alike;
+     `device flash --yes`'s lines, `device list` and `device format` only
+     listen. `device time` reads and sets one board's clock the same way
+     (clause 66a), and reads it once more after a set (its `after`), for
+     the device checks.
+   - A listen told to stop (the tab left, a write asked for) sends no
+     `@time <unix-ms>`. A set the board answered `@time ok` before the
+     stop is still said and kept for Details, and a refusal it gave is
+     still said; only a silence the stop cut short, or a port that failed
+     meanwhile, is said by none.
+   - A board whose `@status` has no `clock=` (before 0.14.0) is never
+     asked: absence is how the page tells, never the version. Should one
+     answer `@err 7 time` anyway, it is left as it is.
+   - Nothing else is written and no reset follows. Neither form of `@time`
+     is sent during a write, a read, a count or a format.
+
+   **The readers are watched beside the ports, every 2 s**, by the
+   transfer worker (clause 55). A card the computer has mounted is read
+   (its root, `state.json`, `device.txt`, the play log) with nothing
+   written; its server is then asked once what changed (one manifest
+   request, 304 when unchanged).
 6. **Every frame while the page exists**, the host does what the hub's
    loop does: the worker's reports are folded in (the worker watches the
    ports every two seconds by itself), a held button steps, the tooltip
@@ -133,7 +250,8 @@ comes from the cache, or a download, beside them.
    port is free: at once for a page that never saw a board, a moment later
    for listens (they let their ports go at once), after the board's restart
    for a read under way. The screen then goes to the Library and lets the
-   page go.
+   page go. A sync is not the page's: Esc during a sync goes back to the
+   Library and the sync goes on (clause 55).
 8. **Leaving the tab any other way lets the boards go** — another tab,
    `K`, a nav digit, `D`, `0`, or any screen change from elsewhere. Before
    or after a write that is safe: the tab tells the worker to let go as Esc
@@ -144,26 +262,43 @@ comes from the cache, or a download, beside them.
    until the worker says every port is free (`Released`) — at most eight
    seconds — then dropped; a page that never saw one is dropped at once. No
    board is left in its bootloader by leaving, and no visit meets its own
-   port in use.
+   port in use. Leaving never stops a sync or a format: the sync is the
+   GUI's worker's, and a format runs on the player (clause 59). A page kept
+   aside lets its boards' ports go as before; the transfer worker holds no
+   serial port.
 9. **The write cannot be left.** From a gate's yes until the board's write
    has ended — written and restarted, or failed — and for Update all until
    the last board's has, the tab holds the GUI:
-   - every key is the page's, and only `d` and `l` (Details) and `←` `→`
-     (look at another board, clause 26) do anything: `q`, `K`, `T`, `M`,
-     `0`, the digits, `D`, `V`, Tab, Esc, Enter and the transport letters
-     do nothing;
+   - every key is the page's, and only `d` and `l` (Details), `←` `→`
+     (look at another board or card, clause 26) and `x` on a card whose
+     sync runs (below; clause 57) do anything: `q`, `K`, `T`, `M`, `0`,
+     the digits, `D`, `V`, Tab, Esc, Enter and the transport letters do
+     nothing;
    - the top bar's clicks do nothing — the tabs, the Visualizer item, the
      server label and `[+]` — and its tabs do not light under the pointer;
      below the floor the mini player's buttons answer nothing either;
    - no screen change from anywhere is honoured, and the page is never
      dropped.
+
+   The lock covers the whole tab, cards included. `←` `→` still switch to a
+   card to look at it, and nothing on a card can start meanwhile: no Sync,
+   no Settings, no gate. A sync already running goes on beside the write,
+   since they share no device, and `x` on that card is still honoured: it
+   stops the sync at its next save and writes nothing to any board. The
+   footer stays the write's (it has no room for more); the card's own *Stop
+   at the next save* link names the key.
 10. **Ctrl+C, the window's close button and, on macOS, Cmd-Q and the app
     menu's (or the Dock's) Quit still quit**, as on every GUI screen and
     as in the standalone page: they are the ways to cut a write short, and
     they leave the board half written (writing it again fixes that: its ROM
     bootloader always answers). The write's hint, on the footer, warns
     against unplugging the board; the mini player's line, while the write
-    runs out of sight, names quitting too (clause 4).
+    runs out of sight, names quitting too (clause 4). During a write these
+    quit at once even while a sync runs: the write's rule wins, no gate is
+    shown (no modal outranks the page during a write), and the sync is cut
+    where it stands and recovered at its next run from its last save (the
+    card contract's crash table). With no write under way, a quit during a
+    sync is clause 57's.
 11. **Quitting lets the boards go first.** When the player quits (any way:
     `q`, Ctrl+C, the window's close button, Cmd-Q) with a page — the tab's,
     or one kept aside — that has seen a board, the GUI tells its worker to
@@ -172,7 +307,10 @@ comes from the cache, or a download, beside them.
     way. The wait is bounded at eight seconds, and in the terminal a wait
     past a second says why on stderr (`dev.letting_go`). With no page, a
     page that never saw a board, or a write under way, the quit does not
-    wait. The standalone page does the same on its way out.
+    wait. The standalone page does the same on its way out. With a sync
+    under way and no write, the quit is clause 57's: it waits for the
+    sync's next save, at most about 30 s, after the gate where the way of
+    quitting has one.
 
 ### Keys and the pointer
 
@@ -199,6 +337,24 @@ comes from the cache, or a download, beside them.
     modal outranks the page, and not during a write. The page's keys reach
     it only where it was drawn last frame: below the floor, in the mini
     player, none do.
+
+    With cards (clause 25) the page's keys are those of the subject in view
+    (the user's pick of 2026-10-19, the set's card 07 §7, choice 6):
+    - **on a board**, the keys above, plus `f` (Format as FAT32…, clause
+      59) where the format is offered: for a card the player can't read
+      whatever Details shows, for one it reads only with Details open, as
+      `w`;
+    - **on a card**, Enter (the primary), `d` and `l` (Details), `o`
+      (Settings…), `e` (Eject), `p` (Send the plays), `x` (Stop at the next
+      save) and `h` (Not a card? Hide it, clause 63);
+    - `←` `→` walk every subject, boards then cards, wrapping;
+    - with the card's Settings sheet up, its keys are the Advanced sheet's
+      (clause 34), plus `←` `→` between its two tabs while no row has the
+      keyboard;
+    - with a gate up, its keys are clause 23's, `y` `n` `e` Enter Esc, in
+      place of the subject's: in the stronger removal gate `e` (or a click)
+      flips its box, as it flips the install gate's erase box, and is not
+      Eject there (clause 58).
 13. **`K` is the tab's key**: from the Library, Now Playing, Stats and the
     Admin hallway it opens the tab, and on the tab it leads back to the
     Library. Its lowercase is no key of the GUI's, so no slip of Shift or
@@ -214,7 +370,9 @@ comes from the cache, or a download, beside them.
     page. A GUI modal or the server menu owns the pointer while it is open,
     as elsewhere (outside a write, clause 9). The wheel scrolls the page's
     log, and never the hidden Library room or queue. Below the floor the
-    page takes no click.
+    page takes no click. With cards, the card tabs, the Card view's links
+    and primary, its Settings sheet and the transfer's gates are the page's
+    the same way (clauses 44, 48, 58).
 15. **The footer** is always drawn on this tab, whatever the key-hints
     setting — the page's hint is part of the page, the write's warning not
     to unplug the board above all — and the page's area ends above it. It
@@ -223,12 +381,21 @@ comes from the cache, or a download, beside them.
     goes. The hint names the keys that do something on the board in view —
     the primary's verb first after the switch keys — and never runs past 99
     cells: in a long locale the lesser keys give way before the primary,
-    Details and Esc — `s`, `a` and `o` first, then `c`, `w`, `r` and `x`.
-    With the sheet up the hint is the sheet's (clause 34), its Esc and
-    Enter never giving way. It outranks the queue panel's
+    Details and Esc — `s`, `a`, `o` and `f` first, then `c`, `w`, `r` and
+    `x`. Where *Format as FAT32 ▸* is the primary its verb is Enter's
+    (`Enter format`) and `f` is not named again. With the sheet up the
+    hint is the sheet's (clause 34), its Esc and Enter never giving way. It
+    outranks the queue panel's
     and an armed pick's tips; only a GUI modal's own come first, and none
     during a write. While a visit waits for the last page to let its ports
     go, the footer is empty.
+
+    On a card the hint names that card's keys, the primary's verb first
+    after the switch keys. The switch word is "switch" once a card shares
+    the row; boards alone keep "player". The lesser keys give way in a long
+    locale before the primary, Details and Esc: `p` first, then `h`, `o`
+    and `e`. During a sync the hint is "x stop at the next save · d details
+    · Esc library", none of it giving way.
 16. **The strip**: Library, Stats, Admin, MP3 Player, then the Visualizer
     item. The session's server label at the right never covers it: the
     label starts at least a blank cell past the Visualizer item, cut short
@@ -236,7 +403,11 @@ comes from the cache, or a download, beside them.
     tabs keep every cell and every click. At the GUI's 100 columns a local
     server's label, `http://localhost:3000 ▾`, stands whole in every
     locale; a quick-connect session's or a LAN address's may be cut in the
-    longer ones.
+    longer ones. While any sync runs, the strip's MP3 Player tab wears its
+    percentage after its name, in the accent (dim while paused): ` MP3
+    Player 28% ` (the user's pick of 2026-10-19 over a chip at the top
+    bar's right; card 07 §7, choice 3). The server label's cut rule
+    measures the strip with it. The mark goes at the sync's end.
 17. **The tab wears the slab** while the screen is up, as the other tabs
     do.
 
@@ -289,6 +460,21 @@ comes from the cache, or a download, beside them.
       no write primary and no next write chosen, the dim text button **Write
       v0.8.0 again** (`w`), behind the same gate. A failed write shows only the Port fact before
       the log, so the log's last lines are what Details opens on.
+
+    With cards the board card's rows are unchanged but for two things: the
+    card line under the SD card row (clause 20a), and one more primary. For
+    a card the player can't read (clause 59), *Format as FAT32 ▸* is the
+    primary when the verdict has none and the board reports its card: ✓ Up
+    to date, ahead of the pin, or ? Version not recognised (a board's
+    status keys say whether it can format, never its version: clause 59).
+    The other verdicts with no primary, Starting up and Not a Core2, have
+    no card to format. A verdict with a primary keeps it (*Update ▸*,
+    *Install ▸*, …, and a next write's direction): that primary wins, and
+    the format waits for it.
+    Meanwhile the format is the dim text button *Format as FAT32…* under the
+    SD card row, behind the format's gate (clause 59), its key `f`. For a
+    card the player reads, *Format as FAT32…* is in Details only. A damaged
+    card's *Format as FAT32 anyway…* is never the primary (clause 60).
 19. **The verdict** is the board's own word against the pin, never
     guessed:
     - **✓ Up to date · v0.8.0** (ok green): the board's version equals the
@@ -335,6 +521,11 @@ comes from the cache, or a download, beside them.
       bootloader…** and "The screen is dark a few seconds; it restarts as
       it was."
     - During its write the row is the write itself (clause 23).
+
+    Where a verdict above has no primary and its board reports its card —
+    Up to date, ahead of the pin, Version not recognised — a board whose
+    card the player can't read wears *Format as FAT32 ▸* (clause 18); the
+    verdict's own words are unchanged.
 20. **The SD card row** shows only what the running firmware just reported
     — never a number from before a reset, never a guess — in decimal GB
     with one decimal, as the Core2's About shows them:
@@ -356,10 +547,51 @@ comes from the cache, or a download, beside them.
       again"); firmware too old to report it ("? v0.7.0 can't report the
       card." — and "Updating shows it." only when the pinned release
       answers the status query, which the pin says beside its checksum:
-      v0.10.0 does, as every release from v0.9.0 on; v0.8.0, the pin the
+      v0.14.0 does, as every release from v0.9.0 on; v0.8.0, the pin the
       examples here were drawn with, did not); a board that is not
       mStream firmware ("? Only mStream firmware can read the card"); a
       port in use ("? unknown until the port is free").
+
+    With formatting in the player (clause 59), the fix lines for an exFAT,
+    NTFS or GPT card name the player as the formatter
+    (`dev.card_fix_format`, `dev.card_fix_mbr`: "Fix: format it as FAT32 in
+    the player (below). That erases the whole card.") on a board that can
+    format: its status carries `clock=` (clause 59). On one that can't, no
+    line points below at a format that isn't there:
+    - while the pinned release formats (the pin v0.14.0, the first that
+      does), clause 59's line takes the fix line's place, "v0.11.0 can't
+      format a card. Updating lets it.", with the verdict's *Update ▸* (the
+      set's card 06 §4);
+    - while it doesn't (every pin before v0.14.0), the fix lines keep the
+      words from before the format ("Fix: format it FAT32 (MBR) on a
+      computer. That erases it." and its MBR twin), moved with their ten
+      locales to `dev.card_fix_format_pc` and `dev.card_fix_mbr_pc`, and
+      clause 59's line, "v0.11.0 can't format a card.", follows them.
+
+    The line that says where music goes under a card with no tracks gives
+    way to clause 20a's *not filled yet* line on a card whose `cid=` is
+    `-`.
+
+20a. **The board names its card.** Once the firmware reports `cid=`
+   (0.12.0: `@status`'s card id and commit), the SD card row adds one dim
+   line under its numbers.
+   - A card this computer has synced (its id in `cards.json`): "This is Car
+     music · synced 3 days ago from Home". A set's card names itself
+     ("Everything 2/2").
+   - Its commit older than the last one this computer wrote, which happens
+     when the card was synced and put back while the board was on: a
+     second line says "The player still plays the music from before the
+     last sync: restart it to load the new." Nothing restarts the board
+     from here.
+   - An id this computer never saw: "Filled by mStream on another
+     computer."
+   - `cid=-` on a FAT card: "Nothing from mStream on it yet: put it in this
+     computer's card reader to fill it."
+   - A board whose status has no `cid=` (before 0.12.0, or the key left
+     out of a long line): no line.
+
+   The line gives way first at the floor (clause 4).
+
 21. **The count.** Where free space is not counted, on a board that
     answers the status query, the row offers **Count free space** (`c`, a
     dim text button, "a minute or more on a big card"): one `@count`, never
@@ -425,22 +657,50 @@ comes from the cache, or a download, beside them.
     the line is "Replaced v0.9.0 just now. The SD card was not touched."
     The board's own first line, the plan and the checksum are in the log.
 
-### Several boards
+### Several boards, and cards in readers
 
-25. **Port tabs.** With two boards or more plugged in, the kit's tab row
-    stands above the card: one tab per board in the order the OS lists the
-    ports, its short port name (`ttyACM0`, not `/dev/ttyACM0`) and its
-    mark — ✓ green, ! and ✗ gold, ? and `…` dim, a write's percentage in
-    the accent, `in use` dim — the open one the slab. `←` `→` (wrapping) or
-    a click switch; the card is that board's, with its own verdict and
-    primary. The row's right edge says the count: "1 of 2 needs an update"
-    (gold) where one does, **Update all (2)** (a dim text button, `a`)
-    where two or more do, "2 players plugged in" otherwise, or the mix
-    ("2 players · 1 other board", "1 player · 1 in use", "asking COM7…");
-    during a write "writing COM3…", during Update all "Update all · 2 of
-    3". A board counts as a player only once it answers as mStream
-    firmware. Down to one board, the row goes and the card is the single
-    card again; nothing is reset.
+25. **The tab row of subjects.** With two subjects or more — boards
+    plugged in, cards in this computer's readers — the kit's tab row stands
+    above the view: one tab per board in the order the OS lists the ports,
+    then one per card in a reader, by drive.
+    - A board's tab: its short port name (`ttyACM0`, not `/dev/ttyACM0`)
+      and its mark — ✓ green, ! and ✗ gold, ? and `…` dim, a write's
+      percentage in the accent, `in use` dim.
+    - A card's tab, on Windows: its drive letter, then its name (its
+      `state.json` name, else its volume label, else "new card"); elsewhere
+      its name alone (the user's pick of 2026-10-19, card 07 §7, choice
+      11). Its mark is clause 25a's.
+    - The open tab is the slab. `←` `→` (wrapping) or a click switch, and
+      the view is that subject's: a board's card, with its own verdict and
+      primary, or a card's Card view.
+    - The right edge says, in order of precedence: the write's words
+      ("writing COM3…") and Update all's ("Update all · 2 of 3"); "syncing
+      Car music…" while a sync runs; "reading E:…" while a card is read;
+      the needs-an-update count, "1 of 2 needs an update" (gold) where one
+      does and **Update all (2)** (a dim text button, `a`) where two or
+      more do; else the count of players and cards ("2 players plugged
+      in", "1 player · 1 card", "2 cards"), or the mix ("2 players · 1
+      other board", "1 player · 1 in use", "asking COM7…"). A board counts
+      as a player only once it answers as mStream firmware.
+    - Short of room, the cards' names give way first, down to the drive or
+      six cells of the name; then the right edge's text; then the last
+      tabs (still reached by `←` `→`).
+    - Down to one subject, the row goes and the view is that subject's
+      alone; nothing is reset. A board plugged in never takes the view; a
+      card put in takes it only from the empty card (clause 30; the user's
+      pick of 2026-10-19, card 07 §7, choice 4).
+
+25a. **A card's mark:**
+   - ✓ green: in step with its server, as far as the last answer goes;
+   - ! gold: something waits (new tracks, removals, plays to send, waveforms,
+     set-up, a sign-in);
+   - ✗ gold: it can't be synced here (not FAT32, not a disk of its own,
+     write-protected, a newer format, a disk check first);
+   - ? or … dim: being read, or its server being asked or not answering;
+   - a sync's percentage, in the accent while it runs and dim while it's
+     paused;
+   - `out`, dim: a card taken out during its sync (clause 53).
+
 26. **Look, don't write.** During a write the other boards can be switched
     to and looked at; their facts stay as read, and a board plugged in
     meanwhile is asked as usual. Nothing else starts: no second write, no
@@ -449,7 +709,8 @@ comes from the cache, or a download, beside them.
     one can follow COM3.". The writing board stays in view: its tab carries
     its percentage, the busy line its progress whichever card is open
     ("COM3 · writing v0.8.0… 62% · about 15 s left"), and the footer names
-    it ("please wait — unplugging COM3 now would leave it half written").
+    it ("please wait — unplugging COM3 now would leave it half written"). A
+    card's view during a write is looked at only (clause 9).
 27. **Show on the player** (`s`, a dim text button beside Details) asks a
     board that answers the status query, with two boards or more plugged
     in, to show "This one" and its port's short name on its screen for five
@@ -465,8 +726,14 @@ comes from the cache, or a download, beside them.
     each in its own mode. It
     only updates: never an install, an erase or a step back, and a board
     whose bootloader shows anything but an older release of ours is left
-    as it was. A board unplugged before its turn is passed over; the first
-    failure stops it, and the next board is not started. As it goes, each
+    as it was. A board unplugged before its turn is passed over. A board
+    whose card is being formatted is never written, since a write never
+    cuts a format (clause 59): Update all doesn't take a board with
+    something under way, no format starts while it runs (clause 26), and a
+    board found formatting at its turn all the same is passed over, which
+    the log says ("update all: COM3 is formatting its card — passed over",
+    `log_all_formatting`). The first failure stops it, and the next board
+    is not started. As it goes, each
     board's result is the busy line ("COM3 written and checked in 44 s"),
     and at its end "2 players updated in 1 min 31 s, one after the other.
     Nothing on their SD cards changed." — or, stopped, the board that
@@ -481,14 +748,27 @@ comes from the cache, or a download, beside them.
     state, not the page's failure: "! In use by another program", who might
     hold it and the way out, the SD card unknown until the port is free,
     and **Ask again** (`r`). The page never takes a port back by itself,
-    and holds a port only while it talks to its board.
-30. **No player.** With no Core2-shaped port the card is still there,
-    empty: "No player plugged in", one line on what to do, and the kit's
-    scan widget "watching the USB ports…" — the worker looks every two
-    seconds, so there is no Look again and no Close. **▸ Not showing up?**
-    (`d`) opens today's hints unchanged (a cable that carries data, M5Stack's
-    driver, Linux's dialout group) and the serial ports seen. Ports that
-    cannot be listed at all say so in gold.
+    and holds a port only while it talks to its board. A card put in is
+    read with its tab marked `…` and the busy line "E: put in: reading the
+    card…"; once read, the busy line says once what the next sync would do.
+    A card taken out takes its tab with it ("Car music was taken out of E:.
+    Nothing was being written to it."), but a card in its sync keeps its
+    tab (clause 53).
+30. **Nothing plugged in.** With no Core2-shaped port and no card in a
+    reader, the view is still there, empty:
+    - "Nothing plugged in", one line on what to do ("Plug the Core2 in over
+      USB, or put its SD card in this computer's card reader. Each shows up
+      here by itself."), and the kit's scan widget, "watching the USB ports
+      and card readers…". The workers look at both every two seconds, so
+      there is no Look again and no Close.
+    - Where the OS shows empty readers (Windows gives them drive letters),
+      one dim line names them: "Card readers here: E: and F:, empty."
+    - **▸ Not showing up?** (`d`) opens today's hints unchanged (a cable
+      that carries data, M5Stack's driver, Linux's dialout group), plus
+      two: a card shows up once the computer has mounted it, and the
+      computer's own disks and fixed disks are never listed. Then the
+      serial ports seen and the card readers seen.
+    - Ports or volumes that cannot be listed at all say so in gold.
 
 ### The command line
 
@@ -500,6 +780,8 @@ comes from the cache, or a download, beside them.
     `--flash-mode` its build — each board's next write, never what a board
     is measured against (clause 43) — `--port` keeps the page to that one
     board, and `--erase` / `--no-erase` set the gate's erase (clause 23).
+    The standalone page shows boards only: cards are the GUI tab's and
+    `device card`'s (clause 65).
 32. **`--yes` keeps its printed steps.** One board: today's lines — the
     firmware, the board as its bootloader read it, the plan, the percents,
     Done and the board's first line — with no gate (the flags answer it);
@@ -515,7 +797,9 @@ comes from the cache, or a download, beside them.
     mode (or `--flash-mode`'s). `device list` asks every board at once with
     no reset and prints today's line, then its verdict and its card;
     `--ports` prints today's lines and opens nothing; exit 0 with boards, 1
-    with none, 2 when the ports cannot be listed.
+    with none, 2 when the ports cannot be listed. `device list` appends a
+    board's card when `cid=` names one this computer knows ("· Gym (synced
+    yesterday)").
 
 ### Advanced options
 
@@ -555,7 +839,8 @@ comes from the cache, or a download, beside them.
       (clause 36).
     - **ERASE**: `[ ] Erase the whole flash first — loses the settings`
       (`[✓]` ticked, Space or a click).
-    - **The help line** (the Auto DJ room's): a dim rule and at most two
+    - **The help line** (as the Auto DJ room drew one before its
+      2026-11-10 redesign, which dropped it): a dim rule and at most two
       dim lines about the focused group — what the pin is and that "Up to
       date" always means it, when GitHub is asked, what DIO costs and buys,
       what a local build is checked for, what an erase loses. Short of rows
@@ -628,7 +913,7 @@ comes from the cache, or a download, beside them.
     its own bootloader header (byte 3's low nibble: `F` the QIO build, `0`
     the DIO build), never from its name; a board's from the ELF id it
     reports, against every release's QIO/DIO pair the player carries
-    (v0.5.0–v0.10.0, bumped with the pin) and the images it has had in hand
+    (v0.5.0–v0.14.0, bumped with the pin) and the images it has had in hand
     this run. A board whose ELF says its DIO was chosen (a release that had
     both builds) says so under its chip, once, dim: "In DIO (runs on every
     Core2): updates keep it." — and its Update ▸ and Update all write the
@@ -750,6 +1035,685 @@ comes from the cache, or a download, beside them.
     a DIO board's version. Every choice the sheet makes the flags can make,
     and the reverse, but an app alone (the command line's only).
 
+### Cards in a reader
+
+44. **The Card view.** A card in a reader is shown as one dim rounded card
+    in the board card's grammar: 78 cells, a 14-cell label column, the █░
+    bar, one primary bottom right. Top to bottom:
+    - **the head:** the card's name in bold ("Card in E:" until it has
+      one), and at the right, dim, its drive and file system ("E: ·
+      FAT32");
+    - **Holds:** its libraries and their server ("Rock, Jazz from Home"),
+      one server after another for a card with peers;
+    - **Space:** a bar of used space across the value column, and under it
+      "41.2 of 63.8 GB used · 4,812 tracks" at the left and "22.6 GB free"
+      at the right, from the mounted volume, never the board;
+    - **Last sync:** when, and "verified" when the last run's verify
+      passed; a count of skipped files in gold;
+    - **Next sync:** what a sync would do now, from the server's last
+      answer ("12 new · 2 to remove · 37 plays to send", and "waveforms to
+      add" with a card that lacks them: clause 51a), or "nothing new on
+      Home", or the server not answering, or the fit's verdict (clause 49);
+    - **Converts:** the conversion rule ("only what the player can't play,
+      to Opus 192k"); a card for someone else adds, dim, "for someone else:
+      no Auto DJ index or mood scores, plays not sent" (clause 51b), in two
+      lines at most in every locale;
+    - **the bottom row:** `▸ Details`, then *Settings…*, *Send the plays*
+      (whenever plays wait) and *Eject*, and the one primary. Short of room
+      before the primary (a long locale), *Send the plays* gives way first,
+      as `p` does on the footer (clause 15), then the links from the end;
+      their keys still work;
+    - **Details:** a dim rule, then the facts (Drive, Card, Server,
+      Removes, Plays, Player), then the transfer's log in the page's
+      grammar, then *Sync again* and *Check every file…* (the deep check).
+      A fact is one line in the value column, its words whole in every
+      locale with the longest values a card realistically shows (the
+      Deviations log's entry of 2026-10-20 names them). Where a value of
+      its own runs longer, what is the card's gives way, never the words:
+      Removes' path is cut with an ellipsis before its count ("… and 1,234
+      more"), and a volume's long name (Linux, macOS) takes the Drive
+      fact's serial, then its cluster size, each whole. Past that, the
+      line ends in an ellipsis.
+
+    A state replaces the rows it can't fill and never moves the others.
+    Under its gate or its sheet the card keeps the rows it has at rest,
+    its primary's place kept and the button not drawn, so the modal
+    covers the card as the set draws it (cards 05 and 06: a modal taller
+    than the card shows the card's corners beside it) and one shorter
+    leaves no half a button. The primary, one or none:
+    - *Sync ▸* whenever something waits; none when the card is in step;
+    - *Set up ▸* on a new card;
+    - *Eject ▸* for a card the player can't read, and after Done;
+    - *Add the server ▸* when its server isn't saved here; *Sign in ▸* when
+      its sign-in lapsed;
+    - *Check again ▸* after a disk check;
+    - *Choose what fits ▸* when the selection doesn't fit or passes the
+      track cap;
+    - *Set up as card 2 ▸* when a set waits for its next card.
+45. **The states at rest** are the set's card 03; each says what the card
+    is and the way on, never a code:
+    - new, and new with music of its own;
+    - in step; being read; asking its server;
+    - not FAT32 (exFAT, NTFS, FAT12, GPT), with the route to the player's
+      Format: eject it, put it in the Core2, Format on its tab (clause 59);
+    - not a disk of its own (another file system beside it), never
+      written;
+    - write-protected; Linux names that would list wrong (with the remount
+      hint);
+    - its server not saved here; no server saved on this computer at all
+      (clause 3a); signed out, whose plays wait too ("37 plays wait for
+      Home: sign in to send them": the plays that wait for that server,
+      counted off the card and this computer since the server answers
+      nothing; no line when none waits); not answering;
+    - written by a newer format (an unknown major: read, never written);
+    - a disk check first (a possible cut rename stops every sync until the
+      card is checked);
+    - doesn't fit; over the player's track cap (20,000);
+    - no `device.txt` yet (the player it is written for is assumed and said
+      in one dim line under Converts; Settings' Player changes it);
+    - a set's card (clause 62).
+
+    The computer's own disks and fixed disks are never listed (the
+    drive-safety rule, part A7).
+46. **Nothing is guessed.** The Card view's figures come from the mounted
+    volume and the card's own files; *Next sync* comes from the server's
+    list and is never claimed fresher than its answer (a full read every
+    7th day or 10th sync, the card contract's rule). The fit is computed on
+    this computer, never from the board (clause 49).
+
+### The card's settings
+
+47. **The card's settings live on the card,** in its private
+    `/.mstream/state.json`: its name, its server's key and nickname, its
+    libraries, conversion, removals, covers, Auto DJ, who it is for, the
+    player it is written for, its set, its peers' budgets. No address,
+    token or username. Written by the private-file rule (`state.new`,
+    fsync, delete, rename). `cards.json` on this computer only caches them.
+48. **The Settings sheet** (`o`, *Settings…*; *Set up ▸* and *Choose what
+    fits ▸* open it on Music) is the kit's neutral modal, 74 cells wide,
+    over an inert Card view. Its top is held where its tallest state puts
+    it. It has **two tabs, Music and Writing** (the user's pick of
+    2026-10-19, card 05 alternate A; the one scrolling list, alternate B,
+    was not chosen):
+    - **Music:** Name (a text field), From (a dropdown of this computer's
+      saved servers; another server is clause 58's gate on Apply), the
+      server's libraries as checkboxes with their size on the card and
+      their tracks, and each peer's libraries under its label with its
+      daily budget.
+    - **Writing:** Convert (only what it can't play, or everything), Into (a
+      dropdown of codecs; MP3 above 192k dim until the server offers it),
+      Removals (follow the server, or never remove: Q1), Covers, Auto DJ,
+      For (me, or someone else: no Auto DJ index or mood scores, no plays
+      sent), Player (from `device.txt`, else a dropdown defaulting to the
+      board last seen or the firmware last flashed), Peer budget (the volume
+      widget).
+
+    A help line under the rule explains the focused row (two lines, an
+    ellipsis past them). Its words keep to the two lines in every locale,
+    at the GUI's floor (70 cells) and in the console's narrower sheet
+    (64: only the GUI hosts a Card view today, so this width keeps the
+    words ready for a page that would), with the longest names a server
+    realistically goes by (28 cells: an address with its scheme and port,
+    or Quick Connect's name) and a long library; the ellipsis is for a
+    longer name still. The buttons: *Use defaults* and *Apply*. Apply
+    writes `state.json` and closes; it never syncs. Esc or `[X]` changes
+    nothing. Set-up is the same sheet titled "Set up F:" with *Cancel* and
+    *Set up*.
+49. **The fit line,** under both tabs, is recomputed at every change. It
+    counts:
+    - each file rounded to the cluster;
+    - conversions estimated as duration × kbps;
+    - directory entries;
+    - the card's own files, twice over at a checkpoint;
+    - the player's reserve;
+    - a 1% margin of at least 256 MB;
+    - the 20,000-track cap.
+
+    It reads "✓ Fits · 42.9 of 63.8 GB after this sync · 20.9 GB to spare",
+    "! Tight …", "✗ Doesn't fit by 10.9 GB …" with its offers (*Convert
+    everything (saves about 24 GB)*, *Leave out Audiobooks*, *Spread over 2
+    cards…*), "✗ 23,410 tracks: the player holds 20,000 on one card", the
+    scan widget while a library's list is coming, or a peer's days at its
+    budget. The Card view's *Next sync* and *Choose what fits ▸* use the
+    same figures.
+50. **Set-up** (*Set up* in the sheet) writes `/music`, the empty first
+    commit that mints the card's id, and `state.json`, then shows the ready
+    card. Nothing else on the card is touched. A card with music of its own
+    then asks clause 58's adoption gate. With no server saved on this
+    computer, the sheet's From and its libraries are empty and *Set up*
+    still writes the card, its server left empty; the Card view then asks
+    for one (clause 3a).
+
+### A sync
+
+51. **Sync ▸** starts a run on the transfer worker for that card. The run
+    lists the source, plans, passes the gates (clause 58), sends the plays,
+    deletes, fetches, renames and reads back, checkpoints, writes the
+    covers, the Auto DJ index, the mood scores (clause 51b) and the
+    waveforms (clause 51a), commits and verifies (the card contract's 2.12).
+    The Card view follows it with no primary:
+    - Holds stays;
+    - **Syncing** is a bar of the plan's bytes, with "1,204 of 4,812 · 6.1
+      of 21.3 GB" and the time left once the rate is known, then dim "12.4
+      MB/s · saved 3 min ago, safe to stop";
+    - **Now** is the file being fetched and what it becomes;
+    - **Plays** is their result;
+    - phases with no estimate use the scan widget.
+
+    **A file the listener changed** — one the transfer wrote that is no
+    longer what its ledger says — stays the listener's: never written over
+    or removed. The server's copy is written beside it as "… (2)" in the
+    same run, and Details' log names both ("kept 05 - Undertow.flac: it
+    changed on the card since the last sync; Home's copy is beside it as
+    05 - Undertow (2).flac"). This is the user's pick of 2026-10-19, and
+    the engine does it already (part A8).
+51a. **Waveforms.** A player whose `device.txt` says `read.mpwf=1` draws each
+    track's shape on its progress bar, from a file on the card
+    (`/.mstream/waves-<gen>.bin`, the firmware repo's
+    docs/WAVEFORM-INDEX.md). It has no setting: every such card gets it, a card
+    for someone else too, for it holds shapes and nothing personal. A track
+    with none, which a peer's or a hand-copied file has, is a plain line on
+    the player and nothing to say here.
+    - **Asking:** at the end of a run, after the covers and the Auto DJ
+      index, the server is asked for each track no earlier run brought.
+      **Syncing** then says "▰▰▰▱▱▱▱▱▱▱ 31% asking Home for waveforms… 120
+      of 384" in the scan widget, under the bar when the run copied
+      anything, and the tab's percentage is the same count when it didn't.
+      `device card <drive> sync` prints the phase's line and "120 of 384
+      waveforms" at each tenth. A run that copied anything has saved first, so
+      this half hour never puts its music at risk.
+    - **A fetch that stops is no failed run:** *Stop at the next save*, a
+      signed-out server, one that stops answering or half an hour gone (a
+      server may need a decode for each track) keep what came, with the
+      card's old shapes that still hold, and one line in Details' log says
+      so and that the next sync asks for the rest. The sync ends as Done
+      (clause 54).
+    - **A card with no waveform file** has something to do though its music
+      is in step: Next sync says "waveforms to add", *Sync ▸* is its primary
+      and `device card`'s plan says the same, and the sync adds the file. It
+      costs the player a new list of its library at its next boot, so a run
+      that gains no shape and loses none commits nothing for them. A file
+      that came short doesn't count as lacking: its tracks' shapes come with
+      the next sync that runs for anything else.
+    - **A card whose server has none to give** isn't offered them again: when
+      a run has asked for every track and got none, the card's `state.json`
+      keeps that commit's revision (it holds nothing else of them), and Next
+      sync says "nothing new" until the next commit. Any sync asks again. A
+      server with no ffmpeg to make them hasn't said that: it may be one still
+      bringing its ffmpeg up, so the card stays offered them, and goes quiet
+      the same way only once three runs in a row have come to no more.
+    - **The fit** counts the file (clause 49). A card with nothing else to do
+      and no room for it goes without, in a line of the log: it never reads
+      "doesn't fit" for its waveforms.
+51b. **Mood scores.** A player whose firmware reads them filters its Albums
+    list and its Auto DJ by mood (the firmware repo's docs/MOOD-FILTERS.md),
+    from each track's scores on the card: 8 bytes at the end of its record
+    in the tags file (MPTG minor 1, that repo's docs/METADATA.md 2.6.4),
+    which an older player skips. They have no setting and nothing on the
+    Card view of their own. Unlike the waveforms, a card for someone else
+    gets none: they come from the same models as the Auto DJ index, under
+    its licence gate.
+    - **Asking:** at the final commit, after the covers and the Auto DJ
+      index and before the waveforms, a server whose `/api/` says
+      `moodScores` is asked for the scores of each of its own tracks on the
+      card (`POST /api/v1/db/mood-scores`, 2,000 paths a call, a few hundred
+      KB each). It is quick, with no phase or count of its own. A peer's
+      tracks are never asked for: on the player they fit no mood.
+    - **When:** a sync whose list stood (a 304) asks nothing of a card that
+      has scores, so a change of scores alone comes with the next whole read
+      (7 days, or the 10th run); a card with none is asked at every sync, so
+      the first sync after an update brings them with no whole read. A run
+      that reads a peer asks as one that reads whole does. Equal scores make
+      no commit; scores that changed make one, which costs the player a new
+      list of its library at its next boot.
+    - **The answer:** a track with scores gets them; one the server has none
+      for (not analysed yet, or its mood analysis off) has none, and loses
+      any it had; one the answer left out keeps its own.
+    - **A fetch that fails is no failed run:** an older mStream (no
+      `moodScores`), a 403 or a 404, an error: every track keeps what the
+      card had, one whose file the sync fetched again among them (the
+      scores are the server's, not the file's), the rest of the run
+      commits, and the sync ends as Done (clause 54). The next sync asks
+      again, or on a card with scores the next that reads whole or changes
+      its files.
+    - **A card for someone else** asks nothing and loses the scores it had in
+      the sync's commit; Converts says so (clause 44).
+    - **Details' log** has one line of them, in English as the run's other
+      notes, and `device card <drive> sync` prints it:
+      - "mood scores for 4,790 of the card's 4,812 tracks from the server":
+        what the answer had a row for, of the tracks asked for;
+      - "no mood scores: the server has none for the card's files": an
+        answer with no row, which clears the card's;
+      - "no mood scores: the card is made for someone else", at each of its
+        syncs;
+      - "no new mood scores:" and why: "the server doesn't serve them (an
+        older mStream)", "the server refused them (a 403 or a 404)", "they
+        didn't come (…)" with the error's words.
+
+      A sync that asks nothing of a card with scores whose list stood, or
+      that *Stop at the next save* ended, says nothing of them.
+    - **Nothing offers them.** A card without scores has nothing to do for
+      them: Next sync never says "mood scores to add", and nothing is kept of
+      a server with none to give, since every sync of such a card asks. The
+      player's dim "No mood data" row is the prompt: it says to sync the card
+      from mStream.
+    - **The fit** counts their 8 bytes a track in the tags file (clause 49).
+52. **Stopping and pauses.** *Stop at the next save* (`x`) finishes the
+    files in flight and checkpoints; the plan stays on the card and the
+    next Sync goes on from it. A pause is the run waiting by itself, with
+    "! Paused" and why, and *Stop for now*:
+    - for a peer's daily budget: the file is parked with its partial kept,
+      and the run goes on after 00:00 UTC and a few minutes, the days left
+      said at the current pace;
+    - for a server that didn't answer: 1 min, doubling to 30, with *Try
+      now*;
+    - for a sign-in: *Sign in ▸*.
+
+    While paused, the tab's percentage and the bar are dim.
+53. **Errors.** An error per file never stops a run: it is counted in gold
+    on Last sync, listed in Details with its reason, and tried again next
+    time. An error per run stops it in gold with the way on:
+    - the card is full;
+    - it was taken out;
+    - it is a different card (the identity triple is checked again before
+      every batch of deletes, every rename, every commit and after any I/O
+      error or resume);
+    - it refuses writes.
+
+    A source that refuses (a peer's 403 on copies) is said on the card and
+    left out. A card taken out during its sync keeps its tab, marked `out`,
+    and its view ("✗ Taken out · stopped at 1,204 of 4,812 · put it back in
+    any reader to go on: nothing is lost") until it is back in any reader
+    or *Give up this run…* forgets it here. The plan stays on the card
+    either way. Another card in that reader is its own subject, never
+    written by that run.
+54. **Done is the Card view again.** The result goes on Last sync ("just
+    now · verified · 37 plays sent to Home") and once on the busy line
+    ("Synced Car music in 28 min: 4,822 tracks, verified. Eject it before
+    you take it out."). The primary is *Eject ▸* (the user's pick of
+    2026-10-19, card 07 §7, choice 12: a card pulled before the OS lets go
+    can lose its last writes), which asks the OS to let the card go and
+    says "Car music can come out now.", or the OS's words when it can't.
+55. **The worker is the GUI's.** The transfer worker lives at the GUI
+    level and outlives the tab and the page. Leaving the tab, switching
+    subject or screen, or going below the floor never stops a sync. The MP3
+    Player tab wears its percentage (clause 16). Below the floor, the mini
+    player's line says "syncing Car music 28% · it goes on while you
+    listen". Coming back opens the view on the card being synced.
+56. **One sync at a time** (the user's pick of 2026-10-19, card 07 §7,
+    choice 9). A second card's Sync waits its turn: "3 new · waits for Car
+    music to finish (one sync at a time)", with *Don't wait*. A firmware
+    write runs beside a sync under its own lock (clause 9).
+57. **Quitting during a sync.** `q` (the GUI's own quit keys) opens a
+    gold gate: "Stop syncing Car music and quit?", with *◂ Keep syncing*
+    first and the primary, and *Stop and quit*. On the yes the GUI waits
+    for the next save, at most about 30 s, the busy line counting, then
+    quits. The window's close button, Cmd-Q and the app menu's Quit don't
+    ask: the window closes at once, and the player's teardown stops the
+    sync at its next save and waits for it, the same 30 s at most, saying
+    so on stderr. Ctrl+C in a terminal stops at the next save without
+    asking, saying so on stderr; a second Ctrl+C quits at once (the user's
+    pick of 2026-10-19, card 07 §7, choice 8). A force-quit, a pulled card
+    or a power cut is recovered at the next run (the card contract's crash
+    table). While the gate is up it holds every key but Ctrl+C, every
+    paste and the mouse wheel: nothing under it moves, an Auto DJ sheet or
+    the header's server list among them.
+    - **While a firmware write runs, the write's rule wins** (clauses
+      9–11): `q` does nothing; Ctrl+C, the close button and Cmd-Q quit at
+      once with no gate and no wait, leaving the board as clause 10 says;
+      the sync is cut where it stands and recovered at its next run from
+      its last save. The gate above is shown only when no write runs.
+    - **`x` during a write** is still honoured on a card that syncs (clause
+      9): the stop touches no board.
+    - **Below the screens' size** (the mini player) the gate has no room:
+      `q` stops the sync at its next save and quits as Ctrl+C does, saying
+      so on stderr. A gate open when the window narrows to the mini player
+      is dropped, and so is one whose sync ends meanwhile: out of sight, or
+      asking about nothing, it would only hold the keys.
+
+### The gates
+
+58. **Every gate is the kit's gold modal** (clause 23's grammar): 74 cells,
+    no `[X]`, the safe choice first and the modal primary, named for what
+    stays. Enter, Esc and `n` keep; `y` or a click on the second button
+    goes; a click on another tab leaves, with nothing written.
+    - **Gates in a chain:** a gate opened by the answer to the one before it
+      (Remove, then Adopt, then the relay) takes no answer until the keys
+      and clicks have been quiet for half a second: one that comes sooner
+      is dropped and starts the half second again. A held key, however long
+      it repeats, or a double-click's second click that answered the first
+      doesn't answer it too.
+    - **Removals (Q1):** up to 50 need no gate (Next sync says how many;
+      Details lists them). Above 50: "Remove 214 tracks from Car music?",
+      the first five paths and how many more, what stays in green, and how
+      to keep them (Settings' *never remove*), with *◂ Not now* and *Remove
+      214 and sync*. **Above half the card's ledger,** the stronger gate:
+      why that is suspicious, the count per library, and a box, "[ ] Home
+      really has dropped them". Until the box is ticked the gate draws only
+      *◂ Not now*: the second button isn't there and `y` does nothing, so
+      nothing invites the yes. `e` or a click flips the box, the install
+      gate's grammar (clause 23); ticked, *Remove 2,412 and sync* appears
+      beside the keep and `y` works; `e` again unticks it and the button
+      goes. The footer says "e tick the box", and once it is ticked "y
+      remove and sync" first, as the install gate keeps "e erase first"
+      whichever way its box is. A card set to *never remove* never shows
+      either.
+    - **Another server:** only on a choice (Settings' From, or the
+      unknown-server card's *Fill it from … instead…*). "Make Studio this
+      card's server?" with what stays, what leaves at the next sync, and
+      the plays that keep waiting for the old server; *◂ Keep Home* and
+      *Make Studio its server*. The plays' count is the stopped sync's, or
+      the card's last look's when Settings asks; with none known (the old
+      server didn't answer), or none waiting, the gate says nothing of
+      them.
+    - **Adopting files** after Set up on a card with music: "Adopt 1,190
+      files Home also has?" They are matched by path and size, then a quick
+      fingerprint (two 4 KiB reads each), and marked ADOPTED, not VERIFIED;
+      the rest stay the listener's. *◂ Leave them all as mine* and *Adopt
+      1,190*.
+    - **A relay**, above about 1 GB: "Sync 21.3 GB over a relay?" with the
+      time both ways; *◂ Not now* and *Sync over the relay*.
+    - **A parent's proxy**, once per peer, only on a parent whose mStream
+      doesn't say it forwards the copy header (`GET /api/`'s
+      `features.federationProxy`; before B10): *◂ Leave Lisbon out* and
+      *Copy through Home*.
+
+### Formatting
+
+59. **Formatting is the player's (Q3).** The PC never writes a card's file
+    system: the tab asks, and the player confirms on its own screen and
+    formats (the firmware repo's `docs/HOST-STATUS.md`, "@format", as at
+    its commit d8855d7).
+    - **Where it is offered:** for a card the player can't read
+      (`card=exfat`, `ntfs`, `gpt`), the board's SD row offers *Format as
+      FAT32 ▸*: the primary when the verdict has none (clause 18), else the
+      dim *Format as FAT32…* (`f`) under the row. For
+      a card the player reads, *Format as FAT32…* is in Details only:
+      `@format` may bring up the erase question for any card, the player's
+      own music card included (the user's pick of 2026-10-19; the
+      firmware's refusal of a card it reads, its commit d8e797b, was
+      reverted by 93f84fc).
+    - **Only where the firmware can:** `@format` came in 0.14.0 with
+      `@status`'s `clock=`, and is offered only on a board whose status
+      carries that key: its presence is how the page tells, never the
+      version (clause 5's rule). `cid=` says nothing of it: 0.12.0 and
+      0.13.0 name their card and have no format. A board whose status
+      has no `clock=` says, in the SD row where Format would be offered,
+      "v0.11.0 can't format a card." (`fmt_old`; "v0.13.0 can't format a
+      card." on the last release without it), and so does an `@err 7
+      format` answer. "Updating lets it." (`fmt_old_update`) follows only
+      when the pinned release answers `@format`, which the pin says beside
+      its checksum as it says `PINNED_ANSWERS_STATUS` (a
+      `PINNED_ANSWERS_FORMAT`, part B6), the rule of clause 20's "Updating
+      shows it.". The pin v0.14.0 answers it, so the line ends "Updating
+      lets it." in the fix line's place (clause 20), beside the verdict's
+      *Update ▸*: every board without `clock=` is on 0.13.0 or older,
+      behind the pin (clause 19), a build of 0.14.0's own development
+      (`v0.14.0-dev+…`) among them.
+    - **The tab's gate:** "Format the card in COM3 as FAT32?" — the player
+      erases the whole card, every part of it, even parts it can't read,
+      and makes one FAT32 volume with an empty `/music`; about how long,
+      from the card's size; that the player confirms on its own screen in
+      two steps (`gate_fmt_confirm`; the hold is named once the player
+      asks, below); what is lost, in gold, named from `@status` — the
+      card's kind (`card=`) and size, and on a card the player reads its
+      music ("your music, 1,284 tracks, on one FAT32 volume"; while the
+      board indexes it, `tracks=building`, "your music, still being
+      indexed, on one FAT32 volume"); and that the player writes its
+      `device.txt` at once. *◂ Keep the card as it is* and *Ask the
+      player*.
+    - **On the yes** the tab sends `@format`. At `@format ok` the question
+      is on the player's screen, and the SD row says "waiting for you to
+      confirm on the player" and "Nothing is erased until you hold the red
+      button there." (`fmt_waiting_2`, in the words of the player's own
+      hint). The firmware has no verb that takes the question back, so the
+      tab offers no Cancel: the player's own *Cancel*, a tap on its tab bar
+      or a minute with no answer ends it (`@format no`). The wait ends on
+      `@format no`, `@format 0` or `@err 4 format`. At `@format 0` the
+      board restarts to format (its boot lines pass by); then the progress
+      ("formatting the card… 41%", from `@format <percent>`), then
+      `@format done size=… free=… cluster=…`, and the row is the empty card
+      as the board then reports it, with "Formatted just now: put it in
+      this computer's card reader to fill it."
+    - **Other outcomes**, on the busy line: `@format no` within the
+      firmware's minute, "Not formatted: it was cancelled on COM3's
+      screen."; past it, "Not formatted: nobody confirmed on the player
+      within a minute." Three answers are not the player's no, and are told
+      apart by what came before them:
+      - a refusal at once, in place of `@format ok` (`@err 4 format
+        ui|screen|viz|busy|card`: the player starting up, another screen
+        up, a computer driving the dancer, a restart under way, no card),
+        says why;
+      - a refusal at the player's second answer, after `@format ok` and
+        with no restart (`@err 4 format card|size|busy`: another card in
+        the slot since the board started or none answering, a card FAT32
+        can't take, a restart under way), says why and that nothing was
+        formatted, a word this player doesn't know too ("Not formatted:
+        COM3 answered …; nothing was erased."), and the row is the card as
+        the board reports it;
+      - a failure after the restart (`@err 4 format
+        card|size|write|mkfs|check|files`) says so in gold, the row shows
+        the card as the board then reports it, and Details' log has the
+        reason.
+
+      Their words are new with part B6 (`fmt_refused_*`, the second
+      answer's among them, and `fmt_failed_*`): the set drew none. Each
+      fits the hosted busy line, 96 cells, beside the longest port name
+      the page shows (16 cells, a Mac's `cu.usbmodem14101`). Leaving the
+      tab doesn't stop a format: the player formats on its own, and coming
+      back asks the board again (clause 5).
+    - **On the player** (part B5, as built at d8855d7): step 1, the
+      firmware's question, its words by the card, with *Cancel* and
+      *Format…*; step 2, "Erase the whole card?", **the hold** (the user's
+      pick of 2026-10-19, card 06 alternate B): its red *Hold to erase*
+      (`format.sure_button`) answers only to a finger kept on it 2 s,
+      filling meanwhile, and under the body, from the start, the hint
+      "Hold the red button for 2 seconds". Lifted sooner or slid off, it
+      empties, the hint turns amber and nothing else happens; the question
+      stays up, and no tap, double tap or run of taps passes both steps.
+      *Cancel* stays the default: its button, a tap on the tab bar or each
+      step's minute ends the question.
+      Then the boot's "Formatting the card" over a bar, and "Card
+      formatted: ready for your music". The words are the firmware's own
+      (its repo's UiStrings, ten languages). Whether a 2 s hold reads well
+      on the Core2's touch panel is the firmware's device check to say.
+    - **Never during** a write, a read or a count of that board, and never
+      twice at once.
+60. **Damaged cards** (`card=other` — blank, another system's, or a FAT
+    that didn't mount, which the board can't tell apart — and
+    `unreadable`) are offered the computer's disk check first ("Try it in
+    this computer's card reader first: a disk check there may save what's
+    on it."), as the firmware's own question does. *Format as FAT32
+    anyway…* is a dim second step, never the primary.
+
+### Plays and sets
+
+61. **Play history.** A sync reads the card's new plays first
+    (`/.player/plays.jnl`) and maps each through the ledger. It posts them
+    to the server that filled that track; a peer's go to its parent with
+    the peer's id. Plays never go to another server, nor from a card for
+    someone else:
+    - **A card for someone else sends none**, by its settings' *For*, as a
+      sync finds them or as it leaves them. Its new plays are counted and
+      mapped to nothing. None is posted, by a sync or by *Send the plays*,
+      nor any that waited on this computer from before the card was
+      marked. Next sync counts no plays to send; Details' *Plays* says
+      "not sent: a card for someone else" (`plays_gift`) in place of its
+      counts, the busy line says the same when `p` is pressed, and the log
+      says how many. `device card <drive> plays` says "E: is a card for
+      someone else: its plays aren't sent." and exits 0, asking its server
+      nothing for the plays (the command's look at the card, which plans
+      its next sync, asks the server as for any card).
+    - **Nor later, from any computer.** Such a play is dropped as it is
+      counted, like one from before the clock was set. The card keeps
+      that it was: the state file the sync ends with (or the Apply that
+      makes the card the listener's own again) takes it into the card's
+      **gift ranges** (`giftPlays`, beside the marks: of each player and
+      epoch, the plays from the first counted so to the last, split where
+      a play between them wasn't), and every look after, on this computer
+      or another and whatever *For* says by then, counts a play in a range
+      as a gift's and sends none. A play mapped before the card was
+      marked lies below its range, and is the listener's own anywhere. The
+      next sync's commit acknowledges it, so the player trims it (the
+      sync that first counts it doesn't: its commits come before its state
+      file). Nothing of it is kept on this computer: a sync that would
+      have marked the card and stops before its state file is written
+      leaves those plays the listener's own, as the card still says.
+      *Send the plays* writes nothing to the card, as ever.
+    - **Making the card the listener's own again** (*For: me*: the sheet's
+      Apply, `--for me`, or a sync) first drops the plays its log holds,
+      the same way and in the same write as the setting. Nothing played
+      while the card was someone else's ever reaches an account. A log
+      that can't be read then leaves the card for someone else, and says
+      why.
+    - **What the log holds when the card is marked is a gift's too.** The
+      software can't tell when a play was made: *Send the plays* before
+      marking the card keeps the listener's own.
+    - What waited on this computer from before the card was marked goes at
+      the first sync once the card is the listener's own again, from this
+      computer only. Until then it holds the card's acknowledgements where
+      it stands; the plays logged after it are in the gift ranges all the
+      same, so another computer sends none of them, and they are trimmed
+      from the player once it has gone. The one that waits is in no range:
+      another computer, or this one with its outbox lost, sends it as the
+      listener's own.
+
+    **A play the server turns away waits while its answer may change.** A
+    server in a scan answers that it doesn't know a track its scan hasn't
+    reached (`unknown-track`). That answer drops the play only when the
+    sync read the server's list whole, with no scan running, and the track
+    isn't in it: the file is gone from the server.
+    - Otherwise the play waits on this computer and goes again at the next
+      sync: after a list that stood (a 304), one that holds the track, or
+      one of other libraries. While a scan's list lacks its track it isn't
+      sent at all.
+    - *Send the plays* reads the server's whole list too, every library's,
+      and goes by it the same way.
+    - A server also turns a play away for its time (`bad-time`: a start
+      ahead of its clock, or older than it keeps). When this computer's
+      clock finds the start recent, no more than 5 minutes ahead, the
+      server's clock is the one that disagrees, and the play waits. A
+      start truly ahead (the player's clock was wrong) is dropped, as the
+      server says.
+    - The wait is 30 days from the play's start, by this computer's clock;
+      after that the server's answer stands. A start more than 5 minutes
+      ahead of this computer's clock says nothing of the play's age (this
+      computer's clock may be the slow one): its 30 days count from when
+      this computer first held the play. A `bad-time` for such a start is
+      dropped at once, as above.
+    - Details' log and the command line say how many wait and why, in the
+      run's own words ("2 plays wait: the server doesn't know their tracks,
+      and no listing says they are gone (a scan may be under way)"; "1 play
+      waits: the server refuses its time, though this computer's clock
+      finds it recent (the server's clock disagrees)"). Next sync goes on
+      counting them to send.
+    - Whatever else the run has to say of the plays is said there too,
+      when it went well as when it failed: a server that takes none ("the
+      server takes no plays (it has no Stats API): they wait"), a play the
+      server's schema refuses, a card with no ledger to map them through
+      yet, a post that failed.
+
+    **A play that waits on this computer stays until its server has
+    answered it.** The card's marks may pass it meanwhile (its log rotated
+    the play out, or another computer's sync sent it): it goes to its
+    server all the same when that server is next read, which answers a
+    play it already has as a duplicate. Only a sync, or *Send the plays*,
+    that reads another server drops a play the marks have passed.
+
+    Details counts what can't be sent:
+    - plays from before the player's clock was set (counted, never sent:
+      the card's contract dates a play only by a later one of the same
+      boot, and with none it has no start to send; nothing keeps it for
+      later). The tab sets the player's clock whenever it sees the board
+      (clause 5), and `device time` does from the command line (clause
+      66a); `device card <drive> sync` and `plays` say how many such plays
+      the card holds, and name that command;
+    - plays of the listener's own files (counted);
+    - plays the log overwrote (counted).
+
+    *Send the plays* (`p`) posts them without syncing music. The board's
+    Details gains a *Clock* fact, and its log a line when clause 5 set the
+    clock.
+62. **Sets.** A selection spread over several cards (*Spread over 2
+    cards…*, a sheet of its own: split by artist A to Z, or by library;
+    each card's range, size and tracks; *Cancel* / *Make the set*). Each
+    card is a whole library of its own, and its `state.json` holds the
+    whole set.
+    - **A set's card:** a *Set* row ("card 1 of 2 · card 2 (M–Z) seen
+      yesterday", or "card 2 (M–Z) not set up yet: put a new card in"), and
+      moves counted in Next sync.
+    - **The next card:** a new card while a set waits for one offers *Set
+      up as card 2 ▸*, with *Set up as a card of its own* beside it.
+    - **A full card** offers to move the edge or add a card.
+    - **Moves** are two-phase: an album leaves its old card only after its
+      new card has committed it.
+63. **Hiding a volume.** A removable volume the player can't use is listed
+    with why (the user's pick of 2026-10-19, card 07 §7, choice 5), and
+    *Not a card? Hide it* (`h`) keeps it off the row on this computer, by
+    its volume serial, until *Not showing up?* shows it again.
+
+### The cards' command line
+
+64. **`device cards`** lists every card in a reader, one line each: the
+    drive, the name, the size, the file system, then the server, tracks,
+    last sync and next sync, or why it can't be synced. It also lists
+    refused removable volumes with their reason. Exit 0 with cards, 1 with
+    none (saying which readers it saw empty), 2 when the volumes can't be
+    listed. It reads only; it asks each card's server once.
+65. **`device card <drive> status|setup|sync|plays|eject [--yes]`.**
+    `<drive>` is a drive letter, a mount path, or a card's name when one
+    card has it.
+    - `status` prints the Card view's facts as `key  value` lines and
+      writes nothing.
+    - `setup`, `sync` and `plays` print their plan and stop (exit 1)
+      without `--yes`; on a terminal they ask "go on? [y/N]". With `--yes`
+      they print each step and exit 0 when done, 1 on a refusal or
+      failure, and 3 when paused or stopped. Exit 3 means "run it again
+      later; it goes on from the last save".
+    - Ctrl+C stops at the next save (clause 57).
+    - **The gates are flags that name what they allow** (the user's pick
+      of 2026-10-19, card 07 §7, choice 7):
+      - `--allow-removals N`, with N the plan's exact count
+        (`--list-removals` prints them), and the stronger gate the same;
+      - `--server S --take-over`;
+      - `--adopt` or `--keep-mine` (set-up on a card with music refuses
+        without one);
+      - `--through-parent`.
+
+      The relay warning is printed and `--yes` goes on.
+    - **The settings are flags** on `setup`: `--name`, `--server`,
+      `--libraries`, `--convert needed|all`, `--to`, `--removals
+      follow|never`, `--covers on|off`, `--autodj on|off`, `--for
+      me|someone-else`, `--player`, `--budget`, `--set N`, `--into-set`.
+      They write `state.json` only.
+    - `eject` asks the OS to let the card go.
+66. **`device format [--port P]`** (the user's pick of 2026-10-19, card 07
+    §7, choice 10, for parity with the tab) sends `@format` to the board's
+    player and prints the card as the board reports it (its kind, size and
+    tracks: what is lost), the player's answer, the progress and the
+    result. It has no `--yes`: the player confirms. Exit 0 formatted; 1
+    declined, timed out, refused (older firmware too) or failed (clause
+    59's three answers that are not the player's no), and with several
+    boards and no `--port`, a refusal naming them as `device flash --yes`'s
+    does; 2 no board.
+66a. **`device time <port> [--dry-run]`** reads the clock of the board
+    on `<port>` (one `device list` names) and sets it as the tab's listen
+    does (clause 5): a bare `@time`, then one `@time <unix-ms>` when the
+    clock is unset or more than 2 s off, with no reset. `--dry-run` reads
+    and sets nothing. It prints what it found and did as JSON (the board's
+    time or `unset`, how far off it was, what was sent, the time read back,
+    the host lines both ways). Exit 0 in step or set; 1 when the board has
+    no clock verb (older firmware), refused the time or didn't answer, or
+    this computer's clock is outside the board's range; 2 for a port that
+    isn't a board's, or one that couldn't be opened. It is the command
+    line's way to a dated play log: a listener who never opens the tab
+    sets the player's clock with it.
+67. **The command line keeps parity** (clause 43's rule for cards): every
+    choice the Card view, its Settings and its gates make, the flags make,
+    and the reverse. A gate's flag says what it lets through, never merely
+    "yes". The lines are plain English, as `device list`'s are: lines a
+    script reads.
+
 ## Wording
 
 The page's strings are `dev.*`. The card's: the labels (`label_firmware`
@@ -811,18 +1775,119 @@ in code: `▾`, `(•)`, `[✓]`, `↑↓`, `←→` and the scan widget's cells
 | `dev.fw_looping` | Keeps restarting |
 | `dev.gate_title_mode` | Write %{to}? |
 | `dev.gate_title_local` | Write a local build over %{from}? |
+
 The `--yes` lines and `device list` are plain English, like the `plan:`
 line: they are lines a script reads.
+
+The cards' strings (clauses 3a, 20a, 25a and 44–67) are `dev.card.*`:
+- the tab row's (`tabs_*`, `tab_out`, `tab_new`, `readers_*`), the busy
+  line's (`busy_*`) and *Not showing up?*'s two new hints
+  (`hint_card_shows`, `hint_own_disks`);
+- the head and labels (`name_in`, `head_*`, `label_*`);
+- the rows' words (`holds_*`, `last_*`, `verified`, `next_*`, `conv_*`,
+  `ago_*`, `reading`);
+- the primaries and links (`btn_*`, `link_*`);
+- the footer's pieces (`hint_*`);
+- Details' facts and the transfer's log (`fact_*`, `log_*`);
+- a sync's (`sync_*`, `stopping`, `paused*`, `waiting_*`, `plays_sent`,
+  `done*`, `skipped`, `skip_*`, `ejected`, `waits_for`);
+- the run's errors (`err_*`) and the states at rest (`new_*`, `foreign*`,
+  `not_fat`, `route_*`, `shared*`, `unknown_server*`, `no_server*`,
+  `signin`, `newer*`, `check*`, `locked`, `not_utf8*`, `fit_*`,
+  `plays_*`);
+- sets (`set_*`), and the board's card line and clock (`board_*`,
+  `log_clock_*`);
+- formatting on the tab (`fmt_*`);
+- the gates (`gate_*` and their `hint_gate_*`);
+- quitting (`quit_*`, `mini`);
+- the Settings sheet (`set_title`, `setup_title`, `tab_music`,
+  `tab_writing`, `grp_*`, `row_*`, `opt_*`, `player_*`, `budget_mb`,
+  `fit_*`, `help_*`, `more_below`, `btn_defaults`, `btn_apply`,
+  `btn_cancel`, `btn_do_setup`, `spread_*`).
+
+Five `dev.*` keys change their words: `card_fix_format`, `card_fix_mbr`,
+`none_title`, `none_body` and `none_watching`. With the 342 new
+`dev.card.*` keys that is 347 keys drawn in the set, three of them added
+since the picks of 2026-10-19 (`gate_fmt_music`, `log_kept_yours` and
+`fmt_old_update`), and the frames reuse 42 existing `dev.*` keys
+unchanged. The set's card 07 §5 has every one with its English, and a
+German draft wherever a floor frame shows it (160 of them). Three of the
+347 wait for firmware that part B5 did not build, and are not added until
+it is (`fmt_cancel_note`, `hint_fmt_cancel`, `gate_fmt_part`: clause 59,
+Deviations log), so **the build adds 344 keys now** (339 new, 5
+changed), in all ten locales. Two more keep today's fix words for a
+board that can't format while the pin can't either (`card_fix_format_pc`,
+`card_fix_mbr_pc`, clause 20): moved, their ten locales as they are, not
+new. Part B6 adds the format's refusals and failures beside them
+(`fmt_refused_*`, `fmt_failed_*`, `fmt_no_answer`, `fmt_lost`), which
+the set did not draw, and `gate_fmt_unread`: 19 keys; its review adds
+`fmt_refused_second_other` and `gate_fmt_music_building`, 21 in all
+(Deviations log). Part B13's terminal half adds the clock's other ends,
+which the set did not draw either (clause 5): `log_clock_range`,
+`log_clock_rtc`, `log_clock_ours`, `log_clock_silent` and
+`log_clock_failed`, 5 keys. The waveforms (clause 51a) add `next_waves` and
+`sync_waves`, 2 keys. The mood scores (clause 51b) add none and change one,
+`conv_gift`: their lines in Details' log are the run's, in English. The
+landing review of 2026-11-10 adds one `dev` key, `log_all_formatting`
+(clause 28), changes one, `plays_old` (clause 61: counted, not kept), and
+draws `plays_gift` for the first time (Details' *Plays* fact and the busy
+line of a card for someone else); the lines of the plays that wait are the
+run's, in English. Its worker fixes add two `dev.card` keys for the busy
+line: `worker_gone` (a command the transfer worker can no longer take,
+clause 55) and `not_saved` (settings written to a card no server saved
+here is the server of, whose libraries, server and peers are kept by a
+server's key, clause 48).
+Not keys: the invented names, paths, sizes and versions; the command
+line's lines (plain English, like `device list`'s); the firmware's own
+strings for its dialogs (its repo's lib/core UiStrings, ten languages).
+Glyphs stay in code: ✓ ! ✗ ? … ▸ ▾ ◂ █ ░ ▰ ▱ ←→ ↑↓, the radios, the boxes
+and the caret.
+
+| Key | English |
+|---|---|
+| `dev.card.tabs_cards` | %{n} cards |
+| `dev.card.label_holds` · `label_space` · `label_last` · `label_next` · `label_converts` | Holds · Space · Last sync · Next sync · Converts |
+| `dev.card.next_new` · `next_remove` · `next_plays` | %{n} new · %{n} to remove · %{n} plays to send |
+| `dev.card.next_waves` · `sync_waves` | waveforms to add · asking %{server} for waveforms… %{i} of %{n} |
+| `dev.card.conv_needed` | only what the player can't play, to %{codec} |
+| `dev.card.conv_gift` (changed) | for someone else: no Auto DJ index or mood scores, plays not sent |
+| `dev.card.plays_gift` | not sent: a card for someone else |
+| `dev.card.plays_old` (changed) | %{n} from before the player's clock was set: counted, not sent |
+| `dev.log_all_formatting` | update all: %{port} is formatting its card — passed over |
+| `dev.card.worker_gone` | The card transfer has stopped: quit and start the player again to sync cards. |
+| `dev.card.not_saved` | %{card}: the libraries, server and peers weren't saved: no server saved here is this card's. |
+| `dev.card.btn_sync` · `btn_setup` · `btn_eject` | Sync · Set up · Eject |
+| `dev.card.link_settings` · `link_stop` | Settings… · Stop at the next save |
+| `dev.card.board_is` | This is %{card} · synced %{when} from %{server} |
+| `dev.card.log_kept_yours` | kept %{file}: it changed on the card since the last sync; %{server}'s copy is beside it as %{copy} |
+| `dev.card.log_clock_unset` · `log_clock_off` | the player's clock was unset: set it (@time) · the player's clock was %{s} s off: set it (@time) |
+| `dev.card.log_clock_rtc` | the player's clock wasn't set: its clock chip didn't take the time (@err 4 time rtc) |
+| `dev.card.log_clock_ours` | the player's clock wasn't set: this computer's clock isn't between 2026 and 2099 |
+| `dev.card.gate_remove_title` | Remove %{n} tracks from %{card}? |
+| `dev.card.gate_half_box` · `hint_gate_box` | %{server} really has dropped them · e tick the box |
+| `dev.card.gate_fmt_title` | Format the card in %{port} as FAT32? |
+| `dev.card.gate_fmt_music` | your music, %{n} tracks, on one %{fs} volume |
+| `dev.card.fmt_waiting` | waiting for you to confirm on the player |
+| `dev.card.fmt_waiting_2` | Nothing is erased until you hold the red button there. |
+| `dev.card.fmt_old` · `fmt_old_update` | %{version} can't format a card. · Updating lets it. |
+| `dev.card.quit_title` | Stop syncing %{card} and quit? |
+| `dev.card.mini` | syncing %{card} %{pct}% · it goes on while you listen |
+| `dev.card_fix_format` (changed) | Fix: format it as FAT32 in the player (below). That erases the whole card. |
+| `dev.none_title` (changed) | Nothing plugged in |
+
+The cards' command-line lines are plain English, like the `plan:` line. A
+card's sizes in them are the Card view's words (`dev.card_size`,
+`dev.card_free`, `dev.card.fact_drive_kb`), which the command line,
+setting no locale, prints in English.
 
 ## Out of scope here
 
 - **A check of GitHub on its own.** The page asks GitHub's release list
   only when the sheet's *Another release* is chosen (clause 35), never to
   tell a board that a newer release exists: up to date is the pin.
-- **Formatting a card** (Q3): the SD card row names the fix and its cost;
-  the firmware formats nothing.
-- **Bytes of music** (Q5): the firmware reports `music=?`; the card shows
-  tracks only.
+- **Bytes of music on a board's card** (Q5): the firmware still reports
+  `music=?`, so the board's SD row shows tracks only. A card in a reader
+  shows its bytes, read from the volume (clause 44).
 - **The battery and what is playing** beyond the identity line of several
   boards (Q6).
 - **A port by hand and a write speed** (card 06's R8.2, R8.3; Paul's Q8,
@@ -838,12 +1903,25 @@ line: they are lines a script reads.
 - **`device identify`** on the command line.
 - **The tray launcher's item.** mStream's launcher gets no "MP3 player"
   entry; the GUI's tab is the way in.
-- **A page that outlives the tab.** Leaving lets the page go (clause 8):
-  it is kept only as long as its worker takes to let its ports go, never
-  shown again; the next visit starts over.
+- **A board page that outlives the tab.** Leaving lets the boards' page
+  go (clause 8): it is kept only as long as its worker takes to let its
+  ports go, never shown again; the next visit starts over. Only the
+  transfer worker, which holds no port, outlives the tab (clause 55).
 - **A quit that waits during a write.** The write's end cannot be waited
   for on the way out (half a minute, and the user asked to quit): clause
   10 says what a quit then does.
+- **Formatting on the PC.** No OS formatter, no raw writes, no elevation:
+  the player formats (Q3). The transfer plan's table of the PC's
+  formatters stays a note.
+- **Play history over USB** (`@plays`): not planned. The card's log is
+  read in a reader (clause 61).
+- **exFAT cards:** the firmware reads FAT only; the Card view walks such a
+  card to the player's Format.
+- **Restoring a server from a card.** A card is a playable mirror, never a
+  source for a server (Q1).
+- **Several syncs at once** (clause 56).
+- **The classic TUI:** no MP3 Player tab, as before; the commands serve
+  it.
 
 ## Translation notes
 
@@ -881,7 +1959,10 @@ line: they are lines a script reads.
   grammar: `status:`, `old:`, `silent:`, `chip`, `busy`, `/in=`, `/out=`,
   `/held=`, `/mode=dio`, `/elf=`, `/loop=qio`, `/listing=<s>` — a board
   starting up, answering nothing for that long after each start while it
-  prints `[bt]` and Arduino lines — and any `@status` field),
+  prints `[bt]` and Arduino lines — `/format=` — how a board from 0.14.0
+  on answers `@format`: formatted by default, `no`, `late`, `silent`, a
+  refusal at once, `second-<why>`, `fail-<why>` — and any `@status`
+  field),
   whose trace says what was done to each board, and on a shelf of images
   and a release list in GitHub's place (`firmware::tests::Shelf`): no test
   reaches GitHub either.
@@ -905,6 +1986,58 @@ line: they are lines a script reads.
 - Machine translations for the nine non-English locales, as everywhere;
   key names are never translated, and every new key sits on the same line
   of all ten files.
+- **The Card view** is `src/device/page/card.rs`, the page's third part
+  beside the board card and `sheet.rs`. It reads whole cards from the
+  transfer worker (`card::worker::Event::Card`) as the board card reads
+  boards from the desk: the view keeps only which subject is in view,
+  Details, the sheet, the gate and the notes.
+- **One ring of subjects:** `page.boards` stays; a `page.cards` list
+  beside it, and `page.open` names either kind (an enum of port or card
+  key). The tab row draws both (`tab_row`). `hint_parts` and `card_layout`
+  branch on the open subject's kind.
+- **The transfer worker** is started by the GUI at launch, not by the
+  page, and owned by `Gui`. The page talks to it over `Cmd`/`Event`
+  channels it borrows each visit; the page dropped on leaving drops only
+  its ends. The worker owns the per-volume run lock and the OS advisory
+  lock (`LockFileEx`, `flock`), so a command-line run and the GUI never
+  write one card at once. It watches the readers every 2 s with part A7's
+  `find()`. The clock of clause 5 is the desk's listen's, over
+  `listen::clock`, which the hidden `device time` drives too.
+- **Under test,** the Card view rides channels the test holds, as the
+  board page does (`Page::quiet`), with fake volumes: part A7's fake mount
+  tables, a scratch directory standing in for a card, the card contract's
+  fixtures. The transfer client talks to loopback stubs
+  (`api::transfer::stub`); the board's clock and format to the fake engine
+  (`MSTREAM_DEVICE_FAKE`). No test touches a real volume, a real server or
+  a serial port.
+- **Frames:** the set's frames are exact grids drawn by `page.rs`'s rules.
+  The page's tests compare its English frames character for character at
+  100×30, and draw every state, gate and sheet whole at 100×24 in every
+  locale, as the board card's do.
+- **Words:** the set's German drafts are a start. Every locale is checked
+  at the 14-cell label column and the 58-cell value column (Details'
+  facts), and at the sheet's 70 and 64 cells of help, with the longest
+  values of the Deviations log's entry of 2026-10-20. German
+  addresses the listener as *du* ("Deine eigenen Dateien bleiben", "Du
+  bestätigst …"), the form `locales/de.yml` uses everywhere it addresses
+  anyone (about 60 *du*-forms; no formal *Sie*: its capitalised
+  "Sie"/"Ihre" are third person). Where the `dev` section can, it stays
+  impersonal ("Erst in den Einstellungen … wählen"); the drafts do the
+  same.
+- **The other eight locales** were written by the build (2026-10-19), in
+  each file's own terms and form of address: French *carte*, *lecteur*,
+  *vous*; Spanish *tarjeta*, *reproductor*, *tú*; Italian *scheda*,
+  *lettore*, *tu*; European Portuguese *cartão*, *leitor*, *você* forms;
+  Polish *karta*, *odtwarzacz*, *ty*; Russian *карта*, *плеер*, *вы*;
+  Japanese *カード*, *プレーヤー*; Chinese *存储卡*, *播放器*, Auto DJ kept
+  in Latin letters as the file keeps it. Where a locale already says the
+  word for a card for a board or a tab too, the tab is named otherwise:
+  Italian *vista* ("nella vista di COM3"), Polish *zakładka*. Counts sit
+  after a colon where a language's plural would bend the noun ("utworów:
+  %{n}", "файлов: %{n}"), so one form serves every number. Japanese and
+  Chinese say "that server" where their sentence would name it a second
+  time, since the completeness test counts every placeholder. They wait
+  for a native review with the German.
 
 ## Deviations log
 
@@ -1141,3 +2274,984 @@ line: they are lines a script reads.
   (clause 35) now leaves out, and marks newer than, the pin the page was
   told, as the line under a picked release always did, rather than the
   build's constant; in a real run the two are the same release.
+- **2026-10-18 — The pin moves to v0.11.0, which asks the transfer for an
+  Auto DJ index.** Firmware v0.11.0 (17 Oct) is the pin; both checksums
+  are its SHA256SUMS's and GitHub's digests of the assets, and the ELF
+  table (clause 37) gains its pair (QIO `1b1b71a1`, DIO `0d07e24d`), from
+  its notes and both images' own app descriptions. It answers the status
+  query as v0.10.0 does (its HostStatus and docs/HOST-STATUS.md are
+  unchanged), so `PINNED_ANSWERS_STATUS` stays true and no clause is
+  rewritten; what changes is where boards fall (clause 19): a board on
+  v0.10.0 is now *Update available · v0.10.0 → v0.11.0* with *Update ▸*,
+  and one on v0.11.0 is up to date with no "Ahead of" line. The reason is
+  the card transfer: v0.10.0 writes `read.mpdj=1` in the card's
+  `/.player/device.txt` and v0.11.0 `read.mpdj=2`, the sign the transfer
+  waits for before it writes an Auto DJ index, so a board written at the
+  old pin would never be given one. The clauses' examples keep v0.8.0 as
+  the pin, as the 2026-10-12 entry says.
+
+- **2026-10-18/19 — The SD card transfer joins the tab (the twelfth set),
+  with the user's picks.**
+  - **The decisions** (2026-10-18), on the transfer plan's four questions:
+    - Q1: a backup card is a playable mirror by default, removals shown
+      first, a gate above 50, a stronger one above half the card, and a
+      per-card *never remove*;
+    - Q2: one tab row per subject on the MP3 Player tab;
+    - Q3: cards are formatted in the Core2, started from the tab,
+      `@format` confirmed on the player, the PC never formatting;
+    - Q4: yes to a small batch of mStream changes (B10, B11).
+  - **The design of record** is the card-transfer design set (twelfth
+    set), alternates per the user's picks of 2026-10-19. It draws the Q2
+    placement whole, with two alternates inside it. It is in no repo yet:
+    it will live in mStream `docs/designs/card-transfer`.
+  - **The picks** (2026-10-19), the set's card 07 §7. By name: (1) the
+    card's Settings in two tabs, Music and Writing (card 05 alternate A;
+    clause 48); (2) the format's second step on the Core2 a 2 s hold of the
+    red button, letting go cancelling (card 06 alternate B; clause 59). The
+    other ten as the set suggested them: (3) the MP3 Player tab wears the
+    sync's percentage (clause 16); (4) a card put in takes the view only
+    from the empty card (25); (5) removable volumes the player can't use
+    are listed, with *Hide* (63); (6) the card keys `o e p x f h` (12); (7)
+    a command-line flag per gate, with the count (65); (8) Ctrl+C during a
+    sync stops at the next save (57); (9) one sync at a time (56); (10)
+    `device format`, for parity (66); (11) a card's tab on Windows named by
+    its drive and name (25); (12) Done's primary *Eject ▸* (54). And two
+    the build raised: a computer's `@format` may bring up the two-step
+    erase question for any card, the player's own music card included —
+    the firmware's refusal of a card it reads (its commit d8e797b) is
+    withdrawn, as its 93f84fc reverted it (clause 59); and a file the
+    listener changed on the card is kept, the server's copy written beside
+    it as "… (2)", as part A8 built it (clause 51).
+  - **This supersedes the 2026-10-09/10 decision's "no Format card"** and
+    the out-of-scope "Formatting a card". A card the player can't read is
+    offered Format on the board's SD row, and one it reads in Details,
+    behind the gold gate; the player itself confirms in two steps and
+    formats (clauses 59, 60). The reason: only the player cannot format
+    the wrong disk (the card is physically in it), it writes exactly what
+    FatFs expects and its `device.txt` at once, and it needs no elevation
+    on any OS, where Windows 10 can't make FAT32 over 32 GB at all.
+  - **Clause 5 gains its one write, the clock**, as the firmware repo's
+    `docs/HOST-STATUS.md` has it at 09874f5 and 79a7438: a bare `@time`
+    once per listen to a board whose `@status` has `clock=`, one `@time
+    <unix-ms>` when the board's clock is unset or more than 2 s off, and a
+    board with no `clock=` never asked.
+  - **What else changes:**
+    - Clause 3 is split: boards stay session-free; a card uses its own
+      server's saved sign-in (3a).
+    - "A page that outlives the tab" stays out of scope for boards, while
+      the transfer worker, which holds no port, outlives the tab (clause
+      55).
+    - Clause 25 becomes the row of every subject (25, 25a); clause 30
+      watches the card readers.
+    - The command line gains `device cards`, `device card …` and `device
+      format`, with clause-43 parity (clauses 64–67).
+    - Clauses 1, 4, 5, 7–12, 14–16, 18–20, 26, 29, 31 and 32 are amended
+      (18–20 for the board card's line and its *Format as FAT32 ▸*);
+      clauses 3a, 20a, 25a and 44–67 are new.
+  - **The numbering.** Clauses 1–43 keep their numbers, so code that cites
+    them stays right. A clause split from an old one, or added beside it,
+    takes a letter (3a, 20a, 25a); the new sections are numbered on from
+    44.
+  - **Where the build parts from the frames**, known before it starts. The
+    set's card 06 §6 proposed `@format check`, `@format cancel` and a
+    partition report for part B5; the firmware built `@format` without
+    them (HOST-STATUS, "@format"). So: Format is offered by `@status`'s
+    0.14.0 key (`clock=`), not by a `check` answer; while the player asks,
+    the tab draws no Cancel (card 06's frame has one, with
+    `fmt_cancel_note` and `hint_fmt_cancel`), and the player's own
+    *Cancel*, its tab bar or its
+    minute ends the question; the gate names the card as `@status` reports
+    it, where the frame lists its partitions (`gate_fmt_part`); declined
+    and timed out are told apart by the firmware's minute, since both
+    answer `@format no`. Should the firmware gain those verbs, the frames
+    come back as drawn. The player's dialogs say *Cancel* and *Format…*
+    in the firmware's own words where the frames say *Keep it*, and its
+    step 2's red button is *Format*, held, where the picked frame says
+    *Hold to erase*; so the busy line's declined words and the SD row's
+    waiting line name no button (`fmt_declined`, and `fmt_waiting_2`'s
+    "hold the red button", the player's own hint's words, both reworded in
+    the set). The firmware's refusals and failures get words of their own
+    with part B6 (clause 59), its refusal at the second answer among them,
+    which the set did not foresee. And this computer's clock outside the
+    board's range sends no `@time` at all, where the set's notes had the
+    board refuse it. What else the build finds is recorded here.
+  - **The firmware followed both picks** on its branch, after B5's first
+    build (a second tap behind a 0.6 s settle guard, and a refusal of a
+    card the player reads, d8e797b): 93f84fc reverted the refusal, and
+    76a10dc made step 2 the hold (HOST-STATUS, "@format": *Format* held 2
+    s; a lift sooner empties it and shows "Hold the red button for 2
+    seconds"; the settle guard kept). Clause 59 follows HOST-STATUS as at
+    76a10dc. Not yet tried on a board: the hold on the Core2's touch panel
+    (the firmware's device check 11).
+  - **The pin can't format** (v0.11.0 has no `@format`), so the line a
+    board with no `cid=` and no `clock=` gets is "v0.11.0 can't format a
+    card." alone, and "Updating lets it." (`fmt_old_update`, split from the
+    set's `fmt_old`, whose frame drew a pin of v0.12.0) follows only while
+    the pin answers `@format` (`PINNED_ANSWERS_FORMAT`, part B6), as the
+    2026-10-12 entry did for "Updating shows it.": at today's pin an up to
+    date board would otherwise be told to update with no Update to give.
+    For the same reason, while the pin can't format, a board that can't
+    keeps today's fix lines (format it on a computer, under the `_pc`
+    keys), where the set's new ones would point below at a Format that
+    isn't there; once the pin can, clause 59's line takes the fix line's
+    place, as the set draws it (clause 20).
+  - **Settled in review** (2026-10-19): during a write `x` on a syncing
+    card is one of the keys that work (clause 9, as clause 57 says);
+    *Format as FAT32 ▸* is the primary on every verdict with none whose
+    board reports its card, *Version not recognised* included, its status
+    keys deciding and never its version (clauses 18, 19); `f` gives way
+    with `o` on the footer, is not named when Format is Enter's, and works
+    on a card the player reads only with Details open, as `w` does
+    (clauses 12, 15); `@err 4 format card|size|busy` after `@format ok` is
+    a refusal at the player's second answer, ending the wait (clause 59);
+    `device format` exits 1 on a failed format too (clause 66); and the
+    design of record's header row is provisional until the set is
+    committed in mStream.
+  - **Words.** 347 keys drawn: the set's 344, the two the picks add and
+    `fmt_old_update`; the build adds 344 now, three waiting for firmware
+    verbs (Wording). The German drafts (160) and the machine translations
+    of the other eight locales wait for a native review.
+- **2026-10-19 — Part B4 built: the Card view, the GUI's transfer worker
+  and the cards' command line.** What the build parts from, and why:
+  - **Settled by the build.** The hidden JSON card commands (`card-probe`,
+    `card-setup`, `card-sync`, `card-set`, `card-plays`, `time`) stay
+    hidden, as they are, for the real-card checks and for scripts that
+    read every field; `device cards` and `device card` are the listener's
+    (clauses 64–67), and the help names only them. The tab's gates and the
+    command line's flags ask the worker which gate a plan stops at
+    (`gate_ahead`, `relay_ahead`), so the two never disagree (clause 67).
+  - **Not built yet**, each drawn by the set: the Spread sheet and the
+    set's rows and links (*Set up as card N ▸*, *Move the edge*, *Add
+    card N*; clause 62: the Set row alone is shown), so the command line
+    has no `--set` or `--into-set` either; *Check every file…*; the fit
+    line's offers (*Convert everything*, *Leave out*, *Spread over*);
+    adding a peer in the sheet (its peers are the card's own); the Player
+    row's list (the row says what `device.txt` says, and the command line
+    has no `--player`); the empty readers line (the worker lists volumes,
+    not empty readers, so `device cards` says "No card in a reader."
+    alone); the format's route and its rows (part B6, clause 59: the
+    board's fix lines stay under the `_pc` keys until then); and setting
+    the clock from the tab (`@time`, part B6).
+  - **Drawn otherwise.** *verified* follows a sync of this session only;
+    Next sync's look leaves the peers out, and a listing shows "asking
+    Home what changed…" with no count of libraries; library sizes are the
+    listed libraries'; the codec list always offers MP3 past 192k (a
+    server older than 6.32 gets the highest it takes); a card with no
+    `device.txt` is synced for the player's first defaults
+    (`conv_default`, where the set has `conv_assumed`: the sync reads no
+    board); the sheet's tabs hint has no glyph; `log_asked` is two lines
+    (`log_asked_same` when the list stood); `check_win` names the drive;
+    *Keep* on the another-server gate shows no count of the tracks kept.
+    While the card's gate or sheet is up its primary is not drawn under
+    it, so the frame stays whole at the floor; at the floor a card's
+    dim explanation lines give way first, then Converts.
+  - **Quitting.** `q` and the GUI's quit ask (clause 57) and wait in the
+    loop for the next save, at most 30 s; the window's close button and
+    Cmd-Q quit at once and wait in the teardown; Ctrl+C in the terminal
+    GUI waits after the screen is restored, saying so on stderr. On the
+    command line Ctrl+C is caught only by `sync`.
+  - **The command line's set-up** checks `--adopt` or `--keep-mine` on a
+    card with music mStream didn't put there, and says it; the answer is
+    the first sync's flag (`sync --adopt`), since `state.json` keeps no
+    answer and the sync's adopt gate asks again.
+  - **Words.** 358 keys under `dev.card` and five `dev` keys reworded
+    (`card_fix_format`, `card_fix_mbr`, `none_title`, `none_body`,
+    `none_watching`; today's two fix lines kept as `card_fix_format_pc` and
+    `card_fix_mbr_pc`). Beyond the set: `ago_hours`, `dur_s`, `dur_min`,
+    `dur_h_min`, `btn_new_id`, `hint_enter_new_id`, `copied`, `copied_2`,
+    `conv_default`, `holds_none`, `not_fat_card`, `player_none`, `sync_of`,
+    `help_lib_short`, `help_lib_unknown`, `help_budget`, `help_writing`,
+    `help_from` and `log_asked_same`. German from the set's drafts; the
+    other eight written by the build (Translation notes) — all nine wait
+    for a native review. Not tried on hardware: ejecting a real card (the
+    OS's eject, part V1), and a card's sync under the GUI end to end.
+- **2026-10-19 — Part B4's review fixes.** The review of B4 found three
+  writes before their gate and a handful of smaller gaps; fixed as follows.
+  - **Nothing is written before its gate.** Settings' From set to another
+    server opens the another-server gate before anything is sent: *Make
+    Studio its server* writes the settings (Apply, which never syncs:
+    clause 48) and the next *Sync ▸* takes the card over; *◂ Keep Home*
+    writes nothing (clause 58). `device card <drive> sync --server S
+    --take-over` prints the take-over's plan from a dry run (the sheet's
+    fit, which plans another server as its take-over runs), and writes
+    `state.json` only after `--yes` or "go on? y" (clause 65). A card's
+    Next sync, and the sheet's fit line, plan a chosen server the same way.
+  - **Eject ▸ on a card the player can't read** (exFAT, NTFS, GPT,
+    write-protected) now asks the OS, as the route to the player's Format
+    needs (clause 45): the eject asks of any removable volume the tab
+    lists, never the computer's own disks or a fixed disk; `e` works where
+    Enter's *Eject ▸* does, and `device card <drive> eject` too.
+  - **The gates' keeps that answer.** *◂ Leave them all as mine* syncs
+    adopting nothing, as `--keep-mine` does (the set's card 06 note:
+    "Leave them all as mine still sets the card up"); *◂ Leave Lisbon out*
+    is kept on this computer, in `cards.json` (`leftOut`, by card id), so
+    that peer is left out of the card's syncs here and never asked again
+    (clause 58: once per peer); the yes was already kept on the card
+    (`state.json`'s `proxyCopies`). The command line has no flag for that
+    no yet: `--through-parent` remains its only answer.
+  - **The removals gates name their count.** A yes (the gate's, or
+    `--allow-removals N`) carries its count into the run, and a plan that
+    removes another number asks again, so a server that changed since the
+    look never takes more than was allowed. The stronger gate counts as
+    the run's own gate does, its paths (every file deleted or replaced in
+    place), each library's share read off the card's ledger by the look as
+    by the run; the command line's check of N against the plan's removals
+    is made only where no removals gate counted it.
+  - **Quitting during a sync** tells the worker to quit: the running sync
+    stops at its next save, and one waiting its turn never starts in the
+    wait (clause 57). The end of one run is told before the next starts.
+  - **Smaller.** A card pulled and put back in its reader while its sync
+    lists or plans keeps its tab, its progress and its quit gate; `p`
+    during a sync does nothing (the sync sends the plays); a card taken
+    out with its view open moves the view right, else left, as a board
+    unplugged does (clause 29); a paused peer's budget is its own, not the
+    default; a lapsed sign-in is the API's 401, never a word in an error's
+    text (a 403 never asks to sign in again).
+  - **Words.** `stopping` loses its count ("stopping at the next save…",
+    where the set has "… 37 files to it"): the run fetches one file at a
+    time, so only that file finishes before the save, and the count was
+    never better than "1 files". `newer` names the card format a newer
+    writer left, read off its file; a newer private file or plan names
+    none, so `newer_any` says the rest of the sentence alone. Both in all
+    ten locales, the nine others waiting for the native review.
+
+- **2026-10-19 — Part B6 built: formatting from the tab, and `device
+  format`.** Clause 59 as written, over the firmware's `@format` as built
+  (HOST-STATUS, "@format", at its d8855d7: the question for any card, the
+  second step a 2 s hold). What the build settled, and where it parts:
+  - **The protocol.** `@format` goes on the port a listen opens (DTR and
+    RTS low: no reset), as a job of the desk like a count
+    (`listen::format`, `desk::Cmd::Format`). Its first answer waits the
+    reply's 1.5 s; the listener's, 150 s (two dialogs of a minute and a
+    margin); each line after `@format 0`, a count's 60 s, the board's
+    restart among them. An `@format no` that came 59 s or more after
+    `@format ok` is the question's minute running out (`fmt_timeout`),
+    sooner a Cancel (`fmt_declined`): a Cancel in the minute's last second,
+    or a step 2 left to its own minute after step 1 was answered late,
+    reads by the clock alone. An `@err 4 format` is told apart by when it
+    came: before `@format ok` (not asked), after it with no restart (the
+    second answer's refusal), after `@format 0` (a failure); `@err 7
+    format` is firmware with no format, and the SD row says so from then
+    on.
+  - **While it runs** the board's work is the format's: no write, count,
+    read or second `@format` starts on it (the desk refuses a write too,
+    which would otherwise have stopped the job), and nothing locks the tab.
+    Leaving the tab or quitting lets the job go and the board goes on by
+    itself; the next visit asks it again. The board is asked again after
+    the format ends, after a refusal at the second answer and after a
+    failure (whose card is unknown until it answers), never after a
+    Cancel. Done shows the card the done line says (its size, free, no
+    tracks, `cid=-`) until that listen says it again, and "Formatted just
+    now: …" (`fmt_done`) in place of the board's card line while the card
+    is empty and unfilled.
+  - **The time** is estimated at 1 MB/s for the gap and both FATs, plus
+    15 s for the restart (`board::format_secs`: 34 s for a "64 GB" card,
+    263 s for "1 TB", HOST-STATUS's layouts at the slow end), in the gate
+    and on the row until the percent's rate says better. The device check
+    measures it.
+  - **What the gate names as lost.** `@status` reports no partitions, so
+    a GPT or damaged card's volumes can't be named: the gate says "what
+    the player can't read" (`gate_fmt_unread`, new).
+  - **Drawn beyond the frames.** On firmware that can't format, a damaged
+    card's row says so too ("v0.11.0 can't format a card." under "Try it
+    in a computer."), where its Format would be offered. The player's own
+    card's link in Details carries "erases the whole card", as the damaged
+    card's does.
+  - **Words.** 19 new `dev.card` keys: the refusals at once
+    (`fmt_refused_ui|screen|viz|busy|card|other`), at the second answer
+    (`fmt_refused_second_card|size|busy`), the failures
+    (`fmt_failed_card|size|write|mkfs|check|files|other`), `fmt_no_answer`,
+    `fmt_lost` and `gate_fmt_unread`. Each fits the hosted busy line (96
+    cells) in every locale, which the floor test now checks for every end
+    a format can have. German and the other eight written by the build,
+    all nine waiting for the native review.
+  - **`device format`** (clause 66) asks the board as `device list` does,
+    with no worker and no download, prints the card first and the rest as
+    plain lines; the listener's no and the minute go to stdout, the other
+    ends to stderr, all exit 1. A board that doesn't answer `@status` is
+    refused without being asked. Several boards: the localized title
+    `device flash --yes` prints, the boards' lines, then "Pass --port with
+    one of them." (flash's own last line names `--all`, which format
+    hasn't).
+  - **The pin can't format** (`PINNED_ANSWERS_FORMAT` false at v0.11.0, a
+    test holding it to the pin), so every board today keeps the `_pc` fix
+    lines and "v0.11.0 can't format a card.", and no board shows the
+    Format route until it runs 0.14.0.
+  - **Not tried on a board:** the whole route on a Core2 (the firmware's
+    device check 11, on a spare card): the port staying open across the
+    board's restart, the real percent's cadence, the minute's edge.
+- **2026-10-19 — Part B6's review fixes.** The review of B6 found no
+  format that starts by itself and seven smaller gaps; fixed as follows.
+  - **Clause 59 follows the firmware as at d8855d7**, where B6 was built:
+    step 2's red button says *Hold to erase*, as the picked frame drew it,
+    and its hint is under the body from the start. The decision entry's
+    "*Format*, held, where the picked frame says *Hold to erase*" and the
+    firmware entry's "as at 76a10dc" were true of 76a10dc; the SD row's
+    and the busy line's words already named no button, so none changes.
+  - **The busy line fits beside a Mac's port.** The floor test measured
+    the format's ends with "COM3" (4 cells), where the page names a port
+    by up to 16 (`cu.usbmodem14101`); measured with that, eight lines ran
+    over 96 cells, now shortened: German `fmt_asked`, French and
+    Portuguese and Russian `fmt_failed_check`, Italian `fmt_failed_write`,
+    Japanese `fmt_refused_viz`, `fmt_refused_second_busy` and
+    `fmt_failed_size` (the last now ends "書き込みなし。", nothing written,
+    in three words). The test now measures every end, and the asked and
+    done notes, beside a 16-cell port in every locale.
+  - **A refusal at the second answer in a word this player doesn't know**
+    says it was not formatted, as clause 59 has it and as `device format`
+    already did ("Not formatted: COM3 answered …; nothing was erased.",
+    `fmt_refused_second_other`, new), where it said "Couldn't format".
+  - **The player's own card while it indexes** (`tracks=building`): the
+    gate's gold line names the music ("your music, still being indexed,
+    on one FAT32 volume", `gate_fmt_music_building`, new), where it said
+    "one FAT32 volume" alone.
+  - **A write forgets how the last format ended**, as it forgets the
+    count: a board that answered `@err 7 format` and is then written with
+    firmware that formats is offered the format on the same visit, and a
+    "Formatted just now" doesn't outlive the write (a half-written board
+    forgets it too).
+  - **`device format` refuses an empty slot** before asking ("Not asked:
+    COM3: no card answers in its slot.", exit 1), where it printed "no
+    card. Formatting erases all of it…" and then asked, for the board to
+    refuse.
+  - **A test's timing.** The listen test of a no past the minute kept a
+    margin of about 0.1 s against the scheduler; it now waits 1 s past a
+    minute of 0.1 s.
+  - **Words.** The two new keys in all ten locales, and the eight
+    shortened lines: the nine languages other than English wait for the
+    native review with the rest of B6's.
+- **2026-10-19 — Part B13's terminal half built: the clock from the
+  tab; and the proxy's purpose in mStream's own words.** Clause 5's one
+  write, over the firmware's `@time` as built (HOST-STATUS, "@time", at
+  09874f5 and 79a7438). What the build settled, and where it parts:
+  - **Where it is asked.** In the listen job itself, after its status, on
+    the port the listen holds (`desk::Desk::listen`, `listen::clock`): one
+    bare `@time`, one `@time <unix-ms>` when due, and the bare `@time`
+    again to read it back. A listen is a job of its own, so no `@time` goes
+    out during the board's write, read, count or format; a listen told to
+    stop partway (leaving the tab, quitting) claims nothing. The worker
+    takes this computer's clock as `desk::Setup::clock`: the page's
+    (`wall_ms`) for the tab and `device flash`; none for `device flash
+    --yes`, whose printed steps (clause 32) stay as they were, a script's
+    lines.
+  - **Details' *Clock* fact** is the last set of the visit (*set by this
+    computer at 14:03 (it was unset)*, or *(it was 3.2 s off)*), kept for
+    the visit while the board stays plugged in; a clock found in step adds
+    no fact. Its minute is `firmware::clock_at`'s, as the release list's
+    *asked at* is: this computer's zone where it names one, else UTC.
+  - **More gold lines than the clause named.** The clause names `@err 5
+    time`, `@err 4 time rtc` and this computer's clock; a board that
+    doesn't answer `@time` (`log_clock_silent`) and any other answer or a
+    port that fails partway (`log_clock_failed`, the answer word for word)
+    are said in gold too. `@err 7 time` from a board that said `clock=` is
+    left as it is, as the clause has it, with no line past the host lines.
+    5 new keys (Wording); the off is said to a tenth of a second with a
+    point in every language, as the card's rates are.
+  - **The proxy's purpose.** mStream's batch now says in `GET /api/` that
+    its peer stream proxy forwards `X-mStream-Purpose`
+    (`features.federationProxy: { purpose: true }`, the key left out,
+    never `purpose: false`, when it doesn't). The transfer reads that key
+    (`sync::peers::proxy_says_copies`), where wave 3 inferred it from the
+    batch's `instanceId`. The id still stands for it on the batch's own
+    builds from before the key, which say 6.31.1, the version the batch
+    was cut from; on a later server the id with no key is a proxy that
+    drops the header, and a peer only it reaches is asked about (clause
+    58's gate), as behind an older parent.
+  - **Words.** The five keys in all ten locales; the nine languages other
+    than English were written by the build and wait for the native
+    review.
+  - **Not tried on a board:** the set on a 0.14.0 Core2, its log line and
+    the fact (the firmware's device check 10); nor the proxy's key against
+    a running mStream of the batch.
+- **2026-10-19 — Part B13's review fixes.** The review of B13's terminal
+  half found no reset, no `@time` outside a listen and no old board or
+  old server misread, and three smaller gaps; fixed as follows. The entry
+  above's "the bare `@time` again to read it back" and "claims nothing"
+  were true of 36120c8.
+  - **One bare `@time` per listen, as clause 5 says.** The page's listen
+    no longer reads the clock back after a set (`listen::ClockTo::Set`):
+    one bare `@time`, then one `@time <unix-ms>` when due. The firmware
+    reads the chip back itself and answers `@err 4 time rtc` when it
+    didn't take, so the read-back told the page nothing it used. The
+    hidden `device time` still reads it again (`ClockTo::SetAndCheck`, its
+    `after`), for the device checks.
+  - **A stop drops only what it cut short.** A listen told to stop (the
+    tab left, a write asked for) sends no `@time <unix-ms>`; a set the
+    board answered `@time ok` just before the stop is still said and kept
+    for Details' *Clock* fact, and a refusal it gave is still said
+    (`desk::listen_clock`), where the whole outcome was dropped. A silence
+    the stop cut short, or a port that failed meanwhile, is said by none,
+    as before.
+  - **`desk::format_end` has its doc comment back:** `clock_line` had
+    been put between the two. Code only.
+- **2026-10-19 — The terminal gate of wave 4.** The whole suite, the
+  desktop flavour's check and a debug build, then the tab's states of
+  the SD card transfer drawn whole by the GUI in English and German at
+  100×24 and 100×30, for a look. Fixed:
+  - **Details' *Drive* fact** (clause 44) was English in every language
+    ("FAT32 on MBR · 63.8 GB · 32 KB clusters") while its translation sat
+    unused. It is said a piece at a time in the locale's words, since a
+    card may lack its size, its clusters or its serial: the head's
+    `dev.card.head_on`, a new `dev.card.fact_drive_kb` (each locale's own
+    words from the unused key, which went) and `dev.card_size`.
+  - **Sizes in the locale's unit.** The head of a card the player can't
+    use and the Settings sheet's card and library sizes said "GB" in
+    every language; they are `dev.card_size` now, as the Space row's
+    figures were (Go in French, ГБ in Russian).
+
+  Found, not changed (words for the native review, or a choice):
+  - **The Settings sheet's help line** keeps to two lines and an ellipsis
+    (clause 48). In its 70 cells the help of the focused row runs past
+    two lines in eight of the nine other languages (all but Chinese): of
+    Player in all eight, of Name in six (de, es, fr, ja, pt, ru), of
+    Removals in five (de, es, it, ja, pl), of Into in French. German's
+    Name help, drawn, loses its last word, "Benutzername"; the other
+    languages were measured by a script wrapping by words in cells.
+    Shorter words, or a third line where the area has room, would keep
+    them whole.
+  - **Details' facts are a line each, cut with an ellipsis:** in German
+    the *Card* fact loses its version ("mStream Player 0…"), the *Player*
+    fact "Wiedergabeprotokoll" and *Removes* "weitere"; in French the
+    *Drive* fact loses its serial.
+  - **French names two facts *Lecteur*:** the drive (`fact_drive`) and the
+    player (`row_player`).
+- **2026-10-20 — The wave-4 gate's findings fixed.** Measured with the
+  longest values a card realistically shows: a server named by 28 cells
+  (`https://192.168.100.200:3000`, one word a line can't break, and Quick
+  Connect's `quick connect · 0123456789ab`), a library of 23 cells and
+  six digits of tracks; a 1 TB card (1000.2 GB) in 64 KB clusters on
+  `E:` or under a FAT32 label's 11 cells, its revision in four digits,
+  1,234 plays to send, 99 undated and 1,234 of your own, and firmware
+  0.14.0 listing four codecs.
+  - **The help line (clause 48)** keeps to its two lines in every locale
+    at the GUI's floor (70 cells) and on the console's sheet (64), so the
+    ellipsis is left for a longer name still. Shorter words for
+    `help_name`, `help_removals`, `help_into` and `help_player` in de, es,
+    fr, it, ja, pl, pt and ru. English changed only where it was cut
+    itself: `help_player` on the console's sheet, `help_removals` past 26
+    cells of server name (14 on the console) and `help_into` past 19 on
+    the console. French ties its colons and semicolons to the word before
+    with a no-break space, and Russian its dash, so no line starts with
+    one.
+  - **Details' facts (clause 44)** are whole in the 58-cell column.
+    Shorter words where a fact ran over: `fact_drive_kb` (es, fr, it, ja,
+    pt), `fact_card_v` (de, es, fr, it, ja), `fact_plays_v` (de, es, fr,
+    it, pl), `fact_player_v` (de, es, fr, it, pl, pt, ru) and
+    `fact_signed_in` (de, es, it, ja, pl, pt, ru). English's Card fact says
+    "rev." (a four-digit revision ran it to 59 cells) and its Plays fact
+    "undated" for the plays made before the clock was set (four-digit
+    counts ran it to 63).
+  - **Two rules for the values no wording can hold,** the smallest change
+    found: Removes' path is cut before its count, and a volume's long name
+    takes the Drive fact's serial, then its cluster size, each whole
+    (clause 44). The line used to be cut at its end, which took German's
+    "weitere" and French's serial.
+  - **French's two *Lecteur*:** the drive's fact is *Volume* now; the
+    player keeps *Lecteur*.
+  - **The card under its gate or sheet.** The set draws the Card view
+    beneath a modal at its height at rest, its corners beside a taller
+    modal (card 05's sheets at 100×30, card 06's German gates at the
+    floor). The build hid the primary and dropped its three rows with it,
+    so the card stood two rows short and its corners rose into the
+    modal's text. It keeps its rows now and only the button is not drawn
+    (`Row::Actions`' `covered`), which supersedes part B4's entry ("its
+    primary is not drawn under it"): a modal shorter than the card still
+    shows no half a button, and the floor's frames stay whole.
+  - **Not changed: the command line's "GB free" and "KB clusters"** (`device
+    card status`; `device format`'s done line). The cards' command-line
+    lines are plain English, lines a script reads (clauses 64–67 and the
+    Wording section), and those commands never set a locale, so `t!`
+    would print the same English; two translated fragments would only
+    mix the languages of one line. Speaking the locale on the command line
+    would be a change to the contract for all its lines.
+  - **Tests:** every locale's help for every row at both widths (no line
+    starting with a mark a space sets apart), every locale's facts with
+    the values above on a drive letter and on a long volume name, and the
+    card's corners where they are at rest under each of its modals, at
+    the floor and at 100×30, with no primary drawn.
+  - **For the native review:** the 62 rewritten values in the eight
+    languages above (de 8, es 9, fr 9, it 9, ja 7, pl 7, pt 7, ru 6),
+    among them "6.32+" (es, fr, pl, pt), "ab 6.32" (de) and "dalla 6.32"
+    (it) for "6.32 or later", and the shorter words for the revision
+    (Rev., rev., rév., 改訂).
+  - **Found, not changed:** French `fact_removes_v` says "et 1 autres" for
+    one (a plural that bends, against the Translation notes' rule), and
+    the wrap may start a Japanese or Chinese line with "。", since it
+    breaks those languages at any cell (Japanese Removals help with a
+    short server name at 64 cells).
+- **2026-10-20 — The wave-4 fixes reviewed.** What the review of the
+  entry above found, and what changed for it:
+  - **The command line's sizes are the Card view's words**
+    (`dev.card_size`, `dev.card_free`, `dev.card.fact_drive_kb`): `device
+    card status`' volume row, the size in `device cards`' lines, and
+    `device format`'s done line. The command line sets no locale, so they
+    print the same English and clause 67 holds; `device format` already
+    printed `dev.no_device_title` and `dev.several_title` the same way.
+    This supersedes the entry above's "Not changed: the command line's
+    'GB free' and 'KB clusters'". Speaking the user's locale on the
+    command line would still be a change to the contract for all its
+    lines, and is not made.
+  - **The 64-cell sheet is not drawn for a card.** It is the console
+    page's width, and that page has no transfer worker: only the GUI
+    shows a Card view, its sheet at 70 cells. English's `help_player` and
+    `help_into` were whole at 70 and changed for the 64-cell leg alone,
+    which the brief asked of every locale. Kept, and clause 48 says why
+    the width is tested; a main session that drops the leg can restore
+    the originals: "This card has no device.txt yet: it hasn't been in a
+    player. Opus and Auto DJ need v0.11.0 or later; an older Core2 gets
+    MP3 and FLAC only." and "Opus is always 48 kHz and gapless on the
+    Core2. MP3 above 192k needs %{server}'s mStream to offer it (6.32 or
+    later)."
+  - **"Only" again in `help_player`.** The rewrite had dropped it: English
+    now ends "need v0.11.0 or later; before that, MP3 and FLAC only", and
+    the three that followed it say it too: Spanish "si no, solo MP3 y
+    FLAC", Polish "starsze: tylko MP3 i FLAC", French "Opus et Auto DJ dès
+    la v0.11.0 ; avant, MP3 et FLAC seulement".
+  - **One word for the play log in each locale.** The Player fact's
+    shorter word ended the line where the log line under it kept the
+    longer one; the log line takes the fact's word now (`log_plays`):
+    "Hörverlauf gelesen", "historial de escuchas leído", "historique
+    d'écoute lu", "cronologia di ascolto letta", "przeczytano historię
+    odtwarzania", "histórico de reprodução lido", "история прослушиваний
+    прочитана".
+  - **Rewordings for sense:** German `help_removals` says "wenn du die
+    Liste gesehen hast; ab 51 fragt er erst" (it said "once you know the
+    list"); French `help_removals` "à la synchro, une fois la liste vue ;
+    dès 51, confirmation d'abord" (a bare "liste vue", and an "il" with no
+    subject); Japanese `fact_card_v` says "rev." as English does (改訂 is
+    a revised edition); Chinese spaces "Opus 和 Auto DJ" on both sides
+    (`help_player`, and `gate_fmt_txt`, which had the same phrase).
+  - **Kept: "rev." in English.** The revision is the root's generation,
+    which counts commits, not syncs: a sync commits at least once, and a
+    long one at each checkpoint (500 files or 5 minutes), so a fourth
+    digit comes within a card's life, and "revision 1000" runs the fact
+    to 59 cells.
+  - **The no-break space** of the French and Russian help lines has a
+    glyph of its own in the window's face (Hack maps U+00A0), so the GUI
+    draws it as the frames show. The rest of fr.yml keeps a plain space
+    before its colons; only the help lines are tested for a line that
+    starts with one.
+  - **Tests:** the corners test adds a modal shorter than the card (a new
+    card's Set up sheet, no library offered) and checks every state for
+    a button's frame in the rows between the modal and the card's
+    bottom; with the primary drawn under its modal it fails (on that
+    sheet, and on the half gate beside a board at the floor). The facts
+    test checks the Drive fact a piece at a time (the most pieces that
+    fit, never an ellipsis): whole on a drive letter, its clusters kept
+    under a label's 11 cells, gone too under a name longer than a label
+    holds; a Drive fact cut at the column fails it. The command line's
+    tests hold the English locale, and its volume row in German shows
+    that the words are the Card view's.
+  - **For the native review, added:** the 16 values above (en 1, de 2,
+    es 2, fr 3, it 1, ja 1, pl 2, pt 1, ru 1, zh 2); the Plays fact's
+    "undated" (en, de, es, fr, it, pl) beside "before the clock" (ja, pt,
+    ru, zh), one meaning in two wordings. Found in passing, not changed:
+    Polish `fact_card_v` calls the revision "wersja", the word for the
+    player's version beside it.
+- **2026-11-02 — The waveforms (clause 51a).** The firmware reads a waveform
+  index now; a sync writes it with no setting and no new sheet row. What the
+  format's document left to this screen:
+  - **The prompt.** A card with no file has something to do though its music
+    is in step, as the document asks. Two corners it can't settle, since the
+    file keeps no "asked, none", are settled here. A server with none to give
+    would offer the same sync at every look: a run that asked for every track
+    and got none says so in `state.json` (`wavesNone`, that root's generation),
+    and the look is quiet until the next commit. A 503 is no such answer: a
+    server still bringing its ffmpeg up says it of every track and has them a
+    minute later. `wavesNoFfmpeg` counts the runs in a row that came to no more,
+    and the third makes the look quiet too, or a host with no ffmpeg would be a
+    Sync ▸ for ever. And a file that came short never prompts: at a decode for
+    each track on an uncached library that would be a Sync ▸ and a rebuild of
+    the player's library for half an hour's worth of shapes, again and again,
+    over something a plain line covers; the tracks left over come with the next
+    sync that runs for anything else, or *Sync again*.
+  - **No room:** a card with nothing else to do and no room for the file goes
+    without, in a line of the log. The fit counted it at first (clause 49),
+    which told a card in step that it doesn't fit, and stopped its sync, over a
+    decoration.
+  - **The percentage with nothing to copy** was 100 from the plan on, which
+    would have gone back to 0 for the waveforms' count: it is now 0 until they
+    are asked for, their count, then 100 at the verify, which a run that makes
+    no commit (plays to send and nothing else) comes to as well.
+  - **A save ahead of the asking:** the half hour comes before the final
+    commit's first write, and a run of a few hundred files has made no other,
+    so a card pulled in it would have them all fetched again. The extra commit
+    costs the player nothing: it reads the root it finds at its next boot.
+  - **A stop or the half hour drops what is on its way:** a decode may be 30 s
+    behind two others, and clause 57's quit waits for about that long. The
+    server's decode isn't lost: its cache has it for the next run.
+  - **A card taken out while they are asked for stops the asking,** and one
+    taken out before the first ask, in the minutes of the Auto DJ index's step,
+    never starts it: its run's next write, which finds the gap by itself
+    otherwise (clause 53), may be half an hour off with other cards waiting
+    (clause 56).
+  - **For the native review:** `next_waves` and `sync_waves` in the nine
+    translated locales, drawn from each one's `pass_waveform` word.
+- **2026-11-07 — The mood scores (clause 51b).** The firmware's mood
+  filters (its Albums and its Auto DJ, built on its branches, not yet in a
+  release) read a tail on each track's record; a sync lays it, with no
+  setting and no new row (the firmware repo's docs/MOOD-FILTERS.md 5.2, 5.3,
+  9.11). What that plan left to this screen:
+  - **Two lines it didn't name.** Its notes said only why nothing new came.
+    A sync that brought scores said nothing, so neither Details nor the
+    command line showed they had come; and an answer with no row (a server
+    with its mood analysis off, or one not yet at these files) cleared the
+    card's with no word, the player then reading "No mood data". The first
+    says the count of what came, the second that the server has none. A
+    card for someone else's line comes at every sync, as Converts says it
+    at rest.
+  - **No prompt.** A card without scores isn't offered a sync for them, as
+    one without waveforms is: every sync of it asks, so a state of "asked,
+    none" would only hold a prompt off that never comes. The player's dim
+    row says to sync.
+  - **Converts' words wrap.** The plan said they wrap in Russian; in the
+    value column's 58 cells they take two lines in eight locales, English
+    among them ("… mood scores, plays" over "not sent"), and one in Japanese
+    and Chinese. Seven wrapped already. Two lines hold them in every locale,
+    at 58 and in the console's narrower card's 50, which the page's test
+    holds.
+  - **For the native review:** `conv_gift` in the nine translated locales,
+    each with its locale's mood word from the player's own strings (its
+    `mood.no_data`, the phone app's): Stimmungswerte, puntuaciones de ánimo,
+    scores d'ambiance, punteggi d'atmosfera, ムードスコア, oceny nastroju,
+    pontuações de clima, оценки настроения, 氛围评分.
+- **2026-11-10 — The landing review: the play history and the device
+  commands.** What the review of the card transfer found against clause 61
+  and the command line, and how each was settled.
+  - **A card for someone else sent its plays.** The settings' *For* was
+    read for the Auto DJ index and the mood scores alone: a gift card's
+    plays went to the owner's account, and on to whatever that account
+    forwards them to, where clause 61, `--for`'s help and `conv_gift` all
+    said they don't. None is mapped or posted now while the card is
+    marked, the plays that waited from before among them, and a look
+    counts none to send. `plays_gift`, in the set since the picks and
+    drawn nowhere, is Details' *Plays* fact on such a card and `p`'s busy
+    line; the command line says it in its own words.
+  - **A gift card's plays are dropped, not kept** (decided again the same
+    day, by the owner). They were first held in the card's log with no
+    ACKS, so that *For: me* brought them back: a card marked by mistake
+    lost nothing, but a card that was truly someone else's sent that
+    someone's plays once it was the listener's own. The second outweighs
+    the first. A play of such a card settles now as the listener's own
+    files' do (counted, the mark passing it, the player free to trim), and
+    this computer keeps its id until a sync has stored the mark.
+    - **No change of the setting lets one through.** The look of a sync
+      that marks the card, or makes it the listener's own again, is a gift
+      card's. The sheet's Apply settles what the log holds as it turns the
+      setting off, the marks in the one write with it; with a log it can't
+      read it refuses (and so does such a sync), and the card stays
+      marked.
+    - **What it costs.** The plays a listener's own card holds unsent when
+      it is marked are dropped: they can't be told from a gift's. A card
+      marked and unmarked by mistake loses them too. *Send the plays*
+      first keeps them.
+    - **Not closed** when this entry was written: plays that waited here
+      from before the card was marked held its marks, so the gift's plays
+      logged after them were settled on this computer alone until those
+      had gone, and another computer that synced the card in between, the
+      card the listener's own by then, sent them. Closed since by the
+      card's gift floor (the entry of the second landing review below),
+      made ranges since (the last review's entry).
+  - **A server in a scan lost the card's plays.** mStream answers
+    `unknown-track` for a file its scan hasn't reached, and every answer
+    settled its play: the marks passed them and the next commit's ACKS let
+    the player trim them, the whole log since the last sync for a card
+    synced during a rescan. An `unknown-track` settles now only on the word
+    of a whole listing, trusted for deletions (no scan running, nothing
+    moved under the read), that covers the path and lacks it; with any
+    other listing, or none, the play waits in the outbox and holds its
+    mark, and a scan's listing that lacks its path keeps it from being
+    sent. The wait is bounded, 30 days from the play's start, so the plays
+    of a file truly gone can't pile up behind a server that never lists
+    whole. *Send the plays* goes by the same rule: the listing it reads
+    for the paths the server moved is the server's whole one (it was first
+    held to settle none, as though that listing said less than a sync's).
+    The lines that say so are the run's own, in English, as its other
+    notes in Details' log are. The card contract (the firmware repo's
+    docs/METADATA.md 2.20.6, item 10 and the lines under its post table)
+    says a rejection settles a play; this is the software reading
+    "rejected" more narrowly, and is still to be written there.
+  - **A server whose clock was behind lost recent plays.** It refuses a
+    start more than 5 minutes ahead of its own clock, with the word it
+    has for one older than it keeps (`bad-time`), and that settled the
+    play. Held to this computer's clock instead: a start within the last
+    30 days and no more than those 5 minutes ahead waits for the server's
+    clock to be set right, and the log says the clocks disagree; an older
+    one, or one truly ahead, settles as before.
+  - **Update all and a format** (clause 28). The board's own write is
+    refused while its card is being formatted (clause 59); Update all's
+    turn had no such rule, and would stop the format's listen and write
+    the board, resetting it with its card half made. The review read it
+    as reachable once the pin formats. It isn't, by two rules far from
+    the turn: a board whose card is being formatted has something under
+    way, so Update all doesn't take it, and no format starts while a
+    write waits or runs.
+    The turn itself passes a formatting board over now, so the rule no
+    longer rests on those two, with a log line of its own
+    (`log_all_formatting`, one new `dev` key in the ten locales, the nine
+    translated ones from each locale's `log_all_skip` and `fmt_running`,
+    for the native review).
+  - **Undated plays were said to be kept.** Clause 61 and `plays_old`
+    said the plays from before the player's clock was set are "kept on
+    this computer"; nothing keeps them. The card contract (the firmware
+    repo's docs/METADATA.md 2.20.6, items 7, 8 and 10) has them counted
+    and not sent, the mark passing them, and that stands: the clause and
+    `plays_old` say so now, in the ten locales ("counted, not sent", each
+    locale's word from its `plays_mine`).
+  - **`device time` is in the help** (clause 66a, new). It was one of the
+    hidden JSON commands (the B4 entry above lists it among them), which
+    left a listener of the command line alone with no way to set the
+    player's clock, the tab being the only other. Its JSON is as it was.
+    `device card <drive> sync` and `plays` name it beside the count of
+    undated plays.
+  - **0.14.0, not 0.12.0.** The firmware's side of the card transfer (the
+    clock and `@time`, the play log, `@format`, `clock=` in `@status`) was
+    to ship in 0.12.0 when these clauses were written. 0.12.0 shipped
+    `cid=` and nothing else of it, 0.13.0 no more; 0.14.0 is the first
+    with the rest. Clauses 5 and 59, the fake's grammar in the translation
+    notes and the entries above that named 0.12.0 as that firmware name
+    0.14.0 now, changed in place on this date, and so do the command
+    line's words ("its firmware is older than 0.14.0") and the README.
+    What the design set's frame drew, a pin of v0.12.0, is left as drawn.
+    The pin is v0.11.0 still, and can't format.
+  - **`cid=` did ship in 0.12.0, and no longer offers the format.**
+    Clause 59 offered Format on a board whose status carries `cid=` or
+    `clock=`, the two keys that were to come with `@format`. `cid=` came
+    alone, in 0.12.0 (clause 20a keeps that), so every board on 0.12.0
+    or 0.13.0 would have been offered a format its firmware answers
+    `@err 7 format` to. The offer goes by `clock=` alone now, the key
+    that did come with it; such a board says "v0.13.0 can't format a
+    card." where the format would be, as v0.11.0 does.
+  - **Next sync counted plays already sent** (found while there, not one
+    of the review's). *Send the plays* settles them on this computer and
+    leaves the card's marks to a sync, so the card's log holds them as new
+    until one runs: the look after counted them to send again and offered
+    the link again, which then sent none. Next sync and Details' *Plays*
+    count the plays that wait for the card's server, which is what a sync
+    sends.
+  - **Two lines counted the card's marks for its plays** (the same pass).
+    A signed-out server's "37 plays wait for Home: sign in to send them"
+    and the take-over gate's "37 plays not yet sent to Home wait on this
+    computer for Home." both took their number from the card's state
+    file: how many marks it holds, one for each player and epoch that
+    logged plays there. A card one player had played said 1, whatever
+    waited, and one with no mark stored yet said nothing. The sign-in
+    line counts the plays that wait for that server, off the card and
+    this computer's outbox (the server answers nothing then); the gate
+    says the stopped sync's count of the plays that wait for the server
+    the card leaves, or the card's last look's when the Settings sheet
+    asks, and nothing when there is no count.
+  - **What a look and a post said of the plays reached nobody when the
+    job went well** (the same pass). A post that failed during a sync, a
+    server with no Stats API, a play its schema refuses, a card with no
+    ledger yet: each was a note in the plays' tally, and only *Send the
+    plays* failing outright showed them. They go where the lines of the
+    plays that wait go: a sync's notes and the plays job's lines, in
+    Details' log and on the command line, in the run's own words.
+  - **A waiting play was forgotten when the card's mark passed it.** The
+    marks rise over a seq the log holds no more, as over one another
+    computer's sync settled, and a play waiting here below them was
+    dropped unposted at the next look: the plays of a server out of reach
+    while the player's log rotated, lost. A waiting play stays now; one
+    the marks have passed goes to its server when that server is read (a
+    play already there comes back a duplicate), and is dropped only by a
+    sync from another server, as before.
+  - **One play the server's schema refuses held every play behind it.**
+    Its validator refuses a whole batch (a 400) for one play's field, and
+    the batch was sent again whole at every sync. Known ahead now: a time
+    or a length past 2^53 − 1, which no JSON number holds exactly (a start
+    from a broken clock), is never sent and is dropped alone, as a path
+    too long already was. For a fault the software can't know of, a batch
+    refused whole goes one play at a time, and the play refused alone is
+    dropped; when the server takes no call at all the fault may be the
+    request's, and nothing is dropped but a play 30 days old, as the
+    other waits end: a play refused with nothing beside it to prove the
+    request held its device's marks for good otherwise.
+- **2026-11-10 — The landing review: the screens and the command line's
+  lines.** What the review found in the quit's gate, the sheet, the gates
+  and the progress lines, and how each was settled.
+  - **The quit's gate was set where it couldn't be drawn.** Below the
+    screens' size the mini player drew no gate, yet `q` set one and it held
+    every key: the player looked hung. There `q` now stops at the next save
+    as Ctrl+C does (clause 57), and a gate left open when the window
+    narrows, or when its sync ends, goes.
+  - **A held key answered two gates.** Gates follow one another on one
+    Sync ▸, and a key's repeat or a double-click answered the next one as
+    it opened. A chained gate waits half a second for its answer (clause
+    58).
+  - **A sheet followed the view.** The view jumps to a sync that starts
+    (clause 55); a Settings sheet open on another card then drew and
+    applied as if for the card in view. A sheet and its gates are the card
+    they were opened for.
+  - **The command line looked stopped at 90%.** Its progress lines said the
+    tenths 1 to 9 only. They say the tenth of the end too, and a phase's
+    last count as it ends when that wasn't the last one said.
+- **2026-11-10 — The pin moves to v0.14.0, which formats a card.**
+  Firmware v0.14.0 (10 Nov) is the pin: the first release with the clock
+  and `@time`, the play log and `@format`, which the card transfer talks
+  to; at v0.11.0 an Update would have installed a firmware without them.
+  Both checksums are its SHA256SUMS's (equal to GitHub's digests of the
+  assets, read the same day), and the ELF table (clause 37) gains
+  v0.12.0's, v0.13.0's and v0.14.0's pairs (QIO `769811d5`, `e43d98f7`,
+  `08a671e0`; DIO `14294679`, `cd577310`, `91c7b448`), as the releases
+  name them. The release's code ran on a Core2 that day (its settings
+  kept, the clock set, plays written, a card formatted by hand); the
+  published image itself has not been written by this player yet.
+  - **The pin formats** (`PINNED_ANSWERS_FORMAT` true now, the test still
+    holding it to the pin), so what clauses 20 and 59 kept for that day
+    is drawn: a board with no `clock=` (0.13.0 and older) says "v0.13.0
+    can't format a card. Updating lets it." in its fix line's place, under
+    an exFAT, NTFS or GPT card, beside the verdict's *Update ▸*, and the
+    `_pc` fix lines ("on a computer") are no longer drawn under any board
+    the tab asks: a board that formats points at its own Format, one
+    that can't at the update. A damaged card still goes to a computer's
+    disk check first, with the same line under it. The clauses say so in
+    place.
+  - **Where boards fall** (clause 19): one on v0.11.0, v0.12.0 or v0.13.0
+    is now *Update available* with *Update ▸*, as is a build of 0.14.0's
+    own development (`v0.14.0-dev+…`, before the release); one on v0.14.0
+    is up to date; a development build past it (`v0.14.0-3-g…`) stays up
+    to date with the "Ahead of" line (the 2026-10-10 entry), never offered
+    a step back. Nothing in those rules moved; only the constants did.
+  - **The command line** (`device format`) still says "its firmware is
+    older than 0.14.0" to a board without the format, with no word of
+    updating; `device list` offers the update on such a board's line as
+    on any board behind the pin.
+- **2026-11-10 — The second landing review: the play history, the card
+  worker and the screens.** A second review read the fixes of the first
+  and found no way to write to a card other than the one picked and no
+  way to post a play twice; what it found besides, and how each was
+  settled.
+  - **A gift card's plays are kept on the card, not on this computer**
+    (clause 61). The first fix kept the ids of a card for someone else's
+    plays in this computer's outbox until a sync had stored the marks
+    past them. Three gaps were left: a store that turned the mark off
+    after the outbox failed to save let the next look send them; another
+    computer, or this one with its outbox lost, sent the ones a waiting
+    play held below the mark (the entry above's "Not closed"); and a sync
+    that would have marked the card and stopped before its state file
+    had them dropped all the same, though the card was never marked. The
+    card's `state.json` now keeps a **gift floor** (`giftPlays`: of each
+    player and epoch, the highest play counted as a gift's), written by
+    the same write as the marks and never ahead of it, and every look on
+    any computer counts a play at or below it as a gift's, whatever *For*
+    says by then; this computer keeps nothing of them. A state file older
+    than the floor has none. The commits of the sync that first counts
+    such a play leave it unacknowledged (they come before the state file
+    that stores the floor): the player trims it after the next sync, not
+    this one. The card contract (the firmware repo's docs/METADATA.md
+    2.12.7 and 2.20.6, item 11) is to say so; the words are proposed to
+    it. The plays' line in the run's notes says "played while the card was
+    for someone else" now, since a card made the listener's own again
+    still counts them.
+  - **`device card <drive> plays` on a gift card "asked its server
+    nothing"**: the command asks nothing for the plays, but its look at
+    the card (the one every command makes, to plan the next sync) asks
+    the server as for any card. Clause 61 says so now.
+  - **A play started ahead of this computer's clock waited for ever.**
+    Only a start older than 30 days was past the wait; one more than 5
+    minutes ahead (the player's clock was wrong) and turned away as a
+    track the server doesn't know held its mark for good. It is past the
+    wait at once now, and settles as the server says.
+  - **One play refused alone sent the rest of the post as `other`.** A
+    batch refused whole now goes one play at a time with the source it
+    had; a play with no source of its own refused with `device` goes once
+    more as `other`, and only when that is taken does the rest of the
+    post go as `other` (an mStream older than that source).
+  - **A sync paused for the sign-in went round and round.** A server that
+    lists its library and refuses the files (401) paused it, the look
+    after found a plan, and the sync went on under the same sign-in, to
+    pause again. It goes on only under another sign-in (clause 52), as
+    the servers' list already had it.
+  - **A card job's fault tore the terminal down.** Its thread caught the
+    panic, but the player's panic hook ran first and restored the
+    screen under a UI still running. The job, fit, eject and sync threads
+    are named now, and the hook stands back for them as for the audio
+    thread; the card says why the job ended.
+  - **A job that couldn't open its card said the card couldn't be read.**
+    Apply, Set up, *Send the plays* and Eject each fail as themselves
+    now (the command line exits 1, and never says the settings were
+    changed); a look that can't open the card says nothing and looks
+    again at the next look at the readers. A job looks at the volumes
+    once, not twice.
+  - **`cards.json` that couldn't be read was saved over.** A file the OS
+    wouldn't let the player read, or one that doesn't read as this
+    player's, was taken for an empty cache and saved with one job's
+    change: every other card's entry, the volumes hidden and the peers
+    left out were lost (a peer is asked about once, clause 58). The
+    update refuses now and says why.
+  - **One serial read that failed on a Mac was a card taken out.** At a
+    session's start (a look, a set-up, the settings' store, a sync), a
+    serial read that fails or reads none where one is expected is read
+    once more, as a run's own check already did.
+  - **A card with no serial wasn't one card.** Its key is its reader's
+    path, which the next card put in there shares: a Settings sheet or a
+    gate stayed open for whichever was in the reader, and Apply or the
+    gate's yes would have answered for it. A sheet and a gate keep the
+    card they were opened for (its serial, its card id) and go when it
+    goes or another is at its key; a sheet whose card left while another
+    was in view no longer holds the keys undrawn. *Send the plays* checks
+    the card as the other jobs do. And a card whose serial the OS lists
+    after it was listed (Linux's lsblk, now and then) keeps its slot,
+    re-keyed: its sync, its sheet and its gate follow it, never a card
+    taken out and a second tab.
+  - **The command line's wait spun when the worker was gone.** It looked
+    for two minutes, then went on as though the cards had settled. It
+    stops with the worker-gone line and exits 1.
+  - **"Not saved" blamed a server that wasn't there.** Settings for a card
+    whose saved server can't be reached now (Quick Connect on the command
+    line, a tunnel down) were said not saved for want of a server; they
+    are saved under the key the server was saved as, the card's source.
+    "Not saved" is said only with no server saved here for the card, and
+    its English words say that (`not_saved`; the nine translations said
+    so already).
+  - **A held key still answered a chained gate.** The half second counted
+    from the gate's opening, so a key held past it answered. Each key or
+    click the gate drops starts the half second again (clause 58).
+  - **Apply wrote the Budget row's limit to every peer.** The row shows
+    the limit saved on this computer; Apply wrote it to each peer of the
+    card's whenever anything else changed. It writes a budget only when
+    the listener changed it.
+  - **Words.** Clause 57 said the window's close button and Cmd-Q open the
+    quit gate; they never did. They close the window at once, and the
+    teardown stops the sync at its next save and waits for it, as the
+    Part B4 entry above says; clause 57 and the README say so now.
+- **2026-11-11 — The last review of the landing fixes.** A last read of
+  the second review's fixes found no play of a gift card's time posted,
+  none posted twice and nothing written to a card other than the one
+  picked; what it found besides, and how each was settled.
+  - **The gift floor dropped a listener's own play** (clause 61). The
+    floor was one highest seq of each player and epoch, so it covered a
+    play mapped before the card was marked that waited in one computer's
+    outbox too: any look that didn't hold it (another computer, or this
+    one with its outbox lost) counted it as a gift's, the marks and ACKS
+    passed it, and it was lost if the computer that held it never posted
+    it. The card keeps **gift ranges** now (`giftPlays`, each
+    `{deviceId, epoch, from, to}`: the plays from the first counted as a
+    gift's to the last, split where a play between them wasn't; a card
+    marked more than once has a few). The play from before lies below
+    its range, and every computer maps it as the listener's own. A state
+    file a development build wrote with the floor (`seq`, a ceiling)
+    reads as a range from 0 to it. Written as before: by the write that
+    settles the plays, nothing of them kept here, the ACKS one commit
+    later. The words for the card contract (the firmware repo's
+    docs/METADATA.md 2.12.7 and 2.20.6, item 11) are proposed to it again
+    with the ranges.
+  - **A card that never opened was looked at again for ever.** A look that
+    can't open the card is tried again at the next look at the readers
+    three times now; the fourth reads as failed, "the volume can't be
+    opened", so the card says why and the command line's wait ends at
+    once instead of after its two minutes.
+  - **A slow clock here settled a fresh play.** A start more than 5
+    minutes ahead of this computer's clock was past its wait at once, so
+    with this computer's clock slow a fresh play turned away as a track
+    a scanning server doesn't know was dropped. Such a play waits now,
+    its 30 days counted from when this computer first held it (kept with
+    it in the outbox, `heldAt`; one kept before has it from the next
+    sync). A `bad-time` for a start truly ahead still drops it at once.
+  - **A card with no serial took on any card with one.** A slot keyed by
+    its reader's path was re-keyed to whatever card the OS then listed
+    there with a serial. It is re-keyed only while that card is the one
+    it read: its root's card id when it read one, else the listing's
+    label and size. Another card is another card: the slot is taken out
+    and the card put in gets a tab of its own.

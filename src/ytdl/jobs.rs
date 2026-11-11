@@ -2,8 +2,8 @@
 //! server and account, kept in `ytdl.json` across runs. It owns an add from
 //! the press — the folder it needs first, then the POST, sent once and
 //! never again — and follows each job in `GET /api/v1/ytdl/downloads` until
-//! it settles: the note line's words, the one word on the room's title
-//! row, the From YouTube list (adding, needs a look, and the Added list:
+//! it settles: the note line's words, the one word on the Files door,
+//! the From YouTube list (adding, needs a look, and the Added list:
 //! the server's record of what came in, merged with this player's own
 //! finished jobs) and "Already adding to this folder". Closing the room or
 //! the window never cancels an add.
@@ -65,11 +65,9 @@ pub(crate) const FLOOR_WAIT_MS: i64 = 5_000;
 /// a surface shows.
 pub(crate) const REPROBE_MS: i64 = 3_000;
 /// What is kept per server and account: the last 20 jobs (open ones
-/// always), a row that needs a look for 7 days, the word's "✓ added" for
-/// an hour.
+/// always), a row that needs a look for 7 days.
 pub(crate) const KEEP_JOBS: usize = 20;
 pub(crate) const KEEP_FAILED_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-pub(crate) const ADDED_NEWS_MS: i64 = 60 * 60 * 1000;
 /// The new server keeps a settled entry a day: an open job's entry gone
 /// sooner died with a restart.
 pub(crate) const SERVER_KEEP_MS: i64 = 24 * 60 * 60 * 1000;
@@ -348,12 +346,6 @@ impl JobState {
                 | JobState::NotSureFinished
                 | JobState::NotFound
         )
-    }
-
-    /// A failure the word counts ("! failed") and the note names ("Couldn't
-    /// add …"). A "not sure" row is a guess, not a failure.
-    pub(crate) fn failure(self) -> bool {
-        matches!(self, JobState::Failed | JobState::StartFailed)
     }
 
     /// Check again can ask about it.
@@ -858,48 +850,6 @@ pub(crate) enum JobEvent {
     FormatOff,
 }
 
-/// The one word the jobs leave on the room's title row, the first that
-/// holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Word {
-    /// `adding` (ACCENT): a job is open.
-    Adding,
-    /// `! failed` (GOLD): a failure the list hasn't shown.
-    Failed,
-    /// `✓ added` (OK): a song added in the last hour the list hasn't shown.
-    Added,
-    /// `added songs` (DIM): the list has something.
-    History,
-}
-
-/// The counts behind the [`Word`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Summary {
-    pub adding: usize,
-    pub failed: usize,
-    pub added: usize,
-    /// The From YouTube list has a row.
-    pub history: bool,
-    /// When `added` next drops by itself (an hour on), with nothing to say
-    /// so: a word showing it is redrawn then.
-    pub news_ends: Option<i64>,
-}
-
-impl Summary {
-    pub(crate) fn word(&self) -> Option<Word> {
-        if self.adding > 0 {
-            Some(Word::Adding)
-        } else if self.failed > 0 {
-            Some(Word::Failed)
-        } else if self.added > 0 {
-            Some(Word::Added)
-        } else if self.history {
-            Some(Word::History)
-        } else {
-            None
-        }
-    }
-}
 
 /// One row of the Added list: a download record (6.30+, every device's
 /// adds), or one of this player's finished jobs no loaded record answers.
@@ -1221,8 +1171,8 @@ impl<T: Transport, C: Clock, S: Store> Tracker<T, C, S> {
         }
     }
 
-    /// The From YouTube list is up (or closed): while it is, outcomes are
-    /// seen as they land.
+    /// The From YouTube list is showing (its room is up) or not: while it
+    /// is, outcomes are seen as they land.
     pub(crate) fn watch(&mut self, on: bool) {
         self.watching = on;
         if on {
@@ -1321,36 +1271,6 @@ impl<T: Transport, C: Clock, S: Store> Tracker<T, C, S> {
     /// `directory`: "Already adding to this folder".
     pub(crate) fn is_adding(&self, url: &str, directory: &str) -> bool {
         self.jobs.iter().any(|j| j.state.open() && j.url == url && bare(&j.directory) == bare(directory))
-    }
-
-    /// The word's counts: open jobs; failures, and songs added in the last
-    /// hour, the list hasn't shown; whether the list has anything at all.
-    pub(crate) fn summary(&self) -> Summary {
-        let now = self.now();
-        let mut s = Summary::default();
-        for job in &self.jobs {
-            if job.hidden {
-                continue;
-            }
-            s.history = true;
-            if job.state.open() {
-                s.adding += 1;
-                continue;
-            }
-            if job.seen {
-                continue;
-            }
-            if job.state.failure() && fresh(job, now) {
-                s.failed += 1;
-            }
-            if let Some(ended) = job.ended_at.filter(|e| job.state == JobState::Added && now - e <= ADDED_NEWS_MS) {
-                s.added += 1;
-                let ends = ended + ADDED_NEWS_MS;
-                s.news_ends = Some(s.news_ends.map_or(ends, |have| have.min(ends)));
-            }
-        }
-        s.history |= self.records_shown() && !self.added.records.is_empty();
-        s
     }
 
     /// The Added list: on 6.30+ the account's record (paged) with this
@@ -3212,7 +3132,7 @@ mod tests {
             };
             let id = rig.t.start(req);
             assert_eq!(rig.state(&id), JobState::Starting);
-            assert_eq!(rig.t.summary().word(), Some(Word::Adding));
+            assert_eq!(rig.t.adding().len(), 1);
             assert!(rig.t.is_adding(LINK, "Music/Daft Punk/Homework"));
             // The floor, the job list and the folder go out together; the
             // POST waits for all three.
@@ -3264,7 +3184,7 @@ mod tests {
             let row = &rows[0];
             assert_eq!((row.record_id, row.job.as_deref(), row.ext.as_deref()), (Some(501), Some(id.as_str()), Some("mp3")));
             assert_eq!(row.folder, "Music/Daft Punk/Homework");
-            assert_eq!(rig.t.summary().word(), Some(Word::Added));
+            assert!(rig.t.adding().is_empty() && rig.t.needs_look().is_empty());
         }
 
         #[test]
@@ -3279,7 +3199,6 @@ mod tests {
             assert_eq!((f.problem, f.detail.as_deref()), (Problem::Exists, Some("One_More_Time.mp3")));
             assert!(notes(&events).is_empty(), "the room says it");
             assert!(rig.t.job(&id).is_none() && rig.t.jobs().is_empty(), "no row");
-            assert_eq!(rig.t.summary().word(), None);
 
             // Pressed in the Files window, closed before the answer: a row,
             // and its note.
@@ -3295,7 +3214,7 @@ mod tests {
             let events = rig.events();
             assert!(matches!(outcome(&events), Some(StartOutcome::Failed(f)) if f.problem == Problem::Exists));
             assert_eq!(notes(&events), [Note::CouldntAdd { title: "One More Time".into() }]);
-            assert_eq!(rig.t.summary().word(), Some(Word::Failed));
+            assert_eq!(rig.t.needs_look().len(), 1);
             assert_eq!(rig.sent("jobs"), 2, "the list before each POST; nothing polled for jobs that never started");
         }
 
@@ -3949,7 +3868,7 @@ mod tests {
 
         let mut rig = Rig::with_store(fake, shelf);
         assert_eq!(rig.state(&id), JobState::StartUnsure);
-        assert_eq!(rig.t.summary().word(), Some(Word::Adding));
+        assert_eq!(rig.t.adding().len(), 1);
         rig.serve();
         let job = rig.job(&id);
         assert_eq!((job.state, job.server_id.as_deref()), (JobState::Adding, Some("job-1")), "looked for on the first tick");
@@ -4173,33 +4092,27 @@ mod tests {
         let failed = json!({ "id": "f", "url": OTHER, "directory": DIR, "state": "failed", "createdAt": T0 - 7 * DAY + 5000, "endedAt": T0 - 7 * DAY + 5000 });
         let mut rig = Rig::with_store(Fake::new(1, true), Shelf { slot: Some(json!({ "jobs": [failed] })) });
         assert_eq!(rig.t.needs_look().len(), 1);
-        assert_eq!(rig.t.summary().word(), Some(Word::Failed));
         rig.wait(5001);
         assert!(rig.t.needs_look().is_empty());
-        assert_eq!(rig.t.summary().failed, 0);
         rig.add(LINK);
         rig.serve();
         assert!(rig.t.job("f").is_none(), "pruned with the next save");
     }
 
     #[test]
-    fn the_word_is_adding_then_an_unseen_failure_then_an_hours_news_then_history() {
+    fn outcomes_are_seen_while_the_list_shows_and_a_hidden_job_still_adds() {
         let mut rig = Rig::new(Fake::new(1, true));
-        assert_eq!(rig.t.summary().word(), None, "nothing at all: no word");
-        rig.add(LINK);
-        rig.add(OTHER);
+        let first = rig.add(LINK);
+        let second = rig.add(OTHER);
         rig.serve();
-        assert_eq!(rig.t.summary(), Summary { adding: 2, history: true, ..Summary::default() });
+        assert_eq!(rig.t.adding().len(), 2);
         rig.fake.complete(LINK);
         rig.fake.fail_job(OTHER, Some("too-long"), Some("it took longer than an hour"));
         rig.wait(3000);
-        let ended = rig.t.clock_mut().0;
-        let s = rig.t.summary();
-        assert_eq!((s.adding, s.failed, s.added, s.news_ends), (0, 1, 1, Some(ended + ADDED_NEWS_MS)));
-        assert_eq!(s.word(), Some(Word::Failed));
-        // The list shows them: seen, and the word is the list's own.
+        assert!(!rig.job(&first).seen && !rig.job(&second).seen, "landed with the list away: not seen yet");
+        // The list shows them: seen.
         rig.t.watch(true);
-        assert_eq!(rig.t.summary().word(), Some(Word::History));
+        assert!(rig.job(&first).seen && rig.job(&second).seen);
         // While it is up, what lands is seen at once.
         let third = rig.add(THIRD);
         rig.serve();
@@ -4207,27 +4120,21 @@ mod tests {
         rig.wait(3000);
         assert!(rig.job(&third).seen);
         rig.t.watch(false);
-        // Unseen, "✓ added" lasts an hour.
+        // Away again, the next one waits to be seen.
         let home = "/Music/Daft Punk/Homework/";
-        rig.t.start(StartRequest { mkdir: Some(home.into()), ..request(LINK, home, Origin::Room) });
+        let fourth = rig.t.start(StartRequest { mkdir: Some(home.into()), ..request(LINK, home, Origin::Room) });
         rig.serve();
         rig.fake.complete(LINK);
         rig.wait(3000);
-        assert_eq!(rig.t.summary().word(), Some(Word::Added));
-        rig.wait(ADDED_NEWS_MS);
-        assert_eq!(rig.t.summary().word(), Some(Word::Added));
-        rig.wait(1);
-        assert_eq!(rig.t.summary().word(), Some(Word::History));
+        assert!(!rig.job(&fourth).seen);
 
-        // Hidden, an open job counts for nothing — and is still adding there.
+        // Hidden, an open job lists nowhere — and is still adding there.
         let inbox = "/Music/Inbox/";
         let open = rig.t.start(StartRequest { mkdir: Some(inbox.into()), ..request(THIRD, inbox, Origin::Room) });
         rig.serve();
-        assert_eq!(rig.t.summary().word(), Some(Word::Adding));
         assert_eq!(rig.t.adding().len(), 1);
         rig.t.dismiss(&open);
         assert!(rig.job(&open).hidden, "an open job is hidden, not dropped");
-        assert_eq!(rig.t.summary().word(), Some(Word::History));
         assert!(rig.t.is_adding(THIRD, "Music/Inbox"));
         assert!(!rig.t.is_adding(THIRD, DIR), "by link and folder");
         assert!(rig.t.adding().is_empty());

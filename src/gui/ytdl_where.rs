@@ -1,20 +1,21 @@
-//! Add from YouTube's two place windows: Where new songs land — the room's
-//! `d change`: the library, the layout and the folders it makes, kept for
+//! Add from YouTube's two place windows: Saves to — the room's `Saves to`
+//! row (`d`): the library, the layout and the folders it makes, kept for
 //! the server in `config.toml` or used for this song — and Choose a
-//! folder — `c choose a folder`, and a failed row's Choose a folder: a
+//! folder — `choose a folder`, and a failed row's Choose a folder: a
 //! folder that already exists, for an account that can't make one.
 //!
-//! Design: the canvas's TermWhere board (W0–W5). Both stand at Where copies
-//! land's place — 80 wide over the whole frame, its top row 4 at 30 rows,
-//! no band — and Choose a folder takes the place of the window it was
-//! opened from (the Files window, the From YouTube list), which comes back
-//! once it closes. Where copies land's grammar (keep.rs) with Add from
-//! YouTube's own presets ([`crate::ytdl::layout_choices`]): the libraries
-//! side by side only with two or more (the dot OK), the layouts as radios
-//! (the dot ACCENT, the chosen label BOLD), Custom's line editor and its
-//! variables, a bracket trap's GOLD line with its way on, `[ Save ]` DIM
-//! until something changes. It reads the account's Discover destination
-//! and never writes it.
+//! Design: Saves to is the "Add from YouTube · GUI" canvas's SavesTo
+//! board, a sheet ([`super::ytdl_sheets::open_sheet`]): the place it makes
+//! on its title's own row; the libraries side by side only with two or
+//! more (the dot OK); Add from YouTube's own presets
+//! ([`crate::ytdl::layout_choices`]) as radios in two columns (the dot
+//! ACCENT, the chosen label BOLD); Custom's field a bordered card with its
+//! variables under it; a bracket trap's GOLD line with its way on; `use
+//! for this song` and `[ Save ]`, DIM until something changes. It reads
+//! the account's Discover destination and never writes it. Choose a
+//! folder keeps the earlier canvas's TermWhere board (W4, W5): 80 wide at
+//! Where copies land's place, in the place of the window it was opened
+//! from (the Files window), which comes back once it closes.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
@@ -26,7 +27,7 @@ use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::ytdl::{YtdlCallError, YtdlListing};
 use crate::config;
-use crate::kit::theme::{legacy_conhost, th};
+use crate::kit::theme::th;
 use crate::kit::{ListView, dim, width};
 use crate::ytdl::jobs::Redo;
 use crate::ytdl::{
@@ -35,23 +36,22 @@ use crate::ytdl::{
 };
 
 use super::keep::{self, crumb_sep};
-use super::ytdl::{self, FolderLook, Form, Keys, Work, YtAct, yt};
-use super::{Act, Gui, accent, bright_bold, put, sel};
+use super::ytdl::{self, FolderLook, Form, Work, YtAct, yt};
+use super::{Act, Gui, accent, bright_bold, put, sel, ytdl_sheets};
 
 /// Where copies land's width and the height it anchors as (the 100 × 24
 /// floor's whole column).
 const PLACE_W: u16 = 80;
 const PLACE_ANCHOR: u16 = 22;
-/// From the window's left border: the text's column, a radio's label and
-/// Custom's field, a folder's name; the last cell anything is drawn in.
+/// From Choose a folder's left border: the text's column, a folder's
+/// name; the last cell anything is drawn in.
 const TEXT_X: u16 = 2;
-const FIELD_X: u16 = 6;
 const TREE_X: u16 = 4;
 const LAST_X: u16 = 77;
 /// The cells between the libraries side by side.
 const GAP: u16 = 3;
 
-/// Where new songs land's and Choose a folder's controls.
+/// Saves to's and Choose a folder's controls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlaceAct {
     /// `Esc close` on the border.
@@ -68,7 +68,7 @@ pub(crate) enum PlaceAct {
     Use,
     /// `[ Save ]`.
     Save,
-    /// A bracket trap's way on: `y add a year`, `e edit tags`.
+    /// A bracket trap's way on: `add a year`, `edit tags`.
     Fix,
     /// Choose a folder: `◂ Up to …`, a folder (in), `[ Use this folder ]`,
     /// and its bar.
@@ -89,8 +89,8 @@ pub(crate) enum Place {
     Choose(ChooseUi),
 }
 
-/// Where new songs land as a form: the library and layout picked, Custom's
-/// text — the choice it makes is read from them each frame ([`choice`]).
+/// Saves to as a form: the library and layout picked, Custom's text —
+/// the choice it makes is read from them each frame ([`choice`]).
 pub(crate) struct WhereUi {
     library: String,
     kind: LayoutKind,
@@ -115,7 +115,7 @@ enum For {
     Room,
     /// The Files window's song: it takes the window's place.
     Window,
-    /// A failed row, added again there: it takes the list's place.
+    /// A failed row of the room's list, added again there.
     Job(String),
 }
 
@@ -138,22 +138,21 @@ pub(crate) struct ChooseUi {
 
 // ── Where it stands ─────────────────────────────────────────────────────────
 
-/// A place window is up over what it was opened from: Where new songs land
-/// and the room's Choose a folder over the room, the window's over Files,
-/// a row's in the From YouTube list's place.
+/// A place window is up over what it was opened from: Saves to and the
+/// room's Choose a folder (its form's, a row's) over the room, the
+/// window's over Files.
 pub(super) fn is_open(gui: &Gui) -> bool {
     match &gui.ytdl.place {
         None => false,
         Some(Place::Where(_)) => ytdl::in_room(gui),
         Some(Place::Choose(c)) => match c.of {
-            For::Room => ytdl::in_room(gui),
+            For::Room | For::Job(_) => ytdl::in_room(gui),
             For::Window => super::ytdl_here::window_up(gui),
-            For::Job(_) => ytdl::list_held(gui),
         },
     }
 }
 
-/// Once a frame: a window whose ground went closes; Where new songs land
+/// Once a frame: a window whose ground went closes; Saves to
 /// asks for its presets once and checks the folders its place makes.
 pub(super) fn turn(gui: &mut Gui) -> bool {
     if gui.ytdl.place.is_some() && !is_open(gui) {
@@ -182,7 +181,7 @@ pub(super) fn turn(gui: &mut Gui) -> bool {
     sent
 }
 
-/// A folder check's answer, if it is Where new songs land's.
+/// A folder check's answer, if it is Saves to's.
 pub(super) fn checked(gui: &mut Gui, seq: u64, check: &FolderCheck) {
     if let Some(Place::Where(w)) = gui.ytdl.place.as_mut()
         && let Some(folder) = w.folder.as_mut().filter(|f| f.seq == seq)
@@ -218,7 +217,7 @@ pub(super) fn listed(gui: &mut Gui, seq: u64, result: Result<YtdlListing, YtdlCa
 
 // ── Opening ─────────────────────────────────────────────────────────────────
 
-/// Where new songs land, from the room's `d change`: on the choice the
+/// Saves to, from the room's row (`d`): on the choice the
 /// song goes by (a just-this-song one too); on Same as Discover its own
 /// library stays the remembered one, for the radios beside it.
 pub(super) fn open_where(gui: &mut Gui) {
@@ -303,9 +302,9 @@ fn close(gui: &mut Gui) {
     gui.ytdl.place = None;
 }
 
-// ── Where new songs land: its reading ───────────────────────────────────────
+// ── Saves to: its reading ───────────────────────────────────────────────────
 
-/// Everything Where new songs land shows, read at once.
+/// Everything Saves to shows, read at once.
 struct WhereState {
     /// The layouts it offers, in order.
     kinds: Vec<LayoutKind>,
@@ -370,7 +369,7 @@ fn where_state(gui: &Gui, w: &WhereUi) -> WhereState {
     WhereState { kinds, locked: choice.kind == LayoutKind::Discover, choice, target, valid, can_save, problem, trap, new_folder }
 }
 
-// ── Where new songs land: its acts ──────────────────────────────────────────
+// ── Saves to: its acts ──────────────────────────────────────────────────────
 
 fn where_mut(gui: &mut Gui) -> Option<&mut WhereUi> {
     match gui.ytdl.place.as_mut() {
@@ -516,15 +515,15 @@ pub(super) fn act(gui: &mut Gui, act: PlaceAct) {
             match act {
                 PlaceAct::Use if st.valid => use_for_song(gui, st.choice),
                 PlaceAct::Save if st.can_save => save(gui, &st.choice),
-                // "y add a year keeps the choice for this song and opens
-                // Year in the room" (W3).
+                // `add a year` keeps the choice for this song and opens
+                // Edit tags on the year.
                 PlaceAct::Fix => {
                     let Some((_, Some(fix))) = st.trap else { return };
                     let field = fix_field(&st.target, fix);
                     use_for_song(gui, st.choice);
-                    let draft = &mut gui.ytdl.draft;
-                    draft.tags_open = true;
-                    draft.keys = Keys::Tag(field);
+                    close(gui);
+                    ytdl::open_tags(gui, Form::Room, field);
+                    return;
                 }
                 _ => return,
             }
@@ -594,9 +593,9 @@ pub(super) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     false
 }
 
-/// Where new songs land (W0–W3): ← → the library, ↑ ↓ the layout's dot
-/// (↓ on Custom gives its field the keys), Enter saves once it is on, the
-/// drawn key words, Esc closes. Custom's field: Enter or Esc gives the
+/// Saves to: ← → the library, ↑ ↓ the layout's dot (↓ on Custom gives
+/// its field the keys), Enter saves once it is on, the letters of the
+/// controls it drew, Esc closes. Custom's field: Enter or Esc gives the
 /// keys back.
 fn where_key(gui: &mut Gui, key: KeyEvent) {
     let ctrl = key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
@@ -703,7 +702,7 @@ fn open_place(frame: &mut Frame, gui: &mut Gui, area: Rect, rows: u16, title: &s
 }
 
 pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    // The key words this window draws are the only ones live under it.
+    // The controls this window draws are the only ones live under it.
     gui.ytdl.drawn.clear();
     match &gui.ytdl.place {
         Some(Place::Where(_)) => draw_where(frame, gui, area),
@@ -712,16 +711,18 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
 }
 
-/// One row of Where new songs land.
+/// One row of Saves to.
 #[derive(Debug, Clone)]
 enum WRow {
-    Preview,
     /// A bracket trap's GOLD row; the first carries its way on.
     Trap(String, bool),
     Blank,
     Libraries,
-    Radio(LayoutKind),
-    Field,
+    /// Two layouts' radios, side by side.
+    Radios(LayoutKind, Option<LayoutKind>),
+    /// Custom's field, a card three rows tall: its top, the text, its
+    /// bottom.
+    Field(u8),
     Problem(String),
     Vars,
     Footer,
@@ -734,149 +735,148 @@ fn fix_key(fix: Option<TrapFix>) -> Option<(&'static str, PlaceAct)> {
     }
 }
 
-fn where_rows(gui: &Gui, w: &WhereUi, st: &WhereState) -> Vec<WRow> {
-    let wide = usize::from(LAST_X + 1 - TEXT_X);
-    let mut rows = vec![WRow::Preview];
+fn where_rows(gui: &Gui, w: &WhereUi, st: &WhereState, wide: usize) -> Vec<WRow> {
+    let mut rows = Vec::new();
     if let Some((text, fix)) = &st.trap {
-        let key = fix_key(*fix).map_or(0, |(k, _)| width(&t!(k)) + 2);
+        let key = fix_key(*fix).map_or(0, |(k, _)| usize::from(ytdl::link_width(&t!(k), true)) + 2);
         for (i, line) in ytdl::gold_rows(text, wide.saturating_sub(key)).into_iter().enumerate() {
             rows.push(WRow::Trap(line, i == 0));
         }
+        rows.push(WRow::Blank);
     }
-    rows.push(WRow::Blank);
     if gui.app.libraries.len() > 1 {
         rows.push(WRow::Libraries);
         rows.push(WRow::Blank);
     }
-    for kind in &st.kinds {
-        rows.push(WRow::Radio(*kind));
-        if *kind == LayoutKind::Custom && w.kind == LayoutKind::Custom {
-            rows.push(WRow::Field);
-            let room = usize::from(LAST_X + 1 - FIELD_X);
-            rows.extend(st.problem.iter().flat_map(|p| ytdl::gold_rows(p, room)).map(WRow::Problem));
-            rows.push(WRow::Vars);
-        }
+    rows.extend(st.kinds.chunks(2).map(|pair| WRow::Radios(pair[0], pair.get(1).copied())));
+    if w.kind == LayoutKind::Custom {
+        rows.push(WRow::Blank);
+        rows.extend((0..3).map(WRow::Field));
+        rows.extend(st.problem.iter().flat_map(|p| ytdl::gold_rows(p, wide)).map(WRow::Problem));
+        rows.push(WRow::Vars);
     }
     rows.push(WRow::Blank);
     rows.push(WRow::Footer);
     rows
 }
 
-/// Where new songs land (W0–W3).
+/// Saves to (the canvas's SavesTo board): the place on the title's own
+/// row; the libraries side by side where there are two or more; the
+/// layouts' radios in two columns; Custom's field a card, its variables
+/// under it; `use for this song` and `[ Save ]`.
 fn draw_where(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let Some(Place::Where(w)) = &gui.ytdl.place else { return };
     let st = where_state(gui, w);
-    let rows = where_rows(gui, w, &st);
+    let wide = ytdl_sheets::sheet_room(gui, area);
+    let rows = where_rows(gui, w, &st, wide);
     let (library, kind, hand, custom, custom_keys) = (w.library.clone(), w.kind, w.hand, w.custom.clone(), w.custom_keys);
-    let rect = open_place(frame, gui, area, rows.len() as u16, &t!("gui.ytdl.where.title"));
-    let text_x = rect.x + TEXT_X;
-    let field_x = rect.x + FIELD_X;
-    let end = rect.x + LAST_X + 1;
+    let rect = ytdl_sheets::open_sheet(frame, gui, area, rows.len() as u16, place(PlaceAct::Close));
+    ytdl_sheets::sheet_title(frame, rect, &t!("gui.ytdl.room.saves_to"), |frame, x, room| {
+        if st.valid {
+            ytdl::draw_place(frame, x, rect.y, &st.target.crumbs(), st.new_folder, room)
+        } else {
+            let dash = super::discover::dash();
+            put(frame, x, rect.y, dash, dim());
+            width(dash) as u16
+        }
+    });
+    let (x, total) = ytdl_sheets::sheet_text(rect);
+    let end = x + total;
+    let half = total / 2 + 1;
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    let (dot_on, dot_off) = if legacy_conhost() { ("(*)", "( )") } else { ("(•)", "( )") };
+    let (dot_on, dot_off) = ytdl::dots();
+    let mut card = None;
     for (i, row) in rows.into_iter().enumerate() {
         let y = rect.y + 1 + i as u16;
         match row {
             WRow::Blank => {}
-            WRow::Preview => {
-                let lead = t!("gui.ytdl.room.files_go_to").to_string();
-                put(frame, text_x, y, &lead, dim());
-                let px = text_x + width(&lead) as u16 + 1;
-                if st.valid {
-                    ytdl::draw_place(frame, px, y, &st.target.crumbs(), st.new_folder, usize::from(end.saturating_sub(px)));
-                } else {
-                    put(frame, px, y, super::discover::dash(), dim());
-                }
-            }
             WRow::Trap(line, first) => {
-                put(frame, text_x, y, &super::bar::clip(&line, usize::from(end - text_x)), Style::default().fg(th().gold));
+                put(frame, x, y, &super::bar::clip(&line, usize::from(total)), Style::default().fg(th().gold));
                 if let Some((key, act)) = fix_key(st.trap.as_ref().and_then(|(_, f)| *f)).filter(|_| first) {
-                    let x = end.saturating_sub(width(&t!(key)) as u16);
-                    ytdl::key_word(frame, gui, x, y, key, YtAct::Place(act));
+                    let words = t!(key).to_string();
+                    let at = end.saturating_sub(ytdl::link_width(&words, true));
+                    ytdl::link(frame, gui, at, y, &words, true, YtAct::Place(act));
                 }
             }
             WRow::Libraries => {
                 // Same as Discover's library is its own: the dot on it.
                 let chosen = if st.locked { st.choice.library.clone() } else { library.clone() };
-                let mut x = text_x;
+                let mut at = x;
                 for (n, name) in gui.app.libraries.clone().iter().enumerate() {
                     let cells = 4 + width(name) as u16;
-                    if x + 5 > end {
+                    if at + 5 > end {
                         break;
                     }
-                    let w_cells = cells.min(end - x);
-                    let cell = Rect { x, y, width: w_cells, height: 1 };
+                    let w_cells = cells.min(end - at);
+                    let cell = Rect { x: at, y, width: w_cells, height: 1 };
                     let on = *name == chosen;
-                    put(frame, x, y, if on { dot_on } else { dot_off }, if on { Style::default().fg(th().ok) } else { dim() });
+                    put(frame, at, y, if on { dot_on } else { dot_off }, if on { Style::default().fg(th().ok) } else { dim() });
                     let style = match (gui.ui.hovers(cell), on) {
                         (_, true) if hand => accent().add_modifier(Modifier::BOLD),
                         (true, _) => bright_bold(),
                         (false, true) => bold,
                         (false, false) => Style::default(),
                     };
-                    put(frame, x + 4, y, &super::bar::clip(name, usize::from(w_cells.saturating_sub(4))), style);
+                    put(frame, at + 4, y, &super::bar::clip(name, usize::from(w_cells.saturating_sub(4))), style);
                     gui.ui.click(cell, place(PlaceAct::Library(n)));
-                    x += w_cells + GAP;
+                    at += w_cells + GAP;
                 }
             }
-            WRow::Radio(radio) => {
-                let on = kind == radio;
-                // The layout's dot is ACCENT (Where copies land's is OK).
-                put(frame, text_x, y, if on { dot_on } else { dot_off }, if on { accent() } else { dim() });
-                let pick = Rect { x: text_x, y, width: end - text_x, height: 1 };
-                let style = match (gui.ui.hovers(pick), on) {
-                    (true, _) => bright_bold(),
-                    (false, true) => bold,
-                    (false, false) => Style::default(),
-                };
-                let words = radio.label().text();
-                put(frame, field_x, y, &super::bar::clip(&words, usize::from(end - field_x)), style);
-                gui.ui.click(pick, place(PlaceAct::Pick(radio)));
-            }
-            WRow::Field => {
-                let room = end - field_x;
-                if custom_keys {
-                    super::text_field(frame, &mut gui.ui, field_x, y, custom.value(), custom.cursor(), room, Style::default());
-                } else {
-                    put(frame, field_x, y, &super::clip_lead(custom.value(), usize::from(room)), Style::default());
+            WRow::Radios(left, right) => {
+                for (radio, at) in [(Some(left), x), (right, x + half)] {
+                    let Some(radio) = radio else { continue };
+                    let on = kind == radio;
+                    let cells = if at == x { half.saturating_sub(2) } else { end.saturating_sub(at) };
+                    let pick = Rect { x: at, y, width: cells, height: 1 };
+                    // The layout's dot is ACCENT (the library's is OK).
+                    put(frame, at, y, if on { dot_on } else { dot_off }, if on { accent() } else { dim() });
+                    let style = match (gui.ui.hovers(pick), on) {
+                        (true, _) => bright_bold(),
+                        (false, true) => bold,
+                        (false, false) => Style::default(),
+                    };
+                    put(frame, at + 4, y, &super::bar::clip(&radio.label().text(), usize::from(cells.saturating_sub(4))), style);
+                    gui.ui.click(pick, place(PlaceAct::Pick(radio)));
                 }
-                gui.ui.click(Rect { x: field_x, y, width: room, height: 1 }, place(PlaceAct::Field));
             }
+            WRow::Field(0) => card = Some(Rect { x, y, width: total, height: 3 }),
+            WRow::Field(_) => {}
             WRow::Problem(line) => {
-                put(frame, field_x, y, &super::bar::clip(&line, usize::from(end - field_x)), Style::default().fg(th().gold));
+                put(frame, x, y, &super::bar::clip(&line, usize::from(total)), Style::default().fg(th().gold));
             }
             WRow::Vars => {
-                let mut x = field_x;
+                let mut at = x;
                 for (n, name) in YTDL_VARS.iter().enumerate() {
                     if n > 0 {
-                        put(frame, x, y, " · ", dim());
-                        x += 3;
+                        put(frame, at, y, " · ", dim());
+                        at += 3;
                     }
-                    let cell = Rect { x, y, width: width(name) as u16, height: 1 };
-                    put(frame, x, y, name, if gui.ui.hovers(cell) { bright_bold() } else { dim() });
+                    let cell = Rect { x: at, y, width: width(name) as u16, height: 1 };
+                    put(frame, at, y, name, if gui.ui.hovers(cell) { bright_bold() } else { dim() });
                     gui.ui.click(cell, place(PlaceAct::Var(n)));
-                    x += cell.width;
+                    at += cell.width;
                 }
             }
             WRow::Footer => {
-                // Refused, `u use for this song` steps aside (W2).
-                if st.valid {
-                    ytdl::key_word(frame, gui, text_x, y, "gui.ytdl.key.use_song", YtAct::Place(PlaceAct::Use));
-                }
-                let words = format!("[ {} ]", t!("gui.ytdl.where.save"));
-                let cell = Rect { x: end.saturating_sub(width(&words) as u16), y, width: width(&words) as u16, height: 1 };
-                if st.can_save {
-                    let style = if gui.ui.hovers(cell) { bright_bold() } else { accent().add_modifier(Modifier::BOLD) };
-                    put(frame, cell.x, y, &words, style);
-                    gui.ui.click(cell, place(PlaceAct::Save));
-                } else {
+                let button = rect.right().saturating_sub(3);
+                let save = t!("gui.ytdl.where.save").to_string();
+                let at = ytdl_sheets::bracket_button(frame, gui, button, y, &save, st.can_save, place(PlaceAct::Save));
+                if !st.can_save {
                     // Off: no click, no hover — its tooltip says why.
-                    put(frame, cell.x, y, &words, dim());
                     let why = if st.valid { "gui.ytdl.where.save_off_same" } else { "gui.ytdl.where.save_off_bad" };
-                    gui.ui.tip(cell, t!(why).to_string());
+                    gui.ui.tip(Rect { x: at, y, width: button - at, height: 1 }, t!(why).to_string());
+                }
+                // Refused, `use for this song` steps aside.
+                if st.valid {
+                    let words = t!("gui.ytdl.key.use_song").to_string();
+                    let lx = at.saturating_sub(3 + ytdl::link_width(&words, false));
+                    ytdl::link(frame, gui, lx, y, &words, false, YtAct::Place(PlaceAct::Use));
                 }
             }
         }
+    }
+    if let Some(card) = card {
+        ytdl_sheets::field_card(frame, gui, card, custom.value(), custom.cursor(), custom_keys, place(PlaceAct::Field));
     }
 }
 
@@ -1044,11 +1044,13 @@ mod tests {
     use crate::ytdl::jobs::{Answer, Call};
     use crate::ytdl::{DiscoverPlace, FolderCheck, Presets};
     use ratatui::buffer::Buffer;
+    use ratatui::layout::Position;
     use super::super::ytdl::tests::{
-        HOST, LINK, answer_folders, answer_lookup, assert_frame, at, buffer, calls, connected, discovery_new, english,
-        job, key, lines, one_more_time, ping, room, seed, serve, type_text,
+        Cells, HOST, LINK, answer_folders, answer_lookup, assert_frame, at, buffer, calls, connected, discovery_new,
+        english, job, key, lines, one_more_time, ping, room, seed, serve, type_text,
     };
-    use super::super::ytdl::{Reply, apply_reply};
+    use super::super::ytdl::{Keys, Reply, apply_reply};
+    use crate::ytdl::TagField;
 
     /// The account's Discover destination and Music's own template: every
     /// preset shows.
@@ -1069,10 +1071,11 @@ mod tests {
         gui
     }
 
-    /// `d change`: Where new songs land, its presets read, its place checked.
+    /// The `Saves to` row's `d`: the sheet, its presets read, its place
+    /// checked.
     fn opened(gui: &mut Gui, check: FolderCheck) {
         key(gui, KeyCode::Char('d'));
-        assert!(is_open(gui), "Where new songs land");
+        assert!(is_open(gui), "Saves to");
         ytdl::poll(gui);
         answer_presets(gui, presets());
         answer_folders(gui, check);
@@ -1117,7 +1120,7 @@ mod tests {
         YtdlMetadata { year: None, ..one_more_time() }
     }
 
-    /// The place window's 80 columns at x 10, top row 4 (100 × 30) or 1
+    /// Choose a folder's 80 columns at x 10, top row 4 (100 × 30) or 1
     /// (100 × 24).
     fn assert_place(gui: &mut Gui, (w, h): (u16, u16), rows: &str, runs: &[&str]) -> Buffer {
         let b = buffer(gui, w, h);
@@ -1125,92 +1128,121 @@ mod tests {
         b
     }
 
+    /// The Saves to sheet's 66 columns over 100 × 30: in the room's middle
+    /// with the queue folded (x 24), the frame's with it open (x 17).
+    fn assert_sheet(gui: &mut Gui, rows: &str, runs: &[&str]) -> Buffer {
+        let b = buffer(gui, 100, 30);
+        let tall = rows.lines().filter(|l| l.trim_start().starts_with('|')).count() as u16;
+        assert_frame(&b, (if gui.queue_open { 17 } else { 24 }, (30 - tall) / 2), 66, rows, runs);
+        b
+    }
+
+    /// Dump the sheet's frames for a look (`cargo test dump_saves_to -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn dump_saves_to() {
+        let _en = english();
+        let show = |name: &str, gui: &mut Gui| {
+            eprintln!("== {name}");
+            for (y, row) in lines(&buffer(gui, 100, 30)).iter().enumerate() {
+                eprintln!("{y:2} |{}", row.trim_end());
+            }
+        };
+        let board = super::super::ytdl::tests::board_of;
+        let mut gui = found_room(one_more_time(), discovery_new());
+        opened(&mut gui, new_at(1));
+        show("opened", &mut gui);
+        eprintln!("{}", board(&buffer(&mut gui, 100, 30), (24, 10), (66, 9), "W1"));
+        gui.act(place(PlaceAct::Pick(LayoutKind::Custom)));
+        for _ in 0.."{{ALBUM}}".len() {
+            key(&mut gui, KeyCode::Backspace);
+        }
+        type_text(&mut gui, "{{TITLE}}");
+        show("custom", &mut gui);
+        eprintln!("{}", board(&buffer(&mut gui, 100, 30), (24, 7), (66, 16), "REFUSED"));
+        let mut gui = found_room(no_year(), discovery_new());
+        opened(&mut gui, new_at(1));
+        for _ in 0..4 {
+            key(&mut gui, KeyCode::Down);
+        }
+        ytdl::poll(&mut gui);
+        super::super::ytdl::tests::advance(&gui, 500);
+        answer_folders(&mut gui, new_at(1));
+        show("trap", &mut gui);
+        eprintln!("{}", board(&buffer(&mut gui, 100, 30), (24, 9), (66, 12), "W3"));
+    }
+
     mod boards {
         pub(super) const W1: &str = r#"
-            |╭─ Where new songs land ───────────────────────────────────────────────────────╮
-            |│ Files go to Music › Daft Punk › Discovery new                                │
-            |│                                                                              │
-            |│ (•) Music   ( ) Mixes                                                        │
-            |│                                                                              │
-            |│ (•) Artist / Album                                                           │
-            |│ ( ) Artist                                                                   │
-            |│ ( ) Top of the library                                                       │
-            |│ ( ) Same as Discover                                                         │
-            |│ ( ) Library layout                                                           │
-            |│ ( ) Custom                                                                   │
-            |│                                                                              │
-            |│ u use for this song                                                 [ Save ] │
-            |╰────────────────────────────────────────────────────────────────── Esc close ─╯
+            |╭─ Saves to · Music › Daft Punk › Discovery new ─────────────────╮
+            |│ (•) Music   ( ) Mixes                                          │
+            |│                                                                │
+            |│ (•) Artist / Album              ( ) Artist                     │
+            |│ ( ) Top of the library          ( ) Same as Discover           │
+            |│ ( ) Library layout              ( ) Custom                     │
+            |│                                                                │
+            |│                                  use for this song   [ Save ]  │
+            |╰────────────────────────────────────────────────────────────────╯
         "#;
         pub(super) const W1_RUNS: &[&str] = &[
-            "0:0-1:Accent", "0:3-22:Text:B", "0:24-79:Accent", "1:0-0:Accent", "1:2-12:Dim", "1:14-18:Text", "1:20-20:Dim",
-            "1:22-30:Text", "1:32-32:Dim", "1:34-42:Text", "1:44-46:Dim", "1:79-79:Accent", "2:0-0:Accent", "2:79-79:Accent",
-            "3:0-0:Accent", "3:2-4:Ok", "3:6-10:Accent:B", "3:14-16:Dim", "3:18-22:Text", "3:79-79:Accent", "4:0-0:Accent",
-            "4:79-79:Accent", "5:0-0:Accent", "5:2-4:Accent", "5:6-19:Text:B", "5:79-79:Accent", "6:0-0:Accent", "6:2-4:Dim",
-            "6:6-11:Text", "6:79-79:Accent", "7:0-0:Accent", "7:2-4:Dim", "7:6-23:Text", "7:79-79:Accent", "8:0-0:Accent",
-            "8:2-4:Dim", "8:6-21:Text", "8:79-79:Accent", "9:0-0:Accent", "9:2-4:Dim", "9:6-19:Text", "9:79-79:Accent",
-            "10:0-0:Accent", "10:2-4:Dim", "10:6-11:Text", "10:79-79:Accent", "11:0-0:Accent", "11:79-79:Accent",
-            "12:0-0:Accent", "12:2-20:Dim", "12:70-77:Dim", "12:79-79:Accent", "13:0-66:Accent", "13:68-76:Dim",
-            "13:78-79:Accent",
-        ];
-        pub(super) const W2: &str = r#"
-            |╭─ Where new songs land ───────────────────────────────────────────────────────╮
-            |│ Files go to —                                                                │
-            |│                                                                              │
-            |│ (•) Music   ( ) Mixes                                                        │
-            |│                                                                              │
-            |│ ( ) Artist / Album                                                           │
-            |│ ( ) Artist                                                                   │
-            |│ ( ) Top of the library                                                       │
-            |│ ( ) Same as Discover                                                         │
-            |│ ( ) Library layout                                                           │
-            |│ (•) Custom                                                                   │
-            |│     {{ALBUMARTIST}}/{{TITLE}}▏                                               │
-            |│     ! Unknown variable {{TITLE}}. Use ARTIST, ALBUMARTIST, ALBUM, YEAR.      │
-            |│     ARTIST · ALBUMARTIST · ALBUM · YEAR                                      │
-            |│                                                                              │
-            |│                                                                     [ Save ] │
-            |╰────────────────────────────────────────────────────────────────── Esc close ─╯
-        "#;
-        pub(super) const W2_RUNS: &[&str] = &[
-            "0:0-1:Accent", "0:3-22:Text:B", "0:24-79:Accent", "1:0-0:Accent", "1:2-12:Dim", "1:14-14:Dim", "1:79-79:Accent",
-            "2:0-0:Accent", "2:79-79:Accent", "3:0-0:Accent", "3:2-4:Ok", "3:6-10:Text:B", "3:14-16:Dim", "3:18-22:Text",
-            "3:79-79:Accent", "4:0-0:Accent", "4:79-79:Accent", "5:0-0:Accent", "5:2-4:Dim", "5:6-19:Text", "5:79-79:Accent",
-            "6:0-0:Accent", "6:2-4:Dim", "6:6-11:Text", "6:79-79:Accent", "7:0-0:Accent", "7:2-4:Dim", "7:6-23:Text",
-            "7:79-79:Accent", "8:0-0:Accent", "8:2-4:Dim", "8:6-21:Text", "8:79-79:Accent", "9:0-0:Accent", "9:2-4:Dim",
-            "9:6-19:Text", "9:79-79:Accent", "10:0-0:Accent", "10:2-4:Accent", "10:6-11:Text:B", "10:79-79:Accent",
-            "11:0-0:Accent", "11:6-30:Text", "11:31-31:Text", "11:79-79:Accent", "12:0-0:Accent", "12:6-72:Gold",
-            "12:79-79:Accent", "13:0-0:Accent", "13:6-11:Dim", "13:13-13:Dim", "13:15-25:Dim", "13:27-27:Dim",
-            "13:29-33:Dim", "13:35-35:Dim", "13:37-40:Dim", "13:79-79:Accent", "14:0-0:Accent", "14:79-79:Accent",
-            "15:0-0:Accent", "15:70-77:Dim", "15:79-79:Accent", "16:0-66:Accent", "16:68-76:Dim", "16:78-79:Accent",
+            "0:0-1:Accent", "0:3-10:Text:B", "0:12-12:Dim", "0:14-18:Text", "0:20-20:Dim", "0:22-30:Text",
+            "0:32-32:Dim", "0:34-42:Text", "0:44-46:Dim", "0:48-65:Accent", "1:0-0:Accent", "1:2-4:Ok",
+            "1:6-10:Accent:B", "1:14-16:Dim", "1:18-22:Text", "1:65-65:Accent", "2:0-65:Accent", "3:0-4:Accent",
+            "3:6-19:Text:B", "3:34-36:Dim", "3:38-43:Text", "3:65-65:Accent", "4:0-0:Accent", "4:2-4:Dim",
+            "4:6-23:Text", "4:34-36:Dim", "4:38-53:Text", "4:65-65:Accent", "5:0-0:Accent", "5:2-4:Dim",
+            "5:6-19:Text", "5:34-36:Dim", "5:38-43:Text", "5:65-65:Accent", "6:0-65:Accent", "7:0-0:Accent",
+            "7:35-62:Dim", "7:65-65:Accent", "8:0-65:Accent",
         ];
         pub(super) const W3: &str = r#"
-            |╭─ Where new songs land ───────────────────────────────────────────────────────╮
-            |│ Files go to Music › Daft Punk › Discovery () new                             │
-            |│ ! No year for this song, so the folder reads “Discovery ()”.    y add a year │
-            |│                                                                              │
-            |│ (•) Music   ( ) Mixes                                                        │
-            |│                                                                              │
-            |│ ( ) Artist / Album                                                           │
-            |│ ( ) Artist                                                                   │
-            |│ ( ) Top of the library                                                       │
-            |│ ( ) Same as Discover                                                         │
-            |│ (•) Library layout                                                           │
-            |│ ( ) Custom                                                                   │
-            |│                                                                              │
-            |│ u use for this song                                                 [ Save ] │
-            |╰────────────────────────────────────────────────────────────────── Esc close ─╯
+            |╭─ Saves to · Music › Daft Punk › Discovery () new ──────────────╮
+            |│ ! No year for this song, so the folder reads      add a year ▸ │
+            |│   “Discovery ()”.                                              │
+            |│                                                                │
+            |│ (•) Music   ( ) Mixes                                          │
+            |│                                                                │
+            |│ ( ) Artist / Album              ( ) Artist                     │
+            |│ ( ) Top of the library          ( ) Same as Discover           │
+            |│ (•) Library layout              ( ) Custom                     │
+            |│                                                                │
+            |│                                  use for this song   [ Save ]  │
+            |╰────────────────────────────────────────────────────────────────╯
         "#;
         pub(super) const W3_RUNS: &[&str] = &[
-            "0:0-1:Accent", "0:3-22:Text:B", "0:24-79:Accent", "1:0-0:Accent", "1:2-12:Dim", "1:14-18:Text", "1:20-20:Dim",
-            "1:22-30:Text", "1:32-32:Dim", "1:34-45:Text", "1:47-49:Dim", "1:79-79:Accent", "2:0-0:Accent", "2:2-61:Gold",
-            "2:66-77:Dim", "2:79-79:Accent", "3:0-0:Accent", "3:79-79:Accent", "4:0-0:Accent", "4:2-4:Ok", "4:6-10:Text:B",
-            "4:14-16:Dim", "4:18-22:Text", "4:79-79:Accent", "5:0-0:Accent", "5:79-79:Accent", "6:0-0:Accent", "6:2-4:Dim",
-            "6:6-19:Text", "6:79-79:Accent", "7:0-0:Accent", "7:2-4:Dim", "7:6-11:Text", "7:79-79:Accent", "8:0-0:Accent",
-            "8:2-4:Dim", "8:6-23:Text", "8:79-79:Accent", "9:0-0:Accent", "9:2-4:Dim", "9:6-21:Text", "9:79-79:Accent",
-            "10:0-0:Accent", "10:2-4:Accent", "10:6-19:Text:B", "10:79-79:Accent", "11:0-0:Accent", "11:2-4:Dim",
-            "11:6-11:Text", "11:79-79:Accent", "12:0-0:Accent", "12:79-79:Accent", "13:0-0:Accent", "13:2-20:Dim",
-            "13:70-77:Accent:B", "13:79-79:Accent", "14:0-66:Accent", "14:68-76:Dim", "14:78-79:Accent",
+            "0:0-1:Accent", "0:3-10:Text:B", "0:12-12:Dim", "0:14-18:Text", "0:20-20:Dim", "0:22-30:Text",
+            "0:32-32:Dim", "0:34-45:Text", "0:47-49:Dim", "0:51-65:Accent", "1:0-0:Accent", "1:2-45:Gold",
+            "1:52-63:Dim", "1:65-65:Accent", "2:0-0:Accent", "2:4-18:Gold", "2:65-65:Accent", "3:0-65:Accent",
+            "4:0-0:Accent", "4:2-4:Ok", "4:6-10:Text:B", "4:14-16:Dim", "4:18-22:Text", "4:65-65:Accent",
+            "5:0-65:Accent", "6:0-0:Accent", "6:2-4:Dim", "6:6-19:Text", "6:34-36:Dim", "6:38-43:Text",
+            "6:65-65:Accent", "7:0-0:Accent", "7:2-4:Dim", "7:6-23:Text", "7:34-36:Dim", "7:38-53:Text",
+            "7:65-65:Accent", "8:0-4:Accent", "8:6-19:Text:B", "8:34-36:Dim", "8:38-43:Text", "8:65-65:Accent",
+            "9:0-65:Accent", "10:0-0:Accent", "10:35-51:Dim", "10:55-62:Accent:B", "10:65-65:Accent", "11:0-65:Accent",
+        ];
+        pub(super) const SAVES_TO: &str = r#"
+            |╭─ Saves to · Music › Daft Punk › 2001 - Discovery new ──────────╮
+            |│ (•) Music   ( ) Mixes                                          │
+            |│                                                                │
+            |│ ( ) Artist / Album              ( ) Artist                     │
+            |│ ( ) Top of the library          ( ) Same as Discover           │
+            |│ ( ) Library layout              (•) Custom                     │
+            |│                                                                │
+            |│ ╭────────────────────────────────────────────────────────────╮ │
+            |│ │ {{ARTIST}}/{{YEAR}} - {{ALBUM}}▏                           │ │
+            |│ ╰────────────────────────────────────────────────────────────╯ │
+            |│ ARTIST · ALBUMARTIST · ALBUM · YEAR                            │
+            |│                                                                │
+            |│                                  use for this song   [ Save ]  │
+            |╰────────────────────────────────────────────────────────────────╯
+        "#;
+        pub(super) const SAVES_TO_RUNS: &[&str] = &[
+            "0:0-1:Accent", "0:3-10:Text:B", "0:12-12:Dim", "0:14-18:Text", "0:20-20:Dim", "0:22-30:Text",
+            "0:32-32:Dim", "0:34-49:Text", "0:51-53:Dim", "0:55-65:Accent", "1:0-0:Accent", "1:2-4:Ok",
+            "1:6-10:Text:B", "1:14-16:Dim", "1:18-22:Text", "1:65-65:Accent", "2:0-65:Accent", "3:0-0:Accent",
+            "3:2-4:Dim", "3:6-19:Text", "3:34-36:Dim", "3:38-43:Text", "3:65-65:Accent", "4:0-0:Accent", "4:2-4:Dim",
+            "4:6-23:Text", "4:34-36:Dim", "4:38-53:Text", "4:65-65:Accent", "5:0-0:Accent", "5:2-4:Dim",
+            "5:6-19:Text", "5:34-36:Accent", "5:38-43:Text:B", "5:65-65:Accent", "6:0-65:Accent", "7:0-65:Accent",
+            "8:0-2:Accent", "8:4-35:Text", "8:63-65:Accent", "9:0-65:Accent", "10:0-0:Accent", "10:2-36:Dim",
+            "10:65-65:Accent", "11:0-65:Accent", "12:0-0:Accent", "12:35-51:Dim", "12:55-62:Accent:B",
+            "12:65-65:Accent", "13:0-65:Accent",
         ];
         pub(super) const W4: &str = r#"
             |╭─ Choose a folder ────────────────────────────────────────────────────────────╮
@@ -1249,28 +1281,38 @@ mod tests {
 
     // ── Where new songs land ───────────────────────────────────────────────
 
-    /// W0 and W1: `d change` opens it at Where copies land's place — 80
-    /// wide over the frame, top row 4, the queue open or not — on the
-    /// choice the song goes by: the libraries side by side (dot OK, the
-    /// hand ACCENT BOLD on the chosen name), the layouts (dot ACCENT, label
-    /// BOLD), Save off until something changes, its tooltip why.
+    /// The `Saves to` row (or `d`) opens the sheet on the choice the song
+    /// goes by: the place it makes on the title's own row; the libraries
+    /// side by side (dot OK, the hand ACCENT BOLD on the chosen name); the
+    /// layouts in two columns (dot ACCENT, label BOLD); Save off until
+    /// something changes, its tooltip why. It stands over the block it
+    /// was opened from — in the room's middle, or the frame's where the
+    /// queue leaves the room narrower than it.
     #[test]
-    fn where_new_songs_land_opens_on_the_choice_in_force() {
+    fn saves_to_opens_on_the_choice_in_force() {
         let _en = english();
         let mut gui = found_room(one_more_time(), discovery_new());
         opened(&mut gui, new_at(1));
-        let b = assert_place(&mut gui, (100, 30), boards::W1, boards::W1_RUNS);
+        let b = assert_sheet(&mut gui, boards::W1, boards::W1_RUNS);
         let rows = lines(&b);
         assert_eq!(gui.ui.hit(at(&rows, "Mixes")), Some(place(PlaceAct::Library(1))));
         assert_eq!(gui.ui.hit(at(&rows, "Top of the library")), Some(place(PlaceAct::Pick(LayoutKind::Top))));
-        assert_eq!(gui.ui.hit(at(&rows, "u use for this song")), Some(place(PlaceAct::Use)));
+        assert_eq!(gui.ui.hit(at(&rows, "Same as Discover")), Some(place(PlaceAct::Pick(LayoutKind::Discover))), "the second column");
+        assert_eq!(gui.ui.hit(at(&rows, "use for this song")), Some(place(PlaceAct::Use)));
         assert_eq!(gui.ui.hit(at(&rows, "[ Save ]")), Some(Act::Guard), "Save is off: no click");
-        assert_eq!(gui.ui.hit(at(&rows, "Esc close")), Some(place(PlaceAct::Close)));
+        assert_eq!(gui.ui.hit(Position { x: 5, y: 5 }), Some(place(PlaceAct::Close)), "a click outside closes it");
         assert_eq!(tips(&gui), "← → library · ↑ ↓ rows · u use for this song · Esc close");
+        // The block it was opened from is under it whole: nothing of the
+        // room's rows shows beside the sheet.
+        for y in 10..19 {
+            let beside: String = rows[y].chars().skip(90).take(6).collect();
+            assert!(beside.trim().is_empty(), "row {y} beside the sheet: {beside:?}");
+        }
         gui.queue_open = true;
-        assert_place(&mut gui, (100, 30), boards::W1, boards::W1_RUNS);
+        assert_sheet(&mut gui, boards::W1, boards::W1_RUNS);
         gui.queue_open = false;
-        assert_place(&mut gui, (100, 24), boards::W1, boards::W1_RUNS);
+        let b = buffer(&mut gui, 100, 24);
+        assert_frame(&b, (24, 7), 66, boards::W1, boards::W1_RUNS);
         // Without the presets read, Same as Discover and Library layout
         // aren't offered.
         let mut gui = found_room(one_more_time(), discovery_new());
@@ -1303,9 +1345,36 @@ mod tests {
         }
     }
 
-    /// W2: Custom takes the keys, holding the layout in force; a refused
-    /// layout's GOLD line under the field, the place a DIM `—`, Save off
-    /// and `u use for this song` stepping aside; a variable goes in at the
+    /// SavesTo (the canvas's board): Custom chosen — its field a bordered
+    /// card with the keys, its variables under it, the place its layout
+    /// makes on the title's row, Save on. (The board's sample wrote the
+    /// layout without the artist its place shows: the layout that makes
+    /// that place stands in its field here.)
+    #[test]
+    fn saves_to_with_a_custom_layout_is_the_board() {
+        let _en = english();
+        let mut gui = found_room(one_more_time(), discovery_new());
+        gui.queue_open = true;
+        buffer(&mut gui, 100, 30);
+        opened(&mut gui, new_at(1));
+        gui.act(place(PlaceAct::Pick(LayoutKind::Custom)));
+        for _ in 0.."{{ALBUMARTIST}}/{{ALBUM}}".len() {
+            key(&mut gui, KeyCode::Backspace);
+        }
+        type_text(&mut gui, "{{ARTIST}}/{{YEAR}} - {{ALBUM}}");
+        ytdl::poll(&mut gui);
+        super::super::ytdl::tests::advance(&gui, 500);
+        answer_folders(&mut gui, new_at(1));
+        let b = assert_sheet(&mut gui, boards::SAVES_TO, boards::SAVES_TO_RUNS);
+        let rows = lines(&b);
+        assert_eq!(gui.ui.hit(at(&rows, "{{ARTIST}}")), Some(place(PlaceAct::Field)), "the card takes the keys");
+        assert_eq!(gui.ui.hit(at(&rows, "[ Save ]")), Some(place(PlaceAct::Save)));
+        assert_eq!(tips(&gui), "type · Enter or Esc gives the keys back");
+    }
+
+    /// Custom takes the keys, holding the layout in force; a refused
+    /// layout's GOLD lines under its card, the place a DIM `—`, Save off
+    /// and `use for this song` stepping aside; a variable goes in at the
     /// caret; Enter or Esc gives the keys back.
     #[test]
     fn custom_refused_reads_a_dash() {
@@ -1319,10 +1388,19 @@ mod tests {
             key(&mut gui, KeyCode::Backspace);
         }
         type_text(&mut gui, "{{TITLE}}");
-        let b = assert_place(&mut gui, (100, 30), boards::W2, boards::W2_RUNS);
-        assert_eq!(tips(&gui), "type · Enter or Esc gives the keys back");
+        let b = buffer(&mut gui, 100, 30);
         let rows = lines(&b);
-        let year = at(&rows, "YEAR ");
+        let text = rows.join("\n");
+        assert!(rows[7].starts_with_at(24, "╭─ Saves to · — ─"), "the place a dash:\n{text}");
+        assert!(rows[15].starts_with_at(26, "│ {{ALBUMARTIST}}/{{TITLE}}▏"), "{text}");
+        let gold = at(&rows, "! Unknown variable {{TITLE}}. Use ARTIST, ALBUMARTIST, ALBUM,");
+        assert_eq!((gold.x, gold.y, b[(gold.x, gold.y)].fg), (26, 17, th().gold), "under the card:\n{text}");
+        assert!(rows[18].starts_with_at(26, "  YEAR.") && rows[19].starts_with_at(26, "ARTIST · ALBUMARTIST · ALBUM · YEAR"), "{text}");
+        assert!(!text.contains("use for this song"), "refused, it steps aside:\n{text}");
+        let save = at(&rows, "[ Save ]");
+        assert_eq!((b[(save.x, save.y)].fg, gui.ui.hit(save)), (th().dim, Some(Act::Guard)), "Save is off");
+        assert_eq!(tips(&gui), "type · Enter or Esc gives the keys back");
+        let year = Position { x: at(&rows, "ALBUM · YEAR").x + 8, y: 19 };
         assert_eq!(gui.ui.hit(year), Some(place(PlaceAct::Var(3))));
         key(&mut gui, KeyCode::Home);
         gui.act(place(PlaceAct::Var(3)));
@@ -1334,9 +1412,9 @@ mod tests {
         assert!(is_open(&gui) && gui.ytdl.draft.choice.is_none(), "refused: u is no key");
     }
 
-    /// W3: Library layout with no year — the bracket trap's GOLD line with
-    /// `y add a year`, Save on; `y` keeps the choice for this song and opens
-    /// Year in the room.
+    /// Library layout with no year — the bracket trap's GOLD lines with
+    /// `add a year ▸`, Save on; it (or `y`) keeps the choice for this song
+    /// and opens Edit tags on the year.
     #[test]
     fn a_trap_offers_its_way_on() {
         let _en = english();
@@ -1348,19 +1426,21 @@ mod tests {
         ytdl::poll(&mut gui);
         super::super::ytdl::tests::advance(&gui, 500);
         answer_folders(&mut gui, new_at(1));
-        let b = assert_place(&mut gui, (100, 30), boards::W3, boards::W3_RUNS);
+        let b = assert_sheet(&mut gui, boards::W3, boards::W3_RUNS);
         let rows = lines(&b);
-        assert_eq!(gui.ui.hit(at(&rows, "y add a year")), Some(place(PlaceAct::Fix)));
+        assert_eq!(gui.ui.hit(at(&rows, "add a year ▸")), Some(place(PlaceAct::Fix)));
         assert_eq!(gui.ui.hit(at(&rows, "[ Save ]")), Some(place(PlaceAct::Save)));
         assert_eq!(tips(&gui), "← → library · ↑ ↓ rows · y add a year · Enter save · u use for this song · Esc close");
         key(&mut gui, KeyCode::Char('y'));
         assert!(!is_open(&gui));
         let draft = &gui.ytdl.draft;
-        assert_eq!(draft.keys, Keys::Tag(TagField::Year), "Year holds the keys in the room");
-        assert!(draft.tags_open);
+        assert_eq!(draft.keys, Keys::Tag(TagField::Year), "the year holds the keys");
+        assert!(draft.tags_open && ytdl::tags_up(&gui), "in Edit tags");
         assert_eq!(draft.choice.as_ref().map(|c| c.kind), Some(LayoutKind::Library), "for this song");
+        type_text(&mut gui, "2001");
+        key(&mut gui, KeyCode::Enter);
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows.iter().any(|r| r.contains("Files go to Music › Daft Punk › Discovery ()")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("Saves to") && r.contains("Music › Daft Punk › Discovery (2001)")), "{}", rows.join("\n"));
     }
 
     /// Save keeps the choice for this server in config.toml — the
@@ -1392,7 +1472,7 @@ mod tests {
             "only the place changed"
         );
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows.iter().any(|r| r.contains("Files go to Mixes › Daft Punk")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("Saves to") && r.contains("Mixes › Daft Punk")), "{}", rows.join("\n"));
 
         // Use for this song: not remembered.
         opened(&mut gui, new_at(1));
@@ -1404,7 +1484,7 @@ mod tests {
         let prefs = config::ytdl_prefs(&crate::config::load().unwrap(), HOST);
         assert_eq!(prefs.layout_kind.as_deref(), Some("artist"), "the server's choice stands");
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows.iter().any(|r| r.contains("Files go to Mixes ") && !r.contains("Daft Punk")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("Saves to") && r.contains(" Mixes ▸")), "{}", rows.join("\n"));
     }
 
     /// Save with nothing to write it to (no config file the player may
@@ -1432,7 +1512,7 @@ mod tests {
 
     // ── Choose a folder ────────────────────────────────────────────────────
 
-    /// W4 and W5: from the room's `c choose a folder` (the account can't
+    /// W4 and W5: from the room's `choose a folder ▸` (the account can't
     /// make folders): the deepest folder that listed, `◂ Up to …`, its
     /// folders; the first walking key shows the cursor; a folder goes in;
     /// none inside reads so; Use this folder is for this song.
@@ -1445,7 +1525,7 @@ mod tests {
         answer_lookup(&mut gui, Ok(one_more_time()));
         answer_folders(&mut gui, discovery_new());
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows.iter().any(|r| r.contains("c choose a folder")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("choose a folder ▸")), "{}", rows.join("\n"));
         key(&mut gui, KeyCode::Char('c'));
         assert_eq!(answer_listing(&mut gui, &["Homework", "Human After All"]), "/Music/Daft Punk/");
         let b = assert_place(&mut gui, (100, 30), boards::W4, boards::W4_RUNS);
@@ -1470,7 +1550,7 @@ mod tests {
         assert_eq!(gui.ytdl.draft.instead.as_deref(), Some("/Music/Daft Punk/Homework/"));
         answer_folders(&mut gui, FolderCheck { known: true, new_segments: vec![], deepest: Some("/Music/Daft Punk/Homework/".into()), files: Some(vec![]) });
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows.iter().any(|r| r.contains("Files go to Music › Daft Punk › Homework")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("Saves to") && r.contains("Music › Daft Punk › Homework ▸")), "{}", rows.join("\n"));
         assert!(!rows.iter().any(|r| r.contains("can't make folders")), "{}", rows.join("\n"));
         // A folder that won't list on the first look opens its parent.
         key(&mut gui, KeyCode::Char('d'));
@@ -1485,8 +1565,8 @@ mod tests {
         assert_eq!(answer_listing(&mut gui, &["Daft Punk"]), "/Music/");
     }
 
-    /// A failed row's Choose a folder takes the From YouTube list's place;
-    /// the row adds again into the folder used, and the list comes back.
+    /// A failed row's Choose a folder stands over the room; the row adds
+    /// again into the folder used, and the room is back with it adding.
     #[test]
     fn a_rows_choose_a_folder_adds_again_there() {
         let _en = english();
@@ -1496,11 +1576,10 @@ mod tests {
         failed["failure"] = serde_json::json!({ "problem": "mkdirOff", "phase": "start" });
         failed["seen"] = false.into();
         seed(&mut gui, vec![failed]);
-        gui.act(yt(YtAct::List));
         let rows = lines(&buffer(&mut gui, 100, 30));
         let choose = at(&rows, "Choose a folder");
         gui.act(gui.ui.hit(choose).expect("the row's way"));
-        assert!(is_open(&gui) && !ytdl::list_open(&gui), "it takes the list's place");
+        assert!(is_open(&gui) && ytdl::modal_open(&gui), "over the room");
         // From the folder it was to make: never made, it opens its parent.
         let seq = match gui.ytdl.work.last() {
             Some(Work::Listing { seq, directory }) if directory == "/Music/Daft Punk/Discovery/" => *seq,
@@ -1511,9 +1590,9 @@ mod tests {
         listed(&mut gui, seq, Err(gone));
         assert_eq!(answer_listing(&mut gui, &["Homework"]), "/Music/Daft Punk/");
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows.iter().any(|r| r.contains("Choose a folder")) && !rows.iter().any(|r| r.contains("From YouTube")));
+        assert!(rows.iter().any(|r| r.contains("─ Choose a folder ─")), "{}", rows.join("\n"));
         gui.act(place(PlaceAct::UseFolder));
-        assert!(ytdl::list_open(&gui), "the list is back");
+        assert!(!is_open(&gui) && ytdl::in_room(&gui), "the room is back");
         let mut reply = |call: &Call| match call {
             Call::Add(_) => Some(Answer::Add(Ok(YtdlStarted { message: None, id: Some("srv2".into()), file_name: None }))),
             Call::Jobs => Some(Answer::Jobs(Ok(Vec::new()))),
@@ -1523,6 +1602,8 @@ mod tests {
         let jobs = gui.ytdl.jobs().unwrap().jobs();
         assert_eq!(jobs[0].directory, "/Music/Daft Punk/", "added again into the folder used");
         assert!(calls(&gui).iter().all(|c| !matches!(c, Call::Mkdir { .. })), "nothing to make");
+        let rows = lines(&buffer(&mut gui, 100, 30));
+        assert!(rows.iter().any(|r| r.contains("◷ One More Time") && r.contains("starting…")), "its row, on its way:\n{}", rows.join("\n"));
     }
 
     /// The Files window's Choose a folder takes the window's place and
@@ -1537,13 +1618,17 @@ mod tests {
         answer_lookup(&mut gui, Ok(one_more_time()));
         answer_folders(&mut gui, super::super::ytdl::tests::there("/Music/Daft Punk/", &[]));
         buffer(&mut gui, 100, 30);
+        // Saves here's sheet: the dot on Album, then closed.
         key(&mut gui, KeyCode::Char('s'));
         key(&mut gui, KeyCode::Right);
+        key(&mut gui, KeyCode::Enter);
         ytdl::poll(&mut gui);
         super::super::ytdl::tests::advance(&gui, 500);
         answer_folders(&mut gui, new_at(1));
         let rows = lines(&buffer(&mut gui, 100, 30));
         assert!(rows.iter().any(|r| r.contains("! “Discovery” doesn't exist yet and your account can't make folders.")), "{}", rows.join("\n"));
+        let choose = at(&rows, "choose a folder ▸");
+        assert_eq!(gui.ui.hit(choose), Some(yt(YtAct::Choose)));
         key(&mut gui, KeyCode::Char('c'));
         assert!(is_open(&gui));
         answer_listing(&mut gui, &["Homework", "Human After All"]);
@@ -1555,7 +1640,7 @@ mod tests {
         assert!(super::super::ytdl_here::window_up(&gui) && !is_open(&gui), "the window is back");
         answer_folders(&mut gui, super::super::ytdl::tests::there("/Music/Daft Punk/Homework/", &[]));
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows.iter().any(|r| r.contains("│ Into Music › Daft Punk › Homework")), "{}", rows.join("\n"));
+        assert!(rows.iter().any(|r| r.contains("Saves to") && r.contains("Music › Daft Punk › Homework ▸")), "{}", rows.join("\n"));
         assert!(rows.iter().any(|r| r.contains("[ Add to library ]")), "{}", rows.join("\n"));
     }
 }

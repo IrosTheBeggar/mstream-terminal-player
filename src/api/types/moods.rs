@@ -83,6 +83,24 @@ impl MoodLevel {
             MoodLevel::Loose => Some(0.3),
         }
     }
+
+    /// The word a config file keeps (`[player.dj] mood_level`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MoodLevel::Strict => "strict",
+            MoodLevel::Standard => "standard",
+            MoodLevel::Loose => "loose",
+        }
+    }
+
+    /// A kept word read back; a word this build does not know is Standard.
+    pub fn from_name(name: &str) -> MoodLevel {
+        match name {
+            "strict" => MoodLevel::Strict,
+            "loose" => MoodLevel::Loose,
+            _ => MoodLevel::Standard,
+        }
+    }
 }
 
 /// A song list's order under a filter: its own (Rated by rating, Recent

@@ -2319,6 +2319,70 @@ a LATER secondary screen (party view), Columns retired.
   lock lasts from the gate's yes until the board's write has ended; leaving
   keeps a page that saw a board aside until its worker says every port is
   free. The standalone `device flash` is the same page at 72×24.
+- **Add torrent, the redesign ✅ 2026-11-10** — the owner asked for the
+  same treatment for the torrent room, approved the canvas "Add torrent ·
+  GUI" (claude.ai artifact `4TpN68uakPtxhqL7kWqk9Z`, eighteen boards) and
+  said build it. Add from YouTube's shapes for a torrent: one block,
+  centred, at most 56 cells; the two ways in as two boxes with the
+  record's `or` between — a tall frame for the file dialog with `type a
+  path ▸` under it, and the link's box with `Paste` beside it in the
+  window flavour; a loaded file a card with what it holds
+  (`torrent_meta::torrent_facts`, a bencode walk of the file list) and
+  its ways under it; `Metadata` and `Destination` rows that each open a
+  sheet (the library leads the destination and never gives way);
+  `Force fresh download` a checkbox on the page; the primary tall under
+  the form, a slab on the title row at the 100 × 24 floor; under it what
+  this player sent this server, kept in `torrents.json` beside
+  `ytdl.json`; a refusal on the page, whole, under the primary. A paste
+  is taken whole wherever the hand is (`torrent::wants_paste`): a magnet
+  link fills the box, anything else is read as a path and loaded. The
+  three windows are sheets. It mends what the old room's own frames
+  showed at 100 × 30 with the queue open — the second checkbox not drawn
+  at all, the ways through the queue's rule, the preview without its
+  library, `Download fresh anyway` on a border, refusals cut to the note's
+  one row, a pasted link read as keys, the typed picker's dead wheel
+  (docs/ux-contracts/add-torrent.md, the 2026-11-10 entries). The acts
+  are one `Act::Tor(TorAct)`. `smoke/gui/scenario_torrent.py` walks the
+  page on a pty; no rig has a torrent client, so the add itself is the
+  unit tests' alone.
+- **Add from YouTube, the redesign ✅ 2026-11-10** (the entry under this
+  one is the first build) — the owner asked for a better way to add a
+  video, approved the canvas "Add from YouTube · GUI" (claude.ai artifact
+  `JL4aG7b1Nut1YVSqLJcojQ`, sixteen boards) and said build it: the phone's
+  own shape in the GUI's cells. One block, centred, at most 56 cells: the
+  link in a bordered card with `Paste` beside it (the window flavour
+  reads its clipboard — `YtUi::clipboard`; a terminal cannot, so the
+  button is not drawn there); the found song a card — an 8 × 4 cover,
+  the title with `edit tags ▸`, the artist, album and year, YouTube's own
+  line — whose cover is YouTube's thumbnail for the video's id, fetched
+  from `i.ytimg.com` by the player on a thread of its own (`Work::Thumb`;
+  the id's letters make the address, never the server's answer) and cut
+  to its middle square; `Saves to` and `Format` as rows that each open a
+  sheet; the tall primary the block's width under the song, a slab on
+  the title row at the 100 × 24 floor; and the From YouTube list in the
+  room under the form — its window, the title row's word and the
+  tracker's `Summary` are gone, the Files door's `! failed` opens the
+  room. Three sheets (`gui/ytdl_sheets.rs`, a new file: the sheet's
+  frame, Edit tags as four bordered text boxes, Format as radios with
+  what each is good for; `gui/ytdl_where.rs`'s Saves to restyled as one,
+  its layouts in two columns; the Files window's `Saves here` sheet in
+  `gui/ytdl_here.rs`), standing where a room's window does so they cover
+  the block they were opened from. The Files window draws the same form
+  (`form_rows`, `draw_row`). The page's controls are words now, never a
+  key's letter — the letters still act where their control is drawn and
+  the tips line names them — so the page's words are each locale's key
+  words without their key, and the only new word in ten languages is
+  `Paste`; the limits, the first time's words, `Saves to`, the sheet's
+  title and Format's two lines are the phone's own strings. The contract
+  is amended clause by clause with a log of what the canvas's sample got
+  wrong against the kit's rules (`docs/ux-contracts/add-from-youtube.md`).
+  Tests: the canvas's fifteen boards are the tests' boards, written into
+  them from the canvas's own files cell for cell with their tokens
+  (`gui::ytdl` 44, `gui::ytdl_here` 18, `gui::ytdl_where` 10), and every
+  language drawn whole; `scenario_ytdl` walks the new room on a pty.
+  Left open: the cover is fetched only from YouTube (a server-side
+  thumbnail proxy would keep the player off YouTube's host altogether);
+  the list has no scrollbar; the TUI still gets nothing.
 - **Add from YouTube ✅ 2026-11-09** (built; the smoke still to run) —
   designed first (the canvas "Add from YouTube — webapp & desktop", its
   terminal page's five boards and its notes, the user's answers of
@@ -2384,6 +2448,51 @@ a LATER secondary screen (party view), Columns retired.
   and the shell's give-way table at ten sizes for four sets of tools;
   `scenario_ytdl` opens the room from its nav row, and passes on both
   servers after the move.
+- **The Auto DJ room rebuilt ✅ 2026-11-10** — the record's Auto DJ
+  screen was rebuilt (mstream_music `1d4e8974`: one row per setting, a
+  sheet behind each, a split button with quick settings, Recently played,
+  Smart filters, the genre kind, Play from) and the canvas "Auto DJ Panel
+  · GUI" drew it in cells — twenty boards, built as drawn (auto-dj
+  contract, clauses 2, 8, 16, 20, 40–58; decisions 13–19). **The room**:
+  Start / Stop is the status (a 3-row frame the rows' width, the kit's
+  slab on the title row where the room is short); Play from · First song ·
+  Batch; MUST MATCH — Sonic similarity, Smart filters, Genres, Rating,
+  Length; PREFER — Beat matching, Harmonic mixing, Skip words, Artist
+  cooldown; a value in its tone (DIM · OK · GOLD behind `!`), a row the
+  server cannot do DIM in its place with the reason; `Preview picks ▸` on
+  the title row. Nothing scrolls: 23 rows at 100×30, every row whole at
+  100×24, the spare rows coming back in one order. In a wider room the
+  block grows to 56 cells and then stands centred (the owner's call on
+  seeing it in the window). **The sheets**
+  (`src/gui/dj/sheets.rs`): the mood Filters' modal shape with the row's
+  value on the border following a draft; bars a cell a step; Length typed
+  to the second; five stars by halves; Skip words as chips under the
+  kit's text input, a `+` beside it for the pointer (the owner's call
+  too); Genres with
+  Only · Skip and Generated · Tags · Mixed where the server has both;
+  Play from's servers (one ticked) and its folders, behind a window where
+  they outgrow the sheet; Preview's three picks. Smart filters is the
+  mood modal retitled. **The bar**: `│ auto-dj │ ▴ │`, the chevron opening
+  quick config (`src/gui/dj/quick.rs`) — Play from, Sonic with Drift ·
+  Stay close, Smart filters, the room's door — every change at once.
+  **The model**: the toggle's Stop always stops and Start goes to Play
+  from's home (`[player] autodj_home`; the TUI, with no Play from row,
+  starts where it stands); `moods` on a pick and the opener where the
+  server said it has scores; `genreSource` from 6.32.2; the length window
+  to a day with an older file's 20:00 as no maximum (`length_ceiling`);
+  `retrySonic` when a sonic setting changes; Recently played from
+  `stats/recently-played`, each song once, twenty at most, as a fourth
+  First song and a third opener of the empty queue. The shell hands a
+  modal's wheel to the DJ's layers (the old genre picker's never turned).
+  73 locale keys the old room said are gone, 50 arrive in ten languages
+  (the record's ARB words where it has them). Not built: sessions across
+  several servers, the docked sheet, a key for quick config. Tests: 30 in
+  `gui::dj` (the room cell for cell, the floor, the gates, every sheet's
+  draft law, the wheel, ten locales), with the model's, the worker's and
+  the App's beside them; `scenario_dj` rewritten for the new room and
+  passing on the rig (the deviations log has the run, and what it could
+  not show: a server with discovery data, mood scores or both genre
+  kinds).
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
@@ -3064,12 +3173,14 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > mode, `device list`, the fake board and its e2e leg; then the page's UX from the design cards
 > (mStream `docs/designs/firmware-flash`, alternate A): the step line, the SD card row, the time
 > left, what to do next, the port watch, and the log behind `l`. The pin in
-> `src/device/firmware.rs` is firmware v0.10.0 (13 Oct 2026; before it v0.9.0 from 11 Oct,
-> v0.8.0 from 10 Oct, v0.7.0 from 7 Oct, v0.6.0 from 4 Oct, and the first release, v0.5.0) —
-> `device flash` with no flags writes it; `--firmware` / `--release` still override. v0.10.0
-> answers the running firmware's `@status` (v0.9.0 and later do; v0.8.0 and older say their
-> version only), which the pin says beside its checksums (`PINNED_ANSWERS_STATUS`, true since
-> the bump to v0.10.0 below).
+> `src/device/firmware.rs` is firmware v0.14.0 (10 Nov 2026; before it v0.13.0, v0.12.0,
+> v0.11.0 from 17 Oct, v0.10.0 from 13 Oct, v0.9.0 from 11 Oct, v0.8.0 from 10 Oct, v0.7.0 from
+> 7 Oct, v0.6.0 from 4 Oct, and the first release, v0.5.0) — `device flash` with no flags writes
+> it; `--firmware` / `--release` still override. v0.14.0 answers the running firmware's `@status`
+> (v0.9.0 and later do; v0.8.0 and older say their version only) and formats a card at the
+> tab's ask (`@format`, v0.14.0 and later), which the pin says beside its checksums
+> (`PINNED_ANSWERS_STATUS`, true since the bump to v0.10.0 below, and `PINNED_ANSWERS_FORMAT`,
+> true since the bump to v0.14.0).
 > **2026-10-10:** the backend of the MP3 Player tab's redesign (mStream
 > `docs/designs/mp3-tab`, alternate A, "One card"): `src/device/listen.rs` asks the running
 > firmware with no reset, `board.rs` is one board's verdict and card, `desk.rs` the worker that
@@ -3121,6 +3232,25 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 > pin on firmware v0.10.0, which reports its card (#55). The published Windows binaries said
 > 0.13.0, and `device list` read the real Core2 with no reset ("v0.10.0, up to date · card
 > 1022.1 GB free of 1023.9 GB, 113 tracks"). The pin PR opened itself: mStream #1070.
+> **2026-10-18, the pin moves to v0.11.0** (the firmware's v0.11.0 came out 17 Oct and ran on a
+> Core2 before and after its release; both checksums checked against its SHA256SUMS and GitHub's
+> digests, the ELF table given its pair from its notes and both images' app descriptions). It
+> answers `@status` as v0.10.0 does, so `PINNED_ANSWERS_STATUS` stays true and nothing but the
+> constants moves: a board on v0.10.0 is now offered the update, and one on v0.11.0 is up to
+> date rather than ahead of this player. The reason is the card transfer: v0.10.0 says
+> `read.mpdj=1` in the card's `/.player/device.txt` and v0.11.0 `read.mpdj=2`, which the
+> transfer waits for before it writes an Auto DJ index (the firmware's docs/AUTODJ-INDEX.md), so
+> a board written at the old pin would never be given one. No test changed: the device tests
+> take the pin from the constants, as the bump to v0.10.0 meant them to.
+> **2026-11-10, the pin moves to v0.14.0** (published 10 Nov; its code ran on a Core2 that day:
+> boot, settings kept, the clock set, plays written, a card formatted by hand; both checksums
+> read from its SHA256SUMS, equal to GitHub's digests; the ELF table given v0.12.0's, v0.13.0's
+> and v0.14.0's pairs as the releases name them; the published image not yet written by this
+> player). It is the first release with what the card transfer talks to (the clock and `@time`,
+> the play log, `@format`), so `PINNED_ANSWERS_FORMAT` turns true: a board that can't format is
+> told "Updating lets it." in its fix line's place, beside Update ▸ (the screen's contract,
+> clauses 20 and 59, and its deviations log). Boards on v0.11.0 to v0.13.0 are now offered the
+> update.
 
 The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
 reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this

@@ -147,6 +147,12 @@ pub struct PlayerPrefs {
     /// (clause 61).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autodj_server: Option<String>,
+    /// Play from's home: the server Start arms the DJ on, whichever one is
+    /// browsed — the one chosen in the room's Play from, and whichever
+    /// server the DJ last ran on. Absent until then (the session's own
+    /// stands in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autodj_home: Option<String>,
     /// The old mode — "off", "similar" or "tempo+key" — read once for the
     /// migration (a mode other than off arms the DJ on the remembered
     /// session's server) and never written again.
@@ -183,6 +189,7 @@ impl Default for PlayerPrefs {
             repeat: "off".to_string(),
             shuffle: false,
             autodj_server: None,
+            autodj_home: None,
             autodj: String::new(),
             crossfade_seconds: 0.0,
             gapless: true,
@@ -243,11 +250,25 @@ pub struct AutoDjPrefs {
     /// zero is off. Kept from the player's own panel (decision 9).
     pub artist_cooldown: u32,
     /// The track-length window, in seconds; a bound on its rail (0 below,
-    /// 1200 above) is not sent.
+    /// `length_ceiling` above) is not sent.
     pub length: bool,
     pub min_seconds: u32,
     pub max_seconds: u32,
+    /// What "no maximum" was when the file was written: a day (86400)
+    /// since the window took any length, and absent in a file from before,
+    /// where it was the 20:00 end of a bar — so that file's `max_seconds =
+    /// 1200` still reads as no maximum.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length_ceiling: Option<u32>,
     pub allow_unknown_length: bool,
+    /// Smart filters — the mood filter every pick keeps to: a value per
+    /// scale ("" is none), the tags, and how sure every group must be
+    /// ("strict", "standard", "loose"). Nothing chosen is the filter off.
+    pub mood_valence: String,
+    pub mood_energy: String,
+    pub mood_voice: String,
+    pub mood_tags: Vec<String>,
+    pub mood_level: String,
     /// The client-side keyword filter over title, artist, album, filepath.
     pub keyword_filter: bool,
     pub keywords: Vec<String>,
@@ -265,6 +286,10 @@ pub struct AutoDjPrefs {
     /// `dj_genre_mode` / `dj_genres` override.
     pub genre_mode: String,
     pub genres: Vec<String>,
+    /// Which genre links the list matches: "tag", "model", or absent for
+    /// both; a server entry's own `dj_genre_source` overrides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre_source: Option<String>,
     /// Legacy (the three-mode panel): a percent, "off" / "compatible" /
     /// "strict", and the perceptual 1–100 slider. Read for the migration,
     /// dropped on the next write.
@@ -298,7 +323,13 @@ impl Default for AutoDjPrefs {
             length: false,
             min_seconds: 0,
             max_seconds: crate::dj::LENGTH_RAIL_SECONDS,
+            length_ceiling: None,
             allow_unknown_length: false,
+            mood_valence: String::new(),
+            mood_energy: String::new(),
+            mood_voice: String::new(),
+            mood_tags: Vec::new(),
+            mood_level: "standard".to_string(),
             keyword_filter: false,
             keywords: Vec::new(),
             min_rating: 0,
@@ -310,6 +341,7 @@ impl Default for AutoDjPrefs {
             genre_filter: None,
             genre_mode: "off".to_string(),
             genres: Vec::new(),
+            genre_source: None,
             tempo_tolerance: None,
             key_matching: None,
             sonic_tightness: None,
@@ -330,6 +362,8 @@ pub struct DjLibraryOverrides {
     pub genre_filter: Option<bool>,
     pub genre_mode: Option<String>,
     pub genres: Option<Vec<String>>,
+    /// "tag", "model" or "both" when the entry chose a kind of its own.
+    pub genre_source: Option<String>,
 }
 
 /// A server entry's Add from YouTube choices as one value: what the room
@@ -647,6 +681,8 @@ pub struct ServerEntry {
     pub dj_genre_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dj_genres: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_genre_source: Option<String>,
     /// Add from YouTube's Where new songs land for this server: the
     /// library, the folders a song files into under it, and which of the
     /// presets that layout is — needed beside it, since "Same as Discover"
@@ -736,6 +772,11 @@ pub fn follow_rename(config: &mut Config, old: &str, new: &str) {
         }
     }
     if let Some(server) = config.player.autodj_server.as_mut()
+        && let Some(renamed) = renamed_identity(server, old, new)
+    {
+        *server = renamed;
+    }
+    if let Some(server) = config.player.autodj_home.as_mut()
         && let Some(renamed) = renamed_identity(server, old, new)
     {
         *server = renamed;
@@ -1050,6 +1091,49 @@ pub fn delete_stats_file() -> Result<(), String> {
     }
 }
 
+/// `cards.json` — the MP3 player's SD cards this computer has seen, by card
+/// id (src/device/card/cards.rs): a cache of what each card's own settings
+/// file says, beside stats.json and as disposable: a corrupt file is
+/// ignored, and written over at the next save.
+pub fn cards_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("cards.json"))
+}
+
+pub fn load_cards_file() -> Result<Option<String>, String> {
+    let path = cards_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+pub fn save_cards_file(body: &str) -> Result<(), String> {
+    write_atomic(&cards_path()?, body, false)
+}
+
+/// `card-plays.json` — the plays read from the MP3 player's SD cards that
+/// wait for their server, and what this computer has settled of each
+/// card's play log (src/device/card/history.rs), beside stats.json. Not
+/// disposable as the cache is: a play mapped through a ledger a sync has
+/// since replaced can't be mapped again.
+pub fn card_plays_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("card-plays.json"))
+}
+
+pub fn load_card_plays_file() -> Result<Option<String>, String> {
+    let path = card_plays_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+pub fn save_card_plays_file(body: &str) -> Result<(), String> {
+    write_atomic(&card_plays_path()?, body, false)
+}
+
 /// `ytdl.json` — Add from YouTube's jobs, the last ones per server and
 /// account, beside the queue's file and as disposable: a corrupt file, or
 /// one of another version, is ignored, never repaired — the next save
@@ -1061,63 +1145,82 @@ pub fn ytdl_path() -> Result<PathBuf, String> {
 /// The version `ytdl.json` is written at.
 const YTDL_VERSION: u64 = 1;
 
-/// The slot one server and account keep in `ytdl.json`: the server's
-/// identity — never the address it is reached at, which for a tunnel
-/// changes per dial — and the account, since a server lists only the
-/// caller's own jobs, so another account's saved there would read as gone.
-fn ytdl_slot(identity: &str, username: Option<&str>) -> String {
+/// `torrents.json` — what Add torrent sent, the last ones per server and
+/// account, beside `ytdl.json` and as disposable: a corrupt file, or one
+/// of another version, is ignored, never repaired — the next save
+/// replaces it.
+pub fn torrents_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("torrents.json"))
+}
+
+/// The version `torrents.json` is written at.
+const TORRENTS_VERSION: u64 = 1;
+
+/// The slot one server and account keep in a slots file (`ytdl.json`,
+/// `torrents.json`): the server's identity — never the address it is
+/// reached at, which for a tunnel changes per dial — and the account,
+/// since a server lists only the caller's own jobs, so another account's
+/// saved there would read as gone.
+fn slot_key(identity: &str, username: Option<&str>) -> String {
     format!("{}\n{}", identity.trim_end_matches('/'), username.unwrap_or(""))
 }
 
-/// The file as it stands, or a fresh one when there is none or none this
-/// build reads.
-fn read_ytdl_file() -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let path = ytdl_path()?;
-    let text = match fs::read_to_string(&path) {
+/// A slots file as it stands, or a fresh one when there is none or none
+/// this build reads.
+fn read_slots_file(path: &Path, version: u64) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("could not read {}: {e}", path.display())),
     };
     match serde_json::from_str(&text) {
-        Ok(serde_json::Value::Object(file))
-            if file.get("version").and_then(serde_json::Value::as_u64) == Some(YTDL_VERSION) =>
-        {
+        Ok(serde_json::Value::Object(file)) if file.get("version").and_then(serde_json::Value::as_u64) == Some(version) => {
             Ok(file)
         }
         _ => {
             let mut file = serde_json::Map::new();
-            file.insert("version".into(), YTDL_VERSION.into());
+            file.insert("version".into(), version.into());
             Ok(file)
         }
     }
 }
 
-/// One server and account's slot: `None` when the file holds none for
-/// them, or one this build cannot read.
-pub fn load_ytdl_slot<T: serde::de::DeserializeOwned>(
+/// One server and account's slot of a slots file: `None` when the file
+/// holds none for them, or one this build cannot read.
+fn load_slot<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    version: u64,
     identity: &str,
     username: Option<&str>,
 ) -> Result<Option<T>, String> {
-    let file = read_ytdl_file()?;
-    let slot = file.get("servers").and_then(|servers| servers.get(ytdl_slot(identity, username)));
+    let file = read_slots_file(path, version)?;
+    let slot = file.get("servers").and_then(|servers| servers.get(slot_key(identity, username)));
     Ok(slot.and_then(|slot| serde_json::from_value(slot.clone()).ok()))
 }
 
 /// Write one server and account's slot (`None` drops it), merged into the
 /// file as it stands just before: a second player sharing the directory —
 /// a `--torrent` window, another build — keeps its servers' slots, and
-/// whatever else a newer build keeps there.
-pub fn save_ytdl_slot<T: Serialize>(identity: &str, username: Option<&str>, slot: Option<&T>) -> Result<(), String> {
-    let mut file = read_ytdl_file()?;
+/// whatever else a newer build keeps there. `what` names the slot's
+/// contents in a failure's words.
+fn save_slot<T: Serialize>(
+    path: &Path,
+    version: u64,
+    what: &str,
+    identity: &str,
+    username: Option<&str>,
+    slot: Option<&T>,
+) -> Result<(), String> {
+    let mut file = read_slots_file(path, version)?;
     let servers = file.entry("servers").or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if !servers.is_object() {
         *servers = serde_json::Value::Object(serde_json::Map::new());
     }
     if let Some(servers) = servers.as_object_mut() {
-        let key = ytdl_slot(identity, username);
+        let key = slot_key(identity, username);
         match slot {
             Some(slot) => {
-                let value = serde_json::to_value(slot).map_err(|e| format!("could not encode the YouTube jobs: {e}"))?;
+                let value = serde_json::to_value(slot).map_err(|e| format!("could not encode {what}: {e}"))?;
                 servers.insert(key, value);
             }
             None => {
@@ -1125,8 +1228,37 @@ pub fn save_ytdl_slot<T: Serialize>(identity: &str, username: Option<&str>, slot
             }
         }
     }
-    let body = serde_json::to_string(&file).map_err(|e| format!("could not encode the YouTube jobs: {e}"))?;
-    write_atomic(&ytdl_path()?, &body, false)
+    let body = serde_json::to_string(&file).map_err(|e| format!("could not encode {what}: {e}"))?;
+    write_atomic(path, &body, false)
+}
+
+/// One server and account's slot of `ytdl.json`: `None` when the file
+/// holds none for them, or one this build cannot read.
+pub fn load_ytdl_slot<T: serde::de::DeserializeOwned>(
+    identity: &str,
+    username: Option<&str>,
+) -> Result<Option<T>, String> {
+    load_slot(&ytdl_path()?, YTDL_VERSION, identity, username)
+}
+
+/// Write one server and account's slot of `ytdl.json` (`None` drops it),
+/// merged into the file as it stands just before.
+pub fn save_ytdl_slot<T: Serialize>(identity: &str, username: Option<&str>, slot: Option<&T>) -> Result<(), String> {
+    save_slot(&ytdl_path()?, YTDL_VERSION, "the YouTube jobs", identity, username, slot)
+}
+
+/// One server and account's slot of `torrents.json`.
+pub fn load_torrent_slot<T: serde::de::DeserializeOwned>(
+    identity: &str,
+    username: Option<&str>,
+) -> Result<Option<T>, String> {
+    load_slot(&torrents_path()?, TORRENTS_VERSION, identity, username)
+}
+
+/// Write one server and account's slot of `torrents.json` (`None` drops
+/// it), merged into the file as it stands just before.
+pub fn save_torrent_slot<T: Serialize>(identity: &str, username: Option<&str>, slot: Option<&T>) -> Result<(), String> {
+    save_slot(&torrents_path()?, TORRENTS_VERSION, "the torrents sent", identity, username, slot)
 }
 
 /// Drop the saved queue: a cleared queue must not come back on the next
@@ -1363,6 +1495,7 @@ pub fn save_dj_library(identity: &str, overrides: &DjLibraryOverrides) -> Result
     entry.dj_genre_filter = overrides.genre_filter;
     entry.dj_genre_mode = overrides.genre_mode.clone();
     entry.dj_genres = overrides.genres.clone();
+    entry.dj_genre_source = overrides.genre_source.clone();
     save(&config)
 }
 

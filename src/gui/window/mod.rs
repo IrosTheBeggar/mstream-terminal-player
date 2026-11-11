@@ -1341,8 +1341,8 @@ impl App {
         }
         if input::is_paste(&raw) {
             // Whole, for a face that takes it so — Add from YouTube's link
-            // field, caret or not: typed, a link's letters would be the
-            // room's keys once the field gave them back.
+            // field or Add torrent's room, caret or not: typed, a link's
+            // letters would be the room's keys.
             if self.face.takes_paste() {
                 let Some(text) = clipboard_text() else { return };
                 self.feed(event_loop, TermEvent::Paste(text));
@@ -2137,7 +2137,8 @@ fn fit(cell: (u32, u32), (cols, rows): (u16, u16)) -> PhysicalSize<u32> {
 /// is none or no clipboard to read. A clipboard per paste: the X11 one is
 /// a connection of its own, and a paste is rare enough to open it then.
 /// On a Wayland session this is XWayland's clipboard (Cargo.toml says why).
-fn clipboard_text() -> Option<String> {
+/// The GUI's Add from YouTube room reads it too, for its `Paste` button.
+pub(crate) fn clipboard_text() -> Option<String> {
     match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
         Ok(text) => Some(text),
         Err(e) => {

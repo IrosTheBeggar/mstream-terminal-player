@@ -456,8 +456,7 @@ pub(crate) fn cursor_entry(gui: &Gui) -> Option<&config::ServerEntry> {
     stored_at(gui, gui.servers.cursor).and_then(|i| gui.config.servers.get(i))
 }
 
-/// The parent's display name for a peer's "via" line — here and in the
-/// Auto DJ room's server picker.
+/// The parent's display name for a peer's "via" line.
 pub(crate) fn parent_label(gui: &Gui, parent: &str) -> String {
     gui.config
         .servers
@@ -1440,7 +1439,7 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let many = gui.config.servers.iter().filter(|e| config::selectable(e)).count() > 1;
     let chevron = if legacy_conhost() { " v" } else { " ▾" };
     let mark = if many { chevron } else { "" };
-    let strip_end = super::top_strip_end();
+    let strip_end = super::top_strip_end_with(&super::device::strip_mark(gui));
     let Some((x, label)) = header_label(&server, mark, strip_end, plus.x) else { return };
     let width = crate::kit::width(&label) as u16;
     let rect = Rect { x, y: 0, width, height: 1 };
@@ -2694,6 +2693,7 @@ mod tests {
             dj_genre_filter: None,
             dj_genre_mode: None,
             dj_genres: None,
+            dj_genre_source: None,
             ytdl_library: None,
             ytdl_layout: None,
             ytdl_layout_kind: None,

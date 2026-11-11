@@ -1,0 +1,1980 @@
+//! The transfer worker on cards in host folders ([`FatSim`], set up by the
+//! set-up) and the sync tests' loopback mStream: what it reads and asks
+//! when a card is put in, one sync at a time and its progress, the stop,
+//! the gates, the settings, hiding and ejecting. No test touches a real
+//! volume, a real server or a serial port.
+
+use std::sync::Mutex;
+use std::sync::mpsc::Receiver;
+
+use super::*;
+use crate::device::card::contract::mppl::{KIND_PLAY, Slot as Play};
+use crate::device::card::contract::msmf::Ack;
+use crate::device::card::engine::fatsim::FatSim;
+use crate::device::card::sync::tests::{
+    DEVICE, EPOCH, Fake, SERIAL, Scratch, answer, card, logged, no_peers, server, sync_now,
+    with_hidden, with_waves,
+};
+use crate::device::card::volume::{Bus, Clock, Disk, Fs, Serial, Table, Volume};
+
+/// The volumes of the test: host folders, each a FAT card at a serial.
+#[derive(Default)]
+pub(crate) struct Shelf {
+    cards: Mutex<Vec<(Found, u32)>>,
+    pub(crate) ejected: Mutex<Vec<String>>,
+    /// Opening a card breaks the thread that asks (a fault of the worker's).
+    breaks: AtomicBool,
+    /// A card listed but not opened (taken out or remounted as a job
+    /// began), and how many times one was.
+    unopenable: AtomicBool,
+    opened: std::sync::atomic::AtomicUsize,
+}
+
+impl Shelf {
+    pub(crate) fn put(&self, found: Found, serial: u32) {
+        self.cards.lock().unwrap().push((found, serial));
+    }
+
+    fn take(&self, key: &str) {
+        self.cards.lock().unwrap().retain(|(f, _)| key_of(f) != key);
+    }
+
+    /// The card at `key` as the OS lists it now (its free space, say), in
+    /// one step: never seen gone between.
+    fn relist(&self, key: &str, change: impl FnOnce(&mut Found)) {
+        let mut cards = self.cards.lock().unwrap();
+        if let Some((found, _)) = cards.iter_mut().find(|(f, _)| key_of(f) == key) {
+            change(found);
+        }
+    }
+}
+
+impl Volumes for Shelf {
+    fn find(&self) -> io::Result<Vec<Found>> {
+        Ok(self.cards.lock().unwrap().iter().map(|(f, _)| f.clone()).collect())
+    }
+
+    fn open(&self, found: &Found) -> Option<Box<dyn CardWrite>> {
+        assert!(!self.breaks.load(Ordering::SeqCst), "a test's fault in the worker");
+        if self.unopenable.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.opened.fetch_add(1, Ordering::SeqCst);
+        let cards = self.cards.lock().unwrap();
+        let (_, serial) = cards.iter().find(|(f, _)| key_of(f) == key_of(found))?;
+        let card = || Box::new(FatSim::new(&found.volume.path, *serial)) as Box<dyn CardWrite>;
+        found.accepted().then(card)
+    }
+
+    fn eject(&self, found: &Found) -> Result<(), String> {
+        self.ejected.lock().unwrap().push(key_of(found));
+        Ok(())
+    }
+}
+
+/// This computer, in memory: its cards.json, its plays' outbox (one for
+/// every job, as `card-plays.json` is), a fixed clock, and ids that never
+/// repeat from one session to the next.
+#[derive(Default)]
+pub(crate) struct Here {
+    cards: Mutex<Cards>,
+    seed: std::sync::atomic::AtomicU64,
+    outbox: Arc<Mutex<Option<String>>>,
+}
+
+/// The outbox every job of a [`Here`] reads and writes.
+struct Outbox(Arc<Mutex<Option<String>>>);
+
+impl history::Store for Outbox {
+    fn load(&self) -> Result<Option<String>, String> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+
+    fn save(&self, text: &str) -> Result<(), String> {
+        *self.0.lock().unwrap() = Some(text.to_string());
+        Ok(())
+    }
+}
+
+/// Each session's clock and ids from `seed`: a fixed time.
+fn envs_from(seed: u64) -> impl FnMut() -> Env {
+    let mut seed = seed;
+    move || {
+        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut n = seed;
+        let id = move || {
+            n = n.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            n
+        };
+        let producer = "mstream-terminal test".into();
+        Env { now: Box::new(|| 1_791_900_000), id: Box::new(id), producer }
+    }
+}
+
+impl Home for Here {
+    fn cards(&self) -> Cards {
+        self.cards.lock().unwrap().clone()
+    }
+
+    fn update_cards(&self, change: &mut dyn FnMut(&mut Cards)) -> Result<(), String> {
+        change(&mut self.cards.lock().unwrap());
+        Ok(())
+    }
+
+    fn plays(&self) -> Rc<dyn history::Store> {
+        Rc::new(Outbox(self.outbox.clone()))
+    }
+
+    fn federation(&self, _cards: Vec<PathBuf>) -> Result<Federation, String> {
+        Ok(no_peers())
+    }
+
+    fn envs(&self) -> Box<dyn FnMut() -> Env> {
+        let n = self.seed.fetch_add(1, Ordering::SeqCst);
+        Box::new(envs_from(0xC0FF_EE00 ^ n.wrapping_mul(0x1000_0001)))
+    }
+
+    fn now(&self) -> u64 {
+        1_791_900_000
+    }
+}
+
+/// A volume at `dir`, as the OS would list a card in a USB reader.
+pub(crate) fn volume_at(dir: &std::path::Path, fs: Fs, serial: u32) -> Found {
+    let volume = Volume {
+        path: dir.to_path_buf(),
+        device: "sdz1".into(),
+        fs,
+        table: Table::Mbr,
+        label: "CARD".into(),
+        serial: Some(Serial::Fat(serial)),
+        space: Some(Space { size: 64 << 30, free: 32 << 30, cluster: 32 * 1024, clusters: 0 }),
+        read_only: false,
+        utf8: Some(true),
+        clock: Clock::Offset(0),
+    };
+    let disk = Disk {
+        id: "sdz".into(),
+        removable: true,
+        bus: Bus::Usb,
+        read_only: false,
+        system: Vec::new(),
+        others: Vec::new(),
+    };
+    Found::new(volume, disk)
+}
+
+/// The fake server as a saved server, the session's.
+pub(crate) fn home_server(base: &str) -> ServerLink {
+    ServerLink {
+        id: base.to_string(),
+        name: "Home".into(),
+        base: Ok(base.to_string()),
+        token: Some("tok".into()),
+        session: true,
+        ..ServerLink::default()
+    }
+}
+
+struct Rig {
+    link: Link,
+    events: Receiver<Event>,
+    fold: Fold,
+    shelf: Arc<Shelf>,
+    here: Arc<Here>,
+}
+
+impl Rig {
+    fn new(shelf: Shelf) -> Rig {
+        let (shelf, here) = (Arc::new(shelf), Arc::new(Here::default()));
+        let every = Duration::from_millis(40);
+        let setup = Setup { volumes: shelf.clone(), home: here.clone(), every };
+        let (link, events) = spawn(setup);
+        Rig { link, events, fold: Fold::default(), shelf, here }
+    }
+
+    /// Folds the worker's reports until `done` holds of the fold, for at
+    /// most 30 s.
+    fn until(&mut self, what: &str, done: impl Fn(&Fold) -> bool) {
+        let t0 = Instant::now();
+        while !done(&self.fold) {
+            let (cards, notes) = (&self.fold.cards, &self.fold.notes);
+            assert!(t0.elapsed() < Duration::from_secs(30), "waited for {what}: {notes:?}
+{cards:#?}");
+            if let Ok(event) = self.events.recv_timeout(Duration::from_millis(50)) {
+                self.fold.apply(event);
+            }
+        }
+    }
+
+    fn card(&self, key: &str) -> &CardView {
+        self.fold.cards.iter().find(|c| c.key == key).expect("the card")
+    }
+
+    fn send(&self, cmd: Cmd) {
+        assert!(self.link.send(cmd));
+    }
+}
+
+fn planned(card: &CardView) -> Option<&Planned> {
+    match &card.next {
+        Next::Plan(plan) => Some(plan),
+        _ => None,
+    }
+}
+
+/// A set-up card in the shelf, and the server: the rig, the card's key, the
+/// fake server.
+fn with_card(scratch: &Scratch) -> (Rig, String, Fake, FatSim) {
+    let sim = card(scratch);
+    let (base, fake) = server();
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the card read and its server asked", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some())
+    });
+    (rig, key, fake, sim)
+}
+
+/// A second set-up card ("Gym", another serial and id) put in the rig's
+/// shelf and read: its key, and its folder's scratch (kept while it lives).
+fn second_card(rig: &mut Rig, name: &str) -> (String, Scratch) {
+    let other = Scratch::new(name);
+    let root = other.0.join("card");
+    gym_at(&root, SERIAL + 1);
+    let found = volume_at(&root, Fs::Fat32, SERIAL + 1);
+    let key = key_of(&found);
+    rig.shelf.put(found, SERIAL + 1);
+    let wanted = key.clone();
+    rig.until("the second card", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some())
+    });
+    (key, other)
+}
+
+/// A set-up card named Gym (another id) in the folder `root`, at `serial`.
+fn gym_at(root: &std::path::Path, serial: u32) {
+    let second = FatSim::new(root, serial);
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures");
+    let golden = fixtures.join("card/golden/device.txt");
+    std::fs::create_dir_all(root.join(".player")).unwrap();
+    std::fs::copy(golden, root.join(".player/device.txt")).unwrap();
+    let ask = setup::Ask { label: "Gym".into(), new_identity: false };
+    let mut cards = Cards::default();
+    setup::set_up(&second, &ask, &mut envs_from(0xB0B), &mut cards, &mut |_| {}).unwrap();
+}
+
+/// The worker's inbox handled as its loop handles it, until `done` holds of
+/// the worker, for at most 30 s.
+fn handle_until(worker: &mut Worker, inbox: &Receiver<In>, what: &str, done: impl Fn(&Worker) -> bool) {
+    let t0 = Instant::now();
+    while !done(worker) {
+        assert!(t0.elapsed() < Duration::from_secs(30), "waited for {what}");
+        match inbox.recv_timeout(Duration::from_millis(20)) {
+            Ok(In::Cmd(cmd)) => worker.cmd(cmd),
+            Ok(In::Job(key, job)) => worker.done(&key, job),
+            Ok(In::RunEvent(key, event)) => worker.progress(&key, event),
+            Err(_) => {}
+        }
+    }
+}
+
+/// A slot's card, as the worker holds it.
+fn view_of(worker: &Worker, key: &str) -> Option<CardView> {
+    worker.slots.iter().find(|s| s.view.key == key).map(|s| s.view.clone())
+}
+
+/// A run under way on the card, as an event tells it: its run past
+/// waiting its turn.
+fn running_in(event: &Event) -> Option<(&str, bool)> {
+    match event {
+        Event::Progress { key, run } => Some((key.as_str(), run.phase != Phase::Waiting)),
+        Event::Card(card) => {
+            Some((card.key.as_str(), card.run.as_ref().is_some_and(|r| r.phase != Phase::Waiting)))
+        }
+        _ => None,
+    }
+}
+
+fn without_lock(sim: &FatSim) -> std::collections::BTreeMap<String, (u64, u32, u64)> {
+    let mut image = sim.image();
+    image.retain(|p, _| !p.ends_with("run.lock"));
+    image
+}
+
+// ── The tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn a_card_put_in_is_read_and_its_server_asked_with_nothing_written() {
+    let scratch = Scratch::new("worker-look");
+    let sim = card(&scratch);
+    let before = without_lock(&sim);
+    drop(sim);
+    let (base, _fake) = server();
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the plan", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+    let card = rig.card(&key);
+    let facts = card.facts().expect("read");
+    assert!(facts.set_up());
+    assert_eq!(card.name().as_deref(), Some("Car"));
+    // Set up and never synced: it takes the session's server.
+    let server = &card.server;
+    assert!(matches!(server, Server::New(Some(link)) if link.name == "Home"), "{server:?}");
+    let plan = planned(card).unwrap();
+    assert_eq!((plan.new, plan.removals.len()), (5, 0), "every library the account sees: {plan:?}");
+    assert_eq!(plan.offered, ["Rock", "Jazz"]);
+    assert!(plan.fit.is_some_and(|f| f.fits()), "a fit, from the volume's space");
+    // Read and asked, and nothing written.
+    let sim = FatSim::new(&scratch.0.join("card"), SERIAL);
+    assert_eq!(without_lock(&sim), before);
+    assert!(rig.fold.notes.contains(&Note::PutIn { drive: card.drive() }));
+    assert!(rig.fold.notes.contains(&Note::Read { key: key.clone() }));
+    let logs: Vec<&LogItem> =
+        rig.fold.logs.iter().filter(|(k, _)| *k == key).map(|(_, l)| l).collect();
+    assert!(matches!(logs[0], LogItem::PutIn { card, .. } if card == "Car"), "{logs:?}");
+    assert!(logs.iter().any(|l| matches!(l, LogItem::Asked { new: 5, .. })), "{logs:?}");
+    // Nothing left out, nothing said of it.
+    assert_eq!(plan.hidden, Hidden::default());
+    assert!(!logs.iter().any(|l| matches!(l, LogItem::Hidden(_))), "{logs:?}");
+}
+
+/// A look whose listing left out files no server serves (a Mac's twin, a
+/// dot-folder's file) says so in the card's log right under its asked:
+/// how many and where, once. They are none of the plan's new files.
+#[test]
+fn a_look_says_the_files_the_server_cant_serve_under_its_asked() {
+    let scratch = Scratch::new("worker-hidden");
+    drop(card(&scratch));
+    let (base, fake) = server();
+    with_hidden(&fake);
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the plan", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+    let plan = planned(rig.card(&key)).unwrap().clone();
+    let left_out = Hidden {
+        n: 2,
+        sample: vec!["Rock/Artist A/.hidden/".into(), "Rock/Artist A/Album B/._01.mp3".into()],
+        more: false,
+    };
+    assert_eq!(plan.hidden, left_out);
+    assert_eq!(plan.new, 6, "the five, and the one served beside them: {plan:?}");
+    let logs: Vec<&LogItem> =
+        rig.fold.logs.iter().filter(|(k, _)| *k == key).map(|(_, l)| l).collect();
+    // Once a look, each right under its asked.
+    let asked = logs.iter().filter(|l| matches!(l, LogItem::Asked { new: 6, .. })).count();
+    let told: Vec<usize> = (0..logs.len()).filter(|i| matches!(logs[*i], LogItem::Hidden(_))).collect();
+    assert_eq!((asked > 0, told.len()), (true, asked), "{logs:?}");
+    for i in told {
+        assert!(i > 0 && matches!(logs[i - 1], LogItem::Asked { new: 6, .. }), "{logs:?}");
+        assert_eq!(logs[i], &LogItem::Hidden(left_out.clone()));
+    }
+}
+
+#[test]
+fn a_sync_runs_on_the_worker_its_progress_told_and_done_is_the_card_again() {
+    let scratch = Scratch::new("worker-sync");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    let mut phases: Vec<Phase> = Vec::new();
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let t0 = Instant::now();
+    loop {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the sync ended: {:#?}", rig.fold.cards);
+        if let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) {
+            if let Event::Progress { run, .. } = &event
+                && phases.last() != Some(&run.phase)
+            {
+                phases.push(run.phase);
+            }
+            rig.fold.apply(event);
+        }
+        let card = rig.card(&key);
+        if card.run.is_none() && matches!(card.ended, Some(Ended::Done { .. })) {
+            break;
+        }
+    }
+    assert!(phases.contains(&Phase::Copying) && phases.contains(&Phase::Verifying), "{phases:?}");
+    let ended = rig.card(&key).ended.clone();
+    assert!(matches!(ended, Some(Ended::Done { tracks: 5, .. })), "{ended:?}");
+    assert!(rig.fold.notes.iter().any(|n| matches!(n, Note::Synced { tracks: 5, .. })));
+    // The next look says the card is in step, and this computer knows it
+    // synced it from Home.
+    let wanted = key.clone();
+    rig.until("the look after", |f| {
+        let in_step = |p: &Planned| p.new == 0 && p.unchanged;
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(in_step))
+    });
+    let cards = rig.here.cards();
+    let seen = cards.cards.values().next().expect("cards.json knows the card");
+    assert_eq!((seen.server.as_str(), seen.synced), ("Home", 1_791_900_000));
+}
+
+/// Clause 51a: a card in step with its server and no waveform file has a sync
+/// to offer, which tells its phase and its count, and is in step after it.
+#[test]
+fn a_card_in_step_that_lacks_its_waveforms_is_offered_a_sync_and_its_phase_is_told() {
+    let scratch = Scratch::new("worker-waves");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let off = sync::Ask { no_waves: true, ..sync::Ask::default() };
+    let synced = sync_now(&sim, &base, &off, &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    drop(sim);
+    with_waves(&fake);
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the plan", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+    let plan = planned(rig.card(&key)).unwrap();
+    assert_eq!((plan.new, plan.removals.len(), plan.plays), (0, 0, 0), "{plan:?}");
+    assert!(plan.waves_missing && plan.unchanged, "{plan:?}");
+
+    let mut runs: Vec<Run> = Vec::new();
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let t0 = Instant::now();
+    loop {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the sync ended: {:#?}", rig.fold.cards);
+        if let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) {
+            if let Event::Progress { run, .. } = &event {
+                runs.push(run.clone());
+            }
+            rig.fold.apply(event);
+        }
+        let card = rig.card(&key);
+        if card.run.is_none() && matches!(card.ended, Some(Ended::Done { .. })) {
+            break;
+        }
+    }
+    let mut phases: Vec<Phase> = runs.iter().map(|r| r.phase).collect();
+    phases.dedup();
+    assert!(phases.ends_with(&[Phase::Index, Phase::Waves, Phase::Verifying]), "{phases:?}");
+    let first = runs.iter().find(|r| r.phase == Phase::Waves).unwrap();
+    assert_eq!(first.waves, (0, 5), "its phase told at once, with what it asks");
+    let last = runs.last().unwrap();
+    assert_eq!((last.phase, last.waves), (Phase::Verifying, (5, 5)));
+
+    // The next look: in step.
+    let wanted = key.clone();
+    rig.until("the look after", |f| {
+        let in_step = |p: &Planned| !p.waves_missing && p.unchanged;
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(in_step))
+    });
+}
+
+/// The waveforms' counts are told as a download's bytes are, every so often,
+/// and the phase's first, its last and what comes after it at once.
+#[test]
+fn the_waveforms_counts_are_told_every_so_often_and_their_phase_at_once() {
+    let scratch = Scratch::new("worker-waves-told");
+    let (me, _inbox) = channel();
+    let (out, events) = channel();
+    let (volumes, home) = (Arc::new(Shelf::default()), Arc::new(Here::default()));
+    let mut worker = Worker::new(Setup { volumes, home, every: EVERY }, me, out);
+    let found = volume_at(&scratch.0, Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let mut view = CardView::new(found);
+    view.run = Some(Run { phase: Phase::Index, ..Run::default() });
+    worker.slots.push(Slot {
+        view,
+        look_again: false,
+        reopen: false,
+        unopened: 0,
+        synced_with: None,
+        told: None,
+        retry: None,
+        tries: 0,
+        copies: Vec::new(),
+        deferred: Vec::new(),
+    });
+    for done in 0..=1000 {
+        worker.progress(&key, RunEvent::Waves { done, of: 1000 });
+    }
+    let progress = |e: Event| match e {
+        Event::Progress { run, .. } => Some(run),
+        _ => None,
+    };
+    let told: Vec<Run> = events.try_iter().filter_map(progress).collect();
+    assert_eq!((told[0].phase, told[0].waves), (Phase::Waves, (0, 1000)));
+    assert!(told.len() < 1001, "{} of 1,001 told", told.len());
+    // The last count is never held back: it is the one a phase ends at.
+    assert_eq!(told.last().map(|r| r.waves), Some((1000, 1000)), "the last told at once");
+    worker.progress(&key, RunEvent::Committed { generation: 2, last: true });
+    let told: Vec<Run> = events.try_iter().filter_map(progress).collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!((told[0].phase, told[0].waves), (Phase::Verifying, (1000, 1000)));
+}
+
+/// A run with nothing to copy has no bytes for a bar: its waveforms are what
+/// it counts, and it never says 100 ahead of them. One that copied keeps the
+/// bar of its bytes.
+#[test]
+fn a_run_with_nothing_to_copy_counts_its_waveforms_and_says_100_only_after_them() {
+    let scratch = Scratch::new("worker-percent");
+    let mut view = CardView::new(volume_at(&scratch.0, Fs::Fat32, SERIAL));
+    let mut percent = |run: Run| {
+        view.run = Some(run);
+        view.percent()
+    };
+    let nothing = |phase: Phase, waves: (usize, usize)| Run { phase, waves, ..Run::default() };
+    assert_eq!(percent(nothing(Phase::Listing, (0, 0))), Some(0));
+    assert_eq!(percent(nothing(Phase::Planning, (0, 0))), Some(0));
+    assert_eq!(percent(nothing(Phase::Index, (0, 0))), Some(0));
+    assert_eq!(percent(nothing(Phase::Waves, (0, 400))), Some(0));
+    assert_eq!(percent(nothing(Phase::Waves, (100, 400))), Some(25));
+    assert_eq!(percent(nothing(Phase::Waves, (400, 400))), Some(100));
+    assert_eq!(percent(nothing(Phase::Verifying, (400, 400))), Some(100));
+    assert_eq!(percent(nothing(Phase::Waiting, (0, 0))), None);
+    // Its bytes' bar, whatever the waveforms have reached.
+    let copied = |waves: (usize, usize)| Run {
+        phase: Phase::Waves,
+        files: 2,
+        bytes: 400,
+        done_bytes: 300,
+        waves,
+        ..Run::default()
+    };
+    assert_eq!(percent(copied((1, 400))), Some(75));
+    // Files of no known size, copied: nothing to go back on.
+    let no_size = Run { phase: Phase::Waves, files: 2, waves: (1, 400), ..Run::default() };
+    assert_eq!(percent(no_size), Some(100));
+    assert_eq!(Run::default().waves_percent(), 0, "none asked");
+    assert!(Phase::Index < Phase::Waves && Phase::Waves < Phase::Verifying, "the run's order");
+}
+
+/// A sync that makes no commit, with plays to send and nothing else, still comes
+/// to its last look, and says 100 there: the 0 of its index steps doesn't stay
+/// on the tabs till it is done.
+#[test]
+fn a_sync_of_plays_alone_makes_no_commit_and_says_100_at_its_last_look() {
+    let scratch = Scratch::new("worker-plays-alone");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    with_waves(&fake);
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let seen = volume::inspect(&sim).unwrap();
+    let root = seen.root.as_ref().expect("a root");
+    let generation = root.manifest.header.generation;
+    let tags = root.tags.as_ref().expect("its tags file");
+    let record = tags.records.iter().find(|e| e.path.ends_with("01.mp3")).expect("a track");
+    let play = Play {
+        kind: KIND_PLAY,
+        outcome: 1,
+        source: 2,
+        seq: 1,
+        epoch: 0x1122_3344_5566_7788,
+        device_id: [0x00, 0x00, 0x5E, 0x00, 0x53, 0x01],
+        started_at: 1_791_950_000_000,
+        boot_seq: 1,
+        uptime_ms: 1000,
+        played_ms: 181_000,
+        path_hash: record.hash,
+        size: record.rec.size,
+        fat_time: record.rec.fat_time,
+        ..Play::default()
+    };
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play.encode()).unwrap();
+    drop(sim);
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the plan", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+    let plan = planned(rig.card(&key)).unwrap();
+    assert_eq!((plan.new, plan.removals.len(), plan.plays), (0, 0, 1), "{plan:?}");
+    assert!(!plan.waves_missing, "{plan:?}");
+
+    let mut runs: Vec<Run> = Vec::new();
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let t0 = Instant::now();
+    loop {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the sync ended: {:#?}", rig.fold.cards);
+        if let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) {
+            if let Event::Progress { run, .. } = &event {
+                runs.push(run.clone());
+            }
+            rig.fold.apply(event);
+        }
+        let card = rig.card(&key);
+        if card.run.is_none() && matches!(card.ended, Some(Ended::Done { .. })) {
+            break;
+        }
+    }
+    let mut phases: Vec<Phase> = runs.iter().map(|r| r.phase).collect();
+    phases.dedup();
+    assert!(phases.ends_with(&[Phase::Index, Phase::Verifying]), "{phases:?}");
+    let mut view = rig.card(&key).clone();
+    let mut percent = |run: &Run| {
+        view.run = Some(run.clone());
+        view.percent()
+    };
+    let index = runs.iter().find(|r| r.phase == Phase::Index).unwrap();
+    assert_eq!(percent(index), Some(0));
+    assert_eq!(percent(runs.last().unwrap()), Some(100));
+    assert_eq!(fake.lock().unwrap().plays.len(), 1, "the play went");
+    let seen = volume::inspect(&FatSim::new(&scratch.0.join("card"), SERIAL)).unwrap();
+    assert_eq!(seen.root.unwrap().manifest.header.generation, generation, "no commit for it");
+}
+
+#[test]
+fn a_stop_before_anything_is_written_leaves_the_card_as_it_was() {
+    let scratch = Scratch::new("worker-stop");
+    let (mut rig, key, _fake, sim) = with_card(&scratch);
+    let before = without_lock(&sim);
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    rig.send(Cmd::Stop { key: key.clone() });
+    let wanted = key.clone();
+    rig.until("the stop", |f| f.cards.iter().any(|c| c.key == wanted && c.ended.is_some()));
+    let ended = rig.card(&key).ended.clone();
+    assert!(matches!(ended, Some(Ended::Stopped { at: 0, .. })), "{ended:?}");
+    assert_eq!(without_lock(&sim), before, "nothing reached the card");
+}
+
+#[test]
+fn one_sync_at_a_time_the_second_waits_its_turn_and_dont_wait_forgets_it() {
+    let scratch = Scratch::new("worker-two");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    // A second card of its own: another serial, another id.
+    let (key_b, _other) = second_card(&mut rig, "worker-two-b");
+
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    rig.send(Cmd::Sync { key: key_b.clone(), allow: Box::default() });
+    // Both end, one after the other: every report of a run under way names
+    // one card until that card's run has ended (the runs never overlap),
+    // and the second waits its turn meanwhile.
+    let (mut under_way, mut runs, mut waited) = (None::<String>, Vec::new(), false);
+    let t0 = Instant::now();
+    loop {
+        let done = |k: &str| {
+            let ended = |c: &CardView| c.run.is_none() && matches!(c.ended, Some(Ended::Done { .. }));
+            rig.fold.cards.iter().any(|c| c.key == k && ended(c))
+        };
+        if done(&key) && done(&key_b) {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "both synced: {:#?}", rig.fold.cards);
+        let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) else { continue };
+        if let Some((k, running)) = running_in(&event) {
+            match (&under_way, running) {
+                (Some(on), true) => assert_eq!(on, k, "a second run began before {on}'s ended"),
+                (None, true) => {
+                    under_way = Some(k.to_string());
+                    runs.push(k.to_string());
+                }
+                (Some(on), false) if on == k => under_way = None,
+                _ => {}
+            }
+        }
+        if let Event::Card(card) = &event {
+            let waits = card.run.as_ref().is_some_and(|r| r.phase == Phase::Waiting);
+            waited |= card.key == key_b && waits;
+        }
+        rig.fold.apply(event);
+    }
+    assert_eq!(runs, [key.clone(), key_b.clone()], "one run each, the first first");
+    assert!(waited, "the second waited its turn");
+    assert!(!rig.card(&key_b).syncing());
+
+    // A second one forgotten before its turn never runs.
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    rig.send(Cmd::Sync { key: key_b.clone(), allow: Box::default() });
+    rig.send(Cmd::DontWait { key: key_b.clone() });
+    let a = key.clone();
+    rig.until("the first again", |f| {
+        f.cards.iter().any(|c| c.key == a && c.run.is_none() && c.ended.is_some())
+    });
+    assert!(rig.card(&key_b).run.is_none());
+}
+
+#[test]
+fn a_quit_stops_the_run_at_its_save_and_the_one_waiting_never_starts() {
+    let scratch = Scratch::new("worker-quit");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    let (key_b, _other) = second_card(&mut rig, "worker-quit-b");
+    // The second queued behind the first, then the quit, before the first
+    // can end: the quit's wait is the first's save alone.
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    rig.send(Cmd::Sync { key: key_b.clone(), allow: Box::default() });
+    rig.send(Cmd::Quit);
+    let (t0, mut waited) = (Instant::now(), false);
+    while !rig.fold.idle {
+        assert!(t0.elapsed() < Duration::from_secs(30), "idle: {:#?}", rig.fold.cards);
+        let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) else { continue };
+        if let Some((k, running)) = running_in(&event) {
+            assert!(!(k == key_b && running), "the waiting sync started in the quit's wait");
+        }
+        if let Event::Card(card) = &event {
+            let waits = card.run.as_ref().is_some_and(|r| r.phase == Phase::Waiting);
+            waited |= card.key == key_b && waits;
+        }
+        rig.fold.apply(event);
+    }
+    assert!(waited, "the second waited its turn");
+    assert!(rig.card(&key_b).run.is_none(), "told it won't run");
+    assert!(rig.card(&key).run.is_none(), "the first ended");
+    // The worker is gone: nothing more is told.
+    assert!(rig.events.recv_timeout(Duration::from_millis(200)).is_err());
+}
+
+#[test]
+fn half_the_card_gone_from_the_server_is_a_gate_with_each_library_counted() {
+    let scratch = Scratch::new("worker-half");
+    let (mut rig, key, fake, _sim) = with_card(&scratch);
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let wanted = key.clone();
+    rig.until("the first sync", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.ended, Some(Ended::Done { .. })))
+    });
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.tracks.retain(|t| t.path.ends_with("01.mp3"));
+        lib.revision = "1:2:1790000000001:1".into();
+    }
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let wanted = key.clone();
+    rig.until("the gate", |f| f.cards.iter().any(|c| c.key == wanted && c.gate.is_some()));
+    let gate = rig.card(&key).gate.clone().unwrap();
+    let Some(Gate::Half { n, total, by_library }) = gate.first() else { panic!("{gate:?}") };
+    assert_eq!((*n, *total), (3, 5));
+    assert_eq!(by_library, &[("Rock".to_string(), 3, 4)], "Rock's 3 of its 4");
+    // The look before a sync counts the same (the gate a Sync ▸ opens).
+    rig.send(Cmd::Dismiss { key: key.clone() });
+    rig.send(Cmd::Look { key: key.clone() });
+    let wanted = key.clone();
+    rig.until("the look", |f| {
+        let counted = |p: &Planned| !p.removal_libs.is_empty();
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(counted))
+    });
+    let card = rig.card(&key).clone();
+    let ahead = gate_ahead(&card, planned(&card).unwrap(), &Allow::default());
+    assert_eq!(ahead, Some(Gate::Half { n: 3, total: 5, by_library: vec![("Rock".into(), 3, 4)] }));
+
+    // Answered, the sync removes them.
+    let answers = Answers { removals: true, mass_removals: true, ..Answers::default() };
+    let allow = Box::new(Allow { answers, ..Allow::default() });
+    rig.send(Cmd::Sync { key: key.clone(), allow });
+    let wanted = key.clone();
+    rig.until("the removals", |f| {
+        let two = |c: &CardView| matches!(c.ended, Some(Ended::Done { tracks: 2, .. }));
+        f.cards.iter().any(|c| c.key == wanted && two(c))
+    });
+}
+
+#[test]
+fn set_up_then_apply_write_the_cards_settings_and_nothing_else() {
+    let scratch = Scratch::new("worker-setup");
+    let dir = scratch.0.join("new");
+    std::fs::create_dir_all(dir.join(".player")).unwrap();
+    let (base, _fake) = server();
+    let found = volume_at(&dir, Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the new card read", |f| {
+        f.cards.iter().any(|c| c.key == wanted && c.facts().is_some())
+    });
+    let card = rig.card(&key);
+    assert!(!card.facts().unwrap().set_up());
+    let server = &card.server;
+    assert!(matches!(server, Server::New(Some(link)) if link.name == "Home"), "the session's");
+    let mut want = Want::of(card.facts().unwrap(), card.server.link());
+    (want.name, want.libraries) = ("Gym".into(), Some(vec!["Rock".into()]));
+    rig.send(Cmd::SetUp { key: key.clone(), want: Box::new(want.clone()) });
+    let wanted = key.clone();
+    rig.until("set up, and asked", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(|p| p.new == 4))
+    });
+    let card = rig.card(&key);
+    assert_eq!(card.name().as_deref(), Some("Gym"));
+    assert_eq!(card.facts().unwrap().libraries(), ["Rock"]);
+    let text = std::fs::read_to_string(dir.join(".mstream/state.json")).unwrap();
+    assert!(text.contains("\"nickname\":\"Home\"") && !text.contains("127.0.0.1"), "{text}");
+
+    // Apply writes the settings alone: never removes, and nothing in /music.
+    want.removal = Removal::Never;
+    let music = std::fs::read_dir(dir.join("music")).unwrap().count();
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(want) });
+    let wanted = key.clone();
+    rig.until("applied", |f| {
+        f.cards.iter().any(|c| {
+            c.key == wanted
+                && c.facts()
+                    .and_then(|f| f.state.as_ref())
+                    .is_some_and(|s| s.settings.removal == Removal::Never)
+        })
+    });
+    assert_eq!(std::fs::read_dir(dir.join("music")).unwrap().count(), music);
+}
+
+#[test]
+fn the_fit_is_worked_out_for_the_sheets_choice_and_answers_its_own_request() {
+    let scratch = Scratch::new("worker-fit");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    let card = rig.card(&key).clone();
+    let mut want = Want::of(card.facts().unwrap(), card.server.link());
+    want.libraries = Some(vec!["Jazz".into()]);
+    rig.send(Cmd::Fit { key: key.clone(), want: Box::new(want), seq: 7 });
+    let wanted = key.clone();
+    rig.until("the fit", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(&c.fit, Some((7, Next::Plan(_)))))
+    });
+    let Some((_, Next::Plan(plan))) = &rig.card(&key).fit else { unreachable!() };
+    assert_eq!(plan.new, 1, "Jazz's one file");
+    let totals = &plan.totals;
+    assert!(totals.iter().any(|(lib, files, _)| lib == "Jazz" && *files == 1), "{totals:?}");
+}
+
+#[test]
+fn a_volume_the_player_cant_use_is_listed_and_hidden_until_shown_again() {
+    let scratch = Scratch::new("worker-hide");
+    let dir = scratch.0.join("exfat");
+    std::fs::create_dir_all(&dir).unwrap();
+    let found = volume_at(&dir, Fs::ExFat, 0x0BAD_F00D);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, 0x0BAD_F00D);
+    let mut rig = Rig::new(shelf);
+    let wanted = key.clone();
+    rig.until("listed", |f| f.cards.iter().any(|c| c.key == wanted));
+    assert_eq!(rig.card(&key).read, Read::Refused, "listed with why, never read");
+    // Eject ▸, its way to the player's Format: the OS is asked (clause 45).
+    rig.send(Cmd::Eject { key: key.clone() });
+    rig.until("ejected", |f| f.notes.iter().any(|n| matches!(n, Note::Ejected { .. })));
+    assert_eq!(*rig.shelf.ejected.lock().unwrap(), [key.clone()]);
+    rig.send(Cmd::Hide { key: key.clone() });
+    let wanted = key.clone();
+    rig.until("hidden", |f| f.watched && !f.cards.iter().any(|c| c.key == wanted));
+    assert!(rig.here.cards().is_hidden("0BAD-F00D"));
+    // It stays off the row at the next looks, until shown again.
+    for _ in 0..5 {
+        if let Ok(event) = rig.events.recv_timeout(Duration::from_millis(60)) {
+            rig.fold.apply(event);
+        }
+    }
+    assert!(!rig.fold.cards.iter().any(|c| c.key == key));
+    rig.send(Cmd::ShowHidden);
+    let wanted = key.clone();
+    rig.until("shown again", |f| f.cards.iter().any(|c| c.key == wanted));
+    // The computer's own disks are never listed at all.
+    let mut system = volume_at(&scratch.0.join("sys"), Fs::Fat32, 1);
+    system.disk.system = vec!["/".into()];
+    system.refusals = volume::judge(&system.disk, &system.volume);
+    assert!(!listed(&system));
+}
+
+#[test]
+fn eject_asks_the_os_and_a_card_taken_out_takes_its_tab_with_it() {
+    let scratch = Scratch::new("worker-eject");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    rig.send(Cmd::Eject { key: key.clone() });
+    rig.until("ejected", |f| {
+        f.notes.iter().any(|n| matches!(n, Note::Ejected { card } if card == "Car"))
+    });
+    assert_eq!(*rig.shelf.ejected.lock().unwrap(), [key.clone()]);
+    rig.shelf.take(&key);
+    let wanted = key.clone();
+    rig.until("gone", |f| !f.cards.iter().any(|c| c.key == wanted));
+    assert!(rig.fold.notes.iter().any(|n| matches!(n, Note::Out { card, .. } if card == "Car")));
+}
+
+/// A worker with a sync of a card under way at this phase, its place held by
+/// hand: the worker, the shelf, the card's key and its run's stop.
+fn running_at(scratch: &Scratch, phase: Phase) -> (Worker, Arc<Shelf>, String, Arc<AtomicBool>) {
+    let _sim = card(scratch);
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Arc::new(Shelf::default());
+    shelf.put(found.clone(), SERIAL);
+    let (me, _inbox) = channel();
+    let (out, _events) = channel();
+    let setup = Setup { volumes: shelf.clone(), home: Arc::new(Here::default()), every: EVERY };
+    let mut worker = Worker::new(setup, me, out);
+    let mut view = CardView::new(found);
+    view.run = Some(Run { phase, ..Run::default() });
+    worker.slots.push(Slot {
+        view,
+        look_again: false,
+        reopen: false,
+        unopened: 0,
+        synced_with: None,
+        told: None,
+        retry: None,
+        tries: 0,
+        copies: Vec::new(),
+        deferred: Vec::new(),
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    worker.running = Some(Running { key: key.clone(), stop: stop.clone() });
+    (worker, shelf, key, stop)
+}
+
+/// A run's next write may be half an hour off while it asks for its waveforms,
+/// with the other cards' syncs waiting behind it: a card taken out stops the
+/// asking. While it copies, the copy's next write finds the gap by itself.
+#[test]
+fn a_card_taken_out_while_it_asks_for_its_waveforms_stops_asking() {
+    for (phase, stops) in [(Phase::Waves, true), (Phase::Copying, false)] {
+        let scratch = Scratch::new("worker-out-waves");
+        let (mut worker, shelf, key, stop) = running_at(&scratch, phase);
+        shelf.take(&key);
+        worker.watch();
+        assert!(worker.slots[0].view.out, "kept, marked out");
+        assert_eq!(stop.load(Ordering::SeqCst), stops, "{phase:?}");
+    }
+}
+
+/// So does one taken out before it asks, in the minutes of the Auto DJ index's
+/// step, or with its last file skipped, which leaves its phase Copying: the
+/// first ask finds the card marked out. Back in its reader by then, the run
+/// goes on, and a pull that killed its hold on the card is its own to find.
+#[test]
+fn a_card_taken_out_ahead_of_its_first_ask_stops_asking_at_it() {
+    for phase in [Phase::Index, Phase::Copying] {
+        let scratch = Scratch::new("worker-out-first");
+        let (mut worker, shelf, key, stop) = running_at(&scratch, phase);
+        shelf.take(&key);
+        worker.watch();
+        assert!(worker.slots[0].view.out, "kept, marked out");
+        assert!(!stop.load(Ordering::SeqCst), "nothing to stop yet: {phase:?}");
+        worker.progress(&key, RunEvent::Waves { done: 0, of: 5 });
+        assert!(stop.load(Ordering::SeqCst), "{phase:?}");
+    }
+
+    let scratch = Scratch::new("worker-out-back");
+    let (mut worker, shelf, key, stop) = running_at(&scratch, Phase::Index);
+    let found = worker.slots[0].view.found.clone();
+    shelf.take(&key);
+    worker.watch();
+    shelf.put(found, SERIAL);
+    worker.watch();
+    assert!(!worker.slots[0].view.out);
+    worker.progress(&key, RunEvent::Waves { done: 0, of: 5 });
+    assert!(!stop.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_card_taken_out_in_its_sync_keeps_its_tab_marked_out() {
+    // The watch on its own, with the sync's place held by hand.
+    let scratch = Scratch::new("worker-out");
+    let _sim = card(&scratch);
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Arc::new(Shelf::default());
+    shelf.put(found.clone(), SERIAL);
+    let (me, _inbox) = channel();
+    let (out, events) = channel();
+    let setup = Setup { volumes: shelf.clone(), home: Arc::new(Here::default()), every: EVERY };
+    let mut worker = Worker::new(setup, me, out);
+    let mut view = CardView::new(found);
+    view.run = Some(Run { phase: Phase::Copying, files: 4812, done_files: 1204, ..Run::default() });
+    let slot = Slot {
+        view,
+        look_again: false,
+        reopen: false,
+        unopened: 0,
+        synced_with: None,
+        told: None,
+        retry: None,
+        tries: 0,
+        copies: Vec::new(),
+        deferred: Vec::new(),
+    };
+    worker.slots.push(slot);
+    worker.running = Some(Running { key: key.clone(), stop: Arc::new(AtomicBool::new(false)) });
+    shelf.take(&key);
+    worker.watch();
+    assert!(worker.slots[0].view.out, "kept, marked out");
+    let notes: Vec<Event> = events.try_iter().filter(|e| matches!(e, Event::Note(_))).collect();
+    assert!(
+        notes.iter().any(|e| matches!(e, Event::Note(Note::OutRun { at: 1204, of: 4812, .. }))),
+        "{notes:?}"
+    );
+    // Back in that reader before the run met the gap: the run goes on in
+    // its slot, its progress told (clause 53).
+    let back = worker.slots[0].view.found.clone();
+    shelf.put(back, SERIAL);
+    worker.watch();
+    assert_eq!(worker.slots.len(), 1, "one slot");
+    assert!(!worker.slots[0].view.out);
+    assert!(worker.slots[0].view.syncing(), "its run kept");
+    let _ = events.try_iter().count();
+    worker.progress(&key, RunEvent::Wrote { path: "a.flac".into(), bytes: 10 });
+    let wrote = |e: &Event| matches!(e, Event::Progress { run, .. } if run.done_files == 1205);
+    let told = events.try_iter().any(|e| wrote(&e));
+    assert!(told, "its progress told");
+    // Out again, and given up, it goes.
+    shelf.take(&key);
+    worker.watch();
+    worker.running = None;
+    worker.cmd(Cmd::GiveUp { key: key.clone() });
+    assert!(worker.slots.is_empty());
+}
+
+#[test]
+fn a_sync_takes_the_server_its_settings_chose_and_leaves_out_the_peers_left_out() {
+    let scratch = Scratch::new("worker-answers");
+    let sim = card(&scratch);
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let facts = read(&sim, &Cards::default()).unwrap();
+    let id = facts.root.unwrap().0;
+    let here = Arc::new(Here::default());
+    let (me, _inbox) = channel();
+    let (out, events) = channel();
+    let setup = Setup { volumes: Arc::new(Shelf::default()), home: here.clone(), every: EVERY };
+    let mut worker = Worker::new(setup, me, out);
+    let mut view = CardView::new(found);
+    view.read = Read::Read(Box::new(facts));
+    view.gate = Some(vec![Gate::Proxy { peer: 4 }, Gate::Proxy { peer: 5 }]);
+    worker.slots.push(Slot {
+        view,
+        look_again: false,
+        reopen: false,
+        unopened: 0,
+        synced_with: None,
+        told: None,
+        retry: None,
+        tries: 0,
+        copies: Vec::new(),
+        deferred: Vec::new(),
+    });
+    assert_eq!(worker.answers_for(&key, Allow::default()), Allow::default());
+    // The proxy gate's no: kept on this computer, that gate put away.
+    worker.cmd(Cmd::LeaveOut { key: key.clone(), peer: 4 });
+    assert_eq!(here.cards().left_out(id), [4]);
+    assert_eq!(worker.slots[0].view.gate, Some(vec![Gate::Proxy { peer: 5 }]));
+    assert!(events.try_iter().any(|e| matches!(e, Event::Card(_))));
+    // Settings that chose another server: the next sync takes it over.
+    worker.slots[0].view.take_over = true;
+    let allow = worker.answers_for(&key, Allow::default());
+    assert!(allow.take_over);
+    assert_eq!(allow.leave_out, [4], "left out, never asked again");
+    // A yes given since stands.
+    let through = Allow { proxy_copies: vec![4], ..Allow::default() };
+    assert!(worker.answers_for(&key, through).leave_out.is_empty());
+}
+
+#[test]
+fn a_lapsed_sign_in_is_the_apis_401_and_no_other_word() {
+    let unauthorized = crate::api::ApiError::Unauthorized.to_string();
+    // The listing's halt, and a run parked by a fetch's.
+    assert!(signed_out(&unauthorized));
+    assert!(signed_out(&format!("the server no longer takes this sign-in: {unauthorized}")));
+    let refused = sync::Synced {
+        summary: None,
+        end: sync::End::Halted(sync::Halt::Server(unauthorized.clone())),
+        notes: Vec::new(),
+        plays: None,
+        peers: Vec::new(),
+        resume_at: None,
+    };
+    assert_eq!(super::planned(&refused, 0), Next::SignIn { plays: 0 });
+    // A card another run holds is still to be asked, never refused.
+    let busy = sync::Synced {
+        summary: None,
+        end: sync::End::Halted(sync::Halt::Card(Stop::Busy)),
+        notes: Vec::new(),
+        plays: None,
+        peers: Vec::new(),
+        resume_at: None,
+    };
+    assert_eq!(super::planned(&busy, 0), Next::Asking);
+    // A 403, and words that merely hold "sign", are not.
+    for other in [
+        crate::api::ApiError::Forbidden("transfer".into()).to_string(),
+        "server error 500: assignment failed".into(),
+        "could not reach server: no signal".into(),
+        "unexpected response from the design route: x".into(),
+    ] {
+        assert!(!signed_out(&other), "{other}");
+    }
+}
+
+#[test]
+fn a_newer_writers_card_format_is_read_off_its_file() {
+    let scratch = Scratch::new("worker-newer");
+    let sim = card(&scratch);
+    assert_eq!(read(&sim, &Cards::default()).unwrap().newer_major, None);
+    // The manifest's header made major 3: a newer writer's.
+    let path = scratch.0.join("card/.mstream/manifest.bin");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    let facts = read(&FatSim::new(&scratch.0.join("card"), SERIAL), &Cards::default()).unwrap();
+    assert!(facts.newer.contains(&"manifest.bin".to_string()), "{:?}", facts.newer);
+    assert_eq!(facts.newer_major, Some(3));
+}
+
+#[test]
+fn a_cards_server_is_the_saved_one_its_key_names_never_merely_the_sessions() {
+    let home = home_server("http://127.0.0.1:3000");
+    let studio = ServerLink {
+        id: "http://127.0.0.1:4000".into(),
+        name: "Studio".into(),
+        base: Ok("http://127.0.0.1:4000".into()),
+        session: false,
+        ..ServerLink::default()
+    };
+    let key = home.url_key().unwrap();
+    let mut facts = Facts { server: Some(key), nickname: "Home".into(), ..Facts::default() };
+    let both = [studio.clone(), home.clone()];
+    assert!(matches!(server_of(&facts, &both, false), Server::Saved(l) if l.name == "Home"));
+    let alone = std::slice::from_ref(&studio);
+    assert_eq!(server_of(&facts, alone, false), Server::Unknown("Home".into()));
+    facts.server = None;
+    let new = server_of(&facts, &both, false);
+    assert!(matches!(new, Server::New(Some(l)) if l.name == "Home"), "a new card: the session's");
+    assert_eq!(server_of(&facts, &[], false), Server::New(None), "no server saved at all");
+    assert_eq!(home.reached(), crate::device::card::source::local::Reached::Loopback);
+}
+
+#[test]
+fn the_fold_keeps_the_cards_by_drive_and_the_tabs_percentage_follows_the_sync() {
+    let scratch = Scratch::new("worker-fold");
+    let a = volume_at(&scratch.0.join("b"), Fs::Fat32, 1);
+    let b = volume_at(&scratch.0.join("a"), Fs::Fat32, 2);
+    let mut fold = Fold::default();
+    fold.apply(Event::Card(Box::new(CardView::new(a.clone()))));
+    fold.apply(Event::Card(Box::new(CardView::new(b.clone()))));
+    assert_eq!(fold.cards[0].key, key_of(&b), "by drive");
+    assert!(fold.sync_mark().is_none());
+    let run = Run { phase: Phase::Copying, bytes: 400, done_bytes: 112, ..Run::default() };
+    fold.apply(Event::Progress { key: key_of(&a), run });
+    let (card, pct, paused) = fold.sync_mark().unwrap();
+    assert_eq!((card.key.as_str(), pct, paused), (key_of(&a).as_str(), 28, false));
+    let mut view = fold.cards[1].clone();
+    view.run = None;
+    view.ended = Some(Ended::Paused { pause: Pause::SignIn, at: 3, of: 9, bytes: (50, 100) });
+    fold.apply(Event::Card(Box::new(view)));
+    let (_, pct, paused) = fold.sync_mark().unwrap();
+    assert_eq!((pct, paused), (50, true), "paused, dim");
+    fold.apply(Event::Gone { key: key_of(&a) });
+    assert_eq!(fold.cards.len(), 1);
+    assert_eq!(drive_of(&volume_at(std::path::Path::new("E:\\"), Fs::Fat32, 1)), "E:");
+}
+
+#[test]
+fn a_server_that_doesnt_answer_pauses_the_sync_until_its_retry_or_stop_for_now() {
+    let scratch = Scratch::new("worker-pause");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    // The same server, gone: nothing answers at its address now.
+    let home = rig.card(&key).server.link().unwrap().clone();
+    let gone = ServerLink { base: Ok("http://127.0.0.1:9".into()), ..home };
+    rig.send(Cmd::Servers(vec![gone]));
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let wanted = key.clone();
+    rig.until("the pause", |f| f.cards.iter().any(|c| c.key == wanted && c.paused().is_some()));
+    let pause = rig.card(&key).paused().cloned();
+    let a_minute = 1_791_900_000 + 60;
+    let waits = matches!(pause, Some(Pause::Server { tries: 1, until }) if until == a_minute);
+    assert!(waits, "{pause:?}");
+    assert!(rig.fold.sync_mark().is_some_and(|(_, _, paused)| paused), "the tab's mark, dim");
+    rig.send(Cmd::StopPause { key: key.clone() });
+    let wanted = key.clone();
+    rig.until("stopped for now", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.ended, Some(Ended::Stopped { .. })))
+    });
+    // Asked again, it reads the card and asks its server again.
+    rig.fold.logs.clear();
+    rig.send(Cmd::Look { key: key.clone() });
+    let wanted = key.clone();
+    rig.until("asked again", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.next, Next::Unreached { .. }))
+    });
+}
+
+/// *Send the plays* on a card for someone else (clause 61): its look counts
+/// none to send, the note says none is sent, the card's log says how many
+/// and why, and the server is asked for nothing of them. The sheet's For
+/// row applied back, the card is the listener's own with the plays its log
+/// holds settled first: the marks are written with the settings, and none
+/// of those plays is ever sent.
+#[test]
+fn the_plays_of_a_card_for_someone_else_are_sent_nowhere() {
+    let scratch = Scratch::new("worker-gift");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let play = logged(&sim, "Album B/01.mp3", 1, 1_791_950_000_000);
+    let second = logged(&sim, "Album D/02.opus", 2, 1_791_950_200_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), &play).unwrap();
+    drop(sim);
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("a play to send", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(|p| p.plays == 1))
+    });
+
+    // The sheet's For row, applied: the card is for someone else.
+    let card = rig.card(&key).clone();
+    let mut want = Want::of(card.facts().expect("its facts"), card.server.link());
+    want.for_someone_else = true;
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(want) });
+    let wanted = key.clone();
+    rig.until("the mark read and none to send", |f| {
+        let marked = |c: &CardView| {
+            let state = c.facts().and_then(|f| f.state.as_ref());
+            state.is_some_and(|s| s.settings.for_someone_else)
+        };
+        let none = |p: &Planned| p.plays == 0 && p.tally.as_ref().is_some_and(|t| t.gift == 1);
+        f.cards.iter().any(|c| c.key == wanted && marked(c) && planned(c).is_some_and(none))
+    });
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("the note", |f| f.notes.contains(&Note::PlaysGift));
+    let why = LogItem::Said("1 play not sent: played while the card was for someone else".into());
+    assert!(rig.fold.logs.iter().any(|(k, item)| *k == key && *item == why), "{:?}", rig.fold.logs);
+    assert!(!rig.fold.notes.iter().any(|n| matches!(n, Note::PlaysSent { .. })), "{:?}", rig.fold.notes);
+    let unasked = |fake: &Fake| {
+        let lib = fake.lock().unwrap();
+        lib.plays.is_empty() && !lib.asked.iter().any(|a| a.ends_with("/stats/plays"))
+    };
+    assert!(unasked(&fake));
+
+    // Played once more by someone else, then the For row set back and
+    // applied: the plays the log holds are settled as the card is made the
+    // listener's own, and nothing is left to send.
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), [play, second].concat()).unwrap();
+    let card = rig.card(&key).clone();
+    let mut want = Want::of(card.facts().expect("its facts"), card.server.link());
+    want.for_someone_else = false;
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(want) });
+    let mark = vec![Ack { device_id: DEVICE, epoch: EPOCH, seq: 2 }];
+    let wanted = key.clone();
+    rig.until("the card the listener's own, its log's plays settled", |f| {
+        let own = |c: &CardView| {
+            let state = c.facts().and_then(|f| f.state.as_ref());
+            state.is_some_and(|s| !s.settings.for_someone_else && s.plays == mark)
+        };
+        let none = |p: &Planned| p.plays == 0 && p.tally.as_ref().is_some_and(|t| t.new == 0);
+        f.cards.iter().any(|c| c.key == wanted && own(c) && planned(c).is_some_and(none))
+    });
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("no play to send", |f| f.notes.iter().any(|n| matches!(n, Note::PlaysSent { n: 0, .. })));
+    assert!(unasked(&fake), "nothing of the time it was someone else's");
+}
+
+/// *Send the plays* settles them on this computer, and the card's marks
+/// wait for a sync: until then its log's plays are new at every look. The
+/// look after counts none to send, where it counted them all again and
+/// offered to send them.
+#[test]
+fn the_plays_sent_are_not_counted_to_send_again() {
+    let scratch = Scratch::new("worker-sent");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let play = logged(&sim, "Album B/01.mp3", 1, 1_791_850_000_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    drop(sim);
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("a play to send", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(|p| p.plays == 1))
+    });
+    rig.send(Cmd::Plays { key: key.clone() });
+    let sent = Note::PlaysSent { n: 1, server: "Home".into() };
+    rig.until("the play sent", |f| f.notes.contains(&sent));
+    assert_eq!(fake.lock().unwrap().plays.len(), 1);
+    let wanted = key.clone();
+    rig.until("the look after counts none to send", |f| {
+        // New still (no sync has stored the card's mark), and settled.
+        let none = |p: &Planned| p.plays == 0 && p.tally.as_ref().is_some_and(|t| t.new == 1 && t.due == 0);
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(none))
+    });
+}
+
+/// A server that refuses the saved sign-in is asked nothing of the card,
+/// and the card's look counts the plays that wait for it all the same, off
+/// the card and this computer's outbox: the Card view's "3 plays wait for
+/// Home: sign in to send them" (clause 44) says that count. The card's
+/// state file holds no mark yet, and one player logged the three: the
+/// number of its marks said none waited, and would say one.
+#[test]
+fn a_signed_out_servers_card_counts_the_plays_that_wait_for_it() {
+    let scratch = Scratch::new("worker-signed-out");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let at = 1_791_950_000_000;
+    let plays = [
+        logged(&sim, "Album B/01.mp3", 1, at),
+        logged(&sim, "Album D/02.opus", 2, at + 200_000),
+        logged(&sim, "Album B/01.mp3", 3, at + 400_000),
+    ];
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), plays.concat()).unwrap();
+    drop(sim);
+    fake.lock().unwrap().signed_out = true;
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("the sign-in refused, the plays counted", |f| {
+        f.cards.iter().any(|c| c.key == wanted && c.next == Next::SignIn { plays: 3 })
+    });
+    let marks = rig.card(&key).facts().and_then(|f| f.state.as_ref()).map(|s| s.plays.len());
+    assert_eq!(marks, Some(0), "no mark stored yet");
+    let lib = fake.lock().unwrap();
+    assert!(!lib.asked.iter().any(|a| a.ends_with("/stats/plays")), "{:?}", lib.asked);
+}
+
+/// What the plays' look and post have to say reaches the card's log when
+/// the job succeeds, as a sync's notes do: a server with no Stats API takes
+/// none, and *Send the plays* says so where it said "0 plays sent" alone.
+#[test]
+fn send_the_plays_says_why_none_went_to_a_server_that_takes_none() {
+    let scratch = Scratch::new("worker-no-stats");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let synced = sync_now(&sim, &base, &sync::Ask::default(), &mut envs_from(0xB0B)).0;
+    assert!(matches!(synced.end, sync::End::Ran(_)), "{:?}", synced.end);
+    let play = logged(&sim, "Album B/01.mp3", 1, 1_791_850_000_000);
+    std::fs::write(scratch.0.join("card/.player/plays.jnl"), play).unwrap();
+    drop(sim);
+    fake.lock().unwrap().no_stats = true;
+
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = key.clone();
+    rig.until("a play to send", |f| {
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(|p| p.plays == 1))
+    });
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("none sent", |f| f.notes.iter().any(|n| matches!(n, Note::PlaysSent { n: 0, .. })));
+    let why = LogItem::Said("the server takes no plays (it has no Stats API): they wait".into());
+    assert!(rig.fold.logs.iter().any(|(k, item)| *k == key && *item == why), "{:?}", rig.fold.logs);
+    assert!(fake.lock().unwrap().plays.is_empty());
+}
+
+/// The take-over gate's count of plays (clause 58): those that wait on this
+/// computer for a server other than the one the stopped sync read, from
+/// that sync's own tally.
+#[test]
+fn the_take_over_gate_counts_the_plays_that_wait_for_the_server_the_card_leaves() {
+    let tally = Tally { waiting: 5, due: 2, ..Tally::default() };
+    assert_eq!(super::plays_elsewhere(Some(&tally)), 3);
+    assert_eq!(super::plays_elsewhere(None), 0, "a run that never read the card's plays");
+    let guards = [Guard::Server { origin: 0, rows: 12 }];
+    assert_eq!(super::gates(&guards, &[], &[], None, 3), [Gate::Server { rows: 12, plays: 3 }]);
+}
+
+#[test]
+fn the_plays_a_new_identity_a_dismissed_gate_and_the_quit() {
+    let scratch = Scratch::new("worker-misc");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("the plays", |f| f.notes.iter().any(|n| matches!(n, Note::PlaysSent { n: 0, .. })));
+
+    let id = rig.card(&key).facts().and_then(|f| f.root).map(|r| r.0);
+    rig.send(Cmd::NewIdentity { key: key.clone() });
+    let wanted = key.clone();
+    rig.until("a new identity", |f| {
+        f.cards.iter().any(|c| c.key == wanted && c.facts().and_then(|f| f.root).map(|r| r.0) != id)
+    });
+    assert_eq!(rig.card(&key).name().as_deref(), Some("Car"), "its name kept");
+
+    rig.send(Cmd::Dismiss { key: key.clone() });
+    rig.send(Cmd::Quit);
+    rig.until("idle", |f| f.idle);
+    let (link, rx) = Link::pair();
+    assert!(link.send(Cmd::ShowHidden));
+    assert_eq!(sent(&rx), [Cmd::ShowHidden]);
+    let setup = Setup::system();
+    assert_eq!(setup.every, EVERY);
+}
+
+/// Clause 53: a card taken out during its sync, and another card put in that
+/// reader. The other is listed, its own subject, with a key of its own; the
+/// tab of the one taken out applies no settings, sends no plays, ejects
+/// nothing and works out no fit, before its run's end or after it, and
+/// nothing of it reaches the card put in.
+#[test]
+fn another_card_in_the_reader_of_one_taken_out_mid_sync_is_its_own_subject() {
+    let scratch = Scratch::new("worker-swap");
+    drop(card(&scratch));
+    let root = scratch.0.join("card");
+    let found_x = volume_at(&root, Fs::Fat32, SERIAL);
+    let x = key_of(&found_x);
+    let shelf = Arc::new(Shelf::default());
+    shelf.put(found_x.clone(), SERIAL);
+    let (me, inbox) = channel();
+    let (out, events) = channel();
+    let setup = Setup { volumes: shelf.clone(), home: Arc::new(Here::default()), every: EVERY };
+    let mut worker = Worker::new(setup, me, out);
+    let mut view = CardView::new(found_x);
+    view.run = Some(Run { phase: Phase::Copying, files: 9, done_files: 4, ..Run::default() });
+    worker.slots.push(Slot {
+        view,
+        look_again: false,
+        reopen: false,
+        unopened: 0,
+        synced_with: None,
+        told: None,
+        retry: None,
+        tries: 0,
+        copies: Vec::new(),
+        deferred: Vec::new(),
+    });
+    worker.running = Some(Running { key: x.clone(), stop: Arc::new(AtomicBool::new(false)) });
+
+    // Taken out mid-sync, then Gym put in that reader.
+    shelf.take(&x);
+    worker.watch();
+    std::fs::rename(&root, scratch.0.join("card-taken-out")).unwrap();
+    gym_at(&root, SERIAL + 1);
+    let found_y = volume_at(&root, Fs::Fat32, SERIAL + 1);
+    let y = key_of(&found_y);
+    shelf.put(found_y, SERIAL + 1);
+    worker.watch();
+    assert_ne!(x, y, "one reader, two cards, two keys");
+    assert!(view_of(&worker, &x).is_some_and(|v| v.out), "its tab kept, marked out");
+    assert!(view_of(&worker, &y).is_some_and(|v| !v.out), "the card put in is listed");
+    let gone: Vec<Event> = events.try_iter().filter(|e| matches!(e, Event::Gone { .. })).collect();
+    assert!(gone.is_empty(), "{gone:?}");
+    handle_until(&mut worker, &inbox, "Gym read", |w| {
+        view_of(w, &y).is_some_and(|v| v.facts().is_some() && v.busy.is_none())
+    });
+    let before = without_lock(&FatSim::new(&root, SERIAL + 1));
+
+    // The taken-out tab's asks, while its run ends and after.
+    let mut want = Want::of(&Facts::default(), None);
+    (want.name, want.removal) = ("Taken out".into(), Removal::Never);
+    let asks = |want: &Want| {
+        vec![
+            Cmd::Apply { key: x.clone(), want: Box::new(want.clone()) },
+            Cmd::Plays { key: x.clone() },
+            Cmd::Eject { key: x.clone() },
+            Cmd::Fit { key: x.clone(), want: Box::new(want.clone()), seq: 3 },
+            Cmd::Sync { key: x.clone(), allow: Box::default() },
+        ]
+    };
+    for cmd in asks(&want) {
+        worker.cmd(cmd);
+    }
+    let pulled = sync::Synced {
+        summary: None,
+        end: sync::End::Halted(sync::Halt::Card(Stop::Pulled)),
+        notes: Vec::new(),
+        plays: None,
+        peers: Vec::new(),
+        resume_at: None,
+    };
+    let finished = Finished {
+        synced: Some(pulled),
+        why: None,
+        by_library: Vec::new(),
+        removal_libs: Vec::new(),
+        stopped: false,
+    };
+    worker.done(&x, JobDone::Synced(Box::new(finished)));
+    for cmd in asks(&want) {
+        worker.cmd(cmd);
+    }
+    let t0 = Instant::now();
+    handle_until(&mut worker, &inbox, "a moment", |_| t0.elapsed() > Duration::from_millis(300));
+    let taken = view_of(&worker, &x).unwrap();
+    assert!(taken.out && taken.busy.is_none() && taken.run.is_none(), "{taken:#?}");
+    assert!(matches!(taken.ended, Some(Ended::Out { at: 4, of: 9 })), "{:?}", taken.ended);
+    assert_eq!(taken.fit, Some((3, Next::Unasked)));
+    assert!(shelf.ejected.lock().unwrap().is_empty());
+    let gym = view_of(&worker, &y).unwrap();
+    assert!(gym.busy.is_none() && gym.run.is_none(), "{gym:#?}");
+    assert_eq!(without_lock(&FatSim::new(&root, SERIAL + 1)), before, "nothing reached Gym");
+    let state = std::fs::read_to_string(root.join(".mstream/state.json")).unwrap();
+    assert!(state.contains("Gym") && !state.contains("Taken out"), "{state}");
+}
+
+/// A card filled over Quick Connect's bridge is read at a loopback address
+/// whose port is new each session (the review's TU2): the next session knows
+/// its server all the same, by the tunnel's id the sync confirmed into the
+/// card's source, and syncs it with no take-over question.
+#[test]
+fn a_card_filled_over_quick_connect_is_its_servers_in_the_next_session_too() {
+    let scratch = Scratch::new("worker-qc");
+    drop(card(&scratch));
+    let (base, fake) = server();
+    // A server that doesn't say its own id: the keys alone tell it.
+    fake.lock().unwrap().old = true;
+    let served = fake.clone();
+    let other = crate::api::transfer::stub::routed(move |asked| answer(&served, asked));
+    let bridge = |base: &str| ServerLink {
+        id: "mstream+iroh://tunnelidforatest".into(),
+        name: "Home".into(),
+        base: Ok(base.to_string()),
+        token: Some("tok".into()),
+        local_token: Some("bridge".into()),
+        session: true,
+        ..ServerLink::default()
+    };
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    for (session, at) in [(1, &base), (2, &other)] {
+        let shelf = Shelf::default();
+        shelf.put(found.clone(), SERIAL);
+        let mut rig = Rig::new(shelf);
+        rig.send(Cmd::Servers(vec![bridge(at)]));
+        let wanted = key.clone();
+        rig.until("the plan", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+        let card = rig.card(&key).clone();
+        if session == 2 {
+            let server = &card.server;
+            assert!(matches!(server, Server::Saved(l) if l.name == "Home"), "{server:?}");
+            let guards = &planned(&card).unwrap().guards;
+            assert!(!guards.iter().any(|g| matches!(g, Guard::Server { .. })), "{guards:?}");
+        }
+        rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+        let wanted = key.clone();
+        rig.until("the sync", |f| {
+            f.cards.iter().any(|c| c.key == wanted && c.run.is_none() && c.ended.is_some())
+        });
+        let ended = rig.card(&key).ended.clone();
+        assert!(matches!(ended, Some(Ended::Done { .. })), "session {session}: {ended:?}");
+        assert!(rig.card(&key).gate.is_none(), "{:?}", rig.card(&key).gate);
+    }
+}
+
+/// The review's TV1: a card that stays in is seen as the OS lists it now, its
+/// free space among it, and the next look plans for that room; while a run is
+/// bound to it, its card stays as the run's plan took it.
+#[test]
+fn a_card_that_stays_in_is_seen_as_it_is_now_and_a_look_plans_for_its_room_now() {
+    let scratch = Scratch::new("worker-room");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    assert!(planned(rig.card(&key)).unwrap().fit.is_some_and(|f| f.fits()));
+    let full = |found: &mut Found| {
+        let space = found.volume.space.as_mut().unwrap();
+        space.free = 1 << 20;
+    };
+    rig.shelf.relist(&key, full);
+    let wanted = key.clone();
+    let room = |c: &CardView| c.found.volume.space.is_some_and(|s| s.free == 1 << 20);
+    rig.until("seen again", |f| f.cards.iter().any(|c| c.key == wanted && room(c)));
+    rig.send(Cmd::Look { key: key.clone() });
+    let wanted = key.clone();
+    rig.until("the look for the room now", |f| {
+        let full = |p: &Planned| p.fit.is_some_and(|f| !f.fits());
+        f.cards.iter().any(|c| c.key == wanted && planned(c).is_some_and(full))
+    });
+
+    // Under a run, the card stays as the run took it.
+    let scratch = Scratch::new("worker-room-run");
+    let (mut worker, shelf, key, _stop) = running_at(&scratch, Phase::Copying);
+    let before = worker.slots[0].view.found.clone();
+    shelf.relist(&key, full);
+    worker.watch();
+    assert_eq!(worker.slots[0].view.found, before);
+    worker.running = None;
+    worker.watch();
+    assert!(worker.slots[0].view.found.volume.space.is_some_and(|s| s.free == 1 << 20));
+}
+
+/// The review's TV3: what a job or a sync is bound to is the card the
+/// listener picked, its serial and its card id, never merely what is in the
+/// reader when it starts: a set-up, the settings' write and a sync of
+/// another card stop before they write anything.
+#[test]
+fn a_job_on_a_card_another_now_writes_nothing() {
+    let scratch = Scratch::new("worker-picked");
+    let sim = card(&scratch);
+    let id = read(&sim, &Cards::default()).unwrap().root.unwrap().0;
+    let before = without_lock(&sim);
+    let other = Expect { serial: Some(Serial::Fat(SERIAL ^ 1)), ..Expect::default() };
+    let another_id = Expect { card_id: Some(id ^ 1), ..Expect::default() };
+    let ask = setup::Ask { label: "Car".into(), new_identity: true };
+    for picked in [&other, &another_id] {
+        let set = setup::set_up_as(&sim, &ask, picked, &mut envs_from(1), &mut Cards::default(), &mut |_| {});
+        assert!(matches!(set, Err(Stop::DifferentCard)), "{set:?}");
+        let mut change = |state: &mut State| state.label = "Changed".into();
+        let plays: Rc<dyn history::Store> = Rc::new(Outbox(Arc::default()));
+        let stored = setup::store_as(&sim, picked, &mut change, plays, &mut envs_from(2), &mut |_| {});
+        assert!(matches!(stored, Err(Stop::DifferentCard)), "{stored:?}");
+    }
+    let (base, _fake) = server();
+    let ask = sync::Ask { picked: other, ..sync::Ask::default() };
+    let synced = sync_now(&sim, &base, &ask, &mut envs_from(3)).0;
+    let end = &synced.end;
+    assert!(matches!(end, sync::End::Halted(sync::Halt::Card(Stop::DifferentCard))), "{end:?}");
+    assert_eq!(without_lock(&sim), before, "nothing written");
+    // The card it is: the same set-up and settings go through.
+    let mine = Expect { serial: Some(Serial::Fat(SERIAL)), card_id: Some(id), commit_id: None };
+    let mut change = |state: &mut State| state.label = "Changed".into();
+    let plays: Rc<dyn history::Store> = Rc::new(Outbox(Arc::default()));
+    let stored = setup::store_as(&sim, &mine, &mut change, plays, &mut envs_from(4), &mut |_| {});
+    assert_eq!(stored.map(|s| s.label).ok().as_deref(), Some("Changed"));
+}
+
+/// The review's TU3: a run whose last file failed is past its copying all
+/// the same, as one whose last file was written.
+#[test]
+fn a_run_whose_last_file_failed_moves_on_to_its_index() {
+    let scratch = Scratch::new("worker-last-failed");
+    let (mut worker, _shelf, key, _stop) = running_at(&scratch, Phase::Planning);
+    worker.progress(&key, RunEvent::Planned { files: 2, bytes: 20 });
+    worker.progress(&key, RunEvent::Wrote { path: "a.mp3".into(), bytes: 10 });
+    assert_eq!(worker.slots[0].view.run.as_ref().unwrap().phase, Phase::Copying);
+    worker.progress(&key, RunEvent::Failed { server_path: "Rock/b.mp3".into(), why: "gone".into() });
+    let run = worker.slots[0].view.run.clone().unwrap();
+    assert_eq!((run.phase, run.done_files, run.skipped, run.now), (Phase::Index, 2, 1, None));
+}
+
+/// The review's TU7 (clause 52): a sync paused for the sign-in goes on once
+/// the listener has signed in again, its server told with a new sign-in.
+#[test]
+fn a_sync_paused_for_the_sign_in_goes_on_once_signed_in() {
+    let scratch = Scratch::new("worker-sign-in");
+    let (mut rig, key, fake, _sim) = with_card(&scratch);
+    fake.lock().unwrap().signed_out = true;
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let wanted = key.clone();
+    rig.until("the pause", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.paused(), Some(Pause::SignIn)))
+    });
+    fake.lock().unwrap().signed_out = false;
+    let home = rig.card(&key).server.link().unwrap().clone();
+    rig.send(Cmd::Servers(vec![ServerLink { token: Some("tok-again".into()), ..home }]));
+    let wanted = key.clone();
+    rig.until("the sync gone on", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.ended, Some(Ended::Done { .. })))
+    });
+}
+
+/// The second review's C1-1: a server that answers its listing and refuses
+/// the files (401) pauses the sync for the sign-in, and the looks after it
+/// (the one the pause asks for, another asked for) find a plan: under the
+/// same sign-in the sync waits, asking for no file again. Signed in anew,
+/// it goes on.
+#[test]
+fn a_sync_paused_for_the_sign_in_waits_for_another_though_its_listing_answers() {
+    let scratch = Scratch::new("worker-sign-in-loop");
+    let (mut rig, key, fake, _sim) = with_card(&scratch);
+    let count = |fake: &Fake, what: &str| {
+        fake.lock().unwrap().asked.iter().filter(|a| a.contains(what)).count()
+    };
+    {
+        let mut lib = fake.lock().unwrap();
+        let paths: Vec<String> = lib.tracks.iter().map(|t| t.path.clone()).collect();
+        lib.refused.extend(paths);
+    }
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let wanted = key.clone();
+    let paused_and_planned = |f: &Fold| {
+        f.cards.iter().any(|c| {
+            let paused = matches!(c.paused(), Some(Pause::SignIn));
+            c.key == wanted && paused && c.busy.is_none() && planned(c).is_some()
+        })
+    };
+    rig.until("the pause, and the look after it", paused_and_planned);
+    let (fetched, listed) = (count(&fake, "/media/"), count(&fake, "/sync/manifest"));
+    rig.send(Cmd::Look { key: key.clone() });
+    let looked_again = |f: &Fold| paused_and_planned(f) && count(&fake, "/sync/manifest") > listed;
+    rig.until("another look past the pause", looked_again);
+    assert_eq!(count(&fake, "/media/"), fetched, "no file asked for again under the same sign-in");
+    assert!(matches!(rig.card(&key).paused(), Some(Pause::SignIn)));
+
+    fake.lock().unwrap().refused.clear();
+    let home = rig.card(&key).server.link().unwrap().clone();
+    rig.send(Cmd::Servers(vec![ServerLink { token: Some("tok-again".into()), ..home }]));
+    let wanted = key.clone();
+    rig.until("the sync gone on", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.ended, Some(Ended::Done { .. })))
+    });
+}
+
+/// The second review's C1-9: settings for a card whose saved server can't
+/// be reached now are saved under the key it was saved as, the card's
+/// source; "not saved" only when there is no server at all to key them by.
+#[test]
+fn settings_for_a_server_out_of_reach_are_saved_under_its_saved_key() {
+    let scratch = Scratch::new("worker-store-unreached");
+    let sim = card(&scratch);
+    let here = Here::default();
+    let saved = "http://music.example:3000";
+    let gone = ServerLink { base: Err("its tunnel is down".into()), ..home_server(saved) };
+    let want = Want { libraries: Some(vec!["Rock".into()]), ..Want::of(&Facts::default(), None) };
+    assert_eq!(store(&sim, &here, &Expect::default(), &want, Some(&gone)), Ok(true));
+    let state = State::of(&volume::inspect(&sim).expect("it reads").state).expect("a state");
+    let source = state.settings.sources.iter().find(|s| s.url_key == server_url_key(saved));
+    assert_eq!(source.map(|s| s.libraries.clone()), Some(vec!["Rock".to_string()]), "{state:?}");
+    assert_eq!(store(&sim, &here, &Expect::default(), &want, None), Ok(false), "no server at all");
+}
+
+/// A card listed with no serial at first, then with one (lsblk may list a
+/// UUID late) and its run's answers under the old key.
+fn unserialled(scratch: &Scratch) -> (Rig, String, Option<Serial>, Fake) {
+    let _sim = card(scratch);
+    let (base, fake) = server();
+    let mut found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let serial = found.volume.serial.take();
+    let path_key = key_of(&found);
+    let shelf = Shelf::default();
+    shelf.put(found, SERIAL);
+    let mut rig = Rig::new(shelf);
+    rig.send(Cmd::Servers(vec![home_server(&base)]));
+    let wanted = path_key.clone();
+    rig.until("read by its path", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+    (rig, path_key, serial, fake)
+}
+
+/// The second review's C1-7: a card keyed by its path alone whose serial
+/// the OS lists later is re-keyed, never taken out: one tab, the same
+/// card, its sync running on under the new key and ending as its own.
+#[test]
+fn a_card_whose_serial_comes_late_keeps_its_slot_under_the_key_with_it() {
+    let scratch = Scratch::new("worker-rekey");
+    let (mut rig, path_key, serial, _fake) = unserialled(&scratch);
+    rig.send(Cmd::Sync { key: path_key.clone(), allow: Box::default() });
+    rig.shelf.relist(&path_key, |f| f.volume.serial = serial.clone());
+    let with_serial = format!("{path_key}#{}", serial.expect("a serial"));
+    let wanted = with_serial.clone();
+    rig.until("its key with the serial", |f| f.cards.iter().any(|c| c.key == wanted));
+    assert_eq!(rig.fold.key_now(&path_key), with_serial);
+    rig.until("the sync's end", |f| {
+        f.cards.iter().any(|c| c.key == wanted && matches!(c.ended, Some(Ended::Done { .. })))
+    });
+    assert_eq!(rig.fold.cards.len(), 1, "one card, never two tabs");
+    assert!(!rig.card(&with_serial).out, "never taken out");
+}
+
+/// A slot keyed by its path alone is re-keyed only while the card with
+/// the serial is the card it read (the last review's Z6): another card put
+/// in that reader, its root another card id, is another card. The slot is
+/// taken out and the card put in gets a slot of its own, never the read,
+/// the sheets and the gates of the one before.
+#[test]
+fn a_card_with_a_serial_where_a_card_without_one_was_is_another_card_unless_it_is_the_same() {
+    let scratch = Scratch::new("worker-rekey-other");
+    let (mut rig, path_key, serial, _fake) = unserialled(&scratch);
+    let read_before = rig.card(&path_key).facts().and_then(|f| f.root).map(|r| r.0);
+    assert!(read_before.is_some(), "the slot read the card's root");
+    // Another card at that path: set up anew, another id; the OS lists it
+    // with a serial, its label and size as the one before.
+    let sim = FatSim::new(&scratch.0.join("card"), SERIAL);
+    let ask = setup::Ask { label: "Gym".into(), new_identity: true };
+    setup::set_up(&sim, &ask, &mut envs_from(9), &mut Cards::default(), &mut |_| {}).expect("set up anew");
+    rig.shelf.relist(&path_key, |f| f.volume.serial = serial.clone());
+    let with_serial = format!("{path_key}#{}", serial.expect("a serial"));
+    let (wanted, old) = (with_serial.clone(), path_key.clone());
+    rig.until("the card put in, read as its own", |f| {
+        let new = f.cards.iter().any(|c| c.key == wanted && c.facts().is_some());
+        new && !f.cards.iter().any(|c| c.key == old && !c.out)
+    });
+    assert_eq!(rig.fold.key_now(&path_key), path_key, "never re-keyed");
+    let read_now = rig.card(&with_serial).facts().and_then(|f| f.root).map(|r| r.0);
+    assert!(read_now.is_some() && read_now != read_before, "its own root: {read_now:?}");
+
+    // What a listing says of a card but its serial: its filesystem, its
+    // size and its label, one that came late saying nothing.
+    let card = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL).volume;
+    let with = |change: &dyn Fn(&mut volume::Volume)| {
+        let mut v = card.clone();
+        change(&mut v);
+        v
+    };
+    assert!(listed_alike(&card, &card));
+    assert!(!listed_alike(&card, &with(&|v| v.label = "OTHER".into())), "another label");
+    assert!(!listed_alike(&card, &with(&|v| v.space.as_mut().unwrap().size += 1)), "another size");
+    assert!(!listed_alike(&card, &with(&|v| v.fs = Fs::Fat16)), "another filesystem");
+    assert!(listed_alike(&with(&|v| v.label.clear()), &card), "a label that came late");
+    assert!(listed_alike(&card, &with(&|v| v.space.as_mut().unwrap().free = 1)), "its free space moves");
+}
+
+/// The second review's C1-6: a card is the card with no serial too. Another
+/// card put in the same reader (no serial either: the same key) before the
+/// slot is read again isn't the one *Send the plays* was asked of: the job
+/// sends nothing, and says so.
+#[test]
+fn the_plays_job_checks_the_card_it_was_asked_of() {
+    let scratch = Scratch::new("worker-plays-picked");
+    let (mut rig, path_key, _serial, fake) = unserialled(&scratch);
+    // Another card at that path: set up anew, another id.
+    let sim = FatSim::new(&scratch.0.join("card"), SERIAL);
+    let ask = setup::Ask { label: "Gym".into(), new_identity: true };
+    setup::set_up(&sim, &ask, &mut envs_from(9), &mut Cards::default(), &mut |_| {}).expect("set up anew");
+    rig.send(Cmd::Plays { key: path_key.clone() });
+    let different = Note::Failed { why: Stop::DifferentCard.to_string() };
+    rig.until("the job's own answer", |f| f.notes.contains(&different));
+    let posts = fake.lock().unwrap().asked.iter().filter(|a| a.contains("/stats/plays")).count();
+    assert_eq!(posts, 0, "nothing sent for the other card");
+}
+
+/// The review's TU8: a sync's or a job's thread that breaks ends with why,
+/// never left running or busy for ever.
+#[test]
+fn a_sync_or_a_job_that_breaks_ends_with_why() {
+    let scratch = Scratch::new("worker-breaks");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    rig.shelf.breaks.store(true, Ordering::SeqCst);
+    rig.send(Cmd::Fit { key: key.clone(), want: Box::new(Want::of(&Facts::default(), None)), seq: 9 });
+    let wanted = key.clone();
+    rig.until("the fit's end", |f| {
+        f.cards.iter().any(|c| c.key == wanted && c.fit == Some((9, Next::Refused(BROKE.into()))))
+    });
+    rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+    let wanted = key.clone();
+    rig.until("the sync's end", |f| {
+        f.cards.iter().any(|c| c.key == wanted && c.run.is_none() && c.ended.is_some())
+    });
+    assert_eq!(rig.card(&key).ended, Some(Ended::Failed(BROKE.into())));
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(Want::of(&Facts::default(), None)) });
+    rig.until("the job's end", |f| f.notes.iter().any(|n| *n == Note::Failed { why: BROKE.into() }));
+    let wanted = key.clone();
+    rig.until("not busy", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+}
+
+/// The second review's C1-3: a job whose card can't be opened as it begins
+/// fails as that job, with its own note (Apply, Plays, Set up and Eject
+/// alike), never as a failed read; a look that can't open it is no failed
+/// read either, and the card is looked at again at the next look at the
+/// readers.
+#[test]
+fn a_job_that_cant_open_its_card_fails_as_that_job_and_a_look_tries_again() {
+    let scratch = Scratch::new("worker-unopened");
+    let (mut rig, key, _fake, _sim) = with_card(&scratch);
+    rig.shelf.unopenable.store(true, Ordering::SeqCst);
+    let unopened = Note::Failed { why: UNOPENED.into() };
+    let failures = |f: &Fold| f.notes.iter().filter(|n| **n == unopened).count();
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(Want::of(&Facts::default(), None)) });
+    rig.until("Apply's own failure", |f| failures(f) == 1);
+    let wanted = key.clone();
+    rig.until("not busy", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("the plays' own failure", |f| failures(f) == 2);
+    assert!(matches!(rig.card(&key).read, Read::Read(_)), "no failed read: {:?}", rig.card(&key).read);
+
+    // A look: nothing failed, and the card read again once it opens.
+    rig.until("not busy", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+    let before = rig.shelf.opened.load(Ordering::SeqCst);
+    rig.send(Cmd::Look { key: key.clone() });
+    rig.until("the look over", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+    assert!(matches!(rig.card(&key).read, Read::Read(_)), "{:?}", rig.card(&key).read);
+    rig.shelf.unopenable.store(false, Ordering::SeqCst);
+    let t0 = Instant::now();
+    while rig.shelf.opened.load(Ordering::SeqCst) == before {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the card was never looked at again");
+        if let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) {
+            rig.fold.apply(event);
+        }
+    }
+    rig.until("read again", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
+    assert!(matches!(rig.card(&key).read, Read::Read(_)));
+}
+
+/// A card whose look never opens it is looked at again a few times, then
+/// read as failed with the reason: the card says why, and the command
+/// line's wait ends (`settled`), never two minutes of looking. A look that
+/// reads it starts the count again (the last review's Z3).
+#[test]
+fn a_card_that_never_opens_is_looked_at_again_a_few_times_then_reads_as_failed() {
+    let scratch = Scratch::new("worker-never-opens");
+    let (mut worker, _shelf, key, _stop) = running_at(&scratch, Phase::Copying);
+    worker.running = None;
+    worker.slots[0].view.run = None;
+    let unopened = |worker: &mut Worker| {
+        worker.slots[0].view.busy = Some(Job::Look);
+        worker.done(&key, JobDone::Unopened);
+        // The next look at the readers takes the word, as it looks.
+        std::mem::take(&mut worker.slots[0].reopen)
+    };
+    for n in 1..=REOPENS {
+        assert!(unopened(&mut worker), "look {n}: looked at again");
+        let view = &worker.slots[0].view;
+        assert_eq!((&view.read, view.busy), (&Read::Reading, None), "look {n}");
+        assert!(!crate::device::card::lines::settled(view), "look {n}: the command line waits");
+    }
+    assert!(!unopened(&mut worker), "no more");
+    let view = &worker.slots[0].view;
+    assert_eq!((&view.read, view.busy), (&Read::Failed(UNOPENED.into()), None));
+    assert!(crate::device::card::lines::settled(view), "the command line's wait ends");
+
+    // Read once, the count starts again.
+    worker.slots[0].view.busy = Some(Job::Look);
+    worker.done(&key, JobDone::Read(Err("a read fault".into())));
+    assert!(unopened(&mut worker), "looked at again after a read");
+    assert_eq!(worker.slots[0].unopened, 1);
+}
+
+/// The review's smaller items: a read that failed lets what waited for it
+/// go (a sync queued behind it among them), and *Don't wait* spares a sync
+/// that started meanwhile.
+#[test]
+fn a_failed_read_lets_the_queue_go_and_dont_wait_spares_a_sync_under_way() {
+    let scratch = Scratch::new("worker-read-failed");
+    let (mut worker, _shelf, key, _stop) = running_at(&scratch, Phase::Copying);
+    // Don't wait, for a sync that started meanwhile: it runs on.
+    worker.cmd(Cmd::DontWait { key: key.clone() });
+    assert!(worker.slots[0].view.syncing());
+    // Its look failed while another card's sync waited its turn.
+    worker.running = None;
+    worker.slots[0].view.run = None;
+    worker.slots[0].view.busy = Some(Job::Look);
+    worker.slots[0].deferred.push(Cmd::Dismiss { key: key.clone() });
+    worker.queue.push(("elsewhere".into(), Allow::default()));
+    worker.done(&key, JobDone::Read(Err("a read fault".into())));
+    let slot = &worker.slots[0];
+    assert!(slot.view.busy.is_none() && slot.deferred.is_empty());
+    assert_eq!(slot.view.read, Read::Failed("a read fault".into()));
+    assert!(worker.queue.is_empty(), "the sync that waited went");
+}
+
+/// The review's smaller item: settings applied to a card no saved server
+/// answers say they were written but for its libraries, server and peers.
+#[test]
+fn settings_with_no_server_to_key_them_by_say_what_wasnt_saved() {
+    let scratch = Scratch::new("worker-unsaved");
+    let sim = card(&scratch);
+    let here = Here::default();
+    let facts = read(&sim, &Cards::default()).unwrap();
+    let mut want = Want::of(&facts, None);
+    want.name = "Renamed".into();
+    assert_eq!(store(&sim, &here, &Expect::default(), &want, None), Ok(true), "nothing keyed asked");
+    want.libraries = Some(vec!["Rock".into()]);
+    assert_eq!(store(&sim, &here, &Expect::default(), &want, None), Ok(false));
+}

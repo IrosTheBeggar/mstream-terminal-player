@@ -107,14 +107,25 @@ url = "http://127.0.0.1:3041"
 - `stats` — play reporting (play-reporting contract): one row queued and
   played past thirty seconds, then skipped; the `[stats]` log line says the
   play was posted, and Last played and Most played list the track.
-- `dj` — Auto DJ on the rig (auto-dj contract, slice A5): one row queued
-  with `a`, the nav's `Auto DJ` row under TOOLS, the room off with the probe's sonic
-  reason (the rig has no discovery data), Start — the note names the server,
-  a batch of four badged rows lands (songs per fetch 4), Preview lists three
-  picks under its row without queueing, a click on the songs-per-fetch bar's
-  first cell sets "1 song", the Server row's picker moves the DJ to Rig A (the
-  peer through B) and the next turn is picked from there, Stop leaves the
-  rows and their badges. Prints the run's `[dj]` log lines at the end — none
+- `dj` — Auto DJ on the rig (auto-dj contract, clauses 40–58; the room
+  rebuilt 2026-11-10): the nav's `Auto DJ` row under TOOLS, the room off — one
+  row a setting, `Discovery off` and `No mood data` standing where those two
+  values would (the rig has neither), and a greyed row taking no click;
+  Start on an empty queue asks for a First song, Recently played's list
+  hangs from its row with B's own history, and a song of it opens the
+  session — the DJ armed, a batch of four badged rows after it (5 tracks);
+  Preview's sheet lists three picks and queues none; Batch's sheet sets "1
+  song" by a click on its bar's first cell, the border following the draft
+  and the row waiting for Done; Length takes a typed `1:30` ("1:30+") and its
+  `clear`; Genres lists B's own genres, one ticked then cleared; Skip words
+  takes a typed word by a click on the `+` beside its card; First song's
+  list applies on a pick; the bar's chevron opens quick config over the bar
+  and Esc puts it away; Play from's sheet moves the DJ to Rig A (the peer
+  through B) — the rating row says "Not on peers" — and the next turn is
+  picked from there; Stop leaves the rows and their badges; and the bar's
+  `auto-dj` word, with B still browsed, starts the DJ on Play from's home
+  (Rig A) and stops it. Needs B to have played something (the `stats` or
+  `now` scenario, once). Prints the run's `[dj]` log lines at the end — none
   on a clean run: the DJ's log speaks only for a dropped key, a learned
   rejection, a degraded constraint, a deferred pick or a failed fetch.
 
@@ -133,16 +144,19 @@ url = "http://127.0.0.1:3041"
   Punk - Harder, Better, Faster, Stronger"); `"download": {"slowMs": 4000}`
   keeps `adding` on screen. Seed `gui-config/config.toml` with that server
   alone, and between runs delete `gui-config/ytdl.json` and every song but
-  Aerodynamic (the title row's `✓ added` lasts an hour; a song left behind is
-  a clash). The passes (`MSTREAM_YT_STEPS`, default all): `room` — Settings
-  with no doorway (TORRENTS over its switch alone), then the nav's `Add
-  YouTube` row under TOOLS, lit `▸ Add YouTube`, the title with no `◂`, a
-  bracketed paste, the cleaned tags, Enter, the title row's `adding` → `✓
-  added`, the note, the file on disk, Esc then `l` for the From YouTube
-  list; `refuse` — the same link again (warned of, then the 409 standing
-  alone), a live stream's warning, the bot check's failed lookup with a
-  title typed and the add failing in the server's words (`Try again ·
-  Dismiss`); `caps` — an Esc leaves nothing (a nav room has no way back),
+  Aerodynamic (a song left behind is a clash, and the list's own rows are
+  what the passes wait for). The passes (`MSTREAM_YT_STEPS`, default all):
+  `room` — Settings with no doorway (TORRENTS over its switch alone), then
+  the nav's `Add YouTube` row under TOOLS, lit `▸ Add YouTube`, the title
+  with no `◂`, the list and the limits in the room and no `Paste` (a
+  terminal reads no clipboard), a bracketed paste, the song's card and its
+  two rows, the three sheets by `e`, `d` and `f`, Enter, its `✓` row in
+  the list, the note, the file on disk, the form started over and `↓` on
+  the list; `refuse` — the same link again (warned of, then the 409
+  standing alone), a live stream's warning, the bot check's failed lookup
+  with a title typed in Edit tags and the add failing in the server's
+  words on its row (`Try again · Dismiss`); `caps` — an Esc leaves nothing
+  (a nav room has no way back),
   then `D` `T` `A` with nothing holding the keys stay in the room; `door`
   — no door at a library root, the door word on Discovery, `y`, a paste,
   `[ Add here ]`, the door's spot, the re-list with the new song under the
@@ -152,6 +166,28 @@ url = "http://127.0.0.1:3041"
   (`Change format and retry · Dismiss`) and a live stream has no warning
   ahead of time.
 
+- `torrent` — Add torrent (add-torrent contract) against whatever ONE server
+  the rig's `gui-config` names by its address, with a library `"Music"` —
+  the YouTube rig does. No torrent client is needed and nothing is ever
+  added: the pass stops short of the primary. The nav's `Add torrent` row,
+  lit; the two
+  boxes with `or` between them and no `Paste` (a terminal reads no
+  clipboard); the gate's standing, or the server's own reason under the
+  title; a bracketed paste of a magnet link with the hand stowed — the
+  link's box, its own name, `Metadata` and `Destination`, no checkbox, and
+  none of its letters taken for a key; `x`; a bracketed paste of a
+  `.torrent`'s path (written into the rig's folder), as a terminal delivers
+  a dropped file — the card with `3 files · 12 MB`, its ways, the checkbox;
+  `e` for the Metadata sheet, a word typed, the row and the destination
+  following; `l` for the Destination sheet; `x`, then `t` for the typed
+  picker. `Auto-detect metadata` and a live `Add torrent ▸` are checked to
+  stand exactly where the server takes torrents. And the list, which only
+  an add writes a row to: the pass writes two rows into this server's slot
+  of `gui-config/torrents.json` before the player starts and sees them
+  under the form; ↓ walks the hand to the first, `x` takes it off the list
+  and off the file, Enter on the other opens its library in Files. The
+  file is put back as it was.
+
 ```sh
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py direct
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py mixed
@@ -160,6 +196,7 @@ MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py library
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py actions
 MSTREAM_RIG_DIR=/path/to/yt-rig python3 -u smoke/gui/ptygui.py ytdl
 MSTREAM_RIG_DIR=/path/to/old-yt-rig MSTREAM_YT_OLDER=1 python3 -u smoke/gui/ptygui.py ytdl
+MSTREAM_RIG_DIR=/path/to/yt-rig python3 -u smoke/gui/ptygui.py torrent
 ```
 
 The worker-level leg of the same rig is the ignored test in `src/tui/worker.rs`:

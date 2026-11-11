@@ -1,0 +1,554 @@
+//! `cards.json`, beside `stats.json` in the player's config folder: the
+//! cards this computer has seen, by card id — each one's label, when it was
+//! last seen, and its revision then (its root's generation and commit id).
+//! It is a cache of what each card says of itself (the firmware repo's
+//! docs/METADATA.md 2.12.7: a card whose state file is gone has its
+//! settings taken from here), and it is the second sign of a copied card
+//! (the transfer plan's 2.10): a byte-level clone keeps the volume serial,
+//! so only a card id seen at one generation with another commit shows it
+//! ([`Cards::diverged`]). It mirrors each multi-card set's table too, the
+//! newest it has seen ([`Cards::mirror`]): a card of a set learns from it what
+//! the set's other cards did while it was out of the reader (the transfer
+//! plan's 2.12). The Card view (B4) keeps three things of its own beside
+//! them: which server each card was last synced from here, and when, for
+//! the board's card line (the MP3 Player contract's clause 20a); the peers
+//! the listener left out of a card's syncs at the proxy gate (clause 58:
+//! asked once per peer); and the removable volumes the listener hid from
+//! the tab's row (clause 63), by their volume serials. Disposable, as
+//! stats.json is in what it holds, but not in how it is written: a file
+//! that doesn't read is no cache at all, and no save writes it over (it
+//! holds every card's entry, the volumes hidden and the peers left out:
+//! [`Cards::update`] refuses and says why); one of a newer player is read
+//! as none and never written over. Every member this player doesn't know
+//! is kept.
+
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+use serde_json::{Map, Value, json};
+
+use super::span::{self, Set};
+use super::state::{Copied, from_hex, hex};
+
+/// The file's schema.
+pub(crate) const VERSION: u64 = 1;
+
+/// One change to the file at a time in this process ([`Cards::update`]).
+static WRITING: Mutex<()> = Mutex::new(());
+
+/// The members of a card's entry this player reads and writes.
+const KNOWN: [&str; 8] =
+    ["label", "lastSeen", "generation", "commitId", "set", "server", "synced", "leftOut"];
+
+/// A card as this computer last saw it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Seen {
+    pub(crate) label: String,
+    /// Unix seconds.
+    pub(crate) last_seen: u64,
+    /// Its root then.
+    pub(crate) generation: u32,
+    pub(crate) commit_id: u64,
+    /// The multi-card set it is a card of, by the set's id.
+    pub(crate) set: Option<u64>,
+    /// The server's nickname it was last synced from on this computer, and
+    /// when (Unix seconds; 0: never synced here).
+    pub(crate) server: String,
+    pub(crate) synced: u64,
+    /// The peers, by their ids on its server, the listener left out of its
+    /// syncs here: the proxy gate's no (clause 58), never asked again.
+    pub(crate) left_out: Vec<u32>,
+    /// A newer player's members, by name.
+    pub(crate) keep: BTreeMap<String, Value>,
+}
+
+/// The cache.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Cards {
+    pub(crate) cards: BTreeMap<u64, Seen>,
+    /// Each multi-card set's table, by its id: the newest seen.
+    pub(crate) sets: BTreeMap<u64, Set>,
+    /// The volumes the listener hid from the MP3 Player tab, by their volume
+    /// serials as [`Serial`](super::volume::Serial) spells them.
+    pub(crate) hidden: Vec<String>,
+    keep: BTreeMap<String, Value>,
+    /// A newer player's file: read as none, and never written over.
+    newer: bool,
+}
+
+impl Cards {
+    /// The cache a file holds: none when it doesn't read as one.
+    pub(crate) fn parse(text: &str) -> Cards {
+        let Ok(Value::Object(top)) = serde_json::from_str::<Value>(text) else {
+            return Cards::default();
+        };
+        match top.get("version").and_then(Value::as_u64) {
+            Some(VERSION) => {}
+            Some(v) if v > VERSION => return Cards { newer: true, ..Cards::default() },
+            _ => return Cards::default(),
+        }
+        let mut cards = BTreeMap::new();
+        for (id, entry) in top.get("cards").and_then(Value::as_object).into_iter().flatten() {
+            let (Some(id), Some(entry)) = (from_hex(id), entry.as_object()) else { continue };
+            let number = |key: &str| entry.get(key).and_then(Value::as_u64);
+            let text = |key: &str| entry.get(key).and_then(Value::as_str);
+            let set = text("set").and_then(from_hex);
+            let left_out = entry.get("leftOut").and_then(Value::as_array).into_iter().flatten();
+            let left_out = left_out.filter_map(Value::as_u64).filter_map(|n| u32::try_from(n).ok());
+            let known = |name: &str| KNOWN.contains(&name) && (name != "set" || set.is_some());
+            let keep = entry.iter().filter(|(name, _)| !known(name));
+            let seen = Seen {
+                label: text("label").unwrap_or_default().to_string(),
+                last_seen: number("lastSeen").unwrap_or(0),
+                generation: number("generation").and_then(|g| u32::try_from(g).ok()).unwrap_or(0),
+                commit_id: text("commitId").and_then(from_hex).unwrap_or(0),
+                set,
+                server: text("server").unwrap_or_default().to_string(),
+                synced: number("synced").unwrap_or(0),
+                left_out: left_out.collect(),
+                keep: keep.map(|(name, value)| (name.clone(), value.clone())).collect(),
+            };
+            cards.insert(id, seen);
+        }
+        // A set's table this player can't read stays as it was, unread.
+        let mut sets = BTreeMap::new();
+        let mut unread = Map::new();
+        for (id, value) in top.get("sets").and_then(Value::as_object).into_iter().flatten() {
+            match (from_hex(id), Set::read(value)) {
+                (Some(n), Some(set)) if set.id == n => {
+                    sets.insert(n, set);
+                }
+                _ => {
+                    unread.insert(id.clone(), value.clone());
+                }
+            }
+        }
+        let hidden = top.get("hidden").and_then(Value::as_array).into_iter().flatten();
+        let hidden: Vec<String> = hidden.filter_map(Value::as_str).map(str::to_string).collect();
+        let others =
+            |name: &&String| !matches!(name.as_str(), "version" | "cards" | "sets" | "hidden");
+        let keep = top.iter().filter(|(name, _)| others(name));
+        let mut keep: BTreeMap<String, Value> = keep.map(|(n, v)| (n.clone(), v.clone())).collect();
+        if !unread.is_empty() {
+            keep.insert("sets".into(), Value::Object(unread));
+        }
+        Cards { cards, sets, hidden, keep, newer: false }
+    }
+
+    /// The file's text.
+    pub(crate) fn text(&self) -> String {
+        let mut cards = Map::new();
+        for (id, seen) in &self.cards {
+            let mut entry: Map<String, Value> = seen.keep.clone().into_iter().collect();
+            entry.insert("label".into(), seen.label.as_str().into());
+            entry.insert("lastSeen".into(), seen.last_seen.into());
+            entry.insert("generation".into(), seen.generation.into());
+            entry.insert("commitId".into(), hex(seen.commit_id).into());
+            if let Some(set) = seen.set {
+                entry.insert("set".into(), hex(set).into());
+            }
+            if !seen.server.is_empty() {
+                entry.insert("server".into(), seen.server.as_str().into());
+            }
+            if seen.synced != 0 {
+                entry.insert("synced".into(), seen.synced.into());
+            }
+            if !seen.left_out.is_empty() {
+                entry.insert("leftOut".into(), json!(seen.left_out));
+            }
+            cards.insert(hex(*id), Value::Object(entry));
+        }
+        let mut top: Map<String, Value> = self.keep.clone().into_iter().collect();
+        top.insert("version".into(), json!(VERSION));
+        top.insert("cards".into(), Value::Object(cards));
+        if !self.hidden.is_empty() {
+            top.insert("hidden".into(), json!(self.hidden));
+        }
+        if !self.sets.is_empty() {
+            let mut sets = match top.remove("sets") {
+                Some(Value::Object(unread)) => unread,
+                _ => Map::new(),
+            };
+            for (id, set) in &self.sets {
+                sets.insert(hex(*id), set.value(None));
+            }
+            top.insert("sets".into(), Value::Object(sets));
+        }
+        serde_json::to_string_pretty(&Value::Object(top)).unwrap_or_default() + "\n"
+    }
+
+    /// This computer's cache; none when there is no file or it doesn't
+    /// read.
+    pub(crate) fn load() -> Cards {
+        match crate::config::load_cards_file() {
+            Ok(Some(text)) => Cards::parse(&text),
+            _ => Cards::default(),
+        }
+    }
+
+    /// `change` made to what the file holds now, and saved: reloaded under
+    /// one lock for this process, so two jobs (a sync of two hours and the
+    /// listener's hiding a volume meanwhile) never write back a stale copy.
+    /// Another program (the command line) writes it whole too: what it saved
+    /// is reloaded here, before the change, not overwritten.
+    ///
+    /// A file it can't read, or one that doesn't read as this player's (not
+    /// JSON, no version it knows), is never saved over: every other card's
+    /// entry, the hidden volumes and the peers left out would go with it.
+    /// It refuses, and says why.
+    pub(crate) fn update(change: &mut dyn FnMut(&mut Cards)) -> Result<(), String> {
+        let (load, save) = (crate::config::load_cards_file, crate::config::save_cards_file);
+        Cards::update_in(&mut || load(), &mut |text| save(text), change)
+    }
+
+    /// [`Cards::update`] on the file `load` reads and `save` writes.
+    fn update_in(
+        load: &mut dyn FnMut() -> Result<Option<String>, String>,
+        save: &mut dyn FnMut(&str) -> Result<(), String>,
+        change: &mut dyn FnMut(&mut Cards),
+    ) -> Result<(), String> {
+        let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        let text = load().map_err(|e| format!("cards.json isn't written over: {e}"))?;
+        let mut now = match text {
+            Some(text) => Cards::checked(&text)?,
+            None => Cards::default(),
+        };
+        change(&mut now);
+        if now.newer {
+            return Ok(());
+        }
+        save(&now.text())
+    }
+
+    /// The file's `text` read as [`Cards::parse`] reads it, but Err when it
+    /// holds something that isn't this player's cache (an empty file is
+    /// none; a newer player's is read as none, never written over).
+    fn checked(text: &str) -> Result<Cards, String> {
+        if text.trim().is_empty() {
+            return Ok(Cards::default());
+        }
+        let ours = match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(top)) => {
+                top.get("version").and_then(Value::as_u64).is_some_and(|v| v >= VERSION)
+            }
+            _ => false,
+        };
+        match ours {
+            true => Ok(Cards::parse(text)),
+            false => Err("cards.json doesn't read as this player's, and isn't written over".into()),
+        }
+    }
+
+    /// What changed from `before` to `self`, made to `onto` (the file as it
+    /// is now): each card's members that changed, the sets' tables merged as
+    /// [`Cards::mirror`] merges them, the volumes hidden or shown, and the
+    /// file's other members. What `onto` has that neither touched stays.
+    pub(crate) fn rebase(&self, before: &Cards, onto: &mut Cards) {
+        for id in before.cards.keys().filter(|id| !self.cards.contains_key(id)) {
+            onto.cards.remove(id);
+        }
+        for (id, after) in &self.cards {
+            let was = before.cards.get(id).cloned().unwrap_or_default();
+            if *after == was && before.cards.contains_key(id) {
+                continue;
+            }
+            let seen = onto.cards.entry(*id).or_default();
+            if after.label != was.label {
+                seen.label = after.label.clone();
+            }
+            if after.last_seen != was.last_seen {
+                seen.last_seen = after.last_seen.max(seen.last_seen);
+            }
+            if (after.generation, after.commit_id) != (was.generation, was.commit_id) {
+                (seen.generation, seen.commit_id) = (after.generation, after.commit_id);
+            }
+            if after.set != was.set {
+                seen.set = after.set;
+            }
+            if (after.server.as_str(), after.synced) != (was.server.as_str(), was.synced) {
+                seen.server = after.server.clone();
+                seen.synced = after.synced;
+            }
+            for peer in after.left_out.iter().filter(|p| !was.left_out.contains(p)) {
+                if !seen.left_out.contains(peer) {
+                    seen.left_out.push(*peer);
+                }
+            }
+            seen.left_out.retain(|p| !was.left_out.contains(p) || after.left_out.contains(p));
+            for (name, value) in &after.keep {
+                if was.keep.get(name) != Some(value) {
+                    seen.keep.insert(name.clone(), value.clone());
+                }
+            }
+        }
+        for (id, set) in &self.sets {
+            if before.sets.get(id) != Some(set) {
+                let merged = match onto.sets.get(id) {
+                    Some(kept) => span::merge(set, kept),
+                    None => set.clone(),
+                };
+                onto.sets.insert(*id, merged);
+            }
+        }
+        for serial in self.hidden.iter().filter(|h| !before.hidden.contains(h)) {
+            onto.hide(serial);
+        }
+        onto.hidden.retain(|h| !before.hidden.contains(h) || self.hidden.contains(h));
+        for (name, value) in &self.keep {
+            if before.keep.get(name) != Some(value) {
+                onto.keep.insert(name.clone(), value.clone());
+            }
+        }
+    }
+
+    /// The second sign of a copied card: this computer saw the card id at
+    /// this generation with another commit.
+    pub(crate) fn diverged(&self, card_id: u64, generation: u32, commit_id: u64) -> Option<Copied> {
+        let seen = self.cards.get(&card_id)?;
+        let other = seen.generation == generation && seen.commit_id != commit_id;
+        other.then_some(Copied::Diverged { generation, seen: seen.commit_id, now: commit_id })
+    }
+
+    /// The card as it is now: its label, the time, its root's revision —
+    /// unless that revision [`diverged`](Cards::diverged) from the one kept:
+    /// the card seen first keeps its revision here, so the other one is the
+    /// copy at every look (and the first is not), until one of them takes an
+    /// identity of its own.
+    pub(crate) fn saw(&mut self, id: u64, label: &str, now: u64, generation: u32, commit: u64) {
+        let diverged = self.diverged(id, generation, commit).is_some();
+        let seen = self.cards.entry(id).or_default();
+        seen.label = label.to_string();
+        seen.last_seen = now;
+        if !diverged {
+            seen.generation = generation;
+            seen.commit_id = commit;
+        }
+    }
+
+    /// A sync of card `id` from the server this computer calls `server`
+    /// ended at `now`: the board's card line says so (clause 20a). A
+    /// nickname that names a place on a network is never kept.
+    pub(crate) fn synced(&mut self, id: u64, server: &str, now: u64) {
+        let seen = self.cards.entry(id).or_default();
+        let address = super::state::looks_like_address(server);
+        seen.server = if address { String::new() } else { server.into() };
+        seen.synced = now;
+    }
+
+    /// The peers the listener left out of card `id`'s syncs here.
+    pub(crate) fn left_out(&self, id: u64) -> Vec<u32> {
+        self.cards.get(&id).map(|seen| seen.left_out.clone()).unwrap_or_default()
+    }
+
+    /// The proxy gate's no for `peer` on card `id` (clause 58): its syncs
+    /// here leave that peer out from now on, and never ask again.
+    pub(crate) fn leave_out(&mut self, id: u64, peer: u32) {
+        let seen = self.cards.entry(id).or_default();
+        if !seen.left_out.contains(&peer) {
+            seen.left_out.push(peer);
+        }
+    }
+
+    /// The volume of `serial` is hidden from the tab's row (clause 63).
+    pub(crate) fn is_hidden(&self, serial: &str) -> bool {
+        self.hidden.iter().any(|h| h == serial)
+    }
+
+    /// Hides the volume of `serial` from the tab's row, until
+    /// [`Cards::show_hidden`].
+    pub(crate) fn hide(&mut self, serial: &str) {
+        if !serial.is_empty() && !self.is_hidden(serial) {
+            self.hidden.push(serial.to_string());
+        }
+    }
+
+    /// *Not showing up?* shows every hidden volume again.
+    pub(crate) fn show_hidden(&mut self) {
+        self.hidden.clear();
+    }
+
+    /// A set's table as a card of it left it: merged with the one kept
+    /// ([`span::merge`]: the newer ranges, each card's newest facts), and
+    /// each card of it this computer has seen marked as the set's.
+    pub(crate) fn mirror(&mut self, set: &Set) {
+        let merged = match self.sets.get(&set.id) {
+            Some(kept) => span::merge(set, kept),
+            None => set.clone(),
+        };
+        for id in merged.cards.iter().filter_map(|s| s.card_id) {
+            if let Some(seen) = self.cards.get_mut(&id) {
+                seen.set = Some(merged.id);
+            }
+        }
+        self.sets.insert(merged.id, merged);
+    }
+
+    /// The set of id `id` as a card of it knows it (`own`) and as this
+    /// computer last saw it, as one.
+    pub(crate) fn set_of(&self, own: &Set) -> Set {
+        match self.sets.get(&own.id) {
+            Some(kept) => span::merge(own, kept),
+            None => own.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cache_reads_back_what_it_wrote_and_keeps_what_it_doesnt_know() {
+        let mut cards = Cards::default();
+        cards.saw(0x5EED_C0DE_0A1B_2C3D, "Car", 1_791_900_000, 1, 0xC0FF_EE00);
+        let text = cards.text();
+        assert!(text.contains("\"0x5EEDC0DE0A1B2C3D\""));
+        assert!(text.contains("\"commitId\": \"0x00000000C0FFEE00\""), "{text}");
+        assert_eq!(Cards::parse(&text), cards);
+
+        // A newer player's members, in an entry and at the top, stay.
+        let newer = r#"{"version": 1, "sets": {"a": 1}, "cards": {
+            "0x0000000000000009": {"label": "Gym", "lastSeen": 5, "generation": 3, "commitId": "0x0A",
+                                   "set": {"id": "0x01", "index": 2}},
+            "not hex": {"label": "dropped"}}}"#;
+        let mut read = Cards::parse(newer);
+        assert_eq!(read.cards.len(), 1);
+        let gym = &read.cards[&9];
+        let fields = (gym.label.as_str(), gym.last_seen, gym.generation, gym.commit_id);
+        assert_eq!(fields, ("Gym", 5, 3, 10));
+        read.saw(9, "Gym bag", 6, 4, 11);
+        let again = Cards::parse(&read.text());
+        assert_eq!(again.cards[&9].keep["set"], json!({"id": "0x01", "index": 2}));
+        assert_eq!(again.keep["sets"], json!({"a": 1}));
+        assert_eq!(again.cards[&9].label, "Gym bag");
+
+        // A file that doesn't read is no cache; a newer one is read as none
+        // and never written over.
+        for broken in ["", "[]", "{\"cards\": {}}", "{\"version\": 0}", "{\"version\": \"1\"}"] {
+            assert_eq!(Cards::parse(broken), Cards::default(), "{broken}");
+        }
+        let future = Cards::parse(r#"{"version": 2, "cards": {"0x01": {"label": "x"}}}"#);
+        assert!(future.cards.is_empty() && future.newer);
+    }
+
+    /// The second review's C1-4: an update never saves over a file it
+    /// couldn't read or that doesn't read as this player's; it refuses, and
+    /// the file stays as it was.
+    #[test]
+    fn an_update_never_saves_over_a_file_it_couldnt_read() {
+        let saved = std::cell::RefCell::new(Vec::<String>::new());
+        let mut save = |text: &str| {
+            saved.borrow_mut().push(text.to_string());
+            Ok(())
+        };
+        let mut hide = |cards: &mut Cards| cards.hide("1A2B-3C4D");
+        let unread = Cards::update_in(&mut || Err("access denied".into()), &mut save, &mut hide);
+        assert!(unread.is_err_and(|e| e.contains("access denied")));
+        let broken = ["not json", "[]", "{\"cards\": {}}", "{\"version\": 0}", "{\"version\": \"1\"}"];
+        for broken in broken {
+            let text = broken.to_string();
+            let refused = Cards::update_in(&mut || Ok(Some(text.clone())), &mut save, &mut hide);
+            assert!(refused.is_err_and(|e| e.contains("isn't written over")), "{broken}");
+        }
+        assert!(saved.borrow().is_empty(), "nothing saved over any of them");
+        // None, or an empty one: a new cache. A newer player's: left alone.
+        for none in [None, Some(String::new())] {
+            Cards::update_in(&mut || Ok(none.clone()), &mut save, &mut hide).expect("saved");
+        }
+        let newer = r#"{"version": 2}"#.to_string();
+        Cards::update_in(&mut || Ok(Some(newer.clone())), &mut save, &mut hide).expect("left alone");
+        let saved = saved.borrow();
+        assert_eq!(saved.len(), 2);
+        assert!(saved.iter().all(|t| Cards::parse(t).is_hidden("1A2B-3C4D")), "{saved:?}");
+    }
+
+    #[test]
+    fn a_cards_last_sync_here_and_the_hidden_volumes_read_back() {
+        let mut cards = Cards::default();
+        cards.saw(9, "Gym", 5, 2, 20);
+        cards.synced(9, "Home", 6);
+        cards.synced(8, "http://192.0.2.7:3000", 7);
+        cards.hide("1A2B-3C4D");
+        cards.hide("1A2B-3C4D");
+        cards.hide("");
+        cards.leave_out(9, 4);
+        cards.leave_out(9, 4);
+        let text = cards.text();
+        let top: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(top["cards"]["0x0000000000000009"]["leftOut"], json!([4]), "{text}");
+        assert!(!text.contains("192.0.2.7"), "an address is never kept: {text}");
+        let read = Cards::parse(&text);
+        assert_eq!(read, cards);
+        assert_eq!((read.cards[&9].server.as_str(), read.cards[&9].synced), ("Home", 6));
+        assert_eq!((read.cards[&8].server.as_str(), read.cards[&8].synced), ("", 7));
+        assert_eq!(read.hidden, ["1A2B-3C4D"]);
+        let left = (read.left_out(9), read.left_out(8));
+        assert_eq!(left, (vec![4], Vec::new()), "asked once per peer");
+        assert!(read.is_hidden("1A2B-3C4D") && !read.is_hidden("FFFF-0000"));
+        let mut shown = read.clone();
+        shown.show_hidden();
+        assert!(!shown.text().contains("hidden"));
+    }
+
+    /// The review's TV4: a sync of hours began with one copy of the file;
+    /// meanwhile a volume was hidden, a peer left out and another card seen.
+    /// Its end makes its own changes alone to the file as it is then.
+    #[test]
+    fn a_long_jobs_changes_are_made_to_the_file_as_it_is_at_its_end() {
+        let mut before = Cards::default();
+        before.saw(9, "Car", 1, 1, 100);
+        before.hide("0BAD-F00D");
+        // The run's copy: the card synced, its label changed.
+        let mut after = before.clone();
+        after.saw(9, "Car music", 5, 2, 200);
+        after.synced(9, "Home", 5);
+        // The file meanwhile: another volume hidden, the first shown again,
+        // a peer left out of card 9, card 8 seen.
+        let mut now = before.clone();
+        now.show_hidden();
+        now.hide("1A2B-3C4D");
+        now.leave_out(9, 4);
+        now.saw(8, "Gym", 3, 1, 50);
+        after.rebase(&before, &mut now);
+        let car = &now.cards[&9];
+        let fields = (car.label.as_str(), car.generation, car.commit_id, car.server.as_str(), car.synced);
+        assert_eq!(fields, ("Car music", 2, 200, "Home", 5));
+        assert_eq!(car.left_out, [4], "the peer left out meanwhile stays");
+        assert_eq!(now.cards[&8].label, "Gym", "the card seen meanwhile stays");
+        assert_eq!(now.hidden, ["1A2B-3C4D"], "what was shown meanwhile stays shown");
+
+        // A change of the job's own: a volume shown, a peer left out.
+        let mut job = now.clone();
+        job.show_hidden();
+        job.leave_out(8, 2);
+        let mut file = now.clone();
+        file.hide("0000-0001");
+        job.rebase(&now, &mut file);
+        assert_eq!(file.hidden, ["0000-0001"], "shown by the job; hidden since, kept");
+        assert_eq!(file.cards[&8].left_out, [2]);
+    }
+
+    #[test]
+    fn one_card_id_at_one_generation_with_two_commits_is_two_cards() {
+        let mut cards = Cards::default();
+        assert_eq!(cards.diverged(9, 1, 100), None, "never seen");
+        cards.saw(9, "Car", 1, 1, 100);
+        assert_eq!(cards.diverged(9, 1, 100), None, "the commit seen");
+        assert_eq!(cards.diverged(9, 2, 200), None, "a later commit: a sync since");
+        let sign = Copied::Diverged { generation: 1, seen: 100, now: 101 };
+        assert_eq!(cards.diverged(9, 1, 101), Some(sign.clone()));
+        assert_eq!(cards.diverged(8, 1, 101), None, "another card");
+
+        // The copy seen keeps the revision seen first: the copy is the one
+        // said to be a copy at every look, and the first card never is.
+        cards.saw(9, "Car copy", 2, 1, 101);
+        let seen = &cards.cards[&9];
+        let fields = (seen.label.as_str(), seen.last_seen, seen.generation, seen.commit_id);
+        assert_eq!(fields, ("Car copy", 2, 1, 100));
+        assert_eq!(cards.diverged(9, 1, 100), None);
+        assert_eq!(cards.diverged(9, 1, 101), Some(sign));
+        // A sync since, of either: its next generation is the one kept.
+        cards.saw(9, "Car", 3, 2, 200);
+        assert_eq!((cards.cards[&9].generation, cards.cards[&9].commit_id), (2, 200));
+    }
+}

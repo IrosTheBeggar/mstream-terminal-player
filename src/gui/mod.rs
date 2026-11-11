@@ -45,6 +45,7 @@ mod torrent_meta;
 mod vizwin;
 mod ytdl;
 mod ytdl_here;
+mod ytdl_sheets;
 mod ytdl_where;
 // The GUI's own window: the desktop flavour's (`--features desktop`, or
 // `window` alone); the terminal releases are built without it.
@@ -131,6 +132,9 @@ pub(crate) enum Act {
     /// The top bar's Visualizer item: open the window, or bring it to the
     /// front (docs/ux-contracts/visualizer-window.md).
     VizWindow,
+    /// The quit's gate during a sync (mp3-player-screen contract, clause
+    /// 57): stop at the next save and quit, or keep syncing.
+    QuitSync(bool),
     /// A settings row, activated (click, Enter, Space).
     Row(usize),
     BlendDown,
@@ -169,11 +173,17 @@ pub(crate) enum Act {
     /// A queue row: click plays it, its hover [x] removes it.
     QueueRow(usize),
     QueueRemove(usize),
-    /// Auto DJ's empty-queue chooser (contract clause 2) and the empty
-    /// queue's openers (clause 16).
+    /// Auto DJ's opening question (contract clause 2) — its two answers,
+    /// the box, Recently played's list and a song of it — and the empty
+    /// queue's openers (clause 16), its own Recently played list among
+    /// them.
     DjChoose(usize),
     DjRemember,
     DjCancel,
+    DjRecentToggle,
+    DjRecentPick(usize),
+    DjRecentOpen,
+    DjRecentClose,
     /// The [X] on an armed pick's banner: the pick let go (Esc's twin).
     CaptureCancel,
     DjSurprise,
@@ -212,28 +222,19 @@ pub(crate) enum Act {
     /// clause 33): the opener and the strip's words, the modal's stops and
     /// its `[ Done ]`, the strip's `[X]`.
     Mood(moods::MoodAct),
-    /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
-    /// radios, chips, the keyword field, the genre and server pickers —
-    /// starting with its one primary: Start through the toggle (the
-    /// opening question included), Stop wherever the DJ is armed.
+    /// The Auto DJ room (auto-dj contract, clauses 40–58): its one primary
+    /// — Start through the toggle (the opening question included), Stop
+    /// wherever the DJ is armed — a row pressed by the pointer or by the
+    /// keyboard (its sheet, its list or its switch), Preview, First song's
+    /// list, a sheet's controls, and quick config over the bar.
     DjStartStop,
-    DjFocus(dj::Item),
-    DjStep(crate::tui::app::DjRow, i32),
-    DjSet(crate::tui::app::DjRow, u32),
-    DjAnchor(crate::dj::SonicAnchor),
-    DjEmpty(crate::dj::EmptyQueueStart),
-    DjGenreMode(crate::dj::GenreMode),
-    DjGenre(String),
-    DjPickGenres,
-    DjGenresClose,
-    DjKeywordFocus,
-    DjKeywordAdd,
-    DjKeywordRemove(String),
-    DjSource(String),
+    DjRow(dj::Row),
+    DjRowKey(dj::Row),
     DjPreview,
-    DjServerPick,
-    DjServer(usize),
-    DjServerClose,
+    DjFirst(crate::dj::EmptyQueueStart),
+    DjFirstClose,
+    DjSheet(dj::SheetAct),
+    DjQuick(dj::QuickAct),
     // ── Sonic path (see gui::sonic) ─────────────────────────────────────
     /// A setup card's body or a results chip: open the pick-methods menu.
     SonMenu(crate::tui::app::SonicSide),
@@ -297,40 +298,14 @@ pub(crate) enum Act {
     FormCancel,
     QrClose,
     // ── Add torrent (see gui::torrent) ──────────────────────────────────
-    /// A form row, clicked: the keyboard cursor lands there.
-    TorRow(torrent::Row),
-    /// The library picker's arrows (and the name, which cycles).
-    TorLib(i32),
-    /// The native file dialog (falls back to the typed picker), the typed
-    /// picker on purpose, drop the loaded file, the chip's two verbs.
-    TorPick,
-    TorType,
-    TorUnload,
-    TorHandOff,
-    TorDetect,
-    TorToggleRename,
-    TorToggleForce,
-    TorSubmit,
-    /// The file picker's controls.
-    TorPickerClose,
-    TorPickerSuggest(usize),
-    TorPickerScrollBy(i32),
-    TorPickerScrollTo(usize),
-    /// The partial-match picker: a location, download fresh, or back.
-    TorMatch(usize),
-    TorMatchFresh,
-    TorMatchClose,
-    /// The arrival chooser: add here, hand it on, the don't-ask box.
-    TorChooseAdd,
-    TorChooseHandOff,
-    TorChooseAsk,
-    TorChooseClose,
+    /// The room's controls, its list's and its sheets'.
+    Tor(torrent::TorAct),
     // ── Discover (see gui::discover) ────────────────────────────────────
     /// The Discover room's own pointer ways: its tabs, rows and their
     /// verbs, the two dropdowns, a lead's menu, the seeds modal, the card.
     Disc(discover::DiscAct),
     // ── Add from YouTube (see gui::ytdl) ────────────────────────────────
-    /// The room's controls, the From YouTube list's and the format list's.
+    /// The room's controls, its list's, its sheets' and its windows'.
     Yt(ytdl::YtAct),
     /// A modal's whole-screen backdrop: swallow the click.
     Guard,
@@ -338,7 +313,7 @@ pub(crate) enum Act {
 
 /// The lists the shell scrolls, one per viewport — the App's browse panes
 /// as each room shows them, and the shell's own (the queue panel, the
-/// sonic results, the DJ room's body and its genre picker).
+/// sonic results, the DJ's Genres sheet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum List {
     Files,
@@ -349,8 +324,9 @@ pub(crate) enum List {
     PlaylistTracks,
     Queue,
     Sonic,
-    DjRoom,
-    DjGenres,
+    /// The open DJ sheet's list: Genres' genres, Play from's servers and
+    /// folders.
+    DjSheet,
     /// The Discover room's table: its rows live on the App (`App.taste`).
     Discover,
 }
@@ -363,7 +339,7 @@ impl List {
             List::Files => Some(Tab::Files),
             List::Search => Some(Tab::Search),
             List::Library | List::AlbumTracks | List::Playlists | List::PlaylistTracks => Some(Tab::Library),
-            List::Queue | List::Sonic | List::DjRoom | List::DjGenres | List::Discover => None,
+            List::Queue | List::Sonic | List::DjSheet | List::Discover => None,
         }
     }
 }
@@ -617,12 +593,14 @@ pub(crate) struct Gui {
     sonic: sonic::SonicUi,
     /// The playlists room: its dialogs and the two levels' wheels.
     playlists: playlists::PlaylistsUi,
-    /// The Add-torrent room: its form, picker, chooser and threads.
+    /// The Add-torrent room: its form, its sheets, what it sent and its
+    /// threads.
     torrent: torrent::TorrentUi,
     /// Add from YouTube: the server's facts, the job tracker, the room's
-    /// form and the From YouTube list.
+    /// form and its list, the sheets and windows over them.
     ytdl: ytdl::YtUi,
-    /// The Auto DJ room: its cursor, scroll, inputs and pickers.
+    /// The Auto DJ room: its cursor, the sheet over it, its lists and the
+    /// bar's quick config.
     dj: dj::DjUi,
     /// The Library rooms: the list's scroll and the artist wall's state.
     library: library::LibraryUi,
@@ -662,6 +640,9 @@ impl Gui {
         // No connect screen here: the servers surfaces are this shell's own,
         // and the transport keeps working while a session is down.
         app.connect_screen = false;
+        // Play from is this shell's (the room's sheet, quick config): Start
+        // goes to its home.
+        app.dj_shows_play_from = true;
         let mut ui = Surface::new();
         ui.key_hints = config.gui.key_hints;
         // The Discover room's memories of its own (discovery-page clauses
@@ -726,8 +707,10 @@ impl Gui {
         self.app.note_pending(&effects);
         self.pending.extend(effects);
         // Every App call's batch comes through here: a mood ask the App
-        // just put back takes the room's choice back with it.
+        // just put back takes the room's choice back with it, and an armed
+        // DJ whose queue ran out asks what was played last.
         moods::follow_ask(self);
+        dj::follow(self);
     }
 
     fn forward(&mut self, action: Action) {
@@ -996,6 +979,7 @@ impl Gui {
                 }
             }
             Act::VizWindow => vizwin::toggle(self),
+            Act::QuitSync(yes) => device::quit_answer(self, yes),
             Act::Nav(i) => {
                 // The room already up, chosen again: the Library rooms ask
                 // the server afresh (below).
@@ -1402,11 +1386,19 @@ fn demo_now() -> Now {
 /// click — since the tab cannot be left (mp3-player-screen contract,
 /// clause 9).
 fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
+    // While a sync runs the MP3 Player tab wears its percentage after its
+    // name, in the accent, dim while paused (mp3-player-screen contract,
+    // clause 16; the pick of 2026-10-19 over a chip at the bar's right).
+    let mark = device::sync_mark(gui);
+    let mp3 = match &mark {
+        Some((_, pct, _)) => format!("{} {pct}%", t!("gui.top.mp3")),
+        None => t!("gui.top.mp3").to_string(),
+    };
     let tabs = [
-        (Screen::Library, t!("gui.top.library")),
-        (Screen::Stats, t!("sta.title")),
-        (Screen::Admin, t!("gui.top.admin")),
-        (Screen::Device, t!("gui.top.mp3")),
+        (Screen::Library, t!("gui.top.library").to_string()),
+        (Screen::Stats, t!("sta.title").to_string()),
+        (Screen::Admin, t!("gui.top.admin").to_string()),
+        (Screen::Device, mp3),
     ];
     let viz = t!("gui.top.viz");
     let rects = top_rects([&tabs[0].1, &tabs[1].1, &tabs[2].1, &tabs[3].1, &viz]);
@@ -1420,6 +1412,12 @@ fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
             dim()
         };
         put(frame, rect.x, 0, &format!(" {label} "), style);
+        if let Some((_, pct, paused)) = mark.as_ref().filter(|_| screen == Screen::Device && gui.screen != screen) {
+            let words = format!("{pct}%");
+            let x = rect.right().saturating_sub(crate::kit::width(&words) as u16 + 1);
+            let tone = if *paused { dim() } else { Style::default().fg(th().accent) };
+            put(frame, x, 0, &words, tone);
+        }
         if live {
             gui.ui.click(rect, Act::Screen(screen));
         }
@@ -1464,8 +1462,19 @@ const TOP_KEYS: [&str; 5] =
 /// in the language on screen: the header's server label starts a blank
 /// cell past it, cut short where it would not (servers::draw_header;
 /// mp3-player-screen contract, clause 16).
+#[cfg(test)]
 pub(super) fn top_strip_end() -> u16 {
-    let labels = TOP_KEYS.map(|key| t!(key).to_string());
+    top_strip_end_with("")
+}
+
+/// [`top_strip_end`] with the MP3 Player tab wearing `mark` (a sync's
+/// percentage, clause 16): the server label's cut measures the strip with
+/// it.
+pub(super) fn top_strip_end_with(mark: &str) -> u16 {
+    let mut labels = TOP_KEYS.map(|key| t!(key).to_string());
+    if !mark.is_empty() {
+        labels[3] = format!("{} {mark}", labels[3]);
+    }
     top_rects([&labels[0], &labels[1], &labels[2], &labels[3], &labels[4]])[4].right()
 }
 
@@ -1685,7 +1694,9 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     }
     // Too small for the screens: the mini player — the cover, the
     // transport, and a line asking for room (mini-player contract).
-    if area.width < MIN_W || area.height < MIN_H {
+    let mini = area.width < MIN_W || area.height < MIN_H;
+    device::drawn_as_mini(gui, mini);
+    if mini {
         mini::draw(frame, gui, area);
         return;
     }
@@ -1793,8 +1804,11 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // armed pick's tips, since its keys are the page's there (mp3-player-
     // screen contract, clauses 12 and 15) — only a GUI modal's own tips
     // come first, and not even those during a write, which holds every key
-    // (clause 9).
-    let tips = if gui.screen == Screen::Device && (device::writing(gui) || !gui.modal_open()) {
+    // (clause 9). The quit's gate during a sync is the GUI's own modal, on
+    // any screen (clause 57).
+    let tips = if device::quit_gate_open(gui) {
+        std::borrow::Cow::from(device::quit_tips())
+    } else if gui.screen == Screen::Device && (device::writing(gui) || !gui.modal_open()) {
         std::borrow::Cow::from(device::tips(gui))
     } else if let Some(tip) = actions::tips(gui) {
         std::borrow::Cow::from(tip)
@@ -1894,6 +1908,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
             shuffle: gui.app.queue.shuffle,
             repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
             autodj: gui.app.dj_armed(),
+            quick_open: gui.dj.quick.is_some(),
             queue_open: gui.queue_open,
             has_art,
             footer: gui.footer(),
@@ -1922,6 +1937,13 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     servers::draw_modals(frame, gui, area);
     dj::draw_modals(frame, gui, area);
     actions::draw_modals(frame, gui, area);
+    // The quit's gate during a sync, over any screen (mp3-player-screen
+    // contract, clause 57); and while the quit waits for the save, the
+    // footer says so, counting.
+    device::draw_quit_gate(frame, gui, area);
+    if let Some(words) = device::quit_words(gui) {
+        put(frame, 1, area.height - 1, &format!("{words:<width$}", width = usize::from(area.width - 2)), accent());
+    }
 
     // The tooltip draws over everything, once the dwell matures — the
     // wizard's order.
@@ -2732,6 +2754,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return true;
     }
+    // The quit's gate during a sync holds every key but Ctrl+C (clause 57).
+    if device::quit_gate_open(gui) {
+        device::quit_gate_key(gui, key);
+        return false;
+    }
     // A write on the MP3 Player tab holds every key but Ctrl+C, ahead of
     // any modal a worker's answer opened over it (mp3-player-screen
     // contract, clauses 9–10).
@@ -2756,9 +2783,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if let Some(quit) = torrent::handle_key(gui, key) {
         return quit;
     }
-    // Add from YouTube's: the From YouTube list and the format list over
-    // the room, then the room itself — its link field and tags take the
-    // typed keys while they hold them, and its key words the rest.
+    // Add from YouTube's: its sheets and windows over the room or Files,
+    // then the room itself — its link field takes the typed keys while it
+    // holds them, its controls' letters and its list's keys the rest.
     if let Some(quit) = ytdl::handle_key(gui, key) {
         return quit;
     }
@@ -3069,8 +3096,9 @@ struct Ctx {
     channels: Channels,
     saver: tui::QueueSaver,
     hand: bool,
-    /// Bracketed paste is on: while Add from YouTube's room or Files window
-    /// is up, a paste comes whole, for its link field ([`Host::paste`]).
+    /// Bracketed paste is on: while Add from YouTube's room or Files
+    /// window is up, or Add torrent's room, a paste comes whole, for its
+    /// link field ([`Host::paste`]).
     paste: bool,
     /// Two clocks behind the brisk wait (`kit::pace`): the workers'
     /// requests the App sends, and the side threads' calls — a sign-in, a
@@ -3284,20 +3312,22 @@ where
     let admin_over = admin::frame(gui);
     // The MP3 Player screen's page: its worker's reports, its port watch,
     // and whether it has ended (mp3-player-screen contract, clause 6).
-    let device_over = device::frame(gui);
+    let device = device::frame(gui);
+    ctx.dirty |= device.news;
     // The visualizer window's host: the child's exit, the next texture.
     ctx.dirty |= vizwin::tick(gui);
     // Settings changed a moment ago, now resting: written.
     gui.save_rested();
-    let over = over_control(gui) || page.over || admin_over || device_over;
+    let over = over_control(gui) || page.over || admin_over || device.over;
     if over != ctx.hand {
         ctx.hand = over;
         host.pointer(ctx.hand);
     }
     // Bracketed paste follows what is up, the hand's way: on while Add
-    // from YouTube's link field wants a paste, off once it doesn't — so a
-    // room left by any road turns it off with no bookkeeping.
-    let paste = ytdl::wants_paste(gui);
+    // from YouTube's link field or Add torrent's room wants a paste, off
+    // once neither does — so a room left by any road turns it off with no
+    // bookkeeping.
+    let paste = ytdl::wants_paste(gui) || torrent::wants_paste(gui);
     if paste != ctx.paste {
         ctx.paste = paste;
         host.paste(paste);
@@ -3332,6 +3362,18 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             gui.ui.dismiss_tooltip();
             gui.ui.caret_touch();
             if handle_key(gui, key) {
+                // A quit by a key during a sync asks first; Ctrl+C stops at
+                // the next save without asking (mp3-player-screen contract,
+                // clause 57), as the way out's wait says on stderr.
+                let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
+                if !ctrl_c && device::ask_before_quit(gui) {
+                    return Flow::Continue;
+                }
+                ctx.saver.flush(&gui.app);
+                return Flow::Quit;
+            }
+            // The gate's yes: the terminal waits for the save in its loop.
+            if device::quit_ready(gui) {
                 ctx.saver.flush(&gui.app);
                 return Flow::Quit;
             }
@@ -3450,9 +3492,7 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                 // A right click on a row is its sheet (entry point 1) —
                 // never through a modal, which owns the pointer whole.
                 MouseEventKind::Down(MouseButton::Right) => {
-                    // The From YouTube list is a modal with rows of its own:
-                    // a right click on one is its list (TermList L3).
-                    if (!gui.modal_open() || ytdl::list_open(gui))
+                    if !gui.modal_open()
                         && let Some(act) = gui.ui.hit_context(at)
                         && gui.act(act)
                     {
@@ -3503,14 +3543,19 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             gui.queue.on_resize();
             gui.actions.on_resize();
             gui.discover.on_resize();
+            gui.ytdl.on_resize();
         }
         // A paste, whole: bracketed paste is on only while Add from
-        // YouTube's link field wants one (the window hands its clipboard
-        // over the same way, `Face::takes_paste`).
+        // YouTube's link field or Add torrent's room wants one (the window
+        // hands its clipboard over the same way, `Face::takes_paste`).
         TermEvent::Paste(text) => {
             gui.ui.dismiss_tooltip();
             gui.ui.caret_touch();
-            ytdl::paste(gui, &text);
+            if torrent::wants_paste(gui) {
+                torrent::paste(gui, &text);
+            } else {
+                ytdl::paste(gui, &text);
+            }
         }
         _ => {}
     }
@@ -3530,6 +3575,12 @@ fn event_loop(
     ctx.gate = true;
     loop {
         let wait = frame(terminal, gui, ctx, host)?;
+        // The quit gate's yes, once the sync has saved (clause 57).
+        if device::quit_ready(gui) {
+            ctx.saver.flush(&gui.app);
+            return Ok(());
+        }
+        let wait = if device::quit_waiting(gui) { wait.min(Duration::from_millis(100)) } else { wait };
         if !event::poll(wait)? {
             continue;
         }
@@ -3582,7 +3633,9 @@ fn next_wait(gui: &Gui) -> Duration {
 ///
 /// The Admin and MP3 Player screens and the Discover room do per-frame
 /// work inside their render (the server log's tail, the port watch, the
-/// copies' poll beat), so while one is up every pass draws, as before.
+/// copies' poll beat), so while one is up every pass draws, as before. So
+/// does a quit that waits for a sync's next save: its footer counts the
+/// seconds (mp3-player-screen contract, clause 57).
 fn moving(gui: &mut Gui) -> bool {
     gui.hot
         || gui.app.drawing_audio()
@@ -3590,6 +3643,7 @@ fn moving(gui: &mut Gui) -> bool {
         || stats::stale(gui)
         || matches!(gui.screen, Screen::Admin | Screen::Device)
         || (gui.screen == Screen::Library && gui.active == DISCOVER_NAV)
+        || device::quit_waiting(gui)
 }
 
 impl Gui {
@@ -3611,8 +3665,7 @@ impl Gui {
             List::PlaylistTracks => &mut self.playlists.tracks,
             List::Queue => &mut self.queue_view,
             List::Sonic => &mut self.sonic.results,
-            List::DjRoom => &mut self.dj.body,
-            List::DjGenres => &mut self.dj.genres,
+            List::DjSheet => &mut self.dj.list,
             List::Discover => &mut self.discover.view,
         }
     }
@@ -3643,8 +3696,7 @@ impl Gui {
             List::PlaylistTracks => &self.playlists.tracks,
             List::Queue => &self.queue_view,
             List::Sonic => &self.sonic.results,
-            List::DjRoom => &self.dj.body,
-            List::DjGenres => &self.dj.genres,
+            List::DjSheet => &self.dj.list,
             List::Discover => &self.discover.view,
         }
     }
@@ -3801,6 +3853,7 @@ impl Gui {
             || self.servers.modal_open()
             || self.torrent.modal_open()
             || ytdl::modal_open(self)
+            || device::quit_gate_open(self)
     }
 
     /// Which App tab the active browse room's pane rides — the bar's acts
@@ -3834,6 +3887,12 @@ impl Gui {
     /// that, and swipes silently went nowhere).
     fn wheel(&mut self, at: Position, delta: i32) {
         self.ui.pointer = Some(at);
+        // The quit's gate during a sync holds the wheel as it holds keys
+        // and pastes (clause 57): nothing under it moves, an Auto DJ sheet,
+        // the header dropdown or a room's list among them.
+        if device::quit_gate_open(self) {
+            return;
+        }
         // The header dropdown is on top of everything while it is open.
         if self.servers.drop_open {
             servers::wheel_dropdown(self, delta);
@@ -3842,6 +3901,20 @@ impl Gui {
         // Open elsewhere's list over the track-actions sheet scrolls its
         // own links under the pointer (discovery-page clause 140).
         if self.actions.sheet.as_ref().is_some_and(|s| s.links) && keep::links_wheel(self, delta) {
+            return;
+        }
+        // The DJ's layers scroll their own rows under the wheel, over
+        // whatever screen they stand on: a sheet's list, a Recently played
+        // list. (They are modals, and a modal otherwise swallows the wheel
+        // below — which is how the old genre picker's never turned.)
+        if dj::modal_open(self) {
+            dj::wheel(self, delta);
+            return;
+        }
+        // Add torrent's typed picker scrolls its suggestions under the
+        // wheel, a modal like the DJ's layers.
+        if self.torrent.picker.is_some() {
+            torrent::wheel(self, delta);
             return;
         }
         // The Admin screen's log scrolls under the wheel; a wheel over the
@@ -3858,8 +3931,8 @@ impl Gui {
             discover::wheel(self, delta);
             return;
         }
-        // The From YouTube list and Choose a folder scroll their own rows
-        // under the wheel.
+        // Add from YouTube's Choose a folder scrolls its own rows under
+        // the wheel.
         if ytdl::wheels(self) {
             ytdl::wheel(self, delta);
             return;
@@ -3892,9 +3965,10 @@ impl Gui {
             NavId::Sonic => sonic::wheel(self, delta),
             NavId::Playlists => playlists::wheel(self, delta),
             // Settings scrolls nothing itself; its Manage-servers room's
-            // list does. The Auto DJ room's body and genre picker scroll,
-            // and the Add-torrent room's file picker; Add from YouTube's
-            // windows took the wheel above, and its room scrolls nothing.
+            // list does. The Auto DJ room's sheets and lists scroll (its
+            // rows never do); Add torrent's typed picker and Add from
+            // YouTube's windows took the wheel above, and each of those
+            // two rooms scrolls its list.
             NavId::Settings => {
                 if self.in_settings_room(SettingsRoom::Servers) {
                     servers::wheel(self, delta)
@@ -3904,7 +3978,7 @@ impl Gui {
                 dj::wheel(self, delta);
             }
             NavId::Torrent => torrent::wheel(self, delta),
-            NavId::YouTube => {}
+            NavId::YouTube => ytdl::wheel_room(self, delta),
             NavId::Artists
             | NavId::Genres
             | NavId::Recent
@@ -4052,6 +4126,9 @@ fn start(
 
     let mut gui = Gui::new(config, config_ok, app);
     gui.pending = pending;
+    // The SD card transfer's worker is the GUI's, for the whole session
+    // (mp3-player-screen contract, clause 55).
+    device::start_transfer(&mut gui);
     if std::env::var("MSTREAM_GUI_DEMO").is_ok_and(|v| v == "1") {
         gui.demo = Some(demo_now());
     }
@@ -4098,8 +4175,10 @@ impl GuiFace {
         // A window pass with nothing new skips its draw too; the window
         // says when its surface needs one anyway (`Host::must_draw`).
         ctx.gate = true;
-        // The window hands a paste over whole on every platform.
+        // The window hands a paste over whole on every platform, and
+        // reads its clipboard for Add from YouTube's `Paste` too.
         gui.ytdl.whole_pastes = true;
+        gui.ytdl.clipboard = Some(window::clipboard_text);
         GuiFace { gui, ctx }
     }
 }
@@ -4121,17 +4200,23 @@ impl window::face::Face for GuiFace {
     /// Any input is news for the next pass, as in the terminal's loop.
     fn input(&mut self, event: TermEvent) -> Flow {
         self.ctx.dirty = true;
-        input(&mut self.gui, &mut self.ctx, event)
+        let flow = input(&mut self.gui, &mut self.ctx, event);
+        // The quit gate's yes in a window: it closes now, and its teardown
+        // waits for the sync's next save (clause 57).
+        if device::quit_waiting(&self.gui) {
+            return Flow::Quit;
+        }
+        flow
     }
 
     fn caret_at(&self) -> Option<Position> {
         self.gui.ui.caret_at()
     }
 
-    /// Add from YouTube's room or Files window wants the clipboard whole,
-    /// caret or not.
+    /// Add from YouTube's room or Files window, or Add torrent's room,
+    /// wants the clipboard whole, caret or not.
     fn takes_paste(&self) -> bool {
-        ytdl::wants_paste(&self.gui)
+        ytdl::wants_paste(&self.gui) || torrent::wants_paste(&self.gui)
     }
 
     fn set_composition(&mut self, text: &str) {
@@ -4811,6 +4896,38 @@ mod tests {
         assert_eq!(ctx.drawn, first, "nothing new: the pass skipped its draw");
         frame(&mut terminal, &mut gui, &mut ctx, &mut MustHost).unwrap();
         assert!(ctx.drawn > first, "the host needed a frame: drawn");
+    }
+
+    /// A card sync's report is news to a gated pass on any screen: the top
+    /// bar's MP3 Player tab and the mini player wear its percentage
+    /// (mp3-player-screen contract, clauses 16 and 55). The transfer
+    /// worker's reports are folded after the draw, so the pass after draws.
+    /// And a quit that waits for the sync's save draws every pass: its
+    /// footer counts the seconds (clause 57).
+    #[test]
+    fn a_card_syncs_report_is_news_to_a_gated_pass_and_a_waiting_quit_keeps_drawing() {
+        let mut gui = test_gui();
+        let (host, _inbox, tell) = device::TransferHost::quiet();
+        gui.device.transfer = Some(host);
+        let mut ctx = quiet_ctx(&gui);
+        ctx.gate = true;
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        let first = ctx.drawn;
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        assert_eq!(ctx.drawn, first, "nothing new: the pass skipped its draw");
+        tell.send(crate::device::worker::Event::Idle).unwrap();
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        assert!(ctx.dirty, "the report was folded after the draw: news for the next pass");
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        assert!(ctx.drawn > first, "and the next pass drew it");
+
+        let rested = ctx.drawn;
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        assert_eq!(ctx.drawn, rested, "nothing new again");
+        gui.device.quit_since = Some(Instant::now());
+        frame(&mut terminal, &mut gui, &mut ctx, &mut NoHost).unwrap();
+        assert!(ctx.drawn > rested, "a quit waiting for the save: every pass draws");
     }
 
     /// The window's face gates its passes as the terminal's loop does, and

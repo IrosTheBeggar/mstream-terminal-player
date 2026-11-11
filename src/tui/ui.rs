@@ -2759,7 +2759,18 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             if app.dj_armed() {
                 vec![value("on".into()), note(format!("picking from {}", app.dj_server_name()))]
             } else {
-                vec![value("off".into()), note("Enter starts it here".into())]
+                // Where Enter starts it: here — or, in the shell that has a
+                // Play from (the GUI hosts this tab on its Now Playing
+                // screen), on its home when that is another server.
+                let here = app.session_identity();
+                let elsewhere = app
+                    .dj_play_from()
+                    .filter(|home| here.as_deref().is_none_or(|here| !crate::config::same_server(home, here)));
+                let hint = match elsewhere {
+                    Some(home) => format!("Enter starts it on {}", app.server_name_of(&home)),
+                    None => "Enter starts it here".to_string(),
+                };
+                vec![value("off".into()), note(hint)]
             }
         }
         DjRow::SongsPerFetch => {
@@ -2806,6 +2817,7 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
                 crate::dj::EmptyQueueStart::Ask => "Ask",
                 crate::dj::EmptyQueueStart::Random => "Surprise me",
                 crate::dj::EmptyQueueStart::Pick => "Let me choose",
+                crate::dj::EmptyQueueStart::Recent => "Recently played",
             };
             vec![value(label.into()), note("when switched on with nothing queued".into())]
         }
@@ -4772,6 +4784,37 @@ mod tests {
         assert_eq!(app.now_tabs().len(), 4);
         assert!(text.contains("1-4 tab") && text.contains("←→ adjust"), "got:\n{text}");
         assert!(!text.contains("1-5 tab"));
+    }
+
+    /// Off, the first row says where Enter starts the DJ: here — and, in
+    /// the shell that has a Play from (the GUI hosts this tab on its Now
+    /// Playing screen), on its home when that is another server.
+    #[test]
+    fn the_dj_tab_says_where_enter_starts_it() {
+        use crate::tui::app::KnownServer;
+        let mut app = connected_app();
+        let here = app.session_identity().expect("a session");
+        let known = |id: &str, name: &str| KnownServer {
+            id: id.into(),
+            name: name.into(),
+            token: None,
+            username: None,
+            self_signed: false,
+            peer: None,
+            pairing: None,
+            dj: Default::default(),
+        };
+        app.servers = vec![known(&here, "here"), known("http://attic:3000", "attic")];
+        app.dj_home = Some("http://attic:3000".into());
+        on_the_dj_tab(&mut app);
+        let text = draw_sized(&mut app, 100, 34);
+        assert!(text.contains("Enter starts it here"), "no Play from on this shell's screen: {text}");
+        app.dj_shows_play_from = true;
+        let text = draw_sized(&mut app, 100, 34);
+        assert!(text.contains("Enter starts it on attic"), "the home, where the shell has one: {text}");
+        app.dj_home = Some(here);
+        let text = draw_sized(&mut app, 100, 34);
+        assert!(text.contains("Enter starts it here"), "{text}");
     }
 
     #[test]

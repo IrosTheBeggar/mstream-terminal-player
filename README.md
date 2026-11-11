@@ -500,11 +500,22 @@ opens in its own window instead (see [Two flavours](#two-flavours)).
   server's play history, so Last played and Most played show your own
   listening.
 - **Add from YouTube**, on your own server where your account can add
-  files: the nav's Add YouTube room takes a pasted link, reads the
-  video's tags (tidied, every change undoable and every tag editable),
-  shows the folder the song goes to and asks the server to add it; on a
-  folder in Files, the browse bar's `add from YouTube` (or `y`) adds it
-  right there. A list follows each add to the end and keeps what came in.
+  files: the nav's Add YouTube room takes a pasted link (in the player's
+  own window a `Paste` button reads the clipboard) and shows the song it
+  makes as a card — the video's cover, its tags tidied, every change
+  undoable, `edit tags` a sheet of text boxes — with where it saves and
+  as what on a row each, and one button that asks the server to add it;
+  on a folder in Files, the browse bar's `add from YouTube` (or `y`) adds
+  it right there. The list under the form follows each add to the end and
+  keeps what came in. (The cover is YouTube's own thumbnail for the video,
+  which the player asks YouTube's image host for itself.)
+- **Add torrent** hands the server a `.torrent` or a magnet link: choose
+  the file, or paste the link — or the path of a file dropped on the
+  terminal — and the room shows what it holds (how many files, how big),
+  the artist, album and year it read from the name, and where it will
+  land. `Metadata` and `Destination` each open a sheet; `Add torrent` is
+  under them. What you sent stays listed under the form, and a refusal
+  stays on the page in the server's own words.
 - **Settings**: crossfade, gapless, resume the queue at launch, torrents,
   and **keyboard hints** (off by default — the footer names the keys when
   it is on). The GUI speaks the ten locales the wizard does, from your
@@ -675,6 +686,13 @@ mstream-player device flash --flash-mode dio      # this player's release, in DI
 mstream-player device releases --pre-releases     # the firmware's releases on GitHub
 mstream-player device flash --yes --port COM3     # no screen, no questions
 mstream-player device flash --yes --all           # update every board that runs an older release
+mstream-player device cards                       # the SD cards in this computer's card readers
+mstream-player device card E: status              # one card's facts, as key-value lines
+mstream-player device card E: setup --name Car --yes     # make a new card one the player syncs
+mstream-player device card E: sync                # print the plan and ask to go on; --yes runs it unasked
+mstream-player device card E: eject               # let the card go
+mstream-player device format --port COM3          # format the board's card as FAT32: the player asks first
+mstream-player device time COM3                   # set the player's clock when it is unset or off: its plays are dated by it
 ```
 
 The [mStream MP3 player](https://github.com/IrosTheBeggar/mstream-mp3-player) is an M5Stack
@@ -690,7 +708,7 @@ or a development build based below it), ✗ *Not mStream firmware*, ? *Not answe
 free space under it, in decimal GB as the Core2's About shows them — or what the card is and
 how to fix it (no card, exFAT, GPT), or why it cannot be shown (firmware too old to report it,
 a write under way): the card comes from the firmware's `@status`, which firmware 0.9.0 and
-later answer — v0.10.0, the release this player pins, among them, so a board on v0.8.0 or
+later answer — v0.14.0, the release this player pins, among them, so a board on v0.8.0 or
 older is told *Updating shows it.* Free space a card never counted is offered as one count
 (`c`), never started by itself. One button follows the chip — *Update ▸*, *Install ▸*,
 *Read the board ▸* (a board that does not answer: reading it restarts it, said on the card
@@ -699,7 +717,7 @@ dark screen while it writes, what stays (settings, the paired headphones, the mu
 card), and that unplugging halfway leaves it half written; Enter, Esc and `n` keep the board
 as it is, `y` writes, and the board is reset only then. The erase box is in the install's
 warning alone, on by default over other firmware. When the board restarts, the card is the
-board again — `✓ Up to date · v0.10.0 · just written`, its SD card as the new firmware reports
+board again — `✓ Up to date · v0.14.0 · just written`, its SD card as the new firmware reports
 it — and one line says what was done. Everything technical — the port and bridge, the flash
 size, the firmware's ELF, where this player's image came from, the card's bytes, the run's log
 with a clock, and *Write again* — is behind **Details** (`d`, or
@@ -759,7 +777,7 @@ step and writes without a screen, the flags answering the warning.
 opened with DTR and RTS held low, so the music on it plays on): the firmware's `@status` line —
 its version and its SD card's size, free space and tracks — or, from firmware older than the
 query, the console's `L` for the version alone. Each board's line is the port's as before, then
-its firmware against the pin (`v0.7.0, update to v0.10.0`) and its card (`card 38.2 GB free of
+its firmware against the pin (`v0.7.0, update to v0.14.0`) and its card (`card 38.2 GB free of
 59.6 GB, 1,284 tracks`); a board that says nothing is `not answering`, and a port another
 program holds is `in use by another program`. With several boards, `--yes` still asks for
 `--port` — its refusal lists each board's firmware now — or `--all`, which updates every board
@@ -767,7 +785,7 @@ running an older release of this firmware to the pin, one after another, each in
 it runs (or the one `--flash-mode` names), stopping at the first failure; it never installs
 over other firmware, never erases and never goes back, and names the boards it left alone.
 
-The pinned release is v0.10.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
+The pinned release is v0.14.0, whose image runs the board's flash in QIO, the faster mode. M5Stack
 ships the Core2 in DIO and only one Core2 has been tried in QIO, so the release also carries a
 `-dio-full.bin`, the same firmware in DIO: if a Core2 keeps restarting after an install,
 `device flash --flash-mode dio` writes it, or the tab's Advanced… does (Flash mode, DIO). It
@@ -779,6 +797,43 @@ never its firmware's first line is said to keep restarting: the card goes gold, 
 restarting*, and its button is *Write the DIO image ▸* — through the warning, never written by
 itself.
 
+The board's SD card is filled with the card in **this computer's card reader**, never over the
+cable. A card in a reader is a subject of the MP3 Player tab beside the boards, a tab of its
+own (`E: Car music` on Windows): its **Card view** says what it holds and from which saved
+server, its space, its last sync and what the next one would do (`12 new · 2 to remove · 37
+plays to send`, as that server answered it), and *Sync ▸* fills it — converting what the
+player can't play, writing the covers, the Auto DJ index and each track's waveform for the
+progress bar, all of which the firmware reads, laying each track's mood scores for the
+player's mood filters (none on a card for someone else), and sending the player's plays
+back to the server they came from (none from a card for someone else, then or later, and none
+made before the player's clock was ever set: the tab sets it whenever it sees the player on
+USB, and `device time <port>` does from a terminal). A sync saves as it goes: `x` stops it
+at the next save, a card taken out goes on from there in any reader, and it runs on while
+you listen, the MP3 Player tab wearing its percentage. **Settings…** (`o`) holds the card's
+choices on two tabs, Music (its server and libraries) and Writing (what is converted and to
+what, removals, covers, Auto DJ, a card for someone else), with a line that says at every
+change whether it fits. More than 50 removals, half the card gone, music on the card that
+mStream didn't put there, another server, a relay and a peer reached only through its parent
+each ask first, behind the gold warning. Quitting with `q` during a sync asks, then stops at
+the next save; the window's close button and Cmd-Q stop it at the next save without asking.
+`device cards` lists the cards, one line each, and `device card <drive>
+status|setup|sync|plays|eject` does what the Card view does; each warning is a flag that names
+what it lets through (`--allow-removals 214`, `--server Work --take-over`, `--adopt` or
+`--keep-mine`, `--through-parent`), and `setup`'s flags are the Settings' (`--name`,
+`--libraries`, `--convert`, `--to`, `--removals`, `--covers`, `--autodj`, `--for`,
+`--budget`). Exit 3 means paused or stopped: run it again later. Only FAT32 cards on MBR are
+the player's; a card it can't read is listed with why.
+
+A card the player can't read (exFAT, NTFS, a GPT card) is **formatted in the player**, never on
+the computer: with firmware 0.14.0 or later, the board's SD card row offers *Format as FAT32 ▸*
+(`f` where something else comes first; for the player's own music card, in Details only), behind
+a gold warning that says what is lost. The tab only asks: the player shows the question on its
+own screen, *Format…* then its red button held 2 s, restarts and formats the card, and the row
+follows it to the empty card, ready to fill in a card reader. A damaged card is sent to a
+computer's disk check first. On older firmware the row says it can't format the card, and
+that updating to v0.14.0, the pinned release, lets it. Leaving the tab never stops it. `device format` does the same from a
+terminal; it has no `--yes`, since the player confirms.
+
 Windows and macOS need the USB serial driver from M5Stack's download page; on Linux your
 account needs the `dialout` (or `uucp`) group. A port held by a serial monitor is reported
 as such. `MSTREAM_DEVICE_FAKE=<word>` runs everything against a scripted board, for tests:
@@ -787,7 +842,9 @@ the running firmware's answers `status:<version>` (answers `@status`), `old:<ver
 then `L`), `silent:<version>` (ours, not running) and `chip` (a board that only shares the USB
 chip). Several boards are words separated by commas, and options after slashes script the rest:
 `status:v0.9.0/free=?,old:v0.7.0,chip/in=3` is three boards, the last plugged in three seconds
-on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). `/mode=dio`
+on (`/out=`, `/held=`, `/fail=write`, `/identify=ui`, and any `@status` field). A 0.14.0
+board's `@format` is formatted by default, or `/format=no`, `late`, `silent`, a refusal
+(`viz`, `card`, …, `second-size`), or `fail-write` and its kin. `/mode=dio`
 runs a release's DIO build (its ELF id), `/elf=<hex>` any ELF, and `/loop=qio` is a Core2
 whose flash cannot run QIO: a QIO image written to it keeps it restarting. src/device/engine.rs
 has the whole grammar.
@@ -907,27 +964,41 @@ steer.
 
 Auto DJ keeps the music going: when the queue has nothing left after the
 track that is playing, it asks the server for the next songs and adds them.
-It is **on or off, per server**: press `A` (or click the bar's `auto-dj`
-control) to arm it for the server you are browsing; press it again to switch
-it off; press it while browsing another server to move it there. Its picks
-wear a badge in the queue. Armed on an empty queue it asks how to start —
-**Surprise me** (a random song under your filters), **Choose a song** (pick
-one from the library), or it waits for you to queue something.
+It is **on or off**: click the bar's `auto-dj` button (or press `A`) to
+start it, and again to stop it — Stop always stops, wherever the DJ is
+running. Its picks wear a badge in the queue. Started on an empty queue it
+asks for a **first song** — **Random** (a song under your filters),
+**Choose** (pick one from the library) or **Recently played** (one of the
+last twenty songs played on that server); **Remember** keeps the answer,
+and Esc leaves the DJ off.
 
 The settings live in the **Auto DJ room** — in the GUI under TOOLS in the
-nav (or `D`), in the classic player on the Auto-DJ tab of the full-screen
-view (`0`, then across):
+nav (or `D`). The room is one row per setting, each showing its value and
+opening one small sheet; **Start** / **Stop** sits on top and is the status:
 
-| Setting | |
+| Row | |
 |---|---|
-| **Songs per fetch** | how many the DJ adds at a time (mStream 6.26 and later; one before). |
-| **Sonic similarity** | only pick songs that *sound* like the session, with a strictness and an anchor — follow the mood as it drifts, or hold the song you started from. Needs the server's discovery index. |
-| **BPM continuity** · **Harmonic mixing** | stay near the tempo, with a tolerance; stay in a compatible key (the Camelot wheel's neighbours). |
-| **Minimum rating** · **Track length** | skip anything rated below, or outside a length window. |
-| **Genres** | a whitelist or a blacklist of the server's genres. |
-| **Keyword filter** | words a title, artist or album must not contain. |
-| **Sources** | which of the server's libraries the DJ may draw from. |
-| **Preview** | three picks with the current settings, none of them queued. |
+| **Play from** | which server the DJ picks from, and which of its folders. Start goes to this server whichever one you are browsing; it is remembered. (Shown once there is more than one server or folder to choose.) |
+| **First song** | what Start does with nothing queued: Ask · Random · Choose · Recently played. |
+| **Batch** | how many songs the DJ adds at a time (mStream 6.26 and later; one before). |
+| **Sonic similarity** | only pick songs that *sound* like the session: how close a match, and whether to **Drift** with the mood or **Stay close** to the song you started from. Needs the server's discovery index. |
+| **Smart filters** | the mood filter — happy · sad, energetic · relaxed, vocal · instrumental, tags — where the server has mood scores for its songs. |
+| **Genres** | **Only** these genres, or **Skip** them; and, where the server has both, whether to match generated genres, the files' tags, or either (mStream 6.32.2 and later). |
+| **Rating** · **Length** | skip anything rated below; keep to a length window, typed to the second (`2:00`, `90`, `1:02:30`). |
+| **Beat matching** · **Harmonic mixing** | prefer the tempo near the current song's, within a tolerance; prefer a key that mixes well (the Camelot wheel's neighbours). |
+| **Skip words** | words a title, artist, album or path must not contain. |
+| **Artist cooldown** | keep the last few artists out of the next picks. |
+| **Preview picks** | on the title row: three picks with the current settings, none of them queued. |
+
+A row the server cannot do stays where it is, greyed, and says why — "Needs
+server 6.25+", "Discovery off", "Still scanning", "Not on peers". The
+chevron half of the bar's button (`▴`) opens **quick config**: the DJ's
+server, sonic similarity and smart filters without leaving the room you
+are in.
+
+The classic player keeps these settings on the Auto-DJ tab of its
+full-screen view (`0`, then across) as a list of rows; `A` there starts
+the DJ on the server you are on.
 
 The rules are kept per server, with the global settings behind them. A
 server that does not know a setting is told once: the DJ learns which keys

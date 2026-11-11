@@ -24,7 +24,7 @@ BIN="${BIN:-target/debug/mstream-player}"
 
 # The scenarios, by name (each is a function below); a name asked for
 # that is none of them stops the run before anything is built.
-ALL="A B C D E F G H T K K2 W M KM I"
+ALL="A B C D E F G H T K K2 W M KM I J"
 for s in "$@"; do
   case " $ALL " in *" $s "*) ;; *) echo "no scenario $s (the battery has $ALL)"; exit 2 ;; esac
 done
@@ -474,6 +474,44 @@ assert out.returncode == 1 and 'in use' in out.stderr, (out.returncode, out.stdo
 "
 }
 
+# ── Scenario J: the SD-card transfer's routes, and its hidden command ────
+# The fake's made-up library (FAKE_LIBRARY=1) answers the routes a card sync
+# reads. The sync itself needs a card in a reader, which CI has none of, so
+# `device card-sync` is held only to refusing a volume that isn't one: it
+# lists the volumes and opens nothing.
+scenario_J() {
+FAKE_LIBRARY=1 start_fake J || return
+assert "the fake serves a card sync's routes" "
+import json, urllib.request, urllib.error
+base = 'http://127.0.0.1:$PORT'
+def ask(path, body=None, headers={}):
+    data = json.dumps(body).encode() if body is not None else None
+    kind = {'Content-Type': 'application/json'} if data else {}
+    r = urllib.request.Request(base + path, data=data, headers=dict(headers, **kind))
+    try:
+        with urllib.request.urlopen(r) as resp:
+            return resp.status, resp.headers, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+st, h, b = ask('/api/v1/sync/manifest', {'limit': 5000})
+page = json.loads(b)
+assert st == 200 and len(page['entries']) == 4, page
+st, _, _ = ask('/api/v1/sync/manifest', {'limit': 5000}, {'If-None-Match': '\"%s\"' % page['revision']})
+assert st == 304, st
+st, h, b = ask('/media/Rock/Artist%20A/Album%20B/01.mp3', headers={'Range': 'bytes=0-3'})
+assert st == 206 and b == bytes([0xff, 0xfb, 0x90, 0x40]), (st, b)
+st, h, b = ask('/transcode/Rock/Artist%20C/Album%20D/01.wav?codec=opus&bitrate=192k')
+assert h['Content-Type'] == 'audio/ogg' and b[:4] == b'OggS', h
+"
+stop_fake J
+assert "device card-sync refuses a volume that isn't one" "
+import os, subprocess
+env = dict(os.environ, HOME='$WORK/h18')
+out = subprocess.run(['$BIN', 'device', 'card-sync', '$WORK/no-such-card', '--dry-run'], capture_output=True, text=True, env=env)
+assert out.returncode == 2 and 'volume' in out.stderr, (out.returncode, out.stdout, out.stderr)
+"
+}
+
 # ── The scheduler ────────────────────────────────────────────────────────
 # Each scenario above runs in a subshell of its own, its lines kept in
 # WORK/<name>.log; run_one stops its fake however it ended and leaves
@@ -481,8 +519,9 @@ assert out.returncode == 1 and 'in use' in out.stderr, (out.returncode, out.stdo
 # no long one is left running alone at the end, and print as they end.
 # Measured side by side (2026-11-10, Linux, 8 at a time): A 35 s, KM 29,
 # W 27, K and K2 23, F 21, C 20, M 19, H 16, B 13, E 11, D and I 10, G 9,
-# T 8 — 39 s in all, against 289 s one after another.
-LONGEST_FIRST="A KM W K K2 F C M H B E D I G T"
+# T 8, J 1 — 39 s in all, against 289 s one after another (J measured
+# 2026-11-11, when it joined the battery).
+LONGEST_FIRST="A KM W K K2 F C M H B E D I G T J"
 JOBS="${E2E_JOBS:-8}"
 [ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
 
