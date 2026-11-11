@@ -1370,6 +1370,10 @@ comes from the cache, or a download, beside them.
     no `[X]`, the safe choice first and the modal primary, named for what
     stays. Enter, Esc and `n` keep; `y` or a click on the second button
     goes; a click on another tab leaves, with nothing written.
+    - **Gates in a chain:** a gate opened by the answer to the one before it
+      (Remove, then Adopt, then the relay) takes no answer for half a
+      second, so a held key or a double-click's second click that answered
+      the first doesn't answer it too.
     - **Removals (Q1):** up to 50 need no gate (Next sync says how many;
       Details lists them). Above 50: "Remove 214 tracks from Car music?",
       the first five paths and how many more, what stays in green, and how
@@ -3031,3 +3035,22 @@ setting no locale, prints in English.
     request's, and nothing is dropped but a play 30 days old, as the
     other waits end: a play refused with nothing beside it to prove the
     request held its device's marks for good otherwise.
+- **2026-11-10 — The landing review: the screens and the command line's
+  lines.** What the review found in the quit's gate, the sheet, the gates
+  and the progress lines, and how each was settled.
+  - **The quit's gate was set where it couldn't be drawn.** Below the
+    screens' size the mini player drew no gate, yet `q` set one and it held
+    every key: the player looked hung. There `q` now stops at the next save
+    as Ctrl+C does (clause 57), and a gate left open when the window
+    narrows, or when its sync ends, goes.
+  - **A held key answered two gates.** Gates follow one another on one
+    Sync ▸, and a key's repeat or a double-click answered the next one as
+    it opened. A chained gate waits half a second for its answer (clause
+    58).
+  - **A sheet followed the view.** The view jumps to a sync that starts
+    (clause 55); a Settings sheet open on another card then drew and
+    applied as if for the card in view. A sheet and its gates are the card
+    they were opened for.
+  - **The command line looked stopped at 90%.** Its progress lines said the
+    tenths 1 to 9 only. They say the tenth of the end too, and a phase's
+    last count as it ends when that wasn't the last one said.

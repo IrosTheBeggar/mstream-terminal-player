@@ -1666,6 +1666,13 @@ impl Screen for Page {
     /// The worker takes no queued ops — it reports as it goes — so a pump
     /// is a read of its reports: the hosts that only pump (a page left
     /// behind, the quit's wait for its ports) still hear it.
+    ///
+    /// A host's frame (`HostedRoom::after_frame`) absorbs and then pumps,
+    /// so this reads twice a frame. It is harmless: the second finds the
+    /// channels empty, the fold's notes and lines already taken, and a gate
+    /// already open (`card_asks` opens none over one); what it costs is a
+    /// second look at the cards' fold, the per-frame clones the landing
+    /// review left open.
     fn pump(&mut self) {
         self.absorb();
     }
@@ -1785,7 +1792,9 @@ impl Screen for Page {
     /// to the newest line resumes it).
     fn wheel(&mut self, up: bool, at: Position) {
         let Some(rect) = self.log_rect.filter(|r| r.contains(at)) else { return };
-        let lines = self.open.as_deref().map_or(0, |port| self.log_for(port).len());
+        // The log drawn is the card's while one is in view, else the board's.
+        let shown = self.card_open.as_deref().or(self.open.as_deref());
+        let lines = shown.map_or(0, |port| self.log_for(port).len());
         let most = lines.saturating_sub(usize::from(rect.height));
         self.log_scroll = if up { (self.log_scroll + 1).min(most) } else { self.log_scroll.saturating_sub(1) };
     }

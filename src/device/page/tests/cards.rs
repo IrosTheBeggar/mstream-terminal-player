@@ -1190,3 +1190,141 @@ fn a_command_the_worker_cant_take_says_so() {
     let frame = window(&mut page);
     assert!(frame.contains("The card transfer has stopped"), "{frame}");
 }
+
+/// The wheel over a card's Details log scrolls it when only cards are on
+/// the tab: its bound is the card's log, not a board's that isn't there.
+#[test]
+fn the_wheel_scrolls_a_cards_log_with_no_board_on_the_tab() {
+    let _en = english();
+    let (mut page, _ends, _inbox, fold) = with_cards(|_| {}, vec![cards::ready("E:", now())]);
+    let key = fold.borrow().cards[0].key.clone();
+    for i in 0..40 {
+        let item = worker::LogItem::Said(format!("line {i}"));
+        fold.borrow_mut().apply(worker::Event::Log { key: key.clone(), item });
+    }
+    page.pump();
+    press(&mut page, KeyCode::Char('d'));
+    let frame = window(&mut page);
+    assert!(frame.contains("line 39"), "{frame}");
+    let pane = page.log_rect.expect("the card's log was drawn");
+    let inside = Position { x: pane.x + 2, y: pane.y };
+    Screen::wheel(&mut page, true, inside);
+    Screen::wheel(&mut page, true, inside);
+    assert_eq!(page.log_scroll, 2, "scrolled up two");
+    let frame = window(&mut page);
+    assert!(!frame.contains("line 39") && frame.contains("line 37"), "{frame}");
+}
+
+/// A card taken out with nothing in its reader now: the busy line ends at
+/// its first sentence in every language, Japanese and Chinese by their own
+/// full stop.
+#[test]
+fn the_busy_line_of_a_card_taken_out_ends_at_its_first_sentence_in_every_locale() {
+    for code in crate::setup::LANGS.map(|(code, _)| code) {
+        let words = t!("dev.card.busy_out_run", locale = code, card = "Gym", drive = "E:", i = "3", n = "9", other = "")
+            .to_string();
+        let end = card::first_sentence(&words).unwrap_or_else(|| panic!("{code}: {words}"));
+        let first = &words[..end];
+        assert!(first.contains("Gym") && first.contains('9'), "{code}: {first}");
+        assert!(first.ends_with('.') || first.ends_with('。'), "{code}: {first}");
+        assert!(!words[end..].trim().is_empty(), "{code}: a second sentence cut: {words}");
+    }
+    assert_eq!(card::first_sentence("One sentence alone."), None);
+    assert_eq!(card::first_sentence("一つだけ。"), None);
+}
+
+/// The sheet's labels are 14 cells whatever their script: its values stand
+/// in one column in Japanese and Chinese too.
+#[test]
+fn the_sheets_labels_are_padded_by_display_width() {
+    for words in ["Convert", "変換", "转换为", "名前がとても長いラベルです"] {
+        let label = card::sheet_label(words);
+        assert_eq!(crate::kit::width(&label), 14, "{words}: {label:?}");
+    }
+}
+
+/// The view jumps to a sync that starts (clause 55); a sheet open on another
+/// card stays that card's: its Apply judges the other-server gate by the
+/// card it was opened for, and the gate it opens is that card's.
+#[test]
+fn a_sheet_open_when_the_view_jumps_to_a_sync_acts_on_its_own_card() {
+    let _en = english();
+    let empty = cards::with(cards::ready("F:", now()), |c| cards::facts(c).tracks = 0);
+    let (mut page, _ends, inbox, fold) = with_cards(|_| {}, vec![cards::ready("E:", now()), empty.clone()]);
+    let (e, f) = (fold.borrow().cards[0].key.clone(), fold.borrow().cards[1].key.clone());
+    page.card_act(Act::Card(0));
+    press(&mut page, KeyCode::Char('o'));
+    let sheet = page.card.sheet.as_mut().expect("E:'s sheet");
+    assert_eq!(sheet.key, e);
+    sheet.want.server = Some("another-server".into());
+    // F: starts syncing: the view goes to it, the sheet stays E:'s.
+    let syncing = cards::with(empty, |c| c.run = cards::syncing("F:", now()).run);
+    fold.borrow_mut().apply(worker::Event::Card(Box::new(syncing)));
+    page.pump();
+    assert_eq!(page.card_open.as_deref(), Some(f.as_str()), "the view jumped");
+    let _ = window(&mut page);
+    page.card_act(Act::CardApply);
+    // E: is filled: the other server is asked about first, nothing written.
+    let gate = page.card.gate.as_ref().expect("the other-server gate");
+    assert_eq!(gate.key, e);
+    assert!(matches!(gate.kind, card::GateKind::Server { .. }), "{:?}", gate.kind);
+    assert!(sent(&inbox).iter().all(|c| !matches!(c, worker::Cmd::Apply { .. })), "nothing applied");
+}
+
+/// Gates in a chain: the `y` (held, or a double-click's second click) that
+/// answered "Remove 214 and sync" doesn't also answer the Adopt gate that
+/// opens under it; a fresh answer past the guard does.
+#[test]
+fn a_held_answer_to_one_gate_doesnt_answer_the_next() {
+    let _en = english();
+    let many: Vec<String> = (0..214).map(|i| format!("Velvet Static/Harbour Songs/{i:03} - Track.flac")).collect();
+    let card = cards::with(cards::ready("E:", now()), |c| {
+        if let Next::Plan(plan) = &mut c.next {
+            plan.removals = many.clone();
+            plan.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])];
+        }
+    });
+    let (mut page, _ends, inbox, _fold) = with_cards(|_| {}, vec![card]);
+    press(&mut page, KeyCode::Enter);
+    assert!(matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(card::GateKind::Removals { .. })));
+    press(&mut page, KeyCode::Char('y'));
+    assert!(matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(card::GateKind::Adopt { .. })));
+    // The same key again at once, and a click's: still the Adopt gate.
+    press(&mut page, KeyCode::Char('y'));
+    page.card_act(Act::CardGo);
+    press(&mut page, KeyCode::Esc);
+    assert!(matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(card::GateKind::Adopt { .. })));
+    assert!(sent(&inbox).is_empty(), "nothing answered under the guard");
+    // Past the guard, its own answer.
+    page.card.chained = page.card.chained.map(|t| t - card::CHAIN_GUARD);
+    press(&mut page, KeyCode::Char('y'));
+    let synced = sent(&inbox);
+    let [worker::Cmd::Sync { allow, .. }] = synced.as_slice() else { panic!("{synced:?}") };
+    assert_eq!((allow.answers.removals, allow.answers.adopt), (true, Some(true)));
+}
+
+/// The Budget row says the limit saved on this computer for the card's
+/// peers, not the default; Apply with it unchanged writes nothing.
+#[test]
+fn the_budget_row_says_the_saved_limit() {
+    use crate::device::card::budget::{Budget, PeerKey};
+    use crate::device::card::state::PeerSource;
+    let _en = english();
+    let peer_id = 40_417;
+    let card = cards::with(cards::ready("E:", now()), |c| {
+        let mut peer = PeerSource::default();
+        (peer.peer_id, peer.nickname, peer.libraries) = (peer_id, "Lisbon".into(), vec!["Rock".into()]);
+        cards::facts(c).state.as_mut().expect("set up").settings.peers.push(peer);
+    });
+    let parent_key = cards::home().url_key().expect("the fixture's server has a key");
+    let budget = Budget::system().unwrap();
+    budget.with(|b| b.set_limit(PeerKey { parent_key, peer_id }, Some(750))).unwrap();
+    let (mut page, _ends, inbox, _fold) = with_cards(|_| {}, vec![card]);
+    press(&mut page, KeyCode::Char('o'));
+    let sheet = page.card.sheet.as_ref().expect("the sheet");
+    assert_eq!(sheet.want.budget_mb, Some(750));
+    page.card_act(Act::CardApply);
+    let told = sent(&inbox);
+    assert!(told.iter().all(|c| !matches!(c, worker::Cmd::Apply { .. })), "nothing changed: {told:?}");
+    budget.with(|b| b.set_limit(PeerKey { parent_key, peer_id }, None)).unwrap();
+}

@@ -55,7 +55,33 @@ pub(crate) struct CardUi {
     /// The cards on the row as the last look had them, in order: where a
     /// card taken out stood (clause 29).
     pub(crate) row: Vec<String>,
+    /// When a gate opened as the answer to the one before it: for
+    /// [`CHAIN_GUARD`] it takes no answer, so a held key or a double-click
+    /// that answered the first doesn't answer this one too.
+    pub(crate) chained: Option<Instant>,
 }
+
+/// The daily budget saved on this computer for the card's peers, which the
+/// sheet's one Budget row stands for (Apply writes it to each): the first
+/// one saved. None: none saved, the default stands.
+fn saved_budget(link: Option<&ServerLink>, peers: &[u32]) -> Option<u64> {
+    use crate::device::card::budget::{Budget, PeerKey};
+    if peers.is_empty() {
+        return None;
+    }
+    let parent_key = link?.url_key()?;
+    let book = Budget::system().ok()?.read().ok()?;
+    peers.iter().find_map(|&peer_id| book.peers.get(&PeerKey { parent_key, peer_id }).and_then(|a| a.daily_mb))
+}
+
+/// A chained gate's guard is still up.
+fn held(since: Instant) -> bool {
+    since.elapsed() < CHAIN_GUARD
+}
+
+/// How long a gate opened by another's answer waits before it takes one:
+/// past a key's repeat delay and a double-click's second click.
+pub(crate) const CHAIN_GUARD: Duration = Duration::from_millis(500);
 
 // ── The words ───────────────────────────────────────────────────────────────
 
@@ -303,6 +329,15 @@ impl Page {
         fold.cards.iter().find(|c| c.key == key).cloned()
     }
 
+    /// The card at `key`, in view or not: a sheet's and a gate's card are
+    /// the one they were opened for, whichever the view moved to since (it
+    /// jumps to a sync that starts, clause 55).
+    pub(super) fn card_of(&self, key: &str) -> Option<CardView> {
+        let transfer = self.transfer.as_ref()?;
+        let fold = transfer.fold.borrow();
+        fold.cards.iter().find(|c| c.key == key).cloned()
+    }
+
     /// The servers saved on this computer, as the worker was last told.
     fn servers(&self) -> Vec<ServerLink> {
         self.transfer.as_ref().map(|t| t.fold.borrow().servers.clone()).unwrap_or_default()
@@ -401,8 +436,8 @@ impl Page {
                         .to_string();
                 if other.is_none() {
                     // Nothing in that reader now: the sentence ends at the count.
-                    if let Some(cut) = words.find(". ") {
-                        words.truncate(cut + 1);
+                    if let Some(end) = first_sentence(&words) {
+                        words.truncate(end);
                     }
                 }
                 (words, true, true)
@@ -547,6 +582,8 @@ impl Page {
                     self.open_card_sheet(&card, false);
                 }
             }
+            // A gate just opened by the answer to the one before it.
+            Act::CardKeep | Act::CardGo | Act::CardBox if self.card.chained.is_some_and(held) => {}
             Act::CardKeep => self.gate_keep(),
             Act::CardGo => self.gate_go(),
             Act::CardBox => {
@@ -1540,6 +1577,18 @@ fn gate_of_asked(card: &CardView, asked: &Asked) -> Option<GateKind> {
     })
 }
 
+/// Where the first of several sentences ends, its stop kept: at ". ", or
+/// at the ideographic full stop Japanese and Chinese end one with. None for
+/// one sentence alone.
+pub(super) fn first_sentence(words: &str) -> Option<usize> {
+    let latin = words.find(". ").map(|at| at + 1);
+    let ideographic = words.find('。').map(|at| at + '。'.len_utf8()).filter(|&end| end < words.trim_end().len());
+    match (latin, ideographic) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 impl Page {
     /// A gate the worker asked after a sync stopped for it opens on the
     /// card in view (the sync was the listener's own Sync ▸).
@@ -1615,10 +1664,13 @@ impl Page {
     /// After a gate's answer: the plan's next gate, else the sync with
     /// every answer given.
     fn gate_next(&mut self, key: String, mut allow: Allow) {
-        let card = self.open_card().filter(|c| c.key == key);
+        let card = self.card_of(&key);
         let next = card.as_ref().and_then(|c| gate_for(c, &plan_of(c).cloned().unwrap_or_default(), allow.clone()));
         match next {
-            Some(next) => self.card.gate = Some(next),
+            Some(next) => {
+                self.card.gate = Some(next);
+                self.card.chained = Some(Instant::now());
+            }
             None => {
                 allow.proxy_copies.retain(|id| *id != 0);
                 self.send_card(worker::Cmd::Sync { key, allow: Box::new(allow) });
@@ -1985,11 +2037,15 @@ impl Page {
         if want.libraries.is_none() {
             want.libraries = Some(offered.iter().map(|(l, _)| l.clone()).collect());
         }
-        let peers = facts
+        let peers: Vec<(u32, String, Vec<String>)> = facts
             .state
             .as_ref()
             .map(|s| s.settings.peers.iter().map(|p| (p.peer_id, p.nickname.clone(), p.libraries.clone())).collect())
             .unwrap_or_default();
+        // The Budget row says the limit saved on this computer, not the
+        // default; Apply with it unchanged writes nothing.
+        let ids: Vec<u32> = peers.iter().map(|(id, ..)| *id).collect();
+        want.budget_mb = saved_budget(card.server.link(), &ids);
         self.card.seq += 1;
         let sheet = CardSheet {
             key: card.key.clone(),
@@ -2081,7 +2137,7 @@ impl Page {
             self.send_card(worker::Cmd::SetUp { key, want: Box::new(sheet.want) });
             return;
         }
-        let card = self.open_card();
+        let card = self.card_of(&key);
         let current = card.as_ref().and_then(|c| c.server.link().map(|l| l.id.clone()));
         let filled = card.as_ref().and_then(|c| c.facts()).is_some_and(|f| f.tracks > 0);
         if filled && sheet.want.server.is_some() && sheet.want.server != current {
@@ -2365,11 +2421,20 @@ pub(super) fn sheet_widths(area_w: u16) -> (u16, u16) {
 /// The sheet's rows' height, its tallest state: its top is held there.
 const CARD_SHEET_MAX: u16 = 22;
 
+/// A sheet row's label in its 14 cells, padded by display width: a label in
+/// Japanese or Chinese takes two cells a character, and padding by
+/// characters left its row's value out of line with the others.
+pub(super) fn sheet_label(words: &str) -> String {
+    let label = fit(words, 13);
+    let pad = 14usize.saturating_sub(kit::width(&label));
+    format!("{label}{}", " ".repeat(pad))
+}
+
 /// The sheet over the card (clause 48): the kit's neutral modal, two tabs,
 /// the fit line under both, the help, the buttons.
 pub(super) fn draw_card_sheet(frame: &mut Frame, page: &mut Page, area: Rect) {
     let Some(sheet) = page.card.sheet.clone() else { return };
-    let Some(card) = page.open_card() else { return };
+    let Some(card) = page.card_of(&sheet.key) else { return };
     let (width, text_w) = sheet_widths(area.width);
     if width < 24 || area.height < 8 {
         return;
@@ -2401,7 +2466,7 @@ pub(super) fn draw_card_sheet(frame: &mut Frame, page: &mut Page, area: Rect) {
         lines.push(L::Blank);
     }
     let focus = sheet.focus.min(sheet.rows().len() - 1);
-    let label = |key: &str| format!("{:<14}", fit(&t!(key), 13));
+    let label = |key: &str| sheet_label(&t!(key));
     let on = |b: bool| if b { g.radio_on } else { "( )" };
     let tick = |b: bool| if b { g.checked } else { "[ ]" };
     let mut peer_head: Option<u32> = None;
