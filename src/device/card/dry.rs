@@ -5,9 +5,10 @@
 //! reaches the card. What it wrote reads back as written, under FAT's
 //! case-insensitive names, for as long as it lives.
 //!
-//! It holds the real card's key, so a dry run and a real one in this
-//! process never hold one card at once; it takes no OS lock, so a program
-//! writing the card meanwhile only makes the plan stale.
+//! It takes no place in this process's hold on the card and no OS lock: a
+//! dry run never keeps a real one off the card (a fit worked out while the
+//! listener applies the settings, a look beside another program's run),
+//! and a run writing the card meanwhile only makes the plan stale.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
@@ -235,6 +236,10 @@ impl CardWrite for DryCard<'_> {
         self.real.key()
     }
 
+    fn dry(&self) -> bool {
+        true
+    }
+
     fn serial(&self) -> io::Result<Option<Serial>> {
         self.real.serial()
     }
@@ -298,7 +303,9 @@ impl CardWrite for DryCard<'_> {
     }
 
     fn lock_file(&self, path: &str) -> io::Result<Box<dyn LockFile + '_>> {
-        let note = self.read(path, 64 * 1024)?.unwrap_or_default();
+        // The note is only ever said: a real run's lock on it (Windows locks
+        // the bytes it holds) leaves the dry run none to say.
+        let note = self.read(path, 64 * 1024).ok().flatten().unwrap_or_default();
         Ok(Box::new(DryLock(note)))
     }
 }

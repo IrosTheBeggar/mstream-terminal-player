@@ -1288,6 +1288,24 @@ fn a_stale_lock_is_taken_over_and_a_live_one_keeps_the_card() {
     sync(&card, &wanted, &mut server, 6).expect("free again");
 }
 
+/// A dry run's card takes no place in this process's hold on the card (the
+/// review's TV2): a real run opens beside a dry one's session, and a dry one
+/// beside a real one's, as a fit worked out while the settings are applied.
+#[test]
+fn a_dry_run_keeps_no_real_run_off_the_card() {
+    let dir = Scratch::new("dry-beside");
+    let (card, ..) = first(&dir.0);
+    fn open_on<'c>(card: &'c dyn CardWrite) -> Result<Session<'c>, Stop> {
+        Session::open(card, &Expect::default(), knobs(), &Answers::default(), env(8), &mut NoHooks, &mut |_| {})
+    }
+    let dry = crate::device::card::dry::DryCard::new(&card);
+    let dry_session = open_on(&dry).expect("a dry session");
+    let real = open(&card, Answers::default(), 7, &mut |_| {}).expect("a real run beside a dry one");
+    let again = crate::device::card::dry::DryCard::new(&card);
+    let beside = open_on(&again).expect("a dry one beside a real one");
+    drop((beside, real, dry_session));
+}
+
 #[test]
 fn one_run_holds_a_card_at_a_time() {
     let dir = Scratch::new("one-run");

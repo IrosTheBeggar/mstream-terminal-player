@@ -624,17 +624,12 @@ fn a_sync_adds_the_waveforms_a_card_lacks_and_says_how_far_it_has_come() {
     assert!(said.contains(" of 5 waveforms\n"), "{said}");
     assert!(said.contains("Car synced in ") && said.contains("verified."), "{said}");
 
-    // In step, once the look the sync's worker left behind has let the card go.
-    let t0 = Instant::now();
-    let said = loop {
-        let mut term = Term::new();
-        let code = b.run(Some(&key), What::Status, &Flags::default(), None, &mut term);
-        assert_eq!(code, 0, "{}", term.said());
-        let busy = term.said().contains("another run holds this card");
-        if !busy || t0.elapsed() > Duration::from_secs(10) {
-            break term.said();
-        }
-    };
+    // In step: the look the sync's worker left behind holds no real run's
+    // place, and keeps no other look off the card.
+    let mut term = Term::new();
+    let code = b.run(Some(&key), What::Status, &Flags::default(), None, &mut term);
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
     assert!(said.contains("next sync   nothing new on Home\n"), "{said}");
 }
 

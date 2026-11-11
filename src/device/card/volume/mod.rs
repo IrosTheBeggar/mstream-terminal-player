@@ -522,6 +522,12 @@ pub(crate) trait LockFile {
 pub(crate) trait CardWrite: CardFs {
     /// One text per volume: two runs on one card in this process share it.
     fn key(&self) -> String;
+    /// A dry run's card, whose writes stay in memory: it takes no place in
+    /// this process's hold on the card, as it takes no OS lock, so a dry
+    /// run never keeps a real one off the card.
+    fn dry(&self) -> bool {
+        false
+    }
     /// The volume serial as the OS reports it now (2.10).
     fn serial(&self) -> io::Result<Option<Serial>>;
     /// A file there already, to read (and write) in place.

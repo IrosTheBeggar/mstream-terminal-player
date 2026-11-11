@@ -26,7 +26,8 @@ use super::super::contract::msmf::{self, Manifest, Pick};
 use super::super::volume::{CardFs, CardWrite, LockFile, Serial};
 use super::Stop;
 
-/// The cards a run of this process holds, by [`CardWrite::key`].
+/// The cards a run of this process holds, by [`CardWrite::key`]: a dry
+/// run's ([`CardWrite::dry`]) takes no place.
 static HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub(super) const RUN_LOCK: &str = "/.mstream/run.lock";
@@ -104,7 +105,8 @@ pub(super) fn note(run_id: u64, started: u64, producer: &str) -> String {
 /// A card held by a run.
 pub(super) struct Bound<'c> {
     card: &'c dyn CardWrite,
-    key: String,
+    /// Its place in [`HELD`]; none for a dry run's card.
+    key: Option<String>,
     lock: Option<Box<dyn LockFile + 'c>>,
     pub(super) id: Identity,
     serial_read: Instant,
@@ -123,10 +125,10 @@ impl<'c> Bound<'c> {
         id: Identity,
         note: &str,
     ) -> Result<(Bound<'c>, Option<String>), Stop> {
-        let key = card.key();
-        {
+        let key = (!card.dry()).then(|| card.key());
+        if let Some(key) = &key {
             let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
-            if held.contains(&key) {
+            if held.contains(key) {
                 return Err(Stop::Busy);
             }
             held.push(key.clone());
@@ -229,7 +231,9 @@ impl Drop for Bound<'_> {
         // A run that stops without release leaves run.lock as a stale note
         // (its OS lock goes with the handle): the next run takes it over.
         self.lock = None;
-        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
-        held.retain(|k| k != &self.key);
+        if let Some(key) = &self.key {
+            let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+            held.retain(|k| k != key);
+        }
     }
 }
