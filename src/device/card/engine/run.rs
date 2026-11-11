@@ -315,12 +315,17 @@ impl<'r, 'c> Runner<'r, 'c> {
         }
 
         // Step 8: each file, in the plan's order; the server's own bytes of
-        // a file its source says a later run may take up, into a partial.
+        // a file its source says a later run may take up, into a partial —
+        // only one whose size the listing gave: a cut rename's partial is
+        // paired with its target by the plan's expected size (2.12.8), which
+        // for a file of unknown size is a guess, so such a file goes through
+        // `stage/`, paired by its place in the plan.
         let mut order: Vec<usize> = (0..plan.writes.len()).collect();
         order.sort_by(|&a, &b| compare_file_paths(&plan.writes[a].path, &plan.writes[b].path));
         let resumable = |w: &Write| {
             let file = &plan.wanted.files[w.file];
-            w.from.is_none() && file.original() && fetcher.resumable(file)
+            let sized = file.server_size().is_some();
+            w.from.is_none() && file.original() && sized && fetcher.resumable(file)
         };
         let resumable: HashSet<usize> =
             (0..plan.writes.len()).filter(|&k| resumable(&plan.writes[k])).collect();

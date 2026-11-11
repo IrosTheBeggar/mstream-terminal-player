@@ -847,8 +847,11 @@ impl Fetcher for Peer {
         read.map(|r| r.bytes).map_err(|e| skip(e.to_string()))
     }
 
+    /// Only a file whose size the listing gave: a partial's pairing with
+    /// its target after a cut rename is by size (2.12.8), so one of unknown
+    /// size goes through `stage/`, whose pairing is by the plan's place.
     fn resumable(&self, file: &WantedFile) -> bool {
-        file.origin == self.s.origin && file.original()
+        file.origin == self.s.origin && file.original() && file.server_size().is_some()
     }
 
     fn fetch_part(

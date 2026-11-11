@@ -35,6 +35,8 @@ pub(super) struct PeerLib {
     instance: Option<&'static str>,
     /// The key forbids copies.
     copies_off: bool,
+    /// Its metadata gives no `file-size` (a row it has no size for).
+    sizeless: bool,
     /// The 429s its files' GETs are answered with, in turn.
     limits: VecDeque<Limit>,
     /// Every request, as "via METHOD target": `direct`, or `parent` for one
@@ -73,12 +75,12 @@ pub(super) struct FedPeer {
 /// The peer's own id.
 const PEER_ID: &str = "5d0c2b9a-1f3e-4a6b-8c7d-9e0f1a2b3c4d";
 
-fn peer_meta(t: &Track) -> Value {
+fn peer_meta(t: &Track, sizeless: bool) -> Value {
     let mut m = t.full.clone();
     let audio = md5(&[b"audio:".as_slice(), &t.bytes].concat());
     m["duration"] = json!(t.seconds);
     m["album-art"] = json!(t.art);
-    m["file-size"] = json!(t.bytes.len());
+    m["file-size"] = if sizeless { Value::Null } else { json!(t.bytes.len()) };
     m["modified"] = json!(1_790_000_000_000i64 + t.id);
     m["hash"] = json!(hex(&md5(&t.bytes)));
     m["audio-hash"] = json!(hex(&audio));
@@ -136,9 +138,9 @@ fn peer_answer(fake: &PeerFake, asked: &Asked, via: &str) -> Vec<u8> {
         ("POST", "/api/v1/db/metadata/batch") => {
             let paths: Vec<String> = serde_json::from_value(asked.json()).unwrap_or_default();
             lib.batched.extend(paths.iter().cloned());
-            let mut out = serde_json::Map::new();
+            let (mut out, sizeless) = (serde_json::Map::new(), lib.sizeless);
             for p in paths {
-                let row = |t: &Track| json!({"filepath": p, "metadata": peer_meta(t)});
+                let row = |t: &Track| json!({"filepath": p, "metadata": peer_meta(t, sizeless)});
                 let row = lib.tracks.iter().find(|t| t.path == p).map(row);
                 out.insert(p, row.unwrap_or(Value::Null));
             }
@@ -854,6 +856,48 @@ fn a_peers_budget_spent_parks_it_and_the_next_day_takes_it_up() {
     assert_eq!((outcome.parked.clone(), outcome.written, outcome.verified.clone()), (None, 1, Ok(())));
     let range = format!("bytes={have}-");
     assert_eq!(peer.lock().unwrap().ranges.last().unwrap().as_deref(), Some(range.as_str()));
+    let on_card = std::fs::read(scratch.0.join("card/music/Folk/Dana Duo/Album/02.mp3")).unwrap();
+    assert_eq!(on_card, big(1));
+    let seen = look(&sim);
+    assert!(seen.pending.is_none() && seen.root.as_ref().unwrap().manifest.is_final());
+}
+
+/// A peer whose listing gives no sizes, its budget spent partway through a
+/// file: no partial is kept of it (a partial of unknown size can't be paired
+/// with its target after a cut rename), and the next day's run fetches it
+/// whole, through `stage/`.
+#[test]
+fn a_peers_file_of_unknown_size_is_never_kept_in_a_partial() {
+    let scratch = Scratch::new("peer-sizeless");
+    let sim = card(&scratch);
+    let big = |n: usize| mp3_bytes(2100 + n, true);
+    let tracks = vec![
+        peer_track("Folk/Dana Duo/Album/01.mp3", 1, big(0)),
+        peer_track("Folk/Dana Duo/Album/02.mp3", 2, big(1)),
+    ];
+    let (base, _fake, peer, dial) = world(true, false, tracks);
+    peer.lock().unwrap().sizeless = true;
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    let one_mib = Ask { budget_mb: Some(1), ..rock_and_folk() };
+    let synced = sync_fed(&sim, &base, &one_mib, &fed, &mut envs);
+    let outcome = ran(&synced);
+    let why = "the day's budget for the peer is spent";
+    assert_eq!(outcome.parked.as_deref(), Some(why), "{:?}", outcome.report);
+    let seen = look(&sim);
+    assert!(seen.pending.is_some(), "a checkpoint whose plan keeps it");
+    let parts = seen.resume.value.as_ref().and_then(|v| v["parts"].as_array().cloned());
+    assert!(parts.unwrap_or_default().is_empty(), "no partial listed: {:?}", seen.resume.value);
+    let held = std::fs::read_dir(scratch.0.join("card/.mstream/resume")).map_or(0, |d| d.count());
+    assert_eq!(held, 0, "no partial on the card");
+
+    // The next day: the file whole, from its first byte.
+    clock.store(next_midnight(NOW) + JITTER + 60, Ordering::Relaxed);
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    let outcome = ran(&synced);
+    assert_eq!((outcome.parked.clone(), outcome.written, outcome.verified.clone()), (None, 1, Ok(())));
+    assert_eq!(peer.lock().unwrap().ranges.last().cloned(), Some(None), "asked for whole");
     let on_card = std::fs::read(scratch.0.join("card/music/Folk/Dana Duo/Album/02.mp3")).unwrap();
     assert_eq!(on_card, big(1));
     let seen = look(&sim);

@@ -3765,6 +3765,54 @@ fn every_cut_inside_a_large_files_pieces_is_finished() {
     }
 }
 
+/// A file whose listing gave no size, of a source that says a later run may
+/// take it up: never into a partial (a cut rename's partial is paired with
+/// its target by the plan's expected size, a guess for this one), but
+/// through `stage/`, paired by the plan's place. Every cut of its run — the
+/// rename into `/music` between its two directory writes too — is
+/// finished by the next run, which never renames a partial into place.
+#[test]
+fn a_file_of_unknown_size_is_never_taken_up_and_every_cut_of_it_is_finished() {
+    let bytes = corpus("picture_first.mp3");
+    let mut server = Canned { resumable: true, ..Canned::default() };
+    server.add(BIG, bytes.clone());
+    let mut file = track(BIG, &bytes, 601);
+    // No `file-size`: the plan's size is a guess, and not the file's.
+    (file.ledger.server_size, file.size) = (0, 2 * bytes.len() as u64);
+    let wanted = WantedCard { origins: vec![home()], files: vec![file] };
+    let base = Scratch::new("unsized-base");
+    set_up(&base.0);
+
+    let whole = Scratch::new("unsized-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    let outcome = sync(&card, &wanted, &mut server, 2).expect("uncut");
+    assert_eq!((outcome.written, outcome.verified), (1, Ok(())));
+    let writes = card.log();
+    let want = finished(&card);
+    let rel = BIG.trim_start_matches("Lib/");
+    let on = card.read(&format!("/music/{rel}"), usize::MAX).unwrap().expect("on the card");
+    assert!(on == bytes, "the server's bytes");
+    assert!(!writes.iter().any(|w| w.contains("/resume/")), "no partial: {writes:?}");
+    assert!(writes.iter().any(|w| w.starts_with("rename /.mstream/stage/")), "{writes:?}");
+    assert!(server.asked.is_empty(), "never asked for as a partial");
+
+    let mut between = 0;
+    for (n, how) in cuts_of(&writes, writes.len()) {
+        let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
+        let into_music = writes[n as usize - 1].starts_with("rename /.mstream/stage/");
+        between += usize::from(how == Cut::Between && into_music);
+        let (_dir, card) = cut_card(&base.0, n, how, &wanted, &mut server);
+        let again = recover(&card, &wanted, &mut server, 3);
+        let outcome = again.ran.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!(finished(&card), want, "{what}");
+        let parts = again.writes.iter().filter(|w| w.contains("/resume/")).collect::<Vec<_>>();
+        assert!(parts.is_empty(), "{what}: {parts:?}");
+    }
+    assert!(between > 0, "the rename into /music cut between its directory writes");
+}
+
 /// A card pulled mid-download keeps the bytes its last listing names; the
 /// next run cuts off what came after them and asks for the rest.
 #[test]
