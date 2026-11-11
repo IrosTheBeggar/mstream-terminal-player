@@ -36,6 +36,10 @@ const CEILING_BASE: Duration = Duration::from_secs(5 * 60);
 /// still given more than the time it plays): its size says how long it
 /// plays at most, give or take a factor of two.
 const BYTES_A_SECOND: u64 = 8 * 1024;
+/// A conversion whose output hasn't grown for this long is given up,
+/// whatever its ceiling: ffmpeg writes as it goes, so one that writes
+/// nothing has hung (a damaged file of no known length is given hours).
+const STALL: Duration = Duration::from_secs(3 * 60);
 
 /// The longest a conversion of a source of `expected_ms` (its length, when
 /// known) or else `size` bytes may run before it is given up: a few minutes,
@@ -53,7 +57,8 @@ pub(crate) fn ceiling(expected_ms: Option<u64>, size: u64) -> Duration {
 pub(crate) trait Convert: Send + Sync {
     /// `from` made into `to` as `codec` at `bitrate`; Err why. A `stop`
     /// set ends it, and so does running longer than `within`
-    /// ([`ceiling`]): it fails.
+    /// ([`ceiling`]), or `to` not growing for a few minutes ([`STALL`]):
+    /// it fails.
     fn convert(
         &self,
         from: &Path,
@@ -170,7 +175,8 @@ impl Convert for Ffmpeg {
                 String::from_utf8_lossy(&out).trim().to_string()
             })
         });
-        let status = wait_for(&mut child, within, stop)?;
+        let written = || std::fs::metadata(to).map_or(0, |m| m.len());
+        let status = wait_for(&mut child, Watch { within, stall: STALL, written: &written }, stop)?;
         let words = words.and_then(|w| w.join().ok()).unwrap_or_default();
         match status.success() {
             true => Ok(()),
@@ -186,15 +192,35 @@ impl Convert for Ffmpeg {
     }
 }
 
-/// `child`'s end: killed, and Err why, once `stop` is set or it ran past
-/// `within`.
-fn wait_for(child: &mut Child, within: Duration, stop: &AtomicBool) -> Result<ExitStatus, String> {
+/// How a conversion is watched: the longest it may run, the longest its
+/// output may stand still, and how much of it is written so far.
+struct Watch<'a> {
+    within: Duration,
+    stall: Duration,
+    written: &'a dyn Fn() -> u64,
+}
+
+/// `child`'s end: killed, and Err why, once `stop` is set, it ran past
+/// `watch.within`, or its output stood still for `watch.stall`.
+fn wait_for(child: &mut Child, watch: Watch<'_>, stop: &AtomicBool) -> Result<ExitStatus, String> {
     let started = Instant::now();
+    let (mut size, mut grew) = ((watch.written)(), Instant::now());
+    let mut looked = Instant::now();
     loop {
+        // Its output looked at once a second: grown, the clock starts again.
+        if looked.elapsed() >= Duration::from_secs(1) {
+            looked = Instant::now();
+            let now = (watch.written)();
+            if now != size {
+                (size, grew) = (now, Instant::now());
+            }
+        }
         let why = if stop.load(Ordering::SeqCst) {
             Some("stopped".to_string())
-        } else if started.elapsed() > within {
-            Some(format!("ffmpeg ran past {} s, and was stopped", within.as_secs()))
+        } else if started.elapsed() > watch.within {
+            Some(format!("ffmpeg ran past {} s, and was stopped", watch.within.as_secs()))
+        } else if grew.elapsed() > watch.stall {
+            Some(format!("ffmpeg wrote nothing for {} s, and was stopped", watch.stall.as_secs()))
         } else {
             None
         };
@@ -303,7 +329,9 @@ mod tests {
         assert!(ceiling(None, audiobook) >= Duration::from_secs(9 * 3600), "{:?}", ceiling(None, audiobook));
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let started = Instant::now();
-        let why = wait_for(&mut long_child(), Duration::from_millis(300), &stop).unwrap_err();
+        let still = || 0;
+        let watch = |within| Watch { within, stall: STALL, written: &still };
+        let why = wait_for(&mut long_child(), watch(Duration::from_millis(300)), &stop).unwrap_err();
         assert!(why.contains("ran past"), "{why}");
         assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
         // The listener's stop, set as it runs.
@@ -315,7 +343,7 @@ mod tests {
             })
         };
         let started = Instant::now();
-        let why = wait_for(&mut long_child(), Duration::from_secs(60), &stop).unwrap_err();
+        let why = wait_for(&mut long_child(), watch(Duration::from_secs(60)), &stop).unwrap_err();
         setter.join().unwrap();
         assert_eq!(why, "stopped");
         assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
@@ -355,5 +383,31 @@ mod tests {
         let heard = super::super::length::heard(TransferCodec::Opus, &at).unwrap();
         assert!(heard.ms.abs_diff(1000) <= 30, "{heard:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A conversion whose output stands still is stopped long before its
+    /// ceiling (a hung ffmpeg on a damaged file of no known length is
+    /// given hours); one whose output grows runs to its ceiling (the last
+    /// review's Z4).
+    #[test]
+    fn a_conversion_that_writes_nothing_for_a_while_is_stopped() {
+        let stop = AtomicBool::new(false);
+        let mut child = long_child();
+        let t0 = Instant::now();
+        let still = || 0;
+        let watch = Watch { within: Duration::from_secs(60), stall: Duration::from_secs(2), written: &still };
+        let why = wait_for(&mut child, watch, &stop).unwrap_err();
+        assert!(why.contains("wrote nothing for 2 s"), "{why}");
+        assert!(t0.elapsed() < Duration::from_secs(20), "{:?}", t0.elapsed());
+
+        let mut child = long_child();
+        let n = std::cell::Cell::new(0u64);
+        let growing = || {
+            n.set(n.get() + 1);
+            n.get()
+        };
+        let watch = Watch { within: Duration::from_secs(4), stall: Duration::from_secs(2), written: &growing };
+        let why = wait_for(&mut child, watch, &stop).unwrap_err();
+        assert!(why.contains("ran past 4 s"), "{why}");
     }
 }
