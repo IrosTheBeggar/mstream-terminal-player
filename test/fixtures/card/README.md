@@ -7,15 +7,13 @@ https://creativecommons.org/publicdomain/zero/1.0/), so the player,
 mstream-terminal and mStream can all copy them (docs/METADATA.md part 7,
 U18, proposed). The player's code stays GPL-3.0-or-later.
 
-This copy is mstream-terminal's, made from the player's repo
-(IrosTheBeggar/mstream-mp3-player): `tools/card_fixtures.py` run on commit
-6ba95da (the mood tail, MPTG minor 1, on the waveform index's 6f222b5)
-merged with cc0ccb3 (the play log's `history=1`), since neither branch has
-the other yet. The one conflict the tool minds is device.txt's keys:
-`read.mpwf` and `history` both, in 2.15's order, firmware 0.12.0. Every file
-but this paragraph is byte for byte what that merge makes. Copy them again
-from `test/fixtures/card` on the player's main once both have landed, and
-when the contract changes (docs/METADATA.md 2.17 there says how they may);
+This copy is mstream-terminal's, taken from `test/fixtures/card` on the
+player's main (IrosTheBeggar/mstream-mp3-player at f394a96, firmware
+0.14.0's contract: the waveform index, the mood tail of MPTG minor 1 and
+the play log's `history=1`). Every file but this paragraph is byte for
+byte the player's (the `firmware=` value in `golden/device.txt` is a
+sample, not a release). Copy them again from there when the contract
+changes (docs/METADATA.md 2.17 there says how they may);
 never edit them here. The terminal's tests are
 `src/device/card/contract/tests.rs` (the kit, `moods.json` among them), and
 those of `names.rs` (the `names` vectors), `autodj`, `waves` and `volume`
