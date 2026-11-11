@@ -1783,7 +1783,10 @@ impl Worker {
         // nothing would stop the asking till its next write, half an hour off.
         let asks_out = slot.view.out && matches!(event, RunEvent::Waves { .. });
         let counts = matches!(event, RunEvent::Progress { .. } | RunEvent::Waves { .. });
-        let urgent = run.phase != phase_was || !counts;
+        // The last waveform is told at once: a count the throttle held back
+        // at the end would be the one the command line never says.
+        let last = matches!(event, RunEvent::Waves { done, of } if done >= of);
+        let urgent = run.phase != phase_was || !counts || last;
         let due = slot.told.is_none_or(|t| t.elapsed() >= TELL_EVERY);
         if urgent || due {
             slot.told = Some(Instant::now());

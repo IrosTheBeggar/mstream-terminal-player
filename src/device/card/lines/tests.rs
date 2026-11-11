@@ -622,6 +622,8 @@ fn a_sync_adds_the_waveforms_a_card_lacks_and_says_how_far_it_has_come() {
     assert!(said.contains(" from Home: waveforms to add.\n"), "{said}");
     assert!(said.contains("asking Home for waveforms…\n"), "{said}");
     assert!(said.contains(" of 5 waveforms\n"), "{said}");
+    // Up to the last, said once (the review's TU5).
+    assert_eq!(said.matches("  5 of 5 waveforms\n").count(), 1, "{said}");
     assert!(said.contains("Car synced in ") && said.contains("verified."), "{said}");
 
     // In step: the look the sync's worker left behind holds no real run's
@@ -777,7 +779,7 @@ fn a_worker_gone_under_a_sync_ends_the_command_with_a_line() {
     let (link, inbox) = Link::pair();
     drop(inbox);
     let (_, events) = std::sync::mpsc::channel::<worker::Event>();
-    let mut session = Session { link, events, fold: Fold::default(), told: Instant::now(), gone: false };
+    let mut session = Session::of(link, events);
     let mut term = Term::new();
     let mut ask = |_: &str| None;
     let ctrl_c = AtomicU8::new(0);
@@ -785,4 +787,142 @@ fn a_worker_gone_under_a_sync_ends_the_command_with_a_line() {
     let code = run(&mut session, "E:\\", Allow::default(), &Flags::default(), &mut io);
     assert_eq!(code, 1);
     assert!(term.said().contains("the card transfer stopped unexpectedly"), "{}", term.said());
+}
+
+// ── The run's lines and the command's own copies (the review's TU5, TU9) ──
+
+/// The terminal's side over a `Term`, no one to ask.
+fn with_io<R>(term: &mut Term, body: impl FnOnce(&mut Io) -> R) -> R {
+    let mut ask = |_: &str| None;
+    let ctrl_c = AtomicU8::new(0);
+    let mut io = Io { out: &mut term.out, err: &mut term.err, ask: &mut ask, ctrl_c: &ctrl_c };
+    body(&mut io)
+}
+
+fn waves(done: usize, of: usize) -> Run {
+    Run { phase: Phase::Waves, waves: (done, of), ..Run::default() }
+}
+
+fn copying(done_files: usize, done_bytes: u64) -> Run {
+    Run { phase: Phase::Copying, files: 10, bytes: 1_000, done_files, done_bytes, ..Run::default() }
+}
+
+/// Each tenth is said up to and with the end, and a count the command never
+/// saw at its end is said as its phase ends or the run does: a long run
+/// never looks stopped at 90%.
+#[test]
+fn a_runs_counts_are_said_to_the_end_and_once() {
+    // The end seen: said, once.
+    let mut term = Term::new();
+    with_io(&mut term, |io| {
+        let mut steps = Steps::default();
+        for run in [waves(1, 10), waves(9, 10), waves(10, 10), waves(10, 10)] {
+            steps.see(&run, "Home", io);
+        }
+        steps.see(&Run { phase: Phase::Verifying, waves: (10, 10), ..Run::default() }, "Home", io);
+        steps.end(io);
+    });
+    let said = term.said();
+    assert_eq!(said.matches("  10 of 10 waveforms\n").count(), 1, "{said}");
+    assert!(said.contains("  9 of 10 waveforms\n"), "{said}");
+    assert!(said.ends_with("verifying the card…\n"), "{said}");
+
+    // The end never seen in its phase: said as the next phase begins, and
+    // before its line.
+    let mut term = Term::new();
+    with_io(&mut term, |io| {
+        let mut steps = Steps::default();
+        steps.see(&waves(9, 10), "Home", io);
+        steps.see(&Run { phase: Phase::Verifying, waves: (10, 10), ..Run::default() }, "Home", io);
+        steps.end(io);
+    });
+    let said = term.said();
+    let (end, next) = (said.find("  10 of 10 waveforms\n"), said.find("verifying the card…"));
+    assert!(end.is_some() && end < next, "{said}");
+
+    // A copy whose last files failed never reaches its tenth 10: the count
+    // it ended at is said as the run ends.
+    let mut term = Term::new();
+    with_io(&mut term, |io| {
+        let mut steps = Steps::default();
+        steps.see(&copying(1, 100), "Home", io);
+        steps.see(&copying(9, 900), "Home", io);
+        steps.see(&copying(10, 900), "Home", io);
+        steps.end(io);
+        steps.end(io);
+    });
+    let said = term.said();
+    assert!(said.contains("  9 of 10 files · "), "{said}");
+    assert_eq!(said.matches("  10 of 10 files · ").count(), 1, "{said}");
+}
+
+/// A session on the test's channels, with eight notes of other cards and
+/// `card` already told: the fold keeps no more notes than that.
+fn busy_session(card: &CardView) -> (Session, std::sync::mpsc::Sender<Event>) {
+    let (link, _inbox) = Link::pair();
+    let (tell, events) = std::sync::mpsc::channel();
+    let mut session = Session::of(link, events);
+    tell.send(Event::Card(Box::new(card.clone()))).unwrap();
+    for n in 0..8 {
+        tell.send(Event::Note(Note::Ejected { card: format!("Card {n}") })).unwrap();
+    }
+    session.pump(Duration::from_millis(50));
+    assert_eq!(session.fold.notes.len(), 8, "the fold's notes are full");
+    (session, tell)
+}
+
+#[test]
+fn with_four_cards_a_failed_setup_says_so_and_exits_one() {
+    let card = f::ready("E:", now());
+    let key = card.key.clone();
+    let (mut session, tell) = busy_session(&card);
+    let busy = f::with(card.clone(), |c| c.busy = Some(worker::Job::Apply));
+    tell.send(Event::Card(Box::new(busy))).unwrap();
+    let feeder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        tell.send(Event::Note(Note::Failed { why: "the card is read-only".into() })).unwrap();
+        tell.send(Event::Card(Box::new(card))).unwrap();
+        tell
+    });
+    let mut term = Term::new();
+    let code = with_io(&mut term, |io| wait_job(&mut session, &key, io, "E:'s settings are changed."));
+    let _ = feeder.join();
+    let said = term.said();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("the card is read-only") && !said.contains("settings are changed"), "{said}");
+}
+
+#[test]
+fn with_four_cards_an_eject_that_answered_is_said() {
+    let card = f::ready("E:", now());
+    let key = card.key.clone();
+    let (mut session, tell) = busy_session(&card);
+    tell.send(Event::Note(Note::Ejected { card: "Car music".into() })).unwrap();
+    let mut term = Term::new();
+    let t0 = Instant::now();
+    let code = with_io(&mut term, |io| eject(&mut session, &key, io));
+    let said = term.said();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("(Car music) can be taken out.") && t0.elapsed() < Duration::from_secs(30), "{said}");
+}
+
+#[test]
+fn a_run_with_more_log_lines_than_the_fold_keeps_says_every_skipped_one() {
+    let card = f::ready("E:", now());
+    let key = card.key.clone();
+    let (link, _inbox) = Link::pair();
+    let (tell, events) = std::sync::mpsc::channel();
+    let mut session = Session::of(link, events);
+    tell.send(Event::Card(Box::new(f::syncing("E:", now())))).unwrap();
+    for n in 0..450 {
+        let item = LogItem::Skipped { path: format!("Rock/{n:03}.mp3"), why: "gone".into() };
+        tell.send(Event::Log { key: key.clone(), item }).unwrap();
+    }
+    let ended = f::with(card, |c| c.ended = Some(worker::Ended::Stopped { at: 1_204, of: 4_812 }));
+    tell.send(Event::Card(Box::new(ended))).unwrap();
+    let mut term = Term::new();
+    with_io(&mut term, |io| run(&mut session, &key, Allow::default(), &Flags::default(), io));
+    let said = term.said();
+    assert_eq!(said.matches("  skipped Rock/").count(), 450, "{said}");
+    assert!(said.contains("skipped Rock/000.mp3: gone") && said.contains("skipped Rock/449.mp3: gone"));
 }

@@ -28,7 +28,7 @@ use super::state::{Convert, LabelFault};
 use super::volume::{Fs, Refusal, Table};
 use super::worker::{
     self, Allow, CardView, Cmd, Ended, Event, Fold, Gate, Link, LogItem, Next, Note, Pause, Phase, Planned,
-    Read, Server, ServerLink, Setup, Want,
+    Read, Run, Server, ServerLink, Setup, Want,
 };
 use crate::admin::fmt_count;
 use crate::api::urls::{TransferBitrate, TransferCodec};
@@ -193,13 +193,22 @@ struct Session {
     told: Instant,
     /// The worker is gone: nothing more will be told.
     gone: bool,
+    /// Every note and log line told, in order: the command reads its
+    /// results here, never in the fold's, which keeps only the last few.
+    notes: Vec<Note>,
+    logs: Vec<(String, LogItem)>,
 }
 
 impl Session {
     fn start(setup: Setup, servers: Vec<ServerLink>) -> Session {
         let (link, events) = worker::spawn(setup);
         link.send(Cmd::Servers(servers));
-        Session { link, events, fold: Fold::default(), told: Instant::now(), gone: false }
+        Session::of(link, events)
+    }
+
+    fn of(link: Link, events: Receiver<Event>) -> Session {
+        let (notes, logs) = (Vec::new(), Vec::new());
+        Session { link, events, fold: Fold::default(), told: Instant::now(), gone: false, notes, logs }
     }
 
     /// Folds what was told within `wait`.
@@ -218,6 +227,11 @@ impl Session {
             // a card is told is what the quiet waits for.
             if matches!(event, Event::Card(_) | Event::Progress { .. } | Event::Gone { .. }) {
                 self.told = Instant::now();
+            }
+            match &event {
+                Event::Note(note) => self.notes.push(note.clone()),
+                Event::Log { key, item } => self.logs.push((key.clone(), item.clone())),
+                _ => {}
             }
             self.fold.apply(event);
             next = self.events.try_recv().ok();
@@ -699,7 +713,7 @@ fn job_done(session: &mut Session, key: &str, began: &mut bool) -> bool {
 
 /// The notes told since `from`.
 fn notes_since(session: &Session, from: usize) -> Vec<Note> {
-    session.fold.notes.iter().skip(from).cloned().collect()
+    session.notes.iter().skip(from).cloned().collect()
 }
 
 /// `setup` (clause 50): a new card set up with the flags' settings, or a
@@ -834,7 +848,7 @@ fn settings_lines(want: &Want, server: &str, io: &mut Io) {
 
 /// A job's end: `done` said, or the note that it failed.
 fn wait_job(session: &mut Session, key: &str, io: &mut Io, done: &str) -> i32 {
-    let from = session.fold.notes.len();
+    let from = session.notes.len();
     let (t0, mut began) = (Instant::now(), false);
     while !job_done(session, key, &mut began) {
         if t0.elapsed() >= JOB_WITHIN {
@@ -1077,7 +1091,7 @@ fn sync(session: &mut Session, key: &str, flags: &Flags, servers: &[ServerLink],
     // The take-over's yes: its settings written (clause 48's Apply), and
     // the sync takes the card over.
     if let Some(want) = take_over {
-        let from = session.fold.notes.len();
+        let from = session.notes.len();
         session.link.send(Cmd::Apply { key: key.to_string(), want: Box::new(want) });
         let (t0, mut began) = (Instant::now(), false);
         while !job_done(session, key, &mut began) {
@@ -1117,7 +1131,7 @@ fn asked_of(session: &mut Session, key: &str, want: &Want) -> Next {
 /// The run, its steps as lines until it ends.
 fn run(session: &mut Session, key: &str, mut allow: Allow, flags: &Flags, io: &mut Io) -> i32 {
     session.link.send(Cmd::Sync { key: key.to_string(), allow: Box::new(allow.clone()) });
-    let (mut logs, mut phase, mut tenth, mut stopping) = (session.fold.logs.len(), None, 0u64, false);
+    let (mut logs, mut steps, mut stopping) = (session.logs.len(), Steps::default(), false);
     let mut started = false;
     loop {
         session.pump(Duration::from_millis(100));
@@ -1134,50 +1148,23 @@ fn run(session: &mut Session, key: &str, mut allow: Allow, flags: &Flags, io: &m
                 "stopping {name} at the next save… (Ctrl+C again quits at once; the next sync goes on)"
             ));
         }
-        for (k, item) in session.fold.logs.iter().skip(logs) {
+        for (k, item) in session.logs.iter().skip(logs) {
             if k == key && let Some(line) = log_line(item) {
                 let _ = writeln!(io.out, "  {line}");
             }
         }
-        logs = session.fold.logs.len();
+        logs = session.logs.len();
         let Some(card) = session.card(key).cloned() else {
             io.warn("the card is gone");
             return 3;
         };
         if let Some(run) = &card.run {
             started = true;
-            if phase != Some(run.phase) {
-                phase = Some(run.phase);
-                tenth = 0;
-                io.say(&phase_words(run.phase, run.files, run.bytes, &server_name(&card)));
-            }
-            if run.phase == Phase::Waves {
-                let (done, of) = run.waves;
-                let now = u64::from(run.waves_percent()) / 10;
-                if now > tenth && now < 10 {
-                    tenth = now;
-                    let (done, of) = (fmt_count(done as u64), fmt_count(of as u64));
-                    io.say(&format!("  {done} of {of} waveforms"));
-                }
-            }
-            if run.phase == Phase::Copying && run.bytes > 0 {
-                let now = run.done_bytes.min(run.bytes) * 10 / run.bytes;
-                if now > tenth && now < 10 {
-                    tenth = now;
-                    // The Card view's rate too (clause 51's "12.4 MB/s").
-                    let rate = run.rate.map(|r| format!(" · {:.1} MB/s", r / 1e6));
-                    let rate = rate.unwrap_or_default();
-                    io.say(&format!(
-                        "  {} of {} files · {} of {} GB{rate}",
-                        fmt_count(run.done_files as u64),
-                        fmt_count(run.files as u64),
-                        gb(run.done_bytes),
-                        gb(run.bytes)
-                    ));
-                }
-            }
+            steps.see(run, &server_name(&card), io);
             continue;
         }
+        // The run is over, or met a gate: the count its last phase ended at.
+        steps.end(io);
         if !started && card.ended.is_none() && card.gate.is_none() {
             continue;
         }
@@ -1207,6 +1194,82 @@ fn run(session: &mut Session, key: &str, mut allow: Allow, flags: &Flags, io: &m
             return 1;
         }
         return ended(&card, io);
+    }
+}
+
+/// The run's lines as it goes: each phase's as the run reaches it, its
+/// count every tenth up to and with the end, and the count a phase ended at
+/// when that isn't the last one said — a run never looks stopped at 90%.
+#[derive(Default)]
+struct Steps {
+    phase: Option<Phase>,
+    tenth: u64,
+    /// The count last said in this phase.
+    said: Option<(u64, u64)>,
+    /// The run as last seen: what its last phase ended at.
+    last: Option<Run>,
+}
+
+impl Steps {
+    fn see(&mut self, run: &Run, server: &str, io: &mut Io) {
+        if self.phase != Some(run.phase) {
+            self.ended(run, io);
+            (self.phase, self.tenth, self.said) = (Some(run.phase), 0, None);
+            io.say(&phase_words(run.phase, run.files, run.bytes, server));
+        }
+        if let Some((tenth, count, line)) = count_of(run.phase, run)
+            && tenth > self.tenth
+        {
+            self.tenth = tenth;
+            self.said = Some(count);
+            io.say(&line);
+        }
+        self.last = Some(run.clone());
+    }
+
+    /// The run ended (or stopped at a gate).
+    fn end(&mut self, io: &mut Io) {
+        if let Some(run) = self.last.take() {
+            self.ended(&run, io);
+        }
+        self.phase = None;
+    }
+
+    /// The phase under way ends: `run` holds the counts it ended at.
+    fn ended(&mut self, run: &Run, io: &mut Io) {
+        let Some(was) = self.phase else { return };
+        let Some((_, count, line)) = count_of(was, run) else { return };
+        if count.0 > 0 && self.said != Some(count) {
+            self.said = Some(count);
+            io.say(&line);
+        }
+    }
+}
+
+/// A phase's count: its tenth, what it counts (said again only when that
+/// changed) and its line. Only the waveforms and the copy count.
+fn count_of(phase: Phase, run: &Run) -> Option<(u64, (u64, u64), String)> {
+    match phase {
+        Phase::Waves if run.waves.1 > 0 => {
+            let (done, of) = run.waves;
+            let tenth = u64::from(run.waves_percent()) / 10;
+            let line = format!("  {} of {} waveforms", fmt_count(done as u64), fmt_count(of as u64));
+            Some((tenth, (done as u64, of as u64), line))
+        }
+        Phase::Copying if run.bytes > 0 => {
+            let tenth = run.done_bytes.min(run.bytes) * 10 / run.bytes;
+            // The Card view's rate too (clause 51's "12.4 MB/s").
+            let rate = run.rate.map(|r| format!(" · {:.1} MB/s", r / 1e6)).unwrap_or_default();
+            let line = format!(
+                "  {} of {} files · {} of {} GB{rate}",
+                fmt_count(run.done_files as u64),
+                fmt_count(run.files as u64),
+                gb(run.done_bytes),
+                gb(run.bytes)
+            );
+            Some((tenth, (run.done_files as u64, run.done_bytes), line))
+        }
+        _ => None,
     }
 }
 
@@ -1386,7 +1449,7 @@ fn plays(session: &mut Session, key: &str, flags: &Flags, io: &mut Io) -> i32 {
     if !go_on(flags, io, "send them") {
         return 1;
     }
-    let (from, logs) = (session.fold.notes.len(), session.fold.logs.len());
+    let (from, logs) = (session.notes.len(), session.logs.len());
     session.link.send(Cmd::Plays { key: key.to_string() });
     let (t0, mut began) = (Instant::now(), false);
     while !job_done(session, key, &mut began) {
@@ -1400,7 +1463,7 @@ fn plays(session: &mut Session, key: &str, flags: &Flags, io: &mut Io) -> i32 {
         return 1;
     }
     // Why some went nowhere, in the job's own words.
-    for (k, item) in session.fold.logs.iter().skip(logs) {
+    for (k, item) in session.logs.iter().skip(logs) {
         if k == key && let Some(line) = log_line(item) {
             let _ = writeln!(io.out, "  {line}");
         }
@@ -1428,7 +1491,7 @@ fn plays(session: &mut Session, key: &str, flags: &Flags, io: &mut Io) -> i32 {
 /// `eject` (clause 54): the OS asked to let the card go.
 fn eject(session: &mut Session, key: &str, io: &mut Io) -> i32 {
     let Some(card) = session.card(key).cloned() else { return 2 };
-    let from = session.fold.notes.len();
+    let from = session.notes.len();
     session.link.send(Cmd::Eject { key: key.to_string() });
     let t0 = Instant::now();
     while t0.elapsed() < JOB_WITHIN {

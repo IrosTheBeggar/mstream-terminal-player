@@ -473,7 +473,7 @@ fn a_card_in_step_that_lacks_its_waveforms_is_offered_a_sync_and_its_phase_is_to
 }
 
 /// The waveforms' counts are told as a download's bytes are, every so often,
-/// and the phase's first and what comes after it at once.
+/// and the phase's first, its last and what comes after it at once.
 #[test]
 fn the_waveforms_counts_are_told_every_so_often_and_their_phase_at_once() {
     let scratch = Scratch::new("worker-waves-told");
@@ -504,6 +504,8 @@ fn the_waveforms_counts_are_told_every_so_often_and_their_phase_at_once() {
     let told: Vec<Run> = events.try_iter().filter_map(progress).collect();
     assert_eq!((told[0].phase, told[0].waves), (Phase::Waves, (0, 1000)));
     assert!(told.len() < 1001, "{} of 1,001 told", told.len());
+    // The last count is never held back: it is the one a phase ends at.
+    assert_eq!(told.last().map(|r| r.waves), Some((1000, 1000)), "the last told at once");
     worker.progress(&key, RunEvent::Committed { generation: 2, last: true });
     let told: Vec<Run> = events.try_iter().filter_map(progress).collect();
     assert_eq!(told.len(), 1, "{told:?}");
