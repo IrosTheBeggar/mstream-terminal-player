@@ -938,6 +938,51 @@ fn a_stop_while_a_peers_streams_are_busy_asks_it_nothing_more() {
     assert!(look(&sim).pending.is_some(), "the peer's files stay in the plan on the card");
 }
 
+/// A run whose every file waited (stopped as it began) leaves its plan on
+/// the card beside the root as it was; a run of the peers alone after it
+/// names no revision of the server, so the stopped run's plan isn't
+/// forgotten: the next run reads the server whole and fetches its file.
+#[test]
+fn a_peers_only_run_keeps_a_stopped_runs_plan_for_the_next() {
+    let scratch = Scratch::new("peers-only");
+    let sim = card(&scratch);
+    let (base, fake, _peer, dial) = world(true, false, folk());
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    ran(&sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs));
+    assert_ne!(root_revision(&sim), "");
+
+    // A new file on the server, and a run stopped once planned.
+    a_new_recording(&fake, 6);
+    let stop = Arc::new(AtomicBool::new(false));
+    let ask = Ask { stop: Some(stop.clone()), ..rock_and_folk() };
+    let client = Arc::new(Client::new(&base).unwrap().with_token(Some("tok".into())));
+    let plays: Rc<dyn history::Store> = Rc::new(MemStore::default());
+    let mut said = |e: Event| {
+        if matches!(e, Event::Planned { .. }) {
+            stop.store(true, Ordering::SeqCst);
+        }
+    };
+    let (mut cards, reached) = (Cards::default(), Reached::Elsewhere);
+    let stopped =
+        sync(&sim, space(32 << 30), client, reached, &ask, &mut cards, plays, &fed, &mut envs, &mut said);
+    assert_eq!(ran(&stopped).parked.as_deref(), Some(STOPPED));
+    let seen = look(&sim);
+    assert!(seen.pending.is_some(), "its plan on the card");
+
+    // The peers alone: the server's revision isn't named.
+    let peers_only = Ask { peers_only: true, ..rock_and_folk() };
+    let only = sync_fed(&sim, &base, &peers_only, &fed, &mut envs);
+    assert_eq!(ran(&only).verified, Ok(()));
+    assert_eq!(root_revision(&sim), "", "the stopped run's plan is the next run's");
+
+    // The next: read whole, and the file goes in.
+    let next = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!(next.summary.as_ref().unwrap().listed, Listed::Whole);
+    assert_eq!((ran(&next).written, ran(&next).verified.clone()), (1, Ok(())));
+}
+
 /// A peer's file the player can't play: with no ffmpeg on this computer it
 /// is skipped and listed; with one, the peer's bytes come whole, are made
 /// into Opus here, held to their length and given back their cover.

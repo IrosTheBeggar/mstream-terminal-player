@@ -829,12 +829,15 @@ fn prepare(
 
     // 3. The server's side.
     let reads = talk.clone();
-    let mut origin = Origin {
-        talk,
-        server: Server::direct(instance, url_key),
-        revision: known.clone(),
-        ..Origin::default()
+    // A run of the peers alone that finds a stopped run's plan, or a root
+    // that isn't a run's end, names no revision of the server: the plan's
+    // rest is the next run's, which reads the listing whole.
+    let revision = match ask.peers_only && unsettled {
+        true => String::new(),
+        false => known.clone(),
     };
+    let mut origin =
+        Origin { talk, server: Server::direct(instance, url_key), revision, ..Origin::default() };
     let others = info.user.vpaths.iter().filter(|v| !libraries.contains(v));
     let ignore: Vec<String> = others.cloned().collect();
     let known_revision = (!whole).then_some(known.as_str());
