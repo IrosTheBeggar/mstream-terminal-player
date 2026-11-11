@@ -270,7 +270,7 @@ fn wave_reply(wave: &Wave, flight: &AtomicUsize) -> Vec<u8> {
     }
 }
 
-fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
+pub(crate) fn answer(fake: &Fake, asked: &Asked) -> Vec<u8> {
     let mut lib = fake.lock().unwrap();
     let path = asked.path();
     lib.asked.push(format!("{} {path}", asked.method));

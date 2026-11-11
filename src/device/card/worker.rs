@@ -120,13 +120,22 @@ impl ServerLink {
     }
 
     /// Every key a card may name it by: the address it is read at, and its
-    /// saved URL.
+    /// saved URL or tunnel id.
     fn keys(&self) -> Vec<u64> {
         let mut keys: Vec<u64> = self.url_key().into_iter().collect();
-        if self.id.contains("://") {
-            keys.push(server_url_key(&self.id));
-        }
+        keys.extend(self.saved_key().filter(|k| !keys.contains(k)));
         keys
+    }
+
+    /// The key of what this computer saved it as, its URL or its tunnel's
+    /// id, when that is not the address it is read at: a server reached over
+    /// Quick Connect's bridge is read at a loopback address whose port is
+    /// new each session, and only its tunnel id stays. A sync and the
+    /// settings confirm it into the card's source, so the next session's
+    /// address is the same server's (2.11's key rule).
+    pub(crate) fn saved_key(&self) -> Option<u64> {
+        let key = server_url_key(&self.id);
+        (self.id.contains("://") && key != 0 && Some(key) != self.url_key()).then_some(key)
     }
 
     /// The local-disk source's condition: a loopback address, directly.
@@ -1416,8 +1425,10 @@ impl Worker {
             // A card its settings gave another server is asked as its
             // take-over would run.
             let answers = Answers { new_servers: take_over, ..Answers::default() };
-            let ask = sync::Ask { answers, ..sync::Ask::default() };
-            match (facts.set_up(), server.link()) {
+            let link = server.link();
+            let (also, same_server) = (also_of(link), same_server(&facts, link, take_over));
+            let ask = sync::Ask { answers, also, same_server, ..sync::Ask::default() };
+            match (facts.set_up(), link) {
                 (true, Some(link)) if link.base.is_ok() => {
                     JobDone::Looked(dry_run(card, home, link, &ask, space))
                 }
@@ -1463,6 +1474,8 @@ impl Worker {
                         libraries: want.libraries.clone(),
                         change: want.change(None),
                         answers: Answers { new_servers: take_over, ..Answers::default() },
+                        also: also_of(Some(&link)),
+                        same_server: same_server(&facts, Some(&link), take_over),
                         ..sync::Ask::default()
                     };
                     dry_run(&*card, &*home, &link, &ask, found.volume.space)
@@ -2164,6 +2177,21 @@ pub(crate) fn server_of(facts: &Facts, servers: &[ServerLink], take_over: bool) 
     }
 }
 
+/// The keys a sync of `link` confirms into the card's source beside the
+/// address it reads: its saved URL or tunnel id ([`ServerLink::saved_key`]).
+fn also_of(link: Option<&ServerLink>) -> Vec<u64> {
+    link.and_then(ServerLink::saved_key).into_iter().collect()
+}
+
+/// The card's server is `link` by a key other than the address it is read
+/// at now (its tunnel id, or a key the card confirmed for it): the sync is
+/// told it is the same server, not another one to take the card over.
+fn same_server(facts: &Facts, link: Option<&ServerLink>, take_over: bool) -> bool {
+    let (Some(link), Some(key)) = (link, facts.server) else { return false };
+    !take_over && link.url_key() != Some(key)
+        && matches!(server_of(facts, std::slice::from_ref(link), false), Server::Saved(_))
+}
+
 /// A card read as the device reads it, with nothing written.
 pub(crate) fn read(card: &dyn CardWrite, cards: &Cards) -> Result<Facts, String> {
     let seen = volume::inspect(card).map_err(|e| e.to_string())?;
@@ -2347,6 +2375,11 @@ fn store(
         s.auto_dj = want.auto_dj;
         s.for_someone_else = want.for_someone_else;
         if let Some(key) = url_key {
+            // Its tunnel id first, then its source (the confirm may make one
+            // source of two, the card's selection the one kept).
+            if let Some(saved) = link.and_then(ServerLink::saved_key) {
+                s.confirm(key, saved);
+            }
             let source = s.source(key);
             if let Some(link) = link {
                 source.nickname = link.name.clone();
@@ -2435,6 +2468,8 @@ fn run_sync(
         proxy_copies: allow.proxy_copies.clone(),
         peers,
         stop: Some(stop.clone()),
+        also: also_of(Some(link)),
+        same_server: same_server(facts, Some(link), allow.take_over),
         ..sync::Ask::default()
     };
     let mut cards = home.cards();

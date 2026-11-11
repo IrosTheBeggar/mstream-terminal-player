@@ -183,6 +183,11 @@ pub(crate) struct Ask {
     /// is this server under another address: its key is confirmed as this
     /// server's (2.11's key rule), and stored.
     pub(crate) same_server: bool,
+    /// The other keys this computer knows this server by (a Quick Connect
+    /// server's tunnel id, where its address is a bridge's port that changes
+    /// each session): each is confirmed as this server's in the card's
+    /// source, so the card names it by a key that lasts.
+    pub(crate) also: Vec<u64>,
     /// Read the manifest whole, whatever the schedule says.
     pub(crate) whole: bool,
     /// Plan, and write nothing.
@@ -674,6 +679,9 @@ fn prepare(
     let url_key = server_url_key(&client.server());
     let instance = instance_of(info.instance_id.as_deref());
     let settings = &mut state.settings;
+    for key in ask.also.iter().filter(|k| **k != 0 && **k != url_key) {
+        settings.confirm(url_key, *key);
+    }
     let confirmed = settings.keys(url_key);
     let mut talk = Talk { url_key, instance, confirmed, peer: None };
     let mut ours = ours_on(Some(root), &talk);

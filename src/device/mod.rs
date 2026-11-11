@@ -529,6 +529,7 @@ impl CardSyncArgs {
             change,
             answers,
             same_server: self.same_server,
+            also: Vec::new(),
             whole: self.whole,
             dry_run: self.dry_run,
             peers: (!peers.is_empty()).then_some(peers),

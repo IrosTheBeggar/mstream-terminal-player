@@ -12,8 +12,8 @@ use crate::device::card::contract::mppl::{KIND_PLAY, Slot as Play};
 use crate::device::card::contract::msmf::Ack;
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::sync::tests::{
-    DEVICE, EPOCH, Fake, SERIAL, Scratch, card, logged, no_peers, server, sync_now, with_hidden,
-    with_waves,
+    DEVICE, EPOCH, Fake, SERIAL, Scratch, answer, card, logged, no_peers, server, sync_now,
+    with_hidden, with_waves,
 };
 use crate::device::card::volume::{Bus, Clock, Disk, Fs, Serial, Table, Volume};
 
@@ -1483,4 +1483,53 @@ fn another_card_in_the_reader_of_one_taken_out_mid_sync_is_its_own_subject() {
     assert_eq!(without_lock(&FatSim::new(&root, SERIAL + 1)), before, "nothing reached Gym");
     let state = std::fs::read_to_string(root.join(".mstream/state.json")).unwrap();
     assert!(state.contains("Gym") && !state.contains("Taken out"), "{state}");
+}
+
+/// A card filled over Quick Connect's bridge is read at a loopback address
+/// whose port is new each session (the review's TU2): the next session knows
+/// its server all the same, by the tunnel's id the sync confirmed into the
+/// card's source, and syncs it with no take-over question.
+#[test]
+fn a_card_filled_over_quick_connect_is_its_servers_in_the_next_session_too() {
+    let scratch = Scratch::new("worker-qc");
+    drop(card(&scratch));
+    let (base, fake) = server();
+    // A server that doesn't say its own id: the keys alone tell it.
+    fake.lock().unwrap().old = true;
+    let served = fake.clone();
+    let other = crate::api::transfer::stub::routed(move |asked| answer(&served, asked));
+    let bridge = |base: &str| ServerLink {
+        id: "mstream+iroh://tunnelidforatest".into(),
+        name: "Home".into(),
+        base: Ok(base.to_string()),
+        token: Some("tok".into()),
+        local_token: Some("bridge".into()),
+        session: true,
+        ..ServerLink::default()
+    };
+    let found = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL);
+    let key = key_of(&found);
+    for (session, at) in [(1, &base), (2, &other)] {
+        let shelf = Shelf::default();
+        shelf.put(found.clone(), SERIAL);
+        let mut rig = Rig::new(shelf);
+        rig.send(Cmd::Servers(vec![bridge(at)]));
+        let wanted = key.clone();
+        rig.until("the plan", |f| f.cards.iter().any(|c| c.key == wanted && planned(c).is_some()));
+        let card = rig.card(&key).clone();
+        if session == 2 {
+            let server = &card.server;
+            assert!(matches!(server, Server::Saved(l) if l.name == "Home"), "{server:?}");
+            let guards = &planned(&card).unwrap().guards;
+            assert!(!guards.iter().any(|g| matches!(g, Guard::Server { .. })), "{guards:?}");
+        }
+        rig.send(Cmd::Sync { key: key.clone(), allow: Box::default() });
+        let wanted = key.clone();
+        rig.until("the sync", |f| {
+            f.cards.iter().any(|c| c.key == wanted && c.run.is_none() && c.ended.is_some())
+        });
+        let ended = rig.card(&key).ended.clone();
+        assert!(matches!(ended, Some(Ended::Done { .. })), "session {session}: {ended:?}");
+        assert!(rig.card(&key).gate.is_none(), "{:?}", rig.card(&key).gate);
+    }
 }
