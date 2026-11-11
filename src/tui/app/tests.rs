@@ -4304,6 +4304,7 @@ fn remembered_preferences_are_applied_and_handed_back() {
         repeat: "all".into(),
         shuffle: true,
         autodj_server: Some("http://host:3000".into()),
+        autodj_home: None,
         autodj: String::new(),
         crossfade_seconds: 4.5,
         gapless: true,
@@ -4329,6 +4330,8 @@ fn remembered_preferences_are_applied_and_handed_back() {
     let mut expected = saved.clone();
     expected.dj.genre_filter = Some(false);
     expected.dj.genre_mode = "whitelist".into();
+    // And the length window says what "no maximum" is in this file.
+    expected.dj.length_ceiling = Some(dj::LENGTH_RAIL_SECONDS);
     let out = app.prefs();
     assert_eq!(out, expected);
     assert_eq!(App::new(None, None, None).with_prefs(&out).prefs(), out, "stable from then on");
@@ -4342,6 +4345,7 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
         repeat: "sideways".into(),
         shuffle: false,
         autodj_server: None,
+        autodj_home: None,
         autodj: "disco".into(),
         crossfade_seconds: f32::NAN,
         gapless: false,
@@ -5947,10 +5951,25 @@ fn the_genre_rows_arrows_cycle_the_rule_and_the_switch_keeps_the_mode() {
     // mode — a click on a checked whitelist must never land on blacklist.
     app.dj_edit(crate::tui::app::DjEdit::Step(DjRow::Genres, 1));
     assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (true, dj::GenreMode::Blacklist));
-    app.dj_edit(crate::tui::app::DjEdit::GenreMode(dj::GenreMode::Whitelist));
+    // The GUI's Genres sheet writes the rule whole — the way it cuts, the
+    // kind of genre, the list — and the switch still never touches the mode.
+    app.dj_edit(crate::tui::app::DjEdit::GenreRule {
+        mode: dj::GenreMode::Whitelist,
+        source: GenreSource::Model,
+        genres: vec!["Jazz".into(), "Jazz".into(), "Dub".into()],
+    });
     assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (true, dj::GenreMode::Whitelist));
+    assert_eq!(app.dj.genres, vec!["Jazz", "Dub"], "each once");
+    assert_eq!(app.dj.genre_source, GenreSource::Model);
     app.dj_edit(crate::tui::app::DjEdit::Step(DjRow::Genres, 1));
     assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (false, dj::GenreMode::Whitelist));
+    // An empty list is the filter off, the mode and the kind kept.
+    app.dj_edit(crate::tui::app::DjEdit::GenreRule {
+        mode: dj::GenreMode::Blacklist,
+        source: GenreSource::Model,
+        genres: Vec::new(),
+    });
+    assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (false, dj::GenreMode::Blacklist));
 }
 
 #[test]
@@ -6970,9 +6989,22 @@ fn the_old_mode_arms_on_the_remembered_server_at_start() {
 }
 
 #[test]
-fn the_toggle_arms_here_switches_off_here_and_moves_elsewhere() {
+fn the_toggle_starts_on_play_froms_server_and_stop_always_stops() {
     let _en = english();
     let mut app = connected_app();
+    // The GUI's shell: Play from is on its screen.
+    app.dj_shows_play_from = true;
+    let known = |id: &str| KnownServer {
+        id: id.into(),
+        name: id.into(),
+        token: None,
+        username: None,
+        self_signed: false,
+        peer: None,
+        pairing: None,
+        dj: Default::default(),
+    };
+    app.servers = vec![known(HOST), known("http://other:3000")];
     app.replace_queue(vec![track("a"), track("b")]);
 
     let effects = app.handle_action(Action::ToggleAutoDj);
@@ -6989,16 +7021,212 @@ fn the_toggle_arms_here_switches_off_here_and_moves_elsewhere() {
     assert!(app.dj_server.is_none(), "on here means off");
     assert!(app.message.as_ref().unwrap().text.contains("Auto DJ off"));
 
-    // Armed on one server, the toggle on another moves it there and starts
-    // a new lane; browsing does not.
+    // Armed on one server, the toggle while another is browsed stops it:
+    // Stop always stops (the record's fix — it used to move the DJ there,
+    // so one button meant two things). Browsing moves nothing.
     app.handle_action(Action::ToggleAutoDj);
     let armed_lane = app.lane.epoch;
+    assert!(armed_lane > first_lane);
     app.session.server = "http://other:3000".into();
     app.session.server_id = "http://other:3000".into();
     assert_eq!(app.dj_server.as_deref(), Some(HOST), "a switch of the browsed server moves nothing");
     app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_server.is_none(), "on anywhere means off");
+
+    // Start goes back to Play from's home — where the DJ last ran — not to
+    // the server being browsed.
+    assert_eq!(app.dj_play_from().as_deref(), Some(HOST));
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(app.dj_server.as_deref(), Some(HOST));
+    let (identity, reach) = dj_probe_effect(&effects).expect("the home is probed");
+    assert_eq!(identity, HOST);
+    assert!(reach.is_some(), "another server than the session's rides a reach of its own");
+    assert!(app.prefs().autodj_home.as_deref() == Some(HOST), "and the home is remembered");
+
+    // Play from names another server: a running DJ starts afresh there; an
+    // idle one only remembers it. A home no longer in the book gives way
+    // to the session's.
+    let lane = app.lane.epoch;
+    app.dj_play_from_set("http://other:3000".into());
     assert_eq!(app.dj_server.as_deref(), Some("http://other:3000"));
-    assert!(app.lane.epoch > armed_lane && armed_lane > first_lane, "each arm elsewhere is a new lane");
+    assert!(app.lane.epoch > lane, "a new lane on the new home");
+    app.handle_action(Action::ToggleAutoDj);
+    app.dj_play_from_set(HOST.into());
+    assert!(app.dj_server.is_none(), "off stays off");
+    assert_eq!(app.dj_play_from().as_deref(), Some(HOST));
+    app.servers.retain(|s| s.id != HOST);
+    assert_eq!(app.dj_play_from().as_deref(), Some("http://other:3000"), "the session's stands in");
+}
+
+/// The TUI's tab has no Play from row, so a home would be a server nobody
+/// can see or change: its `A` starts the DJ where it stands, as it always
+/// has — and that server is the home the GUI's Start goes to afterwards.
+#[test]
+fn a_shell_with_no_play_from_starts_the_dj_on_the_server_it_stands_on() {
+    let _en = english();
+    let mut app = connected_app();
+    let known = |id: &str| KnownServer {
+        id: id.into(),
+        name: id.into(),
+        token: None,
+        username: None,
+        self_signed: false,
+        peer: None,
+        pairing: None,
+        dj: Default::default(),
+    };
+    app.servers = vec![known(HOST), known("http://other:3000")];
+    app.replace_queue(vec![track("a"), track("b")]);
+    assert!(!app.dj_shows_play_from, "the App's own default is the TUI's");
+
+    app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(app.dj_server.as_deref(), Some(HOST));
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_server.is_none(), "Stop always stops here too");
+
+    // Browsing another server, Start is for that one — not for the server
+    // the DJ last ran on.
+    app.session.server = "http://other:3000".into();
+    app.session.server_id = "http://other:3000".into();
+    assert_eq!(app.dj_play_from().as_deref(), Some("http://other:3000"));
+    app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(app.dj_server.as_deref(), Some("http://other:3000"));
+    assert_eq!(app.prefs().autodj_home.as_deref(), Some("http://other:3000"), "and it is the home now");
+}
+
+#[test]
+fn a_sheets_edit_applies_whole_and_a_changed_sonic_setting_gives_the_pool_another_go() {
+    use crate::tui::worker::DjNote;
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.lane.sonic_drop = Some(DjNote::SonicRange);
+    app.lane.warned_sonic = true;
+    app.lane.history = vec!["lib/x.mp3".into()];
+    // Sonic similarity: closed as it stood, nothing is retried.
+    app.dj_edit(DjEdit::Sonic { on: true, floor: 55, anchor: dj::SonicAnchor::Rolling });
+    assert!(app.lane.sonic_drop.is_some());
+    // Changed — the floor in points, the anchor — the lane that had dropped
+    // the pool gets another go, and may say so once more.
+    app.dj_edit(DjEdit::Sonic { on: true, floor: 48, anchor: dj::SonicAnchor::Locked });
+    assert_eq!((app.dj.sonic_min_similarity, app.dj.sonic_anchor), (0.48, dj::SonicAnchor::Locked));
+    assert!(app.lane.sonic_drop.is_none() && !app.lane.warned_sonic);
+    assert_eq!(app.lane.history, vec!["lib/x.mp3"], "the session's sound is kept while it stays on");
+    app.dj_edit(DjEdit::Sonic { on: false, floor: 48, anchor: dj::SonicAnchor::Locked });
+    assert!(!app.dj.sonic && app.lane.history.is_empty(), "switched off, the anchors go (clause 43)");
+    app.dj_edit(DjEdit::Sonic { on: true, floor: 99, anchor: dj::SonicAnchor::Locked });
+    assert_eq!(app.dj.sonic_min_similarity, dj::SONIC_MAX_SIMILARITY, "held inside the band");
+
+    // Beat matching.
+    app.dj_edit(DjEdit::Tempo { on: true, tolerance: 99 });
+    assert!(app.dj.bpm);
+    assert_eq!(app.dj.bpm_tolerance, dj::BPM_TOLERANCE_MAX);
+
+    // Length: crossed bounds change places; both sides empty — a typed
+    // zero is empty too — is Any, which is the window off.
+    app.dj_edit(DjEdit::LengthWindow { min: Some(360), max: Some(120), unknown: true });
+    assert_eq!((app.dj.length, app.dj.min_seconds, app.dj.max_seconds), (true, 120, 360));
+    assert!(app.dj.allow_unknown_length);
+    app.dj_edit(DjEdit::LengthWindow { min: None, max: Some(4000), unknown: false });
+    assert_eq!(app.dj.length_bounds(), Some((None, Some(4000))), "past the old bar's end, to the second");
+    app.dj_edit(DjEdit::LengthWindow { min: None, max: Some(0), unknown: false });
+    assert_eq!((app.dj.length, app.dj.min_seconds, app.dj.max_seconds), (false, 0, dj::LENGTH_RAIL_SECONDS));
+
+    // Skip words: the list whole — trimmed, each once whatever its case —
+    // and an empty one is the filter off.
+    app.dj_edit(DjEdit::Keywords(vec![" live ".into(), "LIVE".into(), "".into(), "remix".into()]));
+    assert_eq!(app.dj.keywords, vec!["live", "remix"]);
+    assert!(app.dj.keyword_filter);
+    app.dj_edit(DjEdit::Keywords(Vec::new()));
+    assert!(app.dj.keywords.is_empty() && !app.dj.keyword_filter);
+}
+
+#[test]
+fn smart_filters_go_with_a_pick_only_to_a_server_that_said_it_has_scores() {
+    use crate::api::types::{MoodFilter, MoodScale};
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    let relaxed = MoodFilter::NONE.press(MoodScale::Energy, "relaxed");
+    app.dj_edit(DjEdit::Moods(relaxed));
+    assert_eq!(app.dj.moods, relaxed);
+    let body = |app: &mut App| {
+        app.lane.pending = false;
+        let effects = app.request_turn();
+        serde_json::to_value(dj_request(&effects).expect("a turn").ask.request()).unwrap()
+    };
+    assert!(body(&mut app).get("moods").is_none(), "the session's ping says no scores");
+    let mut info = app.dj_info.clone().expect("the session stands in");
+    info.mood_filters = true;
+    app.dj_info = Some(info);
+    assert_eq!(body(&mut app)["moods"], serde_json::json!({ "energy": "relaxed" }));
+    // Before the server has answered at all, the key stays home.
+    app.dj_info = None;
+    assert!(body(&mut app).get("moods").is_none());
+}
+
+#[test]
+fn the_rooms_gates_read_the_dj_servers_own_answer() {
+    use crate::tui::worker::DjServerInfo;
+    let mut app = connected_app();
+    app.dj_info = None;
+    assert!(app.dj_sonic_gate().is_none() && app.dj_mood_gate().is_none(), "nobody knows yet: nothing is gated");
+    let info = |version: &str, discovery: bool, ready: Option<bool>, moods: bool| DjServerInfo {
+        version: Some(version.into()),
+        discovery,
+        discovery_ready: ready,
+        libraries: vec!["Music".into()],
+        mood_filters: moods,
+    };
+    app.dj_info = Some(info("6.10.0", true, Some(true), false));
+    assert_eq!(app.dj_sonic_gate(), Some(DjGate::NeedsServer(dj::FLOOR_SONIC)), "the version outranks the flag");
+    assert_eq!(app.dj_mood_gate(), Some(DjGate::NoMoodData));
+    assert_eq!(app.dj_floor_gate(dj::FLOOR_BATCH), Some(DjGate::NeedsServer(dj::FLOOR_BATCH)));
+    assert_eq!(app.dj_floor_gate(dj::FLOOR_FILTERS), None);
+    app.dj_info = Some(info("6.33.1", true, Some(false), true));
+    assert_eq!(app.dj_sonic_gate(), Some(DjGate::StillScanning));
+    assert!(app.dj_mood_gate().is_none());
+    app.dj_info = Some(info("6.33.1", false, None, true));
+    assert_eq!(app.dj_sonic_gate(), Some(DjGate::DiscoveryOff));
+    // A fork's version cannot be compared: it hides nothing.
+    app.dj_info = Some(info("velvet", true, None, true));
+    assert!(app.dj_sonic_gate().is_none() && app.dj_floor_gate(dj::FLOOR_BATCH).is_none());
+}
+
+#[test]
+fn recently_played_is_asked_of_the_server_an_opener_is_for_and_a_song_of_it_opens_the_session() {
+    let _en = english();
+    let mut app = connected_app();
+    // Switched on with nothing queued: the question, and the ask for what
+    // was played last on the server it is about.
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::DjRecent { identity, .. })] if identity == HOST));
+    assert!(app.dj_recent_songs().is_empty(), "out: nothing to offer yet");
+    // Another server's answer is not this one's.
+    app.apply_event(Event::DjRecent { identity: "http://elsewhere:3000".into(), tracks: vec![track("x")] });
+    assert!(app.dj_recent_songs().is_empty());
+    app.apply_event(Event::DjRecent { identity: HOST.into(), tracks: vec![track("lib/a.mp3"), track("lib/b.mp3")] });
+    assert_eq!(app.dj_recent_songs().len(), 2);
+    // A song of it is the seed, on the server it was played on; what is
+    // remembered is the way to start, not the song.
+    let effects = app.answer_dj_start_recent(1, true);
+    assert!(app.dj_chooser.is_none());
+    assert_eq!(app.dj_server.as_deref(), Some(HOST));
+    assert_eq!(app.queue.items.len(), 1);
+    assert_eq!(app.queue.items[0].filepath, "lib/b.mp3");
+    assert!(app.queue.items[0].dj.is_none(), "the user's choice wears no badge");
+    assert_eq!(app.dj.empty_queue, dj::EmptyQueueStart::Recent);
+    assert!(dj_request(&effects).is_some(), "and the followers are asked for");
+    assert_eq!(app.dj_home.as_deref(), Some(HOST), "Play from holds where the DJ runs");
+    // Remembered, the next empty start asks again, its list to come down.
+    app.handle_action(Action::ToggleAutoDj);
+    app.queue.items.clear();
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_chooser.as_ref().is_some_and(|chooser| chooser.recent_open));
+    assert_eq!(app.dj_recent_songs().len(), 2, "the list in hand stands while the new one is out");
+    // An index past the list answers nothing.
+    assert!(app.answer_dj_start_recent(9, false).is_empty());
+    assert!(app.dj_chooser.is_some());
 }
 
 #[test]
@@ -7148,7 +7376,11 @@ fn a_degrade_is_said_once_per_lane_and_an_auth_failure_too() {
 fn switching_on_with_an_empty_queue_asks_and_the_opener_seeds_the_session() {
     let mut app = connected_app();
     let effects = app.handle_action(Action::ToggleAutoDj);
-    assert!(effects.is_empty() && app.dj_chooser.is_some(), "the opening question");
+    assert!(app.dj_chooser.is_some(), "the opening question");
+    assert!(
+        matches!(effects.as_slice(), [Effect::Api(ApiCmd::DjRecent { identity, reach: None })] if identity == HOST),
+        "and nothing goes out but the ask for what was played last: {effects:?}"
+    );
     assert!(app.dj_server.is_none(), "not armed until it is answered");
     assert_eq!(app.input_mode(), InputMode::Panel);
 
@@ -7285,6 +7517,7 @@ fn the_dj_tab_only_offers_rows_the_settings_and_the_server_allow() {
         discovery: false,
         discovery_ready: None,
         libraries: vec!["Music".into(), "Audiobooks".into()],
+        mood_filters: false,
     };
     app.dj_panel.rebuild(&app.dj, Some(&info), true);
     let rows = &app.dj_panel.rows;
@@ -7483,6 +7716,7 @@ fn the_sources_chooser_keeps_one_library_on() {
         discovery: true,
         discovery_ready: Some(true),
         libraries: vec!["Music".into(), "Audiobooks".into()],
+        mood_filters: false,
     });
     app.dj_panel.rebuild(&app.dj, app.dj_info.as_ref(), false);
     on_the_dj_tab(&mut app);

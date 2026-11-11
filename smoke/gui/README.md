@@ -107,14 +107,25 @@ url = "http://127.0.0.1:3041"
 - `stats` — play reporting (play-reporting contract): one row queued and
   played past thirty seconds, then skipped; the `[stats]` log line says the
   play was posted, and Last played and Most played list the track.
-- `dj` — Auto DJ on the rig (auto-dj contract, slice A5): one row queued
-  with `a`, the nav's `Auto DJ` row under TOOLS, the room off with the probe's sonic
-  reason (the rig has no discovery data), Start — the note names the server,
-  a batch of four badged rows lands (songs per fetch 4), Preview lists three
-  picks under its row without queueing, a click on the songs-per-fetch bar's
-  first cell sets "1 song", the Server row's picker moves the DJ to Rig A (the
-  peer through B) and the next turn is picked from there, Stop leaves the
-  rows and their badges. Prints the run's `[dj]` log lines at the end — none
+- `dj` — Auto DJ on the rig (auto-dj contract, clauses 40–58; the room
+  rebuilt 2026-11-10): the nav's `Auto DJ` row under TOOLS, the room off — one
+  row a setting, `Discovery off` and `No mood data` standing where those two
+  values would (the rig has neither), and a greyed row taking no click;
+  Start on an empty queue asks for a First song, Recently played's list
+  hangs from its row with B's own history, and a song of it opens the
+  session — the DJ armed, a batch of four badged rows after it (5 tracks);
+  Preview's sheet lists three picks and queues none; Batch's sheet sets "1
+  song" by a click on its bar's first cell, the border following the draft
+  and the row waiting for Done; Length takes a typed `1:30` ("1:30+") and its
+  `clear`; Genres lists B's own genres, one ticked then cleared; Skip words
+  takes a typed word by a click on the `+` beside its card; First song's
+  list applies on a pick; the bar's chevron opens quick config over the bar
+  and Esc puts it away; Play from's sheet moves the DJ to Rig A (the peer
+  through B) — the rating row says "Not on peers" — and the next turn is
+  picked from there; Stop leaves the rows and their badges; and the bar's
+  `auto-dj` word, with B still browsed, starts the DJ on Play from's home
+  (Rig A) and stops it. Needs B to have played something (the `stats` or
+  `now` scenario, once). Prints the run's `[dj]` log lines at the end — none
   on a clean run: the DJ's log speaks only for a dropped key, a learned
   rejection, a degraded constraint, a deferred pick or a failed fetch.
 

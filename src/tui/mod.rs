@@ -479,6 +479,7 @@ pub(crate) fn known_servers(
                 genre_filter: entry.dj_genre_filter,
                 genre_mode: entry.dj_genre_mode.clone(),
                 genres: entry.dj_genres.clone(),
+                genre_source: entry.dj_genre_source.clone(),
             },
         })
         .collect()

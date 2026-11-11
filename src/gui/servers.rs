@@ -456,8 +456,7 @@ pub(crate) fn cursor_entry(gui: &Gui) -> Option<&config::ServerEntry> {
     stored_at(gui, gui.servers.cursor).and_then(|i| gui.config.servers.get(i))
 }
 
-/// The parent's display name for a peer's "via" line — here and in the
-/// Auto DJ room's server picker.
+/// The parent's display name for a peer's "via" line.
 pub(crate) fn parent_label(gui: &Gui, parent: &str) -> String {
     gui.config
         .servers
@@ -2694,6 +2693,7 @@ mod tests {
             dj_genre_filter: None,
             dj_genre_mode: None,
             dj_genres: None,
+            dj_genre_source: None,
             ytdl_library: None,
             ytdl_layout: None,
             ytdl_layout_kind: None,

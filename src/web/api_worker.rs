@@ -154,6 +154,21 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             with_session(session, async |s| worker::genres_event(s.client.genres_async().await)).await
         }
 
+        ApiCmd::DjGenres { source, .. } => {
+            with_session(session, async |s| worker::dj_genres_event(source, s.client.genre_list_async(source).await))
+                .await
+        }
+
+        ApiCmd::DjRecent { identity, .. } => {
+            with_session(session, async |s| {
+                Ok(worker::dj_recent_event(
+                    identity.clone(),
+                    s.client.recently_played_async(worker::DJ_RECENT_ASK).await,
+                ))
+            })
+            .await
+        }
+
         // The track verbs (track-actions contract): the browser build has one
         // client, so a reach is the session's here too; the words are the
         // native worker's shapers.
