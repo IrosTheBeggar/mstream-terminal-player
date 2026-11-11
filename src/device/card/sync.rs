@@ -69,7 +69,7 @@
 //! which wait for their UX contract; until then the hidden `device
 //! card-sync` runs it ([`command`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
@@ -534,8 +534,9 @@ fn run(
     let (url_key, listed, plan_key) = (p.url_key, p.listed, p.plan_key);
     let span = p.span.take();
     hooks.span_cluster = span.as_ref().map(|s| s.cluster);
-    let (files, given_up, withheld) =
-        (std::mem::take(&mut p.files), std::mem::take(&mut p.given_up), p.withheld);
+    let (files, given_up, withheld, retried) =
+        (std::mem::take(&mut p.files), std::mem::take(&mut p.given_up), p.withheld, p.retried);
+    let fetches = Rc::new(Cell::new(Fetches::default()));
     hooks.store = Some(Store {
         state,
         url_key,
@@ -547,9 +548,11 @@ fn run(
         files,
         given_up,
         withheld,
+        retried,
+        fetches: fetches.clone(),
     });
     hooks.history = had.history.take();
-    let mut fetcher = Stopping { inner: &mut p.fetcher, stop: ask.stop.clone() };
+    let mut fetcher = Stopping { inner: &mut p.fetcher, stop: ask.stop.clone(), fetches };
     let ran = session.run(p.plan, &mut fetcher, &mut hooks, events);
     *had.history = hooks.history.take();
     had.notes.append(&mut hooks.notes);
@@ -601,6 +604,27 @@ struct Store {
     /// every file goes in: one it couldn't decide (no conversion now, an
     /// `.ogg` unread) or a scan running. Its revision isn't stored.
     withheld: bool,
+    /// The run tried the files passed over for failing again: the
+    /// schedule's whole read, or one the listener asked for.
+    retried: bool,
+    /// The run's fetches of the server's own files ([`Stopping`]).
+    fetches: Rc<Cell<Fetches>>,
+}
+
+/// A run's fetches of the server's own files: those asked for, and those
+/// whose bytes came.
+#[derive(Clone, Copy, Debug, Default)]
+struct Fetches {
+    asked: u32,
+    came: u32,
+}
+
+impl Fetches {
+    /// Two or more asked for and none came: the server failed, not its
+    /// files (one alone can't tell the two apart).
+    fn servers_fault(self) -> bool {
+        self.asked >= 2 && self.came == 0
+    }
 }
 
 /// A peer's pull past this many bytes through a relay is worth a warning
@@ -625,6 +649,7 @@ struct Prepared {
     files: HashMap<String, (u64, u64)>,
     given_up: Vec<state::Failing>,
     withheld: bool,
+    retried: bool,
 }
 
 /// The card's server this one is (2.11), by its key or a key confirmed as
@@ -786,13 +811,18 @@ fn prepare(
     // card's rows don't stand for the selection a 304 would say is the
     // same, so the listing is read whole (2.12.8: the plan's rest).
     let unsettled = pending || !root.manifest.is_final() || root.tags.is_err();
-    let whole = ask.whole
+    // The whole read the listener asks for, and the schedule's (from a last
+    // whole read that missed nothing), try the files passed over for
+    // failing again ([`Skip::Failing`]).
+    let retry = ask.whole
+        || (source.full_read != 0 && whole_due(source.full_read, now))
+        || source.runs.saturating_add(1) >= WHOLE_EVERY_RUNS;
+    let whole = retry
+        || whole_due(source.full_read, now)
         || known.is_empty()
         || unsettled
         || !joined.is_empty()
         || source.plan_key != plan_key
-        || whole_due(source.full_read, now)
-        || source.runs.saturating_add(1) >= WHOLE_EVERY_RUNS
         || span.as_ref().is_some_and(sets::SetRun::whole);
     // What the card holds, for its set, read while its root is at hand.
     let held = sets::Rows::of(root, space, span.is_some());
@@ -875,10 +905,14 @@ fn prepare(
                 transcode,
             );
             // An `.ogg` unread twice waits for the next run; a file that
-            // failed run after run, as listed still, is passed over.
+            // failed run after run, as listed still, is passed over, but by
+            // a whole read the listener asked for or the schedule's.
             plan::pass_over(&mut wanted, &unread, Skip::Unread, &kept);
             let given_up = |f: &WantedFile| {
                 let l = &f.ledger;
+                if retry {
+                    return false;
+                }
                 let failed = |b: &state::Failing| b.is(&l.server_path, l.server_modified, l.server_size);
                 source.failing.iter().any(|b| b.given_up() && failed(b))
             };
@@ -1158,6 +1192,7 @@ fn prepare(
         files,
         given_up,
         withheld,
+        retried: retry,
     })
 }
 
@@ -1243,11 +1278,25 @@ fn stopped(ask: &Ask) -> bool {
 struct Stopping<'f, F: Fetcher> {
     inner: &'f mut F,
     stop: Option<Arc<AtomicBool>>,
+    /// The fetches of the server's own files, counted.
+    fetches: Rc<Cell<Fetches>>,
+}
+
+impl<F: Fetcher> Stopping<'_, F> {
+    fn count<T>(&self, file: &WantedFile, got: Result<T, Failed>) -> Result<T, Failed> {
+        if file.origin == 0 {
+            let Fetches { asked, came } = self.fetches.get();
+            let came = came.saturating_add(u32::from(got.is_ok()));
+            self.fetches.set(Fetches { asked: asked.saturating_add(1), came });
+        }
+        got
+    }
 }
 
 impl<F: Fetcher> Fetcher for Stopping<'_, F> {
     fn fetch(&mut self, file: &WantedFile, into: &mut dyn Write) -> Result<Fetched, Failed> {
-        self.inner.fetch(file, into)
+        let got = self.inner.fetch(file, into);
+        self.count(file, got)
     }
 
     fn read_range(&mut self, file: &WantedFile, start: u64, len: usize) -> Result<Vec<u8>, Failed> {
@@ -1264,7 +1313,8 @@ impl<F: Fetcher> Fetcher for Stopping<'_, F> {
         have: Option<&Have>,
         into: &mut dyn super::engine::Part,
     ) -> Result<Fetched, Failed> {
-        self.inner.fetch_part(file, have, into)
+        let got = self.inner.fetch_part(file, have, into);
+        self.count(file, got)
     }
 
     fn waits(&self, file: &WantedFile) -> Option<String> {
@@ -1970,17 +2020,27 @@ impl Hooks for SyncHooks {
             let source = settings.source(store.url_key);
             // The server's files the run missed (failed, spared, a name
             // the card had): each one's runs in a row, as listed now. One
-            // passed over stays passed over until it changes.
+            // passed over stays passed over until it changes, or a whole
+            // read the listener asked for or the schedule's tries it again:
+            // failed again, its count starts over. A run whose every fetch
+            // of the server's failed adds no run to any file's count: the
+            // server's fault, not theirs.
+            let servers_fault = store.fetches.get().servers_fault();
             let missed: Vec<state::Failing> = (outcome.missed.iter())
                 .filter(|(origin, _)| *origin == 0)
                 .filter_map(|(_, path)| {
                     let &(modified, size) = store.files.get(path)?;
                     let before = source.failing.iter().find(|b| b.is(path, modified, size));
-                    let tries = before.map_or(1, |b| b.tries.saturating_add(1));
+                    let before = before.filter(|b| !b.given_up());
+                    let tries = match servers_fault {
+                        true => before?.tries,
+                        false => before.map_or(1, |b| b.tries.saturating_add(1)),
+                    };
                     Some(state::Failing { path: path.clone(), modified, size, tries })
                 })
                 .collect();
-            let clean = missed.is_empty() && !store.withheld;
+            let missed_any = outcome.missed.iter().any(|(origin, _)| *origin == 0);
+            let clean = !missed_any && !store.withheld;
             let mut failing = missed;
             match store.listed {
                 Listed::Whole => failing.extend(store.given_up.iter().cloned()),
@@ -1996,8 +2056,12 @@ impl Hooks for SyncHooks {
             // the selection, leaves the schedule as it was and no revision
             // of a server the root doesn't hold it for: the next run reads
             // the manifest whole (the root's says "" already, the engine's).
+            // A run that tried the files passed over again is the schedule's
+            // all the same: they aren't tried again at every run.
             if store.listed == Listed::Whole && clean {
                 (source.full_read, source.runs, source.plan_key) = (store.now, 0, store.plan_key);
+            } else if store.listed == Listed::Whole && store.retried {
+                (source.full_read, source.runs) = (store.now, 0);
             } else if store.listed != Listed::Whole {
                 source.runs = source.runs.saturating_add(1);
             }

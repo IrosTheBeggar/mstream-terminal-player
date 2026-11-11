@@ -1926,6 +1926,88 @@ fn a_file_that_failed_is_found_again_until_it_failed_three_runs_in_a_row() {
     assert!(home_source(&sim).failing.is_empty());
 }
 
+/// A file passed over for failing three runs in a row is tried again by a
+/// whole read the listener asks for, and by the schedule's (7 days on):
+/// failed again, its count starts over, and it is passed over again only
+/// after three more runs.
+#[test]
+fn a_file_passed_over_is_tried_again_by_a_whole_read_and_its_count_starts_over() {
+    let scratch = Scratch::new("failing-again");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let bad = "Rock/Artist A/Album B/01.mp3";
+    fake.lock().unwrap().broken.insert(bad.into());
+    let mut envs = envs();
+    let tries = |sim: &FatSim| home_source(sim).failing.iter().map(|b| b.tries).collect::<Vec<_>>();
+    for run in 1..=3 {
+        let ask = if run == 1 { rock() } else { Ask::default() };
+        ran(&sync_now(&sim, &base, &ask, &mut envs).0);
+    }
+    let passed = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(passed.summary.as_ref().unwrap().skipped, [(bad.to_string(), Skip::Failing)]);
+    assert_eq!(tries(&sim), [3]);
+
+    // Asked for whole: tried again, and failed again, its count starts over.
+    let whole = Ask { whole: true, ..Ask::default() };
+    let again = sync_now(&sim, &base, &whole, &mut envs).0;
+    assert!(again.summary.as_ref().unwrap().skipped.is_empty(), "tried again");
+    assert_eq!(ran(&again).missed, [(0, bad.to_string())]);
+    assert_eq!(tries(&sim), [1]);
+    for run in 2..=3 {
+        ran(&sync_now(&sim, &base, &Ask::default(), &mut envs).0);
+        assert_eq!(tries(&sim), [run]);
+    }
+    let passed = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(passed.summary.as_ref().unwrap().skipped, [(bad.to_string(), Skip::Failing)]);
+    assert_eq!(tries(&sim), [3]);
+
+    // The schedule's whole read, a week on: tried again, and it comes.
+    fake.lock().unwrap().broken.clear();
+    let mut week = {
+        let mut ids = self::envs();
+        move || Env { now: Box::new(|| 1_791_900_000 + WHOLE_EVERY_SECS), ..ids() }
+    };
+    let scheduled = sync_now(&sim, &base, &Ask::default(), &mut week).0;
+    assert_eq!(scheduled.summary.as_ref().unwrap().listed, Listed::Whole);
+    let outcome = ran(&scheduled);
+    assert_eq!((outcome.written, outcome.missed.len()), (1, 0), "{:?}", outcome.report);
+    assert!(tries(&sim).is_empty());
+}
+
+/// A run in which every fetch of the server's files failed (a server that
+/// answers 500 to every file) adds no run to any file's count: the
+/// server's fault, not the files'. A run in which one came counts the
+/// others'.
+#[test]
+fn a_run_whose_every_fetch_failed_counts_no_file_against_it() {
+    let scratch = Scratch::new("failing-server");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let (one, two) = ("Rock/Artist A/Album B/01.mp3", "Rock/Artist A/Album B/02.flac");
+    fake.lock().unwrap().broken.extend([one.to_string(), two.to_string()]);
+    let mut envs = envs();
+    let tries = |sim: &FatSim| {
+        let failing = home_source(sim).failing;
+        failing.iter().map(|b| (b.path.clone(), b.tries)).collect::<Vec<_>>()
+    };
+    // The first: the others came, so these two failed on their own.
+    let first = sync_now(&sim, &base, &rock(), &mut envs).0;
+    assert_eq!(ran(&first).missed.len(), 2);
+    assert_eq!(tries(&sim), [(one.to_string(), 1), (two.to_string(), 1)]);
+    // The next asks for these two alone, and neither comes: no count moves.
+    for _ in 0..3 {
+        let next = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+        assert_eq!(ran(&next).missed.len(), 2);
+        assert_eq!(tries(&sim), [(one.to_string(), 1), (two.to_string(), 1)]);
+        assert_eq!(root_revision(&sim), "", "a run that missed a file names no revision");
+    }
+    // One comes: the other failed on its own.
+    fake.lock().unwrap().broken.remove(one);
+    let mended = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(ran(&mended).missed, [(0, two.to_string())]);
+    assert_eq!(tries(&sim), [(two.to_string(), 2)]);
+}
+
 #[test]
 fn a_server_that_cant_convert_now_leaves_the_cards_conversions_where_they_are() {
     let scratch = Scratch::new("no-transcode");
