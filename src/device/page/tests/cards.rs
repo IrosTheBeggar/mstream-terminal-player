@@ -857,7 +857,11 @@ fn the_cards_states_at_rest_say_what_the_card_is_and_the_way_on() {
     assert!(frame.contains("(one sync at a time)"), "{frame}");
     assert!(frame.contains("Don't wait"), "{frame}");
     let frame = draw(cards::with(ready(), |c| {
-        let pause = worker::Pause::Server { until: now() + 120, tries: 3 };
+        // Two minutes and 59 seconds ahead: the row says the whole minutes
+        // left when it is drawn, so it reads "2 min" for up to 59 seconds
+        // after this line, however slowly the test runs (two minutes to
+        // the second read "1 min" once a second had passed).
+        let pause = worker::Pause::Server { until: now() + 179, tries: 3 };
         let bytes = (8_600_000_000, 21_300_000_000);
         c.ended = Some(worker::Ended::Paused { pause, at: 1_930, of: 4_812, bytes });
     }));
