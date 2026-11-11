@@ -11,9 +11,10 @@
 //! - `created`: when this identity was set up, in Unix seconds;
 //! - `plays`: the play log's posted mark of each device and epoch (2.20.6),
 //!   once a run has settled any of the card's plays;
-//! - `giftPlays`: of each device and epoch, the highest seq counted as a
-//!   play of the card's time as someone else's ([`State::gifts`]): in that
-//!   form, written by the write that settled them; absent: none;
+//! - `giftPlays`: of each device and epoch, the ranges of seqs counted as
+//!   plays of the card's times as someone else's ([`State::gifts`]), each
+//!   `{deviceId, epoch, from, to}`, written by the write that settled them;
+//!   absent: none;
 //! - `set`: for a card of a multi-card set, the set's whole table and this
 //!   card's index in it ([`span`](super::span));
 //! - `wavesNone`: the generation of the root a run left when it had asked the
@@ -94,12 +95,13 @@ pub(crate) struct State {
     /// plays up to the seq are settled, or weren't to be sent. The next
     /// commit's ACKS follow them (2.5.6).
     pub(crate) plays: Vec<Ack>,
-    /// The gift floor of each device and epoch (clause 61): the highest seq
-    /// counted as a play of the card's time as someone else's, by the
-    /// write that settled it. Every look, on any computer, counts a play
-    /// at or below it as such, whatever the settings say now: never mapped,
-    /// never sent. None in a state file older than it.
-    pub(crate) gifts: Vec<Ack>,
+    /// The gift ranges of each device and epoch (clause 61): the seqs
+    /// counted as plays of the card's times as someone else's, by the write
+    /// that settled them. Every look, on any computer, counts a play in one
+    /// as such, whatever the settings say now: never mapped, never sent. A
+    /// play below a range, one mapped before the card was marked, is the
+    /// listener's own. None in a state file older than them.
+    pub(crate) gifts: Vec<GiftRange>,
     /// The multi-card set the card is a card of, its whole table.
     pub(crate) set: Option<Set>,
     /// The file names a set this software can't read (a newer player's):
@@ -158,7 +160,7 @@ impl State {
             uuid: text("volumeUuid").map(str::to_string),
             created: object.get("created").and_then(Value::as_u64).unwrap_or(0),
             plays: object.get("plays").map_or_else(Vec::new, marks_of),
-            gifts: object.get("giftPlays").map_or_else(Vec::new, marks_of),
+            gifts: object.get("giftPlays").map_or_else(Vec::new, ranges_of),
             set,
             set_unread,
             waves_none: object.get("wavesNone").and_then(Value::as_u64).and_then(|g| u32::try_from(g).ok()),
@@ -213,7 +215,7 @@ impl State {
             members.push(("plays", marks_value(&self.plays)));
         }
         if !self.gifts.is_empty() {
-            members.push(("giftPlays", marks_value(&self.gifts)));
+            members.push(("giftPlays", ranges_value(&self.gifts)));
         }
         if let Some(set) = &self.set {
             members.push(("set", set.value(set.slot_of(self.card_id).map(|i| i + 1))));
@@ -292,6 +294,80 @@ pub(crate) fn marks_value(marks: &[Ack]) -> Value {
         Value::Object(object)
     };
     Value::Array(marks.iter().map(mark).collect())
+}
+
+/// The seqs of one device and epoch's log counted as plays of a card's
+/// time as someone else's (clause 61): `from` to `to`, both counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct GiftRange {
+    pub(crate) device_id: [u8; 6],
+    pub(crate) epoch: u64,
+    pub(crate) from: u32,
+    pub(crate) to: u32,
+}
+
+impl GiftRange {
+    /// The one seq `seq` of a device and epoch.
+    pub(crate) fn one(device_id: [u8; 6], epoch: u64, seq: u32) -> GiftRange {
+        GiftRange { device_id, epoch, from: seq, to: seq }
+    }
+
+    /// Holds that play.
+    pub(crate) fn holds(&self, device_id: [u8; 6], epoch: u64, seq: u32) -> bool {
+        (self.device_id, self.epoch) == (device_id, epoch) && (self.from..=self.to).contains(&seq)
+    }
+}
+
+/// `ranges` in order, each device and epoch's overlapping or touching ones
+/// made one: no seq lies between two touching ranges, so none is added.
+pub(crate) fn merged(mut ranges: Vec<GiftRange>) -> Vec<GiftRange> {
+    ranges.sort();
+    let mut out: Vec<GiftRange> = Vec::new();
+    for r in ranges {
+        match out.last_mut() {
+            Some(last)
+                if (last.device_id, last.epoch) == (r.device_id, r.epoch)
+                    && r.from <= last.to.saturating_add(1) =>
+            {
+                last.to = last.to.max(r.to);
+            }
+            _ => out.push(r),
+        }
+    }
+    out
+}
+
+/// `giftPlays`' ranges: each `{deviceId, epoch, from, to}`. One a
+/// development build wrote as a ceiling, `{deviceId, epoch, seq}`, is the
+/// range from 0 to it; a malformed one is passed over.
+pub(crate) fn ranges_of(value: &Value) -> Vec<GiftRange> {
+    let mut ranges = Vec::new();
+    for item in value.as_array().into_iter().flatten() {
+        let device_id = item.get("deviceId").and_then(Value::as_str).and_then(device_of);
+        let epoch = item.get("epoch").and_then(Value::as_str).and_then(from_hex);
+        let seq = |name| item.get(name).and_then(Value::as_u64).and_then(|s| u32::try_from(s).ok());
+        let span = match (seq("from"), seq("to"), seq("seq")) {
+            (Some(from), Some(to), _) if from <= to => Some((from, to)),
+            (None, None, Some(to)) => Some((0, to)),
+            _ => None,
+        };
+        let (Some(device_id), Some(epoch), Some((from, to))) = (device_id, epoch, span) else { continue };
+        ranges.push(GiftRange { device_id, epoch, from, to });
+    }
+    merged(ranges)
+}
+
+/// [`ranges_of`]'s form of `ranges`.
+pub(crate) fn ranges_value(ranges: &[GiftRange]) -> Value {
+    let range = |r: &GiftRange| {
+        let mut object = Map::new();
+        object.insert("deviceId".into(), hex_bytes(&r.device_id).into());
+        object.insert("epoch".into(), hex(r.epoch).into());
+        object.insert("from".into(), r.from.into());
+        object.insert("to".into(), r.to.into());
+        Value::Object(object)
+    };
+    Value::Array(merged(ranges.to_vec()).iter().map(range).collect())
 }
 
 // ── The sync's settings ─────────────────────────────────────────────────────
@@ -1064,21 +1140,38 @@ mod tests {
     }
 
     #[test]
-    fn the_gift_floor_reads_back_beside_the_marks_and_an_older_file_has_none() {
+    fn the_gift_ranges_read_back_beside_the_marks_and_an_older_file_has_none() {
         let mut state = State::new(9, "Car", None, 1);
         let one = [0x00, 0x00, 0x5E, 0x00, 0x53, 0x01];
         let ack = |device_id, epoch, seq| Ack { device_id, epoch, seq };
+        let range = |from, to| GiftRange { device_id: one, epoch: 7, from, to };
         assert!(!String::from_utf8(state.text(1)).unwrap().contains("giftPlays"), "none: no member");
         state.plays = vec![ack(one, 7, 2)];
-        state.gifts = vec![ack(one, 7, 9)];
+        state.gifts = vec![range(12, 14), range(5, 9)];
         let text = String::from_utf8(state.text(2)).unwrap();
-        let line = r#"  "giftPlays": [{"deviceId":"00005e005301","epoch":"0x0000000000000007","seq":9}]"#;
+        let line = concat!(
+            r#"  "giftPlays": [{"deviceId":"00005e005301","epoch":"0x0000000000000007","from":5,"to":9},"#,
+            r#"{"deviceId":"00005e005301","epoch":"0x0000000000000007","from":12,"to":14}]"#
+        );
         assert!(text.contains(line), "{text}");
         let back = read(text.as_bytes()).unwrap();
-        assert_eq!((back.plays, back.gifts), (vec![ack(one, 7, 2)], vec![ack(one, 7, 9)]));
+        assert_eq!((back.plays, back.gifts), (vec![ack(one, 7, 2)], vec![range(5, 9), range(12, 14)]));
         assert!(back.keep.is_empty(), "a member it knows: {:?}", back.keep);
         let older = br#"{"format": "mstream-card-state", "version": 1, "seq": 3, "plays": []}"#;
         assert_eq!(read(older).unwrap().gifts, []);
+        // A development build's ceiling is the range from 0 to it; a range
+        // that touches or overlaps another of its device and epoch joins
+        // it, one that doesn't stays apart; a malformed one is passed over.
+        let odd = r#"{"format": "mstream-card-state", "version": 1, "seq": 3, "giftPlays": [
+            {"deviceId": "00005e005301", "epoch": "0x07", "seq": 3},
+            {"deviceId": "00005e005301", "epoch": "0x07", "from": 4, "to": 6},
+            {"deviceId": "00005e005301", "epoch": "0x07", "from": 9, "to": 11},
+            {"deviceId": "00005e005301", "epoch": "0x07", "from": 10, "to": 12},
+            {"deviceId": "00005e005301", "epoch": "0x07", "from": 20, "to": 19},
+            {"deviceId": "00005e005301", "epoch": "0x07", "from": 30}]}"#;
+        assert_eq!(read(odd.as_bytes()).unwrap().gifts, [range(0, 6), range(9, 12)]);
+        assert!(range(9, 12).holds(one, 7, 9) && range(9, 12).holds(one, 7, 12));
+        assert!(!range(9, 12).holds(one, 7, 8) && !range(9, 12).holds(one, 8, 10));
     }
 
     #[test]

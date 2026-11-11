@@ -24,13 +24,16 @@
 //! - on a card for someone else (its settings' word, [`History::gift()`]),
 //!   none mapped at all, with a ledger or without: each new play that
 //!   wasn't mapped before the card was marked is counted and settled as it
-//!   is, unsent, and the mark rises over it. The card's gift floor rises
-//!   over it too ([`History::floor()`], `giftPlays` in its state file),
-//!   stored by the write that stores the marks and never ahead of it: on
-//!   any computer, and whatever the settings say by then, a play at or
-//!   below the floor is counted so and never mapped, so nothing of the
-//!   time the card was someone else's reaches an account, then or once
-//!   the card is the listener's own again;
+//!   is, unsent, and the mark rises over it. The card's gift ranges take
+//!   it in too ([`History::gift_ranges()`], `giftPlays` in its state file:
+//!   of each device and epoch, the seqs from the lowest counted so to the
+//!   highest, split where a play between them wasn't), stored by the write
+//!   that stores the marks and never ahead of it: on any computer, and
+//!   whatever the settings say by then, a play in a range is counted so
+//!   and never mapped, so nothing of the time the card was someone else's
+//!   reaches an account, then or once the card is the listener's own
+//!   again. A play mapped before the card was marked lies below its
+//!   range, and is the listener's own on every computer;
 //! - the plays to send saved in the outbox ([`Outbox`], `card-plays.json`
 //!   in the config folder, written whole) before the run writes anything:
 //!   a checkpoint deletes the tags file they map through. A sync whose
@@ -98,7 +101,7 @@ use super::contract::server::{
 use super::contract::text::{ALBUM, ARTIST, TITLE};
 use super::engine::Hooks;
 use super::names::match_key;
-use super::state::{State, device_of, from_hex, hex as id_hex, marks_value};
+use super::state::{GiftRange, State, device_of, from_hex, hex as id_hex, marks_value, merged};
 use super::volume::{self, CardFs, Mounted, Root};
 use crate::api::transfer::{
     CardPlay, MANIFEST_PAGE_MAX, Manifest, ManifestEntry, PLAYS_PER_CALL, PlayClient, PlayOutcome,
@@ -605,8 +608,8 @@ pub(crate) struct Tally {
     pub(crate) changed: usize,
     pub(crate) clock: usize,
     pub(crate) server: usize,
-    /// The new plays of a card for someone else, and those at or below its
-    /// gift floor: counted, sent nowhere, and settled as they are (the mark
+    /// The new plays of a card for someone else, and those in its gift
+    /// ranges: counted, sent nowhere, and settled as they are (the mark
     /// passes them).
     pub(crate) gift: usize,
     /// Paths the server moved, found again by their audio hash.
@@ -748,10 +751,11 @@ pub(crate) struct History {
     posted: Vec<Ack>,
     posted_for: u64,
     card_id: u64,
-    /// The card's gift floor as its state file holds it, whatever card id
-    /// that names ([`History::with_floor`]); and the plays this run counted
-    /// as a gift's, by id, which raise it ([`History::floor()`]).
-    floor: Vec<Ack>,
+    /// The card's gift ranges as its state file holds them, whatever card
+    /// id that names ([`History::with_gift_ranges`]); and the plays this run
+    /// counted as a gift's, by id, which they take in
+    /// ([`History::gift_ranges()`]).
+    ranges: Vec<GiftRange>,
     gifted: HashSet<String>,
     /// The log as the look read it; None until a look read one whole. And
     /// whether a look failed to read it (`blind`): it settled nothing of
@@ -791,7 +795,7 @@ impl History {
             posted: posted.1,
             posted_for: posted.0,
             card_id: 0,
-            floor: Vec::new(),
+            ranges: Vec::new(),
             gifted: HashSet::new(),
             log: None,
             blind: false,
@@ -811,8 +815,8 @@ impl History {
     /// plays are sent to nobody's account, now or ever. Each new one is
     /// counted and none is mapped, so none joins the plays to send; and
     /// each is settled as it is, like a play from before the clock was
-    /// set: the mark rises over it, and so does the card's gift floor
-    /// ([`History::floor()`]), both stored on the card by the one write (a
+    /// set: the mark rises over it, and the card's gift ranges take it in
+    /// ([`History::gift_ranges()`]), both stored on the card by the one write (a
     /// sync's state file, the settings' store). No look after that, on any
     /// computer, maps it, the card the listener's own again or not. Nothing
     /// of it is kept on this computer: a run that halts before the write
@@ -829,40 +833,48 @@ impl History {
         self
     }
 
-    /// The card's gift floor, its state file's `giftPlays` (2.12.7), read
-    /// whatever card id the file names: a play at or below it was counted
-    /// as a card for someone else's, and is so again, whatever the settings
-    /// say now.
-    pub(crate) fn with_floor(mut self, floor: Vec<Ack>) -> History {
-        self.floor = floor;
+    /// The card's gift ranges, its state file's `giftPlays` (2.12.7), read
+    /// whatever card id the file names: a play in one was counted as a card
+    /// for someone else's, and is so again, whatever the settings say now.
+    pub(crate) fn with_gift_ranges(mut self, ranges: Vec<GiftRange>) -> History {
+        self.ranges = ranges;
         self
     }
 
-    /// The gift floor to store with the marks: the card's, raised over the
-    /// plays this run counted as a gift's. Written only by the write that
-    /// writes [`History::marks`].
-    pub(crate) fn floor(&self) -> Vec<Ack> {
-        let mut floor: BTreeMap<([u8; 6], u64), u32> = BTreeMap::new();
-        for a in &self.floor {
-            let seq = floor.entry(a.key()).or_insert(0);
-            *seq = (*seq).max(a.seq);
+    /// The gift ranges to store with the marks: the card's, and the plays
+    /// this run counted as a gift's, each device and epoch's from the
+    /// lowest to the highest. A play of the log between two of them that
+    /// wasn't counted so (one mapped before the card was marked, waiting
+    /// in this computer's outbox) splits the range, so no computer counts
+    /// it as a gift's. Written only by the write that writes
+    /// [`History::marks`].
+    pub(crate) fn gift_ranges(&self) -> Vec<GiftRange> {
+        let mut ranges = self.ranges.clone();
+        let mut plays: Vec<&Slot> = self.log.iter().flat_map(|log| &log.plays).collect();
+        plays.sort_by_key(|p| (p.device_id, p.epoch, p.seq));
+        let mut open: Option<GiftRange> = None;
+        for p in plays {
+            let gifted = self.gifted.contains(&p.id());
+            match &mut open {
+                Some(r) if gifted && (r.device_id, r.epoch) == (p.device_id, p.epoch) => r.to = p.seq,
+                _ => {
+                    ranges.extend(open.take());
+                    open = gifted.then(|| GiftRange::one(p.device_id, p.epoch, p.seq));
+                }
+            }
         }
-        let plays = self.log.iter().flat_map(|log| &log.plays);
-        for p in plays.filter(|p| self.gifted.contains(&p.id())) {
-            let seq = floor.entry((p.device_id, p.epoch)).or_insert(0);
-            *seq = (*seq).max(p.seq);
-        }
-        floor.into_iter().map(|((device_id, epoch), seq)| Ack { device_id, epoch, seq }).collect()
+        ranges.extend(open);
+        merged(ranges)
     }
 
-    /// At or below the card's gift floor as it was read: a play of its time
-    /// as someone else's.
-    fn under_floor(&self, p: &Slot) -> bool {
-        p.seq <= mark_of(&self.floor, p.device_id, p.epoch)
+    /// In one of the card's gift ranges as they were read: a play of its
+    /// time as someone else's.
+    fn in_gift_ranges(&self, p: &Slot) -> bool {
+        self.ranges.iter().any(|r| r.holds(p.device_id, p.epoch, p.seq))
     }
 
-    /// The play counted as a gift's: settled as it is, unsent, and raising
-    /// the floor.
+    /// The play counted as a gift's: settled as it is, unsent, and taken
+    /// into the gift ranges.
     fn count_gift(&mut self, id: String) {
         self.tally.gift += 1;
         self.unsent.insert(id.clone());
@@ -964,11 +976,11 @@ impl History {
         let servers = root.manifest.server_table();
         for (slot, fate) in resolve(&log, tags, &servers, skew, &self.posted) {
             self.tally.new += 1;
-            // Played while the card was someone else's, by its floor: never
+            // Played while the card was someone else's, by its ranges: never
             // mapped, whatever the settings say now. One that waited from
             // before it was marked is the listener's own, and waits on.
             let id = slot.id();
-            if self.under_floor(&slot) && !owing.plays.iter().any(|o| o.id == id) {
+            if self.in_gift_ranges(&slot) && !owing.plays.iter().any(|o| o.id == id) {
                 self.count_gift(id);
                 continue;
             }
@@ -998,7 +1010,7 @@ impl History {
 
     /// A look at a card for someone else ([`History::gift()`]), its log's
     /// `files` read: each new play is counted and settled unsent, and
-    /// raises the floor; nothing of it is saved on this computer. All but
+    /// goes into the gift ranges; nothing of it is saved on this computer. All but
     /// the plays mapped before the card was marked, which wait in the
     /// outbox as they did: those are the listener's own.
     fn look_gift(&mut self, files: &[(&'static str, Vec<u8>, u64)]) {
@@ -1346,14 +1358,14 @@ impl History {
 
     /// The marks, risen over the plays settled; with `stored`, over only
     /// those the card already holds settled: a play this run first counted
-    /// as a gift's holds its mark, since the floor that says so is stored
+    /// as a gift's holds its mark, since the range that says so is stored
     /// by the state file a run writes after its commits.
     fn risen(&self, stored: bool) -> Vec<Ack> {
         let Some(log) = &self.log else { return self.posted.clone() };
         let waiting: HashSet<&str> = self.owing.plays.iter().map(|o| o.id.as_str()).collect();
         let done = |p: &Slot| {
             let id = p.id();
-            if stored && self.gifted.contains(&id) && !self.under_floor(p) {
+            if stored && self.gifted.contains(&id) && !self.in_gift_ranges(p) {
                 return false;
             }
             let settled = self.unsent.contains(&id) || self.owing.done.contains(&id);
@@ -1367,7 +1379,7 @@ impl History {
     /// holds plays of; never above the highest seq read of the card's log.
     /// A run that read no log carries them as they are. They pass no play
     /// this run first counted as a gift's: a commit comes before the state
-    /// file that stores the floor, and a run halted between the two would
+    /// file that stores the ranges, and a run halted between the two would
     /// have the player trim plays the card's settings still call the
     /// listener's (the next commit passes them).
     pub(crate) fn acks(&self, carried: &[Ack]) -> Vec<Ack> {
@@ -1501,13 +1513,13 @@ pub(crate) fn plays_of(
         history.note(false, "the card has no commit: its plays wait for a sync".into());
         return (history.tally, Vec::new());
     };
-    // The card's word that it is for someone else, and its gift floor,
+    // The card's word that it is for someone else, and its gift ranges,
     // whatever card id its state file names: only the marks are an
     // identity's own.
     let state = State::of(&seen.state);
     if let Some(state) = &state {
         history.gift = state.settings.for_someone_else;
-        history.floor = state.gifts.clone();
+        history.ranges = state.gifts.clone();
     }
     let state = state.filter(|s| s.card_id == root.manifest.header.card_id);
     if let Some(state) = &state {

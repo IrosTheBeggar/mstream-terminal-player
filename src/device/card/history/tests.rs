@@ -217,6 +217,10 @@ fn ack(device_id: [u8; 6], epoch: u64, seq: u32) -> Ack {
     Ack { device_id, epoch, seq }
 }
 
+fn gifts(device_id: [u8; 6], epoch: u64, from: u32, to: u32) -> GiftRange {
+    GiftRange { device_id, epoch, from, to }
+}
+
 /// A card's state file with no marks.
 fn none() -> (u64, Vec<Ack>) {
     (CARD_ID, Vec::new())
@@ -808,7 +812,7 @@ fn a_play_started_ahead_of_this_computers_clock_settles_as_the_server_says() {
 }
 
 /// The plays alone take the card's word that it is for someone else, and
-/// its gift floor, from its state file whatever card id that names: only
+/// its gift ranges, from its state file whatever card id that names: only
 /// the marks are an identity's own (A5).
 #[test]
 fn the_plays_alone_take_the_gift_from_a_state_file_of_another_identity() {
@@ -828,8 +832,8 @@ fn the_plays_alone_take_the_gift_from_a_state_file_of_another_identity() {
     assert_eq!(marks, [ack(ONE, EPOCH_1, 7)]);
     assert!(fake.lock().unwrap().posts.is_empty(), "no play sent");
 
-    // The setting off, a floor under another id: the plays at or below it
-    // go nowhere, the rest go.
+    // The setting off, a development build's floor under another id (a
+    // range from 0 to it): the plays at or below it go nowhere, the rest go.
     let floored = json!({"format": "mstream-card-state", "version": 1, "seq": 3, "cardId": other,
         "label": "Mine", "giftPlays": mark});
     std::fs::write(&state_file, floored.to_string()).unwrap();
@@ -988,11 +992,11 @@ fn plays_of_another_server_wait_for_it() {
 /// A card for someone else (its settings): its new plays are counted and go
 /// nowhere, whatever they map to, with a ledger or without. Nothing is
 /// owed, nothing is in any request, and each is settled as it is: the mark
-/// and the card's gift floor pass it, for the state file to store, and no
-/// commit acknowledges it before that file holds the floor. Nothing of it
+/// passes it and the card's gift ranges take it in, for the state file to
+/// store, and no commit acknowledges it before that file holds them. Nothing of it
 /// is kept on this computer: a run that halted before its state file was
 /// written left the plays the listener's (A4). Made the listener's own
-/// again, by the write that stores the floor, the card sends none of them,
+/// again, by the write that stores the ranges, the card sends none of them,
 /// from this computer or another, whatever their outboxes hold (A3).
 #[test]
 fn a_card_for_someone_elses_plays_settle_unsent_and_never_go_once_it_is_the_listeners_own() {
@@ -1012,8 +1016,8 @@ fn a_card_for_someone_elses_plays_settle_unsent_and_never_go_once_it_is_the_list
     assert_eq!((gift.tally.due, gift.due(&talk(HOME)), gift.tally.waiting), (0, 0, 0));
     assert!(fake.lock().unwrap().posts.is_empty(), "nothing in any request");
     assert_eq!(gift.marks(), [ack(ONE, EPOCH_1, 7)], "settled as they are: the mark passes them");
-    assert_eq!(gift.floor(), [ack(ONE, EPOCH_1, 7)], "and the floor, stored with it");
-    assert_eq!(gift.acks(&[]), [], "no commit before the state file holds the floor");
+    assert_eq!(gift.gift_ranges(), [gifts(ONE, EPOCH_1, 1, 7)], "and the range, stored with it");
+    assert_eq!(gift.acks(&[]), [], "no commit before the state file holds the range");
     assert_eq!((gift.unstored(), gift.blind()), (None, false));
     assert!(store.outbox().cards.get(&CARD_ID).is_none(), "nothing of them kept here");
 
@@ -1025,20 +1029,20 @@ fn a_card_for_someone_elses_plays_settle_unsent_and_never_go_once_it_is_the_list
 
     // The listener's own again with the marks held back (a play from
     // before still waits somewhere): the log holds the plays, new as ever.
-    // The floor on the card says whose they are, to this computer and to
+    // The range on the card says whose they are, to this computer and to
     // another whose outbox never saw them: neither sends one.
     let outboxes = [("this computer", store.clone()), ("another", Rc::new(MemStore::default()))];
     for (here, outbox) in outboxes {
-        let mut mine = History::new(outbox.clone(), false, none()).with_floor(gift.floor());
+        let mut mine = History::new(outbox.clone(), false, none()).with_gift_ranges(gift.gift_ranges());
         mine.look(&sim, Some(&root), 0);
         mine.post(&client, &talk(HOME), true, true, NOW);
         let t = &mine.tally;
         assert_eq!((t.new, t.gift, t.due, t.waiting, t.accepted), (7, 7, 0, 0, 0), "{here}: {t:?}");
         assert!(fake.lock().unwrap().posts.is_empty(), "{here}: nothing of that time, ever");
         assert_eq!(mine.marks(), [ack(ONE, EPOCH_1, 7)], "{here}");
-        let why = "the floor stored, a commit passes them";
+        let why = "the range stored, a commit passes them";
         assert_eq!(mine.acks(&[]), [ack(ONE, EPOCH_1, 7)], "{here}: {why}");
-        assert_eq!(mine.floor(), [ack(ONE, EPOCH_1, 7)], "{here}: and keeps it");
+        assert_eq!(mine.gift_ranges(), [gifts(ONE, EPOCH_1, 1, 7)], "{here}: and keeps it");
     }
 
     // Once a sync has stored the marks, no computer finds one of them new.
@@ -1050,7 +1054,7 @@ fn a_card_for_someone_elses_plays_settle_unsent_and_never_go_once_it_is_the_list
     assert!(fake.lock().unwrap().posts.is_empty() && elsewhere.outbox().cards.is_empty());
 
     // A run that would have marked the card and halted before its state
-    // file was written: no floor, nothing kept here. The plays are the
+    // file was written: no range, nothing kept here. The plays are the
     // listener's own, as the card still says, and go.
     let mut halted = History::new(store.clone(), false, none());
     halted.look(&sim, Some(&root), 0);
@@ -1061,11 +1065,13 @@ fn a_card_for_someone_elses_plays_settle_unsent_and_never_go_once_it_is_the_list
 
 /// The plays mapped before a card was marked for someone else are the
 /// listener's own: while it is marked they wait in the outbox, none
-/// posted, and hold the mark; the plays logged after them raise the card's
-/// gift floor. *Send the plays* on such a card asks no server and writes
-/// nothing to it. Once the card is the listener's own again the ones from
-/// before go from this computer, and they alone; another computer, whose
-/// outbox never held them, sends none (A3).
+/// posted, and hold the mark; the plays logged after them go into the
+/// card's gift ranges, which start above them. *Send the plays* on such a
+/// card asks no server and writes nothing to it. Once the card is the
+/// listener's own again the ones from before go, and they alone: from this
+/// computer, and from another whose outbox never held them (or this one's,
+/// lost), which maps them as the listener's own, since no range holds them
+/// (the last review's Z1: a floor under the highest gift's play lost them).
 #[test]
 fn the_plays_from_before_a_card_was_marked_wait_and_go_alone_once_it_is_the_listeners_own() {
     let scratch = Scratch::new("gift-before");
@@ -1096,11 +1102,11 @@ fn the_plays_from_before_a_card_was_marked_wait_and_go_alone_once_it_is_the_list
     assert_eq!((t.new, t.gift, t.owed, t.due, t.waiting, t.failed), (3, 2, 1, 0, 1, false), "{t:?}");
     assert!(fake.lock().unwrap().posts.is_empty(), "nothing in any request");
     assert_eq!((marked.marks(), marked.acks(&[])), (vec![], vec![]), "the one that waits holds the mark");
-    assert_eq!(marked.floor(), [ack(ONE, EPOCH_1, 3)], "theirs under the floor");
+    let ranges = marked.gift_ranges();
+    assert_eq!(ranges, [gifts(ONE, EPOCH_1, 2, 3)], "theirs in the range, the one from before below it");
     let owing = &store.outbox().cards[&CARD_ID];
     let why = "it waits on; nothing of theirs kept here";
     assert_eq!((owing.plays.len(), owing.done.len()), (1, 0), "{why}");
-    let floor = marked.floor();
 
     // The plays command reads the mark off the card's own settings, and
     // asks no server (one out of reach fails nothing). It writes nothing
@@ -1117,24 +1123,71 @@ fn the_plays_from_before_a_card_was_marked_wait_and_go_alone_once_it_is_the_list
     assert_eq!(sim.image(), image, "the card as it was");
     std::fs::remove_file(&state_file).unwrap();
 
-    // The listener's own again, the floor stored with the setting: another
-    // computer, its outbox empty, sends none of them, the one from before
-    // among them (it isn't that computer's to send).
+    // The listener's own again, the ranges stored with the setting: another
+    // computer, its outbox empty (or this one's, lost), sends none of the
+    // gift's plays, and the one from before as the listener's own.
     let elsewhere = Rc::new(MemStore::default());
-    let mut other = History::new(elsewhere.clone(), false, none()).with_floor(floor.clone());
+    let mut other = History::new(elsewhere.clone(), false, none()).with_gift_ranges(ranges.clone());
     other.look(&sim, Some(&root), 0);
     other.post(&client, &talk(HOME), true, true, NOW);
-    assert!(fake.lock().unwrap().posts.is_empty(), "no play of the gift's time from another computer");
-    assert_eq!((other.tally.gift, other.marks()), (3, vec![ack(ONE, EPOCH_1, 3)]));
+    assert_eq!(posted_ids(&fake), [vec![own.id()]], "the one from before alone, never the gift's");
+    let t = &other.tally;
+    assert_eq!((t.gift, t.accepted, t.due, t.waiting), (2, 1, 0, 0), "{t:?}");
+    assert_eq!(other.marks(), [ack(ONE, EPOCH_1, 3)]);
+    assert_eq!(other.gift_ranges(), ranges, "the ranges as they were");
 
-    // This one: the one from before goes, alone.
-    let mut mine = History::new(store.clone(), false, none()).with_floor(floor);
+    // This one: the one from before goes from its outbox too, alone (the
+    // server has it already: a duplicate, settled).
+    let mut mine = History::new(store.clone(), false, none()).with_gift_ranges(ranges);
     mine.look(&sim, Some(&root), 0);
     mine.post(&client, &talk(HOME), true, true, NOW);
-    assert_eq!(posted_ids(&fake), [vec![own.id()]], "nothing of the time it was someone else's");
+    let sent = [vec![own.id()], vec![own.id()]];
+    assert_eq!(posted_ids(&fake), sent, "nothing of the time it was someone else's");
     let t = &mine.tally;
-    assert_eq!((t.gift, t.accepted, t.due, t.waiting), (2, 1, 0, 0), "{t:?}");
+    assert_eq!((t.gift, t.due, t.waiting), (2, 0, 0), "{t:?}");
     assert_eq!(mine.marks(), [ack(ONE, EPOCH_1, 3)]);
+}
+
+/// A play the gift's look didn't count (one waiting in this computer's
+/// outbox from before the card was marked) between two it did splits the
+/// card's gift range: no computer counts it as a gift's, so another sends
+/// it as the listener's own (the last review's Z1).
+#[test]
+fn a_waiting_play_between_a_gifts_plays_splits_its_range() {
+    let scratch = Scratch::new("gift-split");
+    let sim = card(&scratch, Golden::One, &[]);
+    let root = root_of(&sim);
+    let log = scratch.0.join("card/.player/plays.jnl");
+    // The listener's own file (no row of the ledger), settled unsent and
+    // its mark never stored; a server's file, mapped and waiting.
+    let first = play_of(&root, "Artist/Album/01 - Title.mp3", ONE, EPOCH_1, 1);
+    let mine = Slot { path_hash: path_hash("Mine/Not On The Server.mp3"), ..first };
+    let waits = play_of(&root, "Artist/Album/02 - Other.mp3", ONE, EPOCH_1, 2);
+    std::fs::write(&log, log_bytes(&[mine, waits])).unwrap();
+    let store = Rc::new(MemStore::default());
+    let mut before = History::new(store.clone(), false, none());
+    before.look(&sim, Some(&root), 0);
+    before.post(&offline(), &talk(HOME), true, true, NOW);
+    assert_eq!((before.tally.own, before.tally.waiting), (1, 1), "{:?}", before.tally);
+
+    // Marked, played once more: the first and the third are counted as a
+    // gift's, the one that waits isn't.
+    let theirs = play_of(&root, "Artist/Album/01 - Title.mp3", ONE, EPOCH_1, 3);
+    std::fs::write(&log, log_bytes(&[mine, waits, theirs])).unwrap();
+    let mut marked = History::new(store.clone(), false, none()).gift(true);
+    marked.look(&sim, Some(&root), 0);
+    assert_eq!((marked.tally.gift, marked.tally.owed), (2, 1), "{:?}", marked.tally);
+    let ranges = marked.gift_ranges();
+    assert_eq!(ranges, [gifts(ONE, EPOCH_1, 1, 1), gifts(ONE, EPOCH_1, 3, 3)]);
+
+    // Another computer, the card the listener's own again: the one that
+    // waited goes, the gift's don't.
+    let (client, fake) = server(Mstream::default());
+    let mut other = History::new(Rc::new(MemStore::default()), false, none()).with_gift_ranges(ranges);
+    other.look(&sim, Some(&root), 0);
+    other.post(&client, &talk(HOME), true, true, NOW);
+    assert_eq!(posted_ids(&fake), [vec![waits.id()]]);
+    assert_eq!((other.tally.gift, other.tally.accepted), (2, 1), "{:?}", other.tally);
 }
 
 /// A play that waits isn't forgotten because the card's mark passed it:

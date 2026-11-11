@@ -32,6 +32,7 @@ use crate::device::card::covers::PROBES;
 use crate::device::card::contract::mppl::{KIND_PLAY, Slot};
 use crate::device::card::covers::tests::picture;
 use crate::device::card::engine::Removal;
+use crate::device::card::state::GiftRange;
 use crate::device::card::engine::fatsim::FatSim;
 use crate::device::card::history::tests::MemStore;
 use crate::device::card::setup;
@@ -1212,7 +1213,7 @@ fn play_posts(fake: &Fake) -> usize {
 
 /// A card for someone else (clause 61): its plays are counted, sent to
 /// nobody, and settled as they are. No request carries one; the state
-/// file's marks and gift floor pass them, at the sync that marks the card
+/// file's marks and gift ranges pass them, at the sync that marks the card
 /// and at the next, which has no flag, and the next commit after that
 /// acknowledges them (a commit comes before the state file). The sync that
 /// makes the card the listener's own again settles what its log holds the
@@ -1236,6 +1237,7 @@ fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unpost
         ..Ask::default()
     };
     let mark = |seq: u32| vec![Ack { device_id: DEVICE, epoch: EPOCH, seq }];
+    let gifts = |to: u32| vec![GiftRange { device_id: DEVICE, epoch: EPOCH, from: 1, to }];
 
     one_more_track(&fake, 6);
     let marked = again(&for_whom(true));
@@ -1246,10 +1248,10 @@ fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unpost
     assert!(marked.notes.iter().any(|n| n == said), "{:?}", marked.notes);
     assert_eq!(play_posts(&fake), 0, "no request carries a play");
     let seen = look(&sim);
-    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, [], "not yet acknowledged: no floor before");
+    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, [], "not yet acknowledged: no ranges before");
     let state = State::of(&seen.state).unwrap();
     assert_eq!((state.plays.clone(), state.settings.for_someone_else), (mark(2), true));
-    assert_eq!(state.gifts, mark(2), "the floor, in the write that settles them");
+    assert_eq!(state.gifts, gifts(2), "the range, in the write that settles them");
 
     // The next sync has no flag: the card's settings say it. One more play
     // of a server's file: counted, settled, and in no request.
@@ -1263,7 +1265,7 @@ fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unpost
     let seen = look(&sim);
     assert_eq!(seen.root.as_ref().unwrap().manifest.acks, mark(2), "acknowledged, unposted");
     let state = State::of(&seen.state).unwrap();
-    assert_eq!((state.plays, state.gifts), (mark(3), mark(3)));
+    assert_eq!((state.plays, state.gifts), (mark(3), gifts(3)));
 
     // Played once more by someone else, then made the listener's own by
     // the sync itself: what the log holds is of the time before, and that
@@ -1277,7 +1279,7 @@ fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unpost
     assert_eq!(play_posts(&fake), 0, "nothing of the time it was someone else's");
     let state = State::of(&look(&sim).state).unwrap();
     assert_eq!((state.plays.clone(), state.settings.for_someone_else), (mark(4), false));
-    assert_eq!(state.gifts, mark(4), "the floor stays with the card, the mark off");
+    assert_eq!(state.gifts, gifts(4), "the range stays with the card, the mark off");
 
     // The listener's own plays, from then on, go.
     plays.push(logged(&sim, "Album B/01.mp3", 5, at + 800_000));
@@ -1290,7 +1292,7 @@ fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unpost
     let ids: Vec<&str> = posted.iter().map(|p| p["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["core2-00005e005301-1122334455667788-5"], "that one alone, ever");
     let state = State::of(&look(&sim).state).unwrap();
-    assert_eq!((state.plays, state.gifts), (mark(5), mark(4)));
+    assert_eq!((state.plays, state.gifts), (mark(5), gifts(4)));
 }
 
 /// A card for someone else whose play log can't be read is not made the

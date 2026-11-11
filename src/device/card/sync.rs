@@ -482,12 +482,12 @@ fn run(
     // played before this run, and nothing of a card's time as someone
     // else's may go: the run that marks the card settles those plays
     // unsent, and so does the run that makes it the listener's own again,
-    // the card's gift floor risen over them in the state file it ends with.
+    // the card's gift ranges taking them in, in the state file it ends with.
     let posted = (state.card_id, state.plays.clone());
     let (was_gift, gift) = (was.settings.for_someone_else, state.settings.for_someone_else);
     let history = History::new(had.plays.clone(), ask.dry_run, posted)
         .gift(was_gift || gift)
-        .with_floor(state.gifts.clone());
+        .with_gift_ranges(state.gifts.clone());
     let history = had.history.insert(history);
     let opened = Session::open(card, &expect, knobs, &ask.answers, envs(), history, events);
     let mut session = opened.map_err(|stop| (None, Halt::Card(stop)))?;
@@ -2042,7 +2042,7 @@ impl Hooks for SyncHooks {
         let store = self.store.as_mut()?;
         if let Some(history) = &self.history {
             store.state.plays = history.marks();
-            store.state.gifts = history.floor();
+            store.state.gifts = history.gift_ranges();
         }
         if let Some(lack) = self.waves_lack {
             let state = &mut store.state;

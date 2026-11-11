@@ -249,7 +249,7 @@ pub(crate) fn set_up_as(
 /// plays its log holds are of the time it was someone else's, and no look
 /// after this could tell. They are settled unsent before the setting goes,
 /// as a sync of such a card settles them ([`History::gift()`]): the marks
-/// and the card's gift floor risen over them are written with the
+/// and the card's gift ranges taking them in are written with the
 /// settings, so no computer's look maps them after, whatever its outbox
 /// holds. A log that can't be read settles nothing, and the card stays as
 /// it is.
@@ -288,8 +288,8 @@ pub(crate) fn store_as(
     let (was_gift, posted) = (state.settings.for_someone_else, (card_id, state.plays.clone()));
     change(&mut state);
     let own_again = was_gift && !state.settings.for_someone_else;
-    let floor = state.gifts.clone();
-    let gift = || History::new(plays, false, posted).gift(true).with_floor(floor);
+    let ranges = state.gifts.clone();
+    let gift = || History::new(plays, false, posted).gift(true).with_gift_ranges(ranges);
     let mut settled = own_again.then(gift);
     let mut none = NoHooks;
     let hooks: &mut dyn Hooks = match settled.as_mut() {
@@ -303,7 +303,7 @@ pub(crate) fn store_as(
             return Err(Stop::Refused(history::LOG_UNREAD.into()));
         }
         state.plays = history.marks();
-        state.gifts = history.floor();
+        state.gifts = history.gift_ranges();
     }
     state.card_id = card_id;
     state.settings.stored = true;

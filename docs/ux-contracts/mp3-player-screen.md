@@ -1544,10 +1544,13 @@ comes from the cache, or a download, beside them.
     - **Nor later, from any computer.** Such a play is dropped as it is
       counted, like one from before the clock was set. The card keeps
       that it was: the state file the sync ends with (or the Apply that
-      makes the card the listener's own again) raises the card's **gift
-      floor** over it (`giftPlays`, beside the marks), and every look
-      after, on this computer or another and whatever *For* says by then,
-      counts a play at or below the floor as a gift's and sends none. The
+      makes the card the listener's own again) takes it into the card's
+      **gift ranges** (`giftPlays`, beside the marks: of each player and
+      epoch, the plays from the first counted so to the last, split where
+      a play between them wasn't), and every look after, on this computer
+      or another and whatever *For* says by then, counts a play in a range
+      as a gift's and sends none. A play mapped before the card was
+      marked lies below its range, and is the listener's own anywhere. The
       next sync's commit acknowledges it, so the player trims it (the
       sync that first counts it doesn't: its commits come before its state
       file). Nothing of it is kept on this computer: a sync that would
@@ -1566,10 +1569,11 @@ comes from the cache, or a download, beside them.
     - What waited on this computer from before the card was marked goes at
       the first sync once the card is the listener's own again, from this
       computer only. Until then it holds the card's acknowledgements where
-      it stands; the plays logged after it are under the floor all the
-      same, so another computer sends none of them (nor the one that waits
-      here: it isn't that computer's), and they are trimmed from the
-      player once it has gone.
+      it stands; the plays logged after it are in the gift ranges all the
+      same, so another computer sends none of them, and they are trimmed
+      from the player once it has gone. The one that waits is in no range:
+      another computer, or this one with its outbox lost, sends it as the
+      listener's own.
 
     **A play the server turns away waits while its answer may change.** A
     server in a scan answers that it doesn't know a track its scan hasn't
@@ -2941,7 +2945,8 @@ setting no locale, prints in English.
       logged after them were settled on this computer alone until those
       had gone, and another computer that synced the card in between, the
       card the listener's own by then, sent them. Closed since by the
-      card's gift floor (the entry of the second landing review below).
+      card's gift floor (the entry of the second landing review below),
+      made ranges since (the last review's entry).
   - **A server in a scan lost the card's plays.** mStream answers
     `unknown-track` for a file its scan hasn't reached, and every answer
     settled its play: the marks passed them and the next commit's ACKS let
@@ -3206,3 +3211,24 @@ setting no locale, prints in English.
     quit gate; they never did. They close the window at once, and the
     teardown stops the sync at its next save and waits for it, as the
     Part B4 entry above says; clause 57 and the README say so now.
+- **2026-11-11 — The last review of the landing fixes.** A last read of
+  the second review's fixes found no play of a gift card's time posted,
+  none posted twice and nothing written to a card other than the one
+  picked; what it found besides, and how each was settled.
+  - **The gift floor dropped a listener's own play** (clause 61). The
+    floor was one highest seq of each player and epoch, so it covered a
+    play mapped before the card was marked that waited in one computer's
+    outbox too: any look that didn't hold it (another computer, or this
+    one with its outbox lost) counted it as a gift's, the marks and ACKS
+    passed it, and it was lost if the computer that held it never posted
+    it. The card keeps **gift ranges** now (`giftPlays`, each
+    `{deviceId, epoch, from, to}`: the plays from the first counted as a
+    gift's to the last, split where a play between them wasn't; a card
+    marked more than once has a few). The play from before lies below
+    its range, and every computer maps it as the listener's own. A state
+    file a development build wrote with the floor (`seq`, a ceiling)
+    reads as a range from 0 to it. Written as before: by the write that
+    settles the plays, nothing of them kept here, the ACKS one commit
+    later. The words for the card contract (the firmware repo's
+    docs/METADATA.md 2.12.7 and 2.20.6, item 11) are proposed to it again
+    with the ranges.
