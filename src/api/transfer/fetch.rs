@@ -1460,6 +1460,7 @@ mod tests {
             reply("200 OK", &[], b"0123456789ab"),
             chunked("200 OK", &[], &[b"012345"]),
             chunked("200 OK", &[("Content-Type", "audio/ogg")], &[b"OggS", b"more"]),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n012345".to_vec(),
         ]);
         let client = Client::new(&base).unwrap();
         let failed = client.download(&Fetch::file("lib/a.flac").expecting(10), &dest, &mut |_, _| {}).unwrap_err();
@@ -1474,6 +1475,14 @@ mod tests {
         let failed = client.download(&fetch, &dest, &mut |_, _| {}).unwrap_err();
         assert!(matches!(failed.error, FetchError::TooLong { cap: 5 }), "{:?}", failed.error);
         assert_eq!(failed.partial, Partial { len: 4, validator: None }, "a conversion's part is never resumed");
+
+        // A file whose listing gave no length (a cap alone): a body shorter
+        // than its own Content-Length is caught all the same.
+        let fetch = Fetch::file("lib/a.flac").cap(FAT32_MAX);
+        let failed = client.download(&fetch, &dest, &mut |_, _| {}).unwrap_err();
+        let short = matches!(failed.error, FetchError::Short { expected: 10, got: 6 });
+        assert!(short || matches!(failed.error, FetchError::Api(_)), "{:?}", failed.error);
+        assert!(failed.partial.len <= 6, "{:?}", failed.partial);
     }
 
     /// The other half of the client's gzip (performance audit #98): its JSON
