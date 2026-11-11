@@ -1416,8 +1416,14 @@ mod tests {
         let ended = Instant::now();
         let (asked, started, seen) = first.join().unwrap();
         assert!(asked && failed.stop && failed.why.contains("queue stayed full for 1 minutes"), "{failed:?}");
-        assert_eq!(1 + seen.try_iter().count(), 3, "asked, waited a second twice, then stopped");
+        // Asked again after each second's wait, and stopped at the first
+        // answer 2 s past the first: three asks, or two on a machine slow
+        // enough that the second answer came 2 s after the first (each
+        // wait is a second at least, so never four).
+        let asks = 1 + seen.try_iter().count();
+        assert!((2..=3).contains(&asks), "asked, waited, asked again, then stopped: {asks}");
         let took = ended.saturating_duration_since(started);
+        assert!(took >= Duration::from_secs(2), "the longest wait waited out: {took:?}");
         assert!(took < Duration::from_secs(10), "{took:?}");
     }
 
