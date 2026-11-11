@@ -1289,7 +1289,10 @@ pub(crate) mod tests {
         assert!(!carded("v0.14.0", CardKind::ExFat, false).can_format(), "never the version");
         let mut one = status("v0.8.0");
         one.clock = Clock::Unset;
-        assert!(heard(Heard::Status(one)).can_format(), "its key alone: `cid=` gave way to the budget");
+        // `clock=` alone decides. No line the firmware sends has it without
+        // `cid=` (when the line runs short, `clock=` gives way first): this
+        // one is built so only to show the key that counts.
+        assert!(heard(Heard::Status(one)).can_format(), "`clock=` alone decides");
         // `cid=` alone is 0.12.0's line, and 0.13.0's: the card's id came two
         // releases before the format, and offers none.
         let mut named = status("v0.13.0");

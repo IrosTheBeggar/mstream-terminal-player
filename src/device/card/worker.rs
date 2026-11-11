@@ -1918,10 +1918,13 @@ impl Worker {
                             let item = LogItem::Said(line);
                             self.tell(Event::Log { key: key.to_string(), item });
                         }
-                        if gift || tally.gift > 0 {
+                        // A card the listener's own again whose log holds
+                        // plays of its time as someone else's: what went is
+                        // said, and the log says why the rest didn't.
+                        let n = tally.accepted + tally.duplicates;
+                        if gift || (tally.gift > 0 && n == 0) {
                             self.tell(Event::Note(Note::PlaysGift));
                         } else {
-                            let n = tally.accepted + tally.duplicates;
                             self.tell(Event::Note(Note::PlaysSent { n, server }));
                         }
                     }

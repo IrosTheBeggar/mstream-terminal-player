@@ -1533,11 +1533,21 @@ comes from the cache, or a download, beside them.
       "not sent: a card for someone else" (`plays_gift`) in place of its
       counts, the busy line says the same when `p` is pressed, and the log
       says how many. `device card <drive> plays` says "E: is a card for
-      someone else: its plays aren't sent." and exits 0, its server asked
-      nothing.
-    - **Nor later.** Such a play is dropped as it is counted, like one
-      from before the clock was set: the sync's commit acknowledges it, so
-      the player trims it, and this computer remembers it until then.
+      someone else: its plays aren't sent." and exits 0, asking its server
+      nothing for the plays (the command's look at the card, which plans
+      its next sync, asks the server as for any card).
+    - **Nor later, from any computer.** Such a play is dropped as it is
+      counted, like one from before the clock was set. The card keeps
+      that it was: the state file the sync ends with (or the Apply that
+      makes the card the listener's own again) raises the card's **gift
+      floor** over it (`giftPlays`, beside the marks), and every look
+      after, on this computer or another and whatever *For* says by then,
+      counts a play at or below the floor as a gift's and sends none. The
+      next sync's commit acknowledges it, so the player trims it (the
+      sync that first counts it doesn't: its commits come before its state
+      file). Nothing of it is kept on this computer: a sync that would
+      have marked the card and stops before its state file is written
+      leaves those plays the listener's own, as the card still says.
       *Send the plays* writes nothing to the card, as ever.
     - **Making the card the listener's own again** (*For: me*: the sheet's
       Apply, `--for me`, or a sync) first drops the plays its log holds,
@@ -1549,9 +1559,11 @@ comes from the cache, or a download, beside them.
       software can't tell when a play was made: *Send the plays* before
       marking the card keeps the listener's own.
     - What waited on this computer from before the card was marked goes at
-      the first sync once the card is the listener's own again. Until
-      then it holds the card's acknowledgements where it stands: the plays
-      logged after it are dropped on this computer, and trimmed from the
+      the first sync once the card is the listener's own again, from this
+      computer only. Until then it holds the card's acknowledgements where
+      it stands; the plays logged after it are under the floor all the
+      same, so another computer sends none of them (nor the one that waits
+      here: it isn't that computer's), and they are trimmed from the
       player once it has gone.
 
     **A play the server turns away waits while its answer may change.** A
@@ -1572,7 +1584,9 @@ comes from the cache, or a download, beside them.
       start truly ahead (the player's clock was wrong) is dropped, as the
       server says.
     - The wait is 30 days from the play's start, by this computer's clock;
-      after that the server's answer stands.
+      after that the server's answer stands. A start more than 5 minutes
+      ahead of this computer's clock is past its wait at once, whatever
+      the server's reason: no wait mends the player's clock.
     - Details' log and the command line say how many wait and why, in the
       run's own words ("2 plays wait: the server doesn't know their tracks,
       and no listing says they are gone (a scan may be under way)"; "1 play
@@ -2917,11 +2931,12 @@ setting no locale, prints in English.
       it is marked are dropped: they can't be told from a gift's. A card
       marked and unmarked by mistake loses them too. *Send the plays*
       first keeps them.
-    - **Not closed.** Plays that waited here from before the card was
-      marked hold its marks, so the gift's plays logged after them are
-      settled on this computer alone until those have gone. Another
-      computer that syncs the card in between, the card the listener's own
-      by then, sends them.
+    - **Not closed** when this entry was written: plays that waited here
+      from before the card was marked held its marks, so the gift's plays
+      logged after them were settled on this computer alone until those
+      had gone, and another computer that synced the card in between, the
+      card the listener's own by then, sent them. Closed since by the
+      card's gift floor (the entry of the second landing review below).
   - **A server in a scan lost the card's plays.** mStream answers
     `unknown-track` for a file its scan hasn't reached, and every answer
     settled its play: the marks passed them and the next commit's ACKS let

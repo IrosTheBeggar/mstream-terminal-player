@@ -24,9 +24,13 @@
 //! - on a card for someone else (its settings' word, [`History::gift()`]),
 //!   none mapped at all, with a ledger or without: each new play that
 //!   wasn't mapped before the card was marked is counted and settled as it
-//!   is, unsent. Its id joins the outbox's settled ones and the mark rises
-//!   over it, so nothing of the time the card was someone else's reaches
-//!   an account, then or once the card is the listener's own again;
+//!   is, unsent, and the mark rises over it. The card's gift floor rises
+//!   over it too ([`History::floor()`], `giftPlays` in its state file),
+//!   stored by the write that stores the marks and never ahead of it: on
+//!   any computer, and whatever the settings say by then, a play at or
+//!   below the floor is counted so and never mapped, so nothing of the
+//!   time the card was someone else's reaches an account, then or once
+//!   the card is the listener's own again;
 //! - the plays to send saved in the outbox ([`Outbox`], `card-plays.json`
 //!   in the config folder, written whole) before the run writes anything:
 //!   a checkpoint deletes the tags file they map through. A sync whose
@@ -601,8 +605,9 @@ pub(crate) struct Tally {
     pub(crate) changed: usize,
     pub(crate) clock: usize,
     pub(crate) server: usize,
-    /// The new plays of a card for someone else: counted, sent nowhere, and
-    /// settled as they are (the mark passes them).
+    /// The new plays of a card for someone else, and those at or below its
+    /// gift floor: counted, sent nowhere, and settled as they are (the mark
+    /// passes them).
     pub(crate) gift: usize,
     /// Paths the server moved, found again by their audio hash.
     pub(crate) remapped: usize,
@@ -658,6 +663,7 @@ impl Tally {
     /// Why plays the card holds went nowhere though its server was read, a
     /// line each (the run's own words): a card for someone else, a server
     /// that turned them away for a reason that may pass.
+    #[cfg(test)]
     pub(crate) fn held(&self) -> Vec<String> {
         let mut lines = self.gift_line();
         if self.unknown > 0 {
@@ -684,7 +690,8 @@ impl Tally {
 
     /// The line of a card for someone else's plays, when it has new ones.
     fn gift_line(&self) -> Vec<String> {
-        let line = || format!("{} not sent: the card is for someone else", plays(self.gift));
+        let why = "played while the card was for someone else";
+        let line = || format!("{} not sent: {why}", plays(self.gift));
         (self.gift > 0).then(line).into_iter().collect()
     }
 }
@@ -719,9 +726,12 @@ fn bad_request(e: &ApiError) -> bool {
     matches!(e, ApiError::Server { status: 400, .. })
 }
 
-/// The play started more than [`WAIT_MS`] ago, by a clock at `now_ms`.
+/// The play started more than [`WAIT_MS`] ago, by a clock at `now_ms`, or
+/// starts further ahead of it than a server takes ([`AHEAD_MS`]): a start
+/// the player's own clock got wrong, which no wait mends. Either settles as
+/// the server says.
 fn past_wait(o: &Owed, now_ms: u64) -> bool {
-    o.started_at.saturating_add(WAIT_MS) < now_ms
+    o.started_at.saturating_add(WAIT_MS) < now_ms || o.started_at > now_ms.saturating_add(AHEAD_MS)
 }
 
 /// One card's plays through a run: looked at once, then remapped and
@@ -738,6 +748,11 @@ pub(crate) struct History {
     posted: Vec<Ack>,
     posted_for: u64,
     card_id: u64,
+    /// The card's gift floor as its state file holds it, whatever card id
+    /// that names ([`History::with_floor`]); and the plays this run counted
+    /// as a gift's, by id, which raise it ([`History::floor()`]).
+    floor: Vec<Ack>,
+    gifted: HashSet<String>,
     /// The log as the look read it; None until a look read one whole. And
     /// whether a look failed to read it (`blind`): it settled nothing of
     /// what the log holds.
@@ -776,6 +791,8 @@ impl History {
             posted: posted.1,
             posted_for: posted.0,
             card_id: 0,
+            floor: Vec::new(),
+            gifted: HashSet::new(),
             log: None,
             blind: false,
             owing: Owing::default(),
@@ -794,12 +811,15 @@ impl History {
     /// plays are sent to nobody's account, now or ever. Each new one is
     /// counted and none is mapped, so none joins the plays to send; and
     /// each is settled as it is, like a play from before the clock was
-    /// set: the mark rises over it (a sync's commit acknowledges it, and
-    /// the player trims it), and the outbox keeps its id until then, so no
-    /// look of this computer maps it once the card is the listener's own
-    /// again. Nothing is posted meanwhile: the plays mapped before the card
-    /// was marked wait in the outbox, hold the mark at the first of them,
-    /// and go once the card is the listener's own.
+    /// set: the mark rises over it, and so does the card's gift floor
+    /// ([`History::floor()`]), both stored on the card by the one write (a
+    /// sync's state file, the settings' store). No look after that, on any
+    /// computer, maps it, the card the listener's own again or not. Nothing
+    /// of it is kept on this computer: a run that halts before the write
+    /// leaves the plays new, as the card that was never marked has them.
+    /// Nothing is posted meanwhile: the plays mapped before the card was
+    /// marked wait in the outbox, hold the mark at the first of them, and
+    /// go once the card is the listener's own.
     ///
     /// A run that changes the setting, either way, is one of a card for
     /// someone else: the plays the log holds at a change can't be told
@@ -807,6 +827,46 @@ impl History {
     pub(crate) fn gift(mut self, gift: bool) -> History {
         self.gift = gift;
         self
+    }
+
+    /// The card's gift floor, its state file's `giftPlays` (2.12.7), read
+    /// whatever card id the file names: a play at or below it was counted
+    /// as a card for someone else's, and is so again, whatever the settings
+    /// say now.
+    pub(crate) fn with_floor(mut self, floor: Vec<Ack>) -> History {
+        self.floor = floor;
+        self
+    }
+
+    /// The gift floor to store with the marks: the card's, raised over the
+    /// plays this run counted as a gift's. Written only by the write that
+    /// writes [`History::marks`].
+    pub(crate) fn floor(&self) -> Vec<Ack> {
+        let mut floor: BTreeMap<([u8; 6], u64), u32> = BTreeMap::new();
+        for a in &self.floor {
+            let seq = floor.entry(a.key()).or_insert(0);
+            *seq = (*seq).max(a.seq);
+        }
+        let plays = self.log.iter().flat_map(|log| &log.plays);
+        for p in plays.filter(|p| self.gifted.contains(&p.id())) {
+            let seq = floor.entry((p.device_id, p.epoch)).or_insert(0);
+            *seq = (*seq).max(p.seq);
+        }
+        floor.into_iter().map(|((device_id, epoch), seq)| Ack { device_id, epoch, seq }).collect()
+    }
+
+    /// At or below the card's gift floor as it was read: a play of its time
+    /// as someone else's.
+    fn under_floor(&self, p: &Slot) -> bool {
+        p.seq <= mark_of(&self.floor, p.device_id, p.epoch)
+    }
+
+    /// The play counted as a gift's: settled as it is, unsent, and raising
+    /// the floor.
+    fn count_gift(&mut self, id: String) {
+        self.tally.gift += 1;
+        self.unsent.insert(id.clone());
+        self.gifted.insert(id);
     }
 
     /// The look couldn't read the card's log: nothing it holds was settled
@@ -904,6 +964,14 @@ impl History {
         let servers = root.manifest.server_table();
         for (slot, fate) in resolve(&log, tags, &servers, skew, &self.posted) {
             self.tally.new += 1;
+            // Played while the card was someone else's, by its floor: never
+            // mapped, whatever the settings say now. One that waited from
+            // before it was marked is the listener's own, and waits on.
+            let id = slot.id();
+            if self.under_floor(&slot) && !owing.plays.iter().any(|o| o.id == id) {
+                self.count_gift(id);
+                continue;
+            }
             let owed = match fate {
                 Ok(owed) => owed,
                 Err(why) => {
@@ -929,10 +997,10 @@ impl History {
     }
 
     /// A look at a card for someone else ([`History::gift()`]), its log's
-    /// `files` read: each new play is counted and settled unsent, its id
-    /// among the outbox's settled ones. All but the plays mapped before the
-    /// card was marked, which wait in the outbox as they did: those are the
-    /// listener's own.
+    /// `files` read: each new play is counted and settled unsent, and
+    /// raises the floor; nothing of it is saved on this computer. All but
+    /// the plays mapped before the card was marked, which wait in the
+    /// outbox as they did: those are the listener's own.
     fn look_gift(&mut self, files: &[(&'static str, Vec<u8>, u64)]) {
         let named: Vec<LogFile<'_>> =
             files.iter().map(|(name, bytes, size)| LogFile { name, bytes, size: *size }).collect();
@@ -941,15 +1009,15 @@ impl History {
         let held: HashSet<String> = log.plays.iter().map(Slot::id).collect();
         owing.done.retain(|id| held.contains(id));
         self.tally.read = log.counts;
-        let posted = &self.posted;
-        for p in log.plays.iter().filter(|p| p.seq > mark_of(posted, p.device_id, p.epoch)) {
+        let above = |p: &&Slot| p.seq > mark_of(&self.posted, p.device_id, p.epoch);
+        let new: Vec<Slot> = log.plays.iter().filter(above).copied().collect();
+        for p in new {
             self.tally.new += 1;
             let id = p.id();
             if owing.plays.iter().any(|o| o.id == id) {
                 self.tally.owed += 1;
             } else {
-                self.tally.gift += 1;
-                owing.done.insert(id);
+                self.count_gift(id);
             }
         }
         (self.log, self.owing) = (Some(log), owing);
@@ -1153,24 +1221,27 @@ impl History {
                 let plays: Vec<CardPlay> = ids.iter().filter_map(owed).map(|o| o.play(device)).collect();
                 client.report_card_plays(&block, &plays)
             };
-            let mut answer = send(ids, device);
-            // A server older than the `device` source refuses the batch
-            // whole: the rest go as `other`.
-            if device && answer.as_ref().is_err_and(bad_request) {
-                device = false;
-                answer = send(ids, false);
-            }
-            // Refused whole still: a play in it is one the server's schema
-            // refuses and [`play_fault`] doesn't know. Each goes alone, and
-            // the one refused alone is the one.
+            // Refused whole: a play in it is one the server's schema refuses
+            // and [`play_fault`] doesn't know. Each goes alone, and the one
+            // refused alone is the one. A play refused alone with the
+            // `device` source goes again as `other`: a server older than
+            // that source refuses a call for it whole. Taken so, the rest
+            // of the post goes as `other`; refused so too, it is the play's.
+            let quiet = |id: &String| self.owing.plays.iter().any(|o| &o.id == id && o.source == 0);
             let (mut answers, mut refused, mut failed) = (Vec::new(), Vec::new(), None);
-            match answer {
-                Ok(answer) => answers.push(answer),
-                Err(e) if !bad_request(&e) => failed = Some(e),
-                Err(_) if ids.len() == 1 => refused.push(ids[0].clone()),
-                Err(_) => {
+            let whole = (ids.len() > 1).then(|| send(ids, device));
+            match whole {
+                Some(Ok(answer)) => answers.push(answer),
+                Some(Err(e)) if !bad_request(&e) => failed = Some(e),
+                _ => {
                     for id in ids {
-                        match send(std::slice::from_ref(id), device) {
+                        let one = std::slice::from_ref(id);
+                        let mut answer = send(one, device);
+                        if device && answer.as_ref().is_err_and(bad_request) && quiet(id) {
+                            answer = send(one, false);
+                            device = answer.is_err();
+                        }
+                        match answer {
                             Ok(answer) => answers.push(answer),
                             Err(e) if bad_request(&e) => refused.push(id.clone()),
                             Err(e) => {
@@ -1270,10 +1341,21 @@ impl History {
     /// The posted marks now: the card's, each device and epoch's risen over
     /// the plays settled or not sent (2.20.6, item 10).
     pub(crate) fn marks(&self) -> Vec<Ack> {
+        self.risen(false)
+    }
+
+    /// The marks, risen over the plays settled; with `stored`, over only
+    /// those the card already holds settled: a play this run first counted
+    /// as a gift's holds its mark, since the floor that says so is stored
+    /// by the state file a run writes after its commits.
+    fn risen(&self, stored: bool) -> Vec<Ack> {
         let Some(log) = &self.log else { return self.posted.clone() };
         let waiting: HashSet<&str> = self.owing.plays.iter().map(|o| o.id.as_str()).collect();
         let done = |p: &Slot| {
             let id = p.id();
+            if stored && self.gifted.contains(&id) && !self.under_floor(p) {
+                return false;
+            }
             let settled = self.unsent.contains(&id) || self.owing.done.contains(&id);
             settled && !waiting.contains(id.as_str())
         };
@@ -1283,11 +1365,15 @@ impl History {
     /// The ACKS of a commit (2.5.6): each entry of the root before raised to
     /// its mark, never lowered; an entry for each device and epoch the log
     /// holds plays of; never above the highest seq read of the card's log.
-    /// A run that read no log carries them as they are.
+    /// A run that read no log carries them as they are. They pass no play
+    /// this run first counted as a gift's: a commit comes before the state
+    /// file that stores the floor, and a run halted between the two would
+    /// have the player trim plays the card's settings still call the
+    /// listener's (the next commit passes them).
     pub(crate) fn acks(&self, carried: &[Ack]) -> Vec<Ack> {
         let Some(log) = &self.log else { return carried.to_vec() };
         let mut out = carried.to_vec();
-        for mark in self.marks() {
+        for mark in self.risen(true) {
             let read = log.last_seq(mark.device_id, mark.epoch);
             let seq = mark.seq.min(read);
             match out.iter_mut().find(|a| a.key() == mark.key()) {
@@ -1415,10 +1501,17 @@ pub(crate) fn plays_of(
         history.note(false, "the card has no commit: its plays wait for a sync".into());
         return (history.tally, Vec::new());
     };
-    let state = State::of(&seen.state).filter(|s| s.card_id == root.manifest.header.card_id);
+    // The card's word that it is for someone else, and its gift floor,
+    // whatever card id its state file names: only the marks are an
+    // identity's own.
+    let state = State::of(&seen.state);
+    if let Some(state) = &state {
+        history.gift = state.settings.for_someone_else;
+        history.floor = state.gifts.clone();
+    }
+    let state = state.filter(|s| s.card_id == root.manifest.header.card_id);
     if let Some(state) = &state {
         (history.posted, history.posted_for) = (state.plays.clone(), state.card_id);
-        history.gift = state.settings.for_someone_else;
     }
     let skew = match root.tags.as_ref().map(|tags| listed_skew(card, tags)) {
         Ok(Err(e)) => {

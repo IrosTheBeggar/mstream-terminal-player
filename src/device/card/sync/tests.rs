@@ -1211,12 +1211,13 @@ fn play_posts(fake: &Fake) -> usize {
 }
 
 /// A card for someone else (clause 61): its plays are counted, sent to
-/// nobody, and settled as they are. No request carries one; the commit the
-/// run makes acknowledges them and the state file's marks pass them, at
-/// the sync that marks the card and at the next, which has no flag. The
-/// sync that makes the card the listener's own again settles what its log
-/// holds the same way: nothing played while it was someone else's ever
-/// goes. What is played after that is the listener's, and goes.
+/// nobody, and settled as they are. No request carries one; the state
+/// file's marks and gift floor pass them, at the sync that marks the card
+/// and at the next, which has no flag, and the next commit after that
+/// acknowledges them (a commit comes before the state file). The sync that
+/// makes the card the listener's own again settles what its log holds the
+/// same way: nothing played while it was someone else's ever goes. What is
+/// played after that is the listener's, and goes.
 #[test]
 fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unposted() {
     let scratch = Scratch::new("gift-plays");
@@ -1241,13 +1242,14 @@ fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unpost
     assert_eq!(ran(&marked).written, 1, "{:?}", marked.notes);
     let t = marked.plays.as_ref().unwrap();
     assert_eq!((t.new, t.gift, t.owed, t.due, t.accepted, t.waiting), (2, 2, 0, 0, 0, 0), "{t:?}");
-    let said = "2 plays not sent: the card is for someone else";
+    let said = "2 plays not sent: played while the card was for someone else";
     assert!(marked.notes.iter().any(|n| n == said), "{:?}", marked.notes);
     assert_eq!(play_posts(&fake), 0, "no request carries a play");
     let seen = look(&sim);
-    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, mark(2), "acknowledged, unposted");
+    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, [], "not yet acknowledged: no floor before");
     let state = State::of(&seen.state).unwrap();
     assert_eq!((state.plays.clone(), state.settings.for_someone_else), (mark(2), true));
+    assert_eq!(state.gifts, mark(2), "the floor, in the write that settles them");
 
     // The next sync has no flag: the card's settings say it. One more play
     // of a server's file: counted, settled, and in no request.
@@ -1259,8 +1261,9 @@ fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unpost
     assert_eq!(still.plays.as_ref().map(|t| (t.new, t.gift, t.owed, t.due)), Some((1, 1, 0, 0)));
     assert_eq!(play_posts(&fake), 0);
     let seen = look(&sim);
-    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, mark(3));
-    assert_eq!(State::of(&seen.state).unwrap().plays, mark(3));
+    assert_eq!(seen.root.as_ref().unwrap().manifest.acks, mark(2), "acknowledged, unposted");
+    let state = State::of(&seen.state).unwrap();
+    assert_eq!((state.plays, state.gifts), (mark(3), mark(3)));
 
     // Played once more by someone else, then made the listener's own by
     // the sync itself: what the log holds is of the time before, and that
@@ -1274,6 +1277,7 @@ fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unpost
     assert_eq!(play_posts(&fake), 0, "nothing of the time it was someone else's");
     let state = State::of(&look(&sim).state).unwrap();
     assert_eq!((state.plays.clone(), state.settings.for_someone_else), (mark(4), false));
+    assert_eq!(state.gifts, mark(4), "the floor stays with the card, the mark off");
 
     // The listener's own plays, from then on, go.
     plays.push(logged(&sim, "Album B/01.mp3", 5, at + 800_000));
@@ -1285,7 +1289,8 @@ fn a_card_for_someone_else_posts_no_play_and_its_commit_acknowledges_them_unpost
     let posted: Vec<Value> = fake.lock().unwrap().plays.clone();
     let ids: Vec<&str> = posted.iter().map(|p| p["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["core2-00005e005301-1122334455667788-5"], "that one alone, ever");
-    assert_eq!(State::of(&look(&sim).state).unwrap().plays, mark(5));
+    let state = State::of(&look(&sim).state).unwrap();
+    assert_eq!((state.plays, state.gifts), (mark(5), mark(4)));
 }
 
 /// A card for someone else whose play log can't be read is not made the

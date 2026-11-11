@@ -1234,7 +1234,7 @@ fn the_plays_of_a_card_for_someone_else_are_sent_nowhere() {
     });
     rig.send(Cmd::Plays { key: key.clone() });
     rig.until("the note", |f| f.notes.contains(&Note::PlaysGift));
-    let why = LogItem::Said("1 play not sent: the card is for someone else".into());
+    let why = LogItem::Said("1 play not sent: played while the card was for someone else".into());
     assert!(rig.fold.logs.iter().any(|(k, item)| *k == key && *item == why), "{:?}", rig.fold.logs);
     assert!(!rig.fold.notes.iter().any(|n| matches!(n, Note::PlaysSent { .. })), "{:?}", rig.fold.notes);
     let unasked = |fake: &Fake| {

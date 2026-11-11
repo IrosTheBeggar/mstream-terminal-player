@@ -11,6 +11,9 @@
 //! - `created`: when this identity was set up, in Unix seconds;
 //! - `plays`: the play log's posted mark of each device and epoch (2.20.6),
 //!   once a run has settled any of the card's plays;
+//! - `giftPlays`: of each device and epoch, the highest seq counted as a
+//!   play of the card's time as someone else's ([`State::gifts`]): in that
+//!   form, written by the write that settled them; absent: none;
 //! - `set`: for a card of a multi-card set, the set's whole table and this
 //!   card's index in it ([`span`](super::span));
 //! - `wavesNone`: the generation of the root a run left when it had asked the
@@ -61,9 +64,9 @@ use crate::api::urls::{TransferBitrate, TransferCodec};
 pub(crate) const FORMAT: &str = "mstream-card-state";
 
 /// The members schema 1 reads and writes; every other member is kept.
-const KNOWN: [&str; 13] = [
+const KNOWN: [&str; 14] = [
     "format", "version", "seq", "cardId", "label", "volumeSerial", "volumeUuid", "created", "plays",
-    "set", "wavesNone", "wavesNoFfmpeg", "autoDjOwed",
+    "giftPlays", "set", "wavesNone", "wavesNoFfmpeg", "autoDjOwed",
 ];
 
 /// The settings' members ([`Settings`]).
@@ -91,6 +94,12 @@ pub(crate) struct State {
     /// plays up to the seq are settled, or weren't to be sent. The next
     /// commit's ACKS follow them (2.5.6).
     pub(crate) plays: Vec<Ack>,
+    /// The gift floor of each device and epoch (clause 61): the highest seq
+    /// counted as a play of the card's time as someone else's, by the
+    /// write that settled it. Every look, on any computer, counts a play
+    /// at or below it as such, whatever the settings say now: never mapped,
+    /// never sent. None in a state file older than it.
+    pub(crate) gifts: Vec<Ack>,
     /// The multi-card set the card is a card of, its whole table.
     pub(crate) set: Option<Set>,
     /// The file names a set this software can't read (a newer player's):
@@ -149,6 +158,7 @@ impl State {
             uuid: text("volumeUuid").map(str::to_string),
             created: object.get("created").and_then(Value::as_u64).unwrap_or(0),
             plays: object.get("plays").map_or_else(Vec::new, marks_of),
+            gifts: object.get("giftPlays").map_or_else(Vec::new, marks_of),
             set,
             set_unread,
             waves_none: object.get("wavesNone").and_then(Value::as_u64).and_then(|g| u32::try_from(g).ok()),
@@ -201,6 +211,9 @@ impl State {
         members.push(("created", self.created.into()));
         if !self.plays.is_empty() {
             members.push(("plays", marks_value(&self.plays)));
+        }
+        if !self.gifts.is_empty() {
+            members.push(("giftPlays", marks_value(&self.gifts)));
         }
         if let Some(set) = &self.set {
             members.push(("set", set.value(set.slot_of(self.card_id).map(|i| i + 1))));
@@ -1048,6 +1061,24 @@ mod tests {
             {"deviceId": "00005e005301", "epoch": 7, "seq": 1},
             {"deviceId": "00005e005301", "epoch": "0x08", "seq": -1}]}"#;
         assert_eq!(read(odd.as_bytes()).unwrap().plays, [ack(one, 7, 5)]);
+    }
+
+    #[test]
+    fn the_gift_floor_reads_back_beside_the_marks_and_an_older_file_has_none() {
+        let mut state = State::new(9, "Car", None, 1);
+        let one = [0x00, 0x00, 0x5E, 0x00, 0x53, 0x01];
+        let ack = |device_id, epoch, seq| Ack { device_id, epoch, seq };
+        assert!(!String::from_utf8(state.text(1)).unwrap().contains("giftPlays"), "none: no member");
+        state.plays = vec![ack(one, 7, 2)];
+        state.gifts = vec![ack(one, 7, 9)];
+        let text = String::from_utf8(state.text(2)).unwrap();
+        let line = r#"  "giftPlays": [{"deviceId":"00005e005301","epoch":"0x0000000000000007","seq":9}]"#;
+        assert!(text.contains(line), "{text}");
+        let back = read(text.as_bytes()).unwrap();
+        assert_eq!((back.plays, back.gifts), (vec![ack(one, 7, 2)], vec![ack(one, 7, 9)]));
+        assert!(back.keep.is_empty(), "a member it knows: {:?}", back.keep);
+        let older = br#"{"format": "mstream-card-state", "version": 1, "seq": 3, "plays": []}"#;
+        assert_eq!(read(older).unwrap().gifts, []);
     }
 
     #[test]
