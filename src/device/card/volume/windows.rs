@@ -269,10 +269,11 @@ pub(crate) fn find() -> std::io::Result<Vec<Found>> {
 
 /// The FAT serial of the volume at `root` (`E:\`), as GetVolumeInformationW
 /// gives it now: what a run reads again to be sure the card is still the
-/// one it was bound to. None when the drive has no volume now (pulled).
+/// one it was bound to. The OS's error when it can't say (the drive has no
+/// volume now: pulled), never "no serial".
 #[cfg(windows)]
-pub(crate) fn serial(root: &std::path::Path) -> Option<Serial> {
-    sys::serial(root).map(Serial::Fat)
+pub(crate) fn serial(root: &std::path::Path) -> std::io::Result<Option<Serial>> {
+    Ok(sys::serial(root)?.map(Serial::Fat))
 }
 
 /// The card's wall-clock time of a file Windows dates `utc` (Unix seconds):
@@ -296,7 +297,7 @@ mod sys {
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_NOT_READY, ERROR_SHARING_VIOLATION, ERROR_UNRECOGNIZED_VOLUME, FILETIME,
+        ERROR_ACCESS_DENIED, ERROR_DIR_NOT_ROOT, ERROR_NOT_READY, ERROR_SHARING_VIOLATION, ERROR_UNRECOGNIZED_VOLUME, FILETIME,
         GetLastError, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
@@ -408,8 +409,9 @@ mod sys {
     }
 
     /// The serial of the volume at a root path (`E:\`, or a folder it is
-    /// mounted on), with no dialog for an empty reader.
-    pub(super) fn serial(root: &std::path::Path) -> Option<u32> {
+    /// mounted on), with no dialog for an empty reader; None at a folder
+    /// that is no volume's root, the OS's error when it can't be read.
+    pub(super) fn serial(root: &std::path::Path) -> io::Result<Option<u32>> {
         let _quiet = Quiet::new();
         let mut path = root.to_string_lossy().into_owned();
         if !path.ends_with('\\') {
@@ -430,7 +432,11 @@ mod sys {
                 0,
             )
         } != 0;
-        read.then_some(serial)
+        if read {
+            return Ok(Some(serial));
+        }
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() == Some(ERROR_DIR_NOT_ROOT as i32) { Ok(None) } else { Err(e) }
     }
 
     /// What Windows says of one volume, by its `\\?\Volume{…}\` name.

@@ -528,7 +528,9 @@ pub(crate) trait CardWrite: CardFs {
     fn dry(&self) -> bool {
         false
     }
-    /// The volume serial as the OS reports it now (2.10).
+    /// The volume serial as the OS reports it now (2.10): None for a volume
+    /// that has none, an error when the OS couldn't be asked (a pulled card
+    /// among the reasons), never "none" for that.
     fn serial(&self) -> io::Result<Option<Serial>>;
     /// A file there already, to read (and write) in place.
     fn open(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>>;
@@ -585,11 +587,11 @@ impl CardWrite for Mounted {
 
     fn serial(&self) -> io::Result<Option<Serial>> {
         #[cfg(windows)]
-        return Ok(windows::serial(&self.root));
+        return windows::serial(&self.root);
         #[cfg(target_os = "linux")]
-        return Ok(linux::serial(&self.root.to_string_lossy()));
+        return linux::serial(&self.root.to_string_lossy());
         #[cfg(target_os = "macos")]
-        return Ok(macos::serial(&self.root.to_string_lossy()));
+        return macos::serial(&self.root.to_string_lossy());
         #[allow(unreachable_code)]
         Ok(None)
     }

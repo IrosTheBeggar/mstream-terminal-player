@@ -59,7 +59,19 @@ pub(crate) struct Expect {
 }
 
 impl Expect {
-    pub(super) fn matches(&self, found: &Identity) -> Result<(), Stop> {
+    /// The card as read before a session (a set-up, the settings' write)
+    /// is the one the listener picked: [`Expect::matches`] on its serial,
+    /// card id and commit.
+    pub(crate) fn picked(&self, serial: Option<&Serial>, card_id: u64, commit_id: u64) -> Result<(), Stop> {
+        self.matches(&Identity { serial: serial.cloned(), card_id, commit_id })
+    }
+
+    /// A volume with no serial read where one is expected is a card taken
+    /// out ([`Stop::Pulled`]); only another serial read is another card.
+    pub(crate) fn matches(&self, found: &Identity) -> Result<(), Stop> {
+        if self.serial.is_some() && found.serial.is_none() {
+            return Err(Stop::Pulled);
+        }
         let serial = self.serial.as_ref().is_none_or(|s| found.serial.as_ref() == Some(s));
         let card = self.card_id.is_none_or(|c| c == found.card_id);
         let commit = self.commit_id.is_none_or(|c| c == found.commit_id);
@@ -179,13 +191,24 @@ impl<'c> Bound<'c> {
             return Err(self.lose(Stop::DifferentCard));
         }
         if serial || self.serial_read.elapsed() >= SERIAL_FOR {
-            let now = match self.card.serial() {
-                Ok(now) => now,
-                Err(_) => return Err(self.lose(Stop::Pulled)),
+            // A read that fails, or reads no serial where the card has one, is
+            // asked once more (a Mac's diskutil that couldn't be run, say):
+            // twice, it is a card taken out, which a run goes on from. Only
+            // another serial read is another card.
+            let bound = self.id.serial.clone();
+            let off = |read: &io::Result<Option<Serial>>| match read {
+                Ok(now) => bound.is_some() && now.is_none(),
+                Err(_) => true,
             };
+            let mut now = self.card.serial();
+            if off(&now) {
+                now = self.card.serial();
+            }
             self.serial_read = Instant::now();
-            if now != self.id.serial {
-                return Err(self.lose(Stop::DifferentCard));
+            match now {
+                Ok(now) if now == bound => {}
+                Ok(Some(_)) => return Err(self.lose(Stop::DifferentCard)),
+                _ => return Err(self.lose(Stop::Pulled)),
             }
         }
         Ok(self.card)

@@ -440,10 +440,12 @@ pub(crate) fn local_offset() -> i64 {
 
 /// The serial's stand-in of the volume mounted at `point`, its volume
 /// UUID as diskutil gives it: what a run reads again to be sure the card is
-/// still the one it was bound to. None when diskutil says nothing of it.
-pub(crate) fn serial_at(du: &dyn Diskutil, point: &str) -> Option<Serial> {
-    let info = parse(&du.info(point)?)?;
-    info.text("VolumeUUID").map(|uuid| Serial::Uuid(uuid.into()))
+/// still the one it was bound to. None when diskutil says nothing of it
+/// (nothing mounted there, or diskutil couldn't be run: a run asks once
+/// more, and takes none against a bound serial for a card taken out).
+pub(crate) fn serial_at(du: &dyn Diskutil, point: &str) -> std::io::Result<Option<Serial>> {
+    let Some(info) = du.info(point).as_deref().and_then(parse) else { return Ok(None) };
+    Ok(info.text("VolumeUUID").map(|uuid| Serial::Uuid(uuid.into())))
 }
 
 /// This Mac's volumes, judged.
@@ -454,7 +456,7 @@ pub(crate) fn find() -> std::io::Result<Vec<Found>> {
 
 /// [`serial_at`] on this Mac.
 #[cfg(target_os = "macos")]
-pub(crate) fn serial(point: &str) -> Option<Serial> {
+pub(crate) fn serial(point: &str) -> std::io::Result<Option<Serial>> {
     serial_at(&sys::Tool, point)
 }
 
@@ -683,8 +685,8 @@ mod tests {
         let mut f = macbook(&slot());
         let volume = f.info["disk4s1"].clone();
         f.info.insert("/Volumes/MUSIC & MORE".into(), volume);
-        assert_eq!(serial_at(&f, "/Volumes/MUSIC & MORE"), Some(Serial::Uuid(uuid.into())));
-        assert_eq!(serial_at(&f, "/Volumes/OTHER"), None);
+        assert_eq!(serial_at(&f, "/Volumes/MUSIC & MORE").unwrap(), Some(Serial::Uuid(uuid.into())));
+        assert_eq!(serial_at(&f, "/Volumes/OTHER").unwrap(), None);
     }
 
     fn found_with(slot: &[(&str, String)]) -> Found {

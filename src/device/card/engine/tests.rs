@@ -4477,3 +4477,101 @@ fn a_file_moved_where_no_record_may_name_it_is_the_listeners_and_the_run_goes_on
     let again = sync(&card, &wanted, &mut server, 3).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!((again.verified, again.written), (Ok(()), 0));
 }
+
+/// A card whose serial reads, once armed, answer as `script` says, one a
+/// read; the card's own answer past the script.
+struct Flaky<'c> {
+    card: &'c FatSim,
+    armed: std::cell::Cell<bool>,
+    script: std::cell::RefCell<std::collections::VecDeque<io::Result<Option<Serial>>>>,
+}
+
+impl CardFs for Flaky<'_> {
+    fn list(&self, dir: &str) -> io::Result<Vec<Item>> {
+        self.card.list(dir)
+    }
+
+    fn stat(&self, path: &str) -> io::Result<Option<Item>> {
+        self.card.stat(path)
+    }
+
+    fn read(&self, path: &str, max: usize) -> io::Result<Option<Vec<u8>>> {
+        self.card.read(path, max)
+    }
+
+    fn read_at(&self, path: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.card.read_at(path, offset, len)
+    }
+}
+
+impl CardWrite for Flaky<'_> {
+    fn key(&self) -> String {
+        self.card.key()
+    }
+
+    fn serial(&self) -> io::Result<Option<Serial>> {
+        let scripted = self.armed.get().then(|| self.script.borrow_mut().pop_front()).flatten();
+        scripted.unwrap_or_else(|| self.card.serial())
+    }
+
+    fn open(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>> {
+        self.card.open(path)
+    }
+
+    fn create(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>> {
+        self.card.create(path)
+    }
+
+    fn delete(&self, path: &str) -> io::Result<()> {
+        self.card.delete(path)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.card.rename(from, to)
+    }
+
+    fn mkdir(&self, path: &str) -> io::Result<()> {
+        self.card.mkdir(path)
+    }
+
+    fn rmdir(&self, path: &str) -> io::Result<()> {
+        self.card.rmdir(path)
+    }
+
+    fn lock_file(&self, path: &str) -> io::Result<Box<dyn LockFile + '_>> {
+        self.card.lock_file(path)
+    }
+}
+
+/// The review's TV6: a serial the OS couldn't give is asked once more, and
+/// twice is a card taken out, which a run goes on from; so is no serial read
+/// where the bound card has one. Only another serial read is another card.
+#[test]
+fn a_serial_that_cant_be_read_is_a_card_taken_out_never_another_card() {
+    let dir = Scratch::new("serial-reads");
+    let (card, ..) = first(&dir.0);
+    let failed = || Err(io::Error::other("diskutil couldn't be run"));
+    let check = |script: Vec<io::Result<Option<Serial>>>| {
+        let flaky = Flaky { card: &card, armed: false.into(), script: std::cell::RefCell::new(script.into()) };
+        let id = bind::look(&flaky).expect("the card as it is");
+        let (mut bound, _) = Bound::take(&flaky, id, "{}").expect("the card taken");
+        flaky.armed.set(true);
+        let checked = bound.check(true).map(|_| ());
+        drop(bound);
+        checked
+    };
+    assert!(check(vec![failed()]).is_ok(), "a read that fails once, then reads");
+    assert!(check(vec![Ok(None)]).is_ok(), "no serial once, then the card's");
+    assert!(matches!(check(vec![failed(), failed()]), Err(Stop::Pulled)));
+    assert!(matches!(check(vec![Ok(None), Ok(None)]), Err(Stop::Pulled)));
+    assert!(matches!(check(vec![failed(), Ok(None)]), Err(Stop::Pulled)));
+    let other = Ok(Some(Serial::Fat(SERIAL ^ 1)));
+    assert!(matches!(check(vec![other]), Err(Stop::DifferentCard)));
+    // At a session's start too: none read where one is expected is a card
+    // taken out.
+    let expect = Expect { serial: Some(Serial::Fat(SERIAL)), ..Expect::default() };
+    let none = Identity { serial: None, card_id: CARD_ID, commit_id: 1 };
+    assert!(matches!(expect.matches(&none), Err(Stop::Pulled)));
+    let another = Identity { serial: Some(Serial::Fat(SERIAL ^ 1)), ..none };
+    assert!(matches!(expect.matches(&another), Err(Stop::DifferentCard)));
+}
