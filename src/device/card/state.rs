@@ -721,7 +721,10 @@ impl Settings {
     /// 304 stands for the last whole listing only under the same key.
     /// `transcode`: what the server converts, when it does; a codec it makes
     /// at a lower bitrate than the setting's (MP3's 320k on a server that
-    /// lists no such rate) is planned otherwise, so it counts too.
+    /// lists no such rate) is planned otherwise, so it counts too; and a
+    /// server that converts nothing, whose files to convert are passed over
+    /// ([`super::plan::Skip::NoTranscode`]): one that starts converting, or
+    /// stops, is read whole once.
     pub(crate) fn plan_key(
         &self,
         libraries: &[String],
@@ -748,6 +751,9 @@ impl Settings {
             if made != c.bitrate {
                 text.push_str(&format!("\n{} {}", codec.as_str(), made.as_str()));
             }
+        }
+        if transcode.is_none() {
+            text.push_str("\nno conversion");
         }
         super::contract::prim::fnv1a64(text.as_bytes())
     }
@@ -1170,7 +1176,10 @@ mod tests {
         let old = TranscodeInfo::default();
         let key = plain.plan_key(&rock, &device, Some(&old));
         assert_eq!(key, plain.plan_key(&rock, &device, Some(&old)));
-        assert_eq!(key, plain.plan_key(&rock, &device, None), "192k is every server's");
+        // A server that converts nothing plans otherwise: its files to
+        // convert are passed over.
+        assert_ne!(key, plain.plan_key(&rock, &device, None), "no conversion");
+        assert_eq!(plain.plan_key(&rock, &device, None), plain.plan_key(&rock, &device, None));
         assert_ne!(key, plain.plan_key(&["Jazz".to_string()], &device, Some(&old)));
         let mut opus = device.clone();
         opus.codecs = "mp3,flac,opus".into();

@@ -2018,27 +2018,61 @@ fn a_server_that_cant_convert_now_leaves_the_cards_conversions_where_they_are() 
     let converted = scratch.0.join("card/music/Artist C/Album D/01.opus");
     assert!(converted.exists());
 
-    // A whole read under a changed setting (no row stands for its entry by
-    // the plan) while its ffmpeg is still starting: the WAV can't be
-    // converted, and the card's conversion of it stays, the listing's
-    // revision not stored (the next run reads it whole).
+    // The server stops converting (its ffmpeg still starting, say): the
+    // plan's key moves, so the listing is read whole; the WAV can't be
+    // converted, and the card's conversion of it stays. The listing stands
+    // for the selection all the same: its revision is stored, and the next
+    // run is a 304.
     fake.lock().unwrap().no_transcode = true;
-    let change = Change { bitrate: Some(TransferBitrate::K128), ..Change::default() };
-    let whole = Ask { whole: true, change, ..Ask::default() };
-    let synced = sync_now(&sim, &base, &whole, &mut envs).0;
+    let synced = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
     let summary = synced.summary.as_ref().unwrap();
+    assert_eq!(summary.listed, Listed::Whole);
     let wav = "Rock/Artist C/Album D/01.wav".to_string();
     assert_eq!(summary.skipped, [(wav, Skip::NoTranscode)]);
     assert!(summary.removals.is_empty(), "{summary:?}");
     let outcome = ran(&synced);
     assert_eq!((outcome.deleted, outcome.records, outcome.verified.clone()), (0, 4, Ok(())));
     assert!(converted.exists());
-    assert_eq!(root_revision(&sim), "");
+    assert_ne!(root_revision(&sim), "");
+    let quiet = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(quiet.summary.as_ref().unwrap().listed, Listed::NotModified);
+    assert!(converted.exists());
+
+    // Converting again: read whole once, and the card's conversion stands.
     fake.lock().unwrap().no_transcode = false;
     let again = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
     assert_eq!(again.summary.as_ref().unwrap().listed, Listed::Whole);
     assert!(again.summary.as_ref().unwrap().skipped.is_empty());
     assert_ne!(root_revision(&sim), "");
+    assert!(converted.exists());
+}
+
+/// A server that never converts doesn't make every run a whole read: its
+/// files to convert are passed over, its revision stored, and the next run
+/// is a 304. The run after it starts converting reads whole and converts.
+#[test]
+fn a_server_that_never_converts_gets_304s_and_a_whole_read_once_it_does() {
+    let scratch = Scratch::new("never-transcode");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    fake.lock().unwrap().no_transcode = true;
+    let mut envs = envs();
+    let first = sync_now(&sim, &base, &rock(), &mut envs).0;
+    let wav = "Rock/Artist C/Album D/01.wav".to_string();
+    assert_eq!(first.summary.as_ref().unwrap().skipped, [(wav, Skip::NoTranscode)]);
+    assert_eq!(ran(&first).verified, Ok(()));
+    let converted = scratch.0.join("card/music/Artist C/Album D/01.opus");
+    assert!(!converted.exists());
+    assert_ne!(root_revision(&sim), "", "the listing stands for the selection");
+    for _ in 0..2 {
+        let quiet = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+        assert_eq!(quiet.summary.as_ref().unwrap().listed, Listed::NotModified);
+    }
+    fake.lock().unwrap().no_transcode = false;
+    let now = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(now.summary.as_ref().unwrap().listed, Listed::Whole);
+    assert_eq!((ran(&now).written, ran(&now).verified.clone()), (1, Ok(())));
+    assert!(converted.exists());
 }
 
 #[test]

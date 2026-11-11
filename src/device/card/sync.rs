@@ -920,7 +920,10 @@ fn prepare(
                 wanted.card.files.iter().filter(|f| given_up(f)).map(|f| f.ledger.server_path.clone()).collect();
             plan::pass_over(&mut wanted, &passed, Skip::Failing, &kept);
             // What the listing can't stand for: the next run reads it whole.
-            let undecided = |(_, why): &(String, Skip)| matches!(why, Skip::NoTranscode | Skip::Unread);
+            // A file passed over for want of a conversion isn't one: the
+            // plan's key says whether the server converts, so a server that
+            // starts or stops gets one whole read.
+            let undecided = |(_, why): &(String, Skip)| matches!(why, Skip::Unread);
             withheld = !listing.deletions_trusted() || wanted.skipped.iter().any(undecided);
             (Listed::Whole, wanted, listing.entries)
         }
