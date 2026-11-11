@@ -4439,6 +4439,38 @@ fn a_collision_leaves_the_plan_on_the_card_without_its_write() {
     assert_eq!(plans, 2, "step 6's, and the one written at the collision: {log:?}");
 }
 
+/// A write whose target the run spared at step 7 (a delete there found the
+/// listener's file, not the one listed) is skipped, and the plan on the card
+/// is written again without it, as at a collision: a cut after it never
+/// leaves the listener's file named as the run's work. (No plan the names
+/// make has a delete and a write at one path; the plan is given one here.)
+#[test]
+fn a_write_to_a_spared_file_leaves_the_plan_on_the_card_without_it() {
+    let dir = Scratch::new("spared-plan");
+    let (card, mut wanted, mut server) = first(&dir.0);
+    let six = corpus("trck_0.mp3");
+    let from = "Lib/Alex Artist/First Album/03 - Six.mp3";
+    server.add(from, six.clone());
+    wanted.files.push(track(from, &six, 401));
+    let (session, mut plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
+    let at = "Alex Artist/First Album/03 - Six.mp3";
+    assert!(plan.writes.iter().any(|w| w.path == at && w.from.is_none()), "{:?}", plan.writes);
+    let listed =
+        super::plan::Delete { path: at.into(), size: 9, fat_time: LATER, removal: false, ours: false };
+    plan.deletes.push(listed);
+    let theirs = corpus("latin1.mp3");
+    put(&dir.0, &format!("/music/{at}"), &theirs, LATER + 2);
+    let start = card.log().len();
+    let outcome = session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).unwrap();
+    assert_eq!((outcome.verified, outcome.written), (Ok(()), 0));
+    assert_eq!(outcome.report.spared, [at], "{:?}", outcome.report);
+    let log = card.log()[start..].to_vec();
+    let plans = log.iter().filter(|l| l.starts_with("rename /.mstream/pending.tmp")).count();
+    assert_eq!(plans, 2, "step 6's, and the one written at the skip: {log:?}");
+    assert!(!server.fetched.iter().any(|f| f == from), "never asked for");
+    assert_eq!(card.read(&format!("/music/{at}"), 1 << 20).unwrap(), Some(theirs), "the listener's file");
+}
+
 /// 2.12.1, step 12: the root's rename is flushed to the card before the
 /// tags file it replaced goes.
 #[test]

@@ -662,6 +662,9 @@ impl<'r, 'c> Runner<'r, 'c> {
         let plan = self.plan;
         let file = &plan.wanted.files[w.file];
         if self.spared.contains(&key_path(&w.path)) {
+            // The listener's file is there: the plan on the card loses the
+            // write at once, as at a collision.
+            self.unclaim = true;
             return self.skip(file, "a file the listener changed is where it goes".into(), events);
         }
         let n = self.index.get(&w.path).copied().unwrap_or(0);
@@ -812,6 +815,9 @@ impl<'r, 'c> Runner<'r, 'c> {
         let plan = self.plan;
         let file = &plan.wanted.files[w.file];
         if self.spared.contains(&key_path(&w.path)) {
+            // The listener's file is there: the plan on the card loses the
+            // write at once, as at a collision.
+            self.unclaim = true;
             return self.skip(file, "a file the listener changed is where it goes".into(), events);
         }
         let (name, have) = self.take_part(file)?;
@@ -1065,6 +1071,9 @@ impl<'r, 'c> Runner<'r, 'c> {
         let plan = self.plan;
         let file = &plan.wanted.files[w.file];
         if self.spared.contains(&key_path(&w.path)) {
+            // The listener's file is there: the plan on the card loses the
+            // write at once, as at a collision.
+            self.unclaim = true;
             return self.skip(file, "a file the listener changed is where it goes".into(), events);
         }
         let Some(old) = self.ledger.get(from).cloned() else { return Ok(Step::Skipped) };
