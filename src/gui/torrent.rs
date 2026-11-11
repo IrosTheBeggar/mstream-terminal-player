@@ -3082,8 +3082,8 @@ mod tests {
     /// English words under assertion: the locale lock, and English pinned —
     /// the locale is process-wide, and the tests that switch it hold the
     /// lock while they draw in another language.
-    fn english() -> std::sync::MutexGuard<'static, ()> {
-        let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn english() -> std::sync::RwLockReadGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale("en");
         guard
     }

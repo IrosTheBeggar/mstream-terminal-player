@@ -580,6 +580,16 @@ impl LockFile for MountedLock {
     }
 }
 
+impl Drop for MountedLock {
+    /// The lock let go by hand, not left to the close: `flock`'s lock is the
+    /// open file description's, and a process another thread is starting
+    /// shares every descriptor until its exec. Closed meanwhile, the lock
+    /// stayed held past the handle, and the next run found the card Busy.
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 impl CardWrite for Mounted {
     fn key(&self) -> String {
         self.root.display().to_string()

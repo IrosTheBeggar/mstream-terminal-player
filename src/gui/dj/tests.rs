@@ -21,11 +21,20 @@ use crate::tui::worker::{ApiCmd, DjNote, DjServerInfo, Event};
 const HOST: &str = "http://host:3000";
 const ATTIC: &str = "http://attic:3000";
 
-/// English words under assertion: the locale lock, and English pinned —
-/// the locale is process-wide, and the tests that switch it hold the
-/// lock while they draw in another language.
-fn english() -> std::sync::MutexGuard<'static, ()> {
-    let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+/// English words under assertion: the locale lock, shared, and English
+/// pinned — the locale is process-wide, and the tests that switch it take
+/// the lock whole ([`every_language`]) while they draw in another language.
+fn english() -> std::sync::RwLockReadGuard<'static, ()> {
+    let guard = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+    rust_i18n::set_locale("en");
+    guard
+}
+
+/// The locale lock taken whole, English pinned, for a test that switches
+/// the language by hand: the tests sharing it to read English wait until
+/// the test is done, so none of them draws in another language.
+fn every_language() -> std::sync::RwLockWriteGuard<'static, ()> {
+    let guard = crate::setup::tests::LOCALE_LOCK.write().unwrap_or_else(|e| e.into_inner());
     rust_i18n::set_locale("en");
     guard
 }
@@ -1573,7 +1582,7 @@ const LOCALES: [&str; 10] = ["en", "de", "es", "fr", "it", "ja", "pl", "pt", "ru
 
 #[test]
 fn every_locale_draws_the_floor_whole() {
-    let _lock = english();
+    let _lock = every_language();
     for locale in LOCALES {
         rust_i18n::set_locale(locale);
         let mut gui = room_gui();
@@ -1607,7 +1616,7 @@ fn every_locale_draws_the_floor_whole() {
 
 #[test]
 fn every_locales_help_and_tips_fit_their_cells() {
-    let _lock = english();
+    let _lock = every_language();
     for locale in LOCALES {
         rust_i18n::set_locale(locale);
         for key in [

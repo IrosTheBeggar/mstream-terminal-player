@@ -14,10 +14,14 @@ Copies modal listing it. No frame of the room may show a number for the
 copy (clause 126).
 Usage: check_keep.py STREAM REPLAY_PY ROWS COLS
 """
-import subprocess
+import os
 import sys
 
 stream, replay, rows, cols = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+sys.dont_write_bytecode = True  # no __pycache__ left in the tree
+sys.path.insert(0, os.path.dirname(os.path.abspath(replay)))
+from replay import frames  # noqa: E402
+
 raw = open(stream, "rb").read()
 END = b"\x1b[?2026l"
 ends = []
@@ -26,16 +30,11 @@ while at >= 0:
     ends.append(at + len(END))
     at = raw.find(END, at + 1)
 ends.append(len(raw))
+FRAMES = frames(raw, ends, int(rows), int(cols))
 
 
 def frame(n):
-    cut = raw[:n]
-    j = cut.rfind(b"\x1b[?1049l")
-    if 0 < j < len(cut):
-        cut = cut[:j]
-    open(stream + ".cut", "wb").write(cut)
-    out = subprocess.run(["python3", replay, stream + ".cut", rows, cols], capture_output=True, text=True).stdout
-    return out.split("\n")
+    return FRAMES[n]
 
 
 def tile_word(lines):

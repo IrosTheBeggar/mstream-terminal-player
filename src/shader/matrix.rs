@@ -92,36 +92,48 @@ fn back(module: &naga::Module, info: &ModuleInfo, backend: Backend) -> Result<()
 
 #[test]
 fn every_pass_of_every_preset_compiles_for_every_backend() {
-    let mut failures = Vec::new();
-    let mut passes = 0;
-    for (file, source) in library::vendored() {
-        let preset = Preset::parse(&source).unwrap_or_else(|e| panic!("{file}: {e}"));
-        for pass in &preset.passes {
-            passes += 1;
-            let at = format!("{file} [{}]", pass.name.as_str());
-            let translated = match glsl::translate(&preset, pass) {
-                Ok(translated) => translated,
-                Err(e) => {
-                    failures.push(format!("{at}: translation: {e}"));
-                    continue;
-                }
-            };
-            match front(&translated) {
-                Err(e) => failures.push(format!("{at}: {e}")),
-                Ok((module, info)) => {
-                    for backend in BACKENDS {
-                        if let Err(e) = back(&module, &info, backend) {
-                            failures.push(format!("{at}: {backend:?}: {e}"));
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let presets: Vec<(String, Preset)> = library::vendored()
+        .into_iter()
+        .map(|(file, source)| {
+            let preset = Preset::parse(&source).unwrap_or_else(|e| panic!("{file}: {e}"));
+            (file, preset)
+        })
+        .collect();
+    let passes = presets.iter().map(|(_, preset)| preset.passes.len()).sum::<usize>();
+    // Each pass on a thread of its own, its failures kept in the matrix's
+    // order: a pass is naga's frontend, its validator and four writers (and
+    // FXC, on Windows), about half a second in a debug build, and no pass
+    // shares anything with another. One after another they made this the
+    // unit suite's second-longest test (7.6 s against 3.6, measured on
+    // Windows, 2026-11-10).
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let runs: Vec<_> = presets
+            .iter()
+            .flat_map(|(file, preset)| preset.passes.iter().map(move |pass| (file, preset, pass)))
+            .map(|(file, preset, pass)| scope.spawn(move || compile_pass(file, preset, pass)))
+            .collect();
+        runs.into_iter().flat_map(|run| run.join().expect("a pass's thread")).collect()
+    });
     assert!(failures.is_empty(), "{} of the passes failed:\n{}", failures.len(), failures.join("\n"));
     // Nine presets, fifteen passes: a count that shrank would mean files
     // were lost, not that everything passed.
     assert!(passes >= 15, "only {passes} passes were compiled");
+}
+
+/// One pass through the matrix: its failures, each named by file and pass.
+fn compile_pass(file: &str, preset: &Preset, pass: &super::preset::Pass) -> Vec<String> {
+    let at = format!("{file} [{}]", pass.name.as_str());
+    let translated = match glsl::translate(preset, pass) {
+        Ok(translated) => translated,
+        Err(e) => return vec![format!("{at}: translation: {e}")],
+    };
+    match front(&translated) {
+        Err(e) => vec![format!("{at}: {e}")],
+        Ok((module, info)) => BACKENDS
+            .into_iter()
+            .filter_map(|backend| back(&module, &info, backend).err().map(|e| format!("{at}: {backend:?}: {e}")))
+            .collect(),
+    }
 }
 
 #[test]

@@ -71,7 +71,11 @@ server, and no audio files:
     and HEAD, /transcode, album art, embeddings; /_library lists what was
     asked. Off by default, and the other routes stay as they are.
 
-Usage: fake_mstream.py PORT
+Usage: fake_mstream.py PORT [PORTFILE]
+
+PORT 0 takes any free port; PORTFILE, when given, gets the port it is
+listening on (written whole, once it listens), which is how run.sh's
+scenarios, side by side, each get a port no other fake can be handed.
 """
 import json
 import os
@@ -805,4 +809,9 @@ class Server(HTTPServer):
         self.server_name, self.server_port = self.server_address[:2]
 
 
-Server(("127.0.0.1", PORT), Handler).serve_forever()
+server = Server(("127.0.0.1", PORT), Handler)
+if len(sys.argv) > 2:
+    with open(sys.argv[2] + ".tmp", "w") as f:
+        f.write(str(server.server_address[1]))
+    os.replace(sys.argv[2] + ".tmp", sys.argv[2])
+server.serve_forever()

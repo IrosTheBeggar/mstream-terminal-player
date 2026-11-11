@@ -9,10 +9,11 @@
 //! run.lock's OS lock is the host's own, so two runs contend for it for real.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::super::contract::fat::{fat_from_wall, fat_wall};
@@ -83,6 +84,10 @@ pub(crate) struct FatSim {
     /// Serial reads that read none, the card in the reader all the same (a
     /// Mac's diskutil that couldn't be run at that moment).
     serial_misses: Cell<u32>,
+    /// The names in each host folder, once [`FatSim::keep_listings`] says
+    /// only the card's own writes change them: FAT's lookup lists a folder at
+    /// every name of a path, and a run looks up thousands of paths.
+    listings: RefCell<Option<HashMap<PathBuf, Rc<[String]>>>>,
 }
 
 fn pulled() -> io::Error {
@@ -116,6 +121,46 @@ impl FatSim {
             bad: RefCell::new(None),
             refuse: RefCell::new(None),
             serial_misses: Cell::new(0),
+            listings: RefCell::new(None),
+        }
+    }
+
+    /// Nothing but this card's own writes touches its folder from now on (a
+    /// test that copied a card in and only runs syncs on it): each host
+    /// folder is listed once and its names kept until a write of the card's
+    /// adds, drops or renames one. Listing them at every lookup was a third
+    /// of an every-cut test's time on Windows.
+    pub(crate) fn keep_listings(&self) {
+        *self.listings.borrow_mut() = Some(HashMap::new());
+    }
+
+    /// The names in a host folder: listed, or as kept.
+    fn names_in(&self, dir: &Path) -> io::Result<Rc<[String]>> {
+        if let Some(kept) = self.listings.borrow().as_ref().and_then(|kept| kept.get(dir)) {
+            return Ok(kept.clone());
+        }
+        let names: Rc<[String]> =
+            std::fs::read_dir(dir)?.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
+        if let Some(kept) = self.listings.borrow_mut().as_mut() {
+            kept.insert(dir.to_path_buf(), names.clone());
+        }
+        Ok(names)
+    }
+
+    /// A write of the card's is about to add or drop the name of this host
+    /// path: its folder is listed afresh at the next lookup.
+    fn names_change(&self, host: &Path) {
+        if let (Some(kept), Some(dir)) = (self.listings.borrow_mut().as_mut(), host.parent()) {
+            kept.remove(dir);
+        }
+    }
+
+    /// A write that moves or removes a folder's names wholesale (a rename,
+    /// a folder removed) or another card in the reader: every folder is
+    /// listed afresh.
+    fn names_all_change(&self) {
+        if let Some(kept) = self.listings.borrow_mut().as_mut() {
+            kept.clear();
         }
     }
 
@@ -219,6 +264,7 @@ impl FatSim {
         {
             (s.root, s.serial, s.swap) = (dir, serial, None);
             s.epoch += 1;
+            self.names_all_change();
         }
     }
 
@@ -268,11 +314,12 @@ impl FatSim {
             if *name == "." || *name == ".." {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a card path"));
             }
-            let listed: Vec<String> = std::fs::read_dir(&at)?
-                .filter_map(|e| e.ok()?.file_name().into_string().ok())
-                .collect();
-            let key = match_key(name);
-            let alike = || listed.iter().find(|n| match_key(n) == key);
+            let listed = self.names_in(&at)?;
+            // The key only when no entry is spelled alike: most names are.
+            let alike = || {
+                let key = match_key(name);
+                listed.iter().find(|n| match_key(n) == key)
+            };
             let found = listed.iter().find(|n| n == name).or_else(alike);
             match found {
                 Some(found) => at.push(found),
@@ -427,7 +474,10 @@ impl CardFile for SimFile<'_> {
         if self.sim.write_op("sync", &self.path)?.is_some() {
             return Err(pulled());
         }
-        self.file.sync_all()
+        // The card's own failure is the cut, counted above. The host's disk
+        // never loses what it was given, so a flush of it would only wait:
+        // half of an every-cut test's time on Windows.
+        Ok(())
     }
 
     fn set_len(&mut self, len: u64) -> io::Result<()> {
@@ -483,7 +533,7 @@ impl LockFile for SimLock<'_> {
         self.file.set_len(0)?;
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(bytes)?;
-        self.file.sync_all()?;
+        // No flush of the host's disk: see SimFile's sync.
         let _ = self.file.set_modified(self.sim.stamp());
         Ok(())
     }
@@ -492,6 +542,15 @@ impl LockFile for SimLock<'_> {
         self.sim.settle_swap();
         let s = self.sim.state.borrow();
         !s.pulled && s.epoch == self.epoch
+    }
+}
+
+impl Drop for SimLock<'_> {
+    /// Let go by hand, as the mounted card's lock is (`MountedLock`): a test
+    /// that spawns a process while another drops a run held the lock past
+    /// its handle.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 
@@ -519,6 +578,7 @@ impl CardWrite for FatSim {
     fn create(&self, path: &str) -> io::Result<Box<dyn CardFile + '_>> {
         self.reading()?;
         let host = self.host(path, true)?;
+        self.names_change(&host);
         if self.write_op("create", path)?.is_some() {
             return Err(pulled());
         }
@@ -530,6 +590,7 @@ impl CardWrite for FatSim {
     fn delete(&self, path: &str) -> io::Result<()> {
         self.reading()?;
         let host = self.host(path, false)?;
+        self.names_change(&host);
         if self.write_op("delete", path)?.is_some() {
             return Err(pulled());
         }
@@ -547,6 +608,7 @@ impl CardWrite for FatSim {
         if !same && b.exists() {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "a file of that name is there"));
         }
+        self.names_all_change();
         match self.write_op("rename", &format!("{from} -> {to}"))? {
             Some(Cut::Between) => {
                 // The new entry is written, the old one not yet removed: one
@@ -573,6 +635,7 @@ impl CardWrite for FatSim {
         if host.exists() {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
+        self.names_change(&host);
         if self.write_op("mkdir", path)?.is_some() {
             return Err(pulled());
         }
@@ -582,6 +645,7 @@ impl CardWrite for FatSim {
     fn rmdir(&self, path: &str) -> io::Result<()> {
         self.reading()?;
         let host = self.host(path, false)?;
+        self.names_all_change();
         if self.write_op("rmdir", path)?.is_some() {
             return Err(pulled());
         }
@@ -591,6 +655,7 @@ impl CardWrite for FatSim {
     fn lock_file(&self, path: &str) -> io::Result<Box<dyn LockFile + '_>> {
         self.reading()?;
         let host = self.host(path, true)?;
+        self.names_change(&host);
         let file = File::options().read(true).write(true).create(true).truncate(false).open(host)?;
         Ok(Box::new(SimLock { sim: self, file, epoch: self.epoch() }))
     }

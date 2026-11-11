@@ -624,7 +624,7 @@ mod tests {
     struct Rig {
         /// The labels' widths move the widgets: no other test may switch
         /// the language under this one's clicks.
-        _locale: std::sync::MutexGuard<'static, ()>,
+        _locale: std::sync::RwLockReadGuard<'static, ()>,
         ctx: egui::Context,
         controls: Controls,
         tuning: Tuning,
@@ -636,7 +636,7 @@ mod tests {
 
     impl Rig {
         fn new() -> Rig {
-            let locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let locale = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
             rust_i18n::set_locale("en");
             let entries = entries();
             let tuning = Tuning::from_prefs(&VisualizerPrefs::default(), &entries);

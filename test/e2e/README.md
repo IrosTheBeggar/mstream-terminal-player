@@ -3,8 +3,12 @@
 `bash test/e2e/run.sh` drives the real binary through the real event
 loop with expect(1), against a **stateful fake mStream**
 (`fake_mstream.py`) — no Node, no real server, no audio files. Its
-scenarios each run on a fresh fake and a fresh `$HOME` (T, the Discover
-room against the taste route, is described in run.sh):
+scenarios each run on a fresh fake (on a port the OS picks) and a fresh
+`$HOME`, so they run side by side: `E2E_JOBS` at a time (8 unless set;
+`E2E_JOBS=1` is one by one), the longest first, each one's lines printed
+whole when it ends. `bash test/e2e/run.sh K W` runs only the scenarios
+named. (T, the Discover room against the taste route, is described in
+run.sh):
 
 - **A** — the full English walk (folders → extras → login → Done), then
   the standalone `qr` pages on the session it saved: the half-block
@@ -112,7 +116,10 @@ room against the taste route, is described in run.sh):
    percentage or a rewritten word never appears as a contiguous token.
    `replay.py` is the oracle: it renders a captured stream (or any
    prefix of one) to a final frame; `check_scan.py` slices a stream
-   through time this way. Gate expect on FIRST-paint single words only.
+   through time this way. The checkers ask `replay.frames` for every
+   prefix they read at once — one pass over the stream, never a process
+   and a replay from byte 0 a frame. Gate expect on FIRST-paint single
+   words only.
 2. **Drain, don't sleep.** A pty whose output buffer fills freezes the
    TUI mid-run; every wait in a leg is an `expect -timeout N timeout {}`
    drain that keeps reading.

@@ -17,10 +17,14 @@ third mark the queue panel empty and nothing playing — the echo pressed
 nothing either time.
 Usage: check_echo.py STREAM REPLAY_PY ROWS COLS
 """
-import subprocess
+import os
 import sys
 
 stream, replay, rows, cols = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+sys.dont_write_bytecode = True  # no __pycache__ left in the tree
+sys.path.insert(0, os.path.dirname(os.path.abspath(replay)))
+from replay import frames  # noqa: E402
+
 raw = open(stream, "rb").read()
 MARKS = [b"@@ECHO:list@@", b"@@ECHO:sheet@@", b"@@ECHO:queue@@"]
 
@@ -48,16 +52,11 @@ at = clean.find(END)
 while at >= 0:
     ends.append(at + len(END))
     at = clean.find(END, at + 1)
+FRAMES = frames(clean, ends + marks, int(rows), int(cols))
 
 
 def frame(n):
-    cut = clean[:n]
-    j = cut.rfind(b"\x1b[?1049l")
-    if 0 < j < len(cut):
-        cut = cut[:j]
-    open(stream + ".cut", "wb").write(cut)
-    out = subprocess.run(["python3", replay, stream + ".cut", rows, cols], capture_output=True, text=True).stdout
-    return out.split("\n")
+    return FRAMES[n]
 
 
 def tile_dots(lines):

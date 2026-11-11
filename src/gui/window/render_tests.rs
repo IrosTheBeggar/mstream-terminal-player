@@ -1568,7 +1568,7 @@ fn wordmark_ink(frame: &Frame, rect: Rect) -> bool {
 #[test]
 fn the_quick_connect_page_draws_its_code_in_the_window() {
     let _gpu = one_at_a_time();
-    let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _locale = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let answered: fn(&mut crate::setup::face::WizardFace) =
         |face| face.answer_ticket("iroh-ticket-abc123");
     let Some(mut frames) = frame_or_skip(wizard_in_the_window(true, &[answered])) else { return };
@@ -1625,7 +1625,7 @@ fn the_wordmark_is_not_painted_over_a_wizard_modal() {
     use crate::setup::face::WizardFace;
 
     let _gpu = one_at_a_time();
-    let _locale = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _locale = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let steps: [fn(&mut WizardFace); 3] = [|_| {}, WizardFace::open_the_browser, |_| {}];
     let Some(frames) = frame_or_skip(wizard_in_the_window(false, &steps)) else { return };
     let [before, opened, after] = &frames[..] else { panic!("three frames") };

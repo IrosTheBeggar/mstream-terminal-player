@@ -4,16 +4,30 @@
 # mStream, no audio files. Requires expect(1) and python3.
 #
 #   BIN=path/to/mstream-player bash test/e2e/run.sh
+#   bash test/e2e/run.sh K W           # only the scenarios named
+#   E2E_JOBS=1 bash test/e2e/run.sh    # one scenario at a time
 #
 # Without BIN it builds and uses target/debug/mstream-player. Legs are
-# grouped into scenarios; each scenario gets a fresh fake (fresh state)
-# and a fresh HOME. The frame oracle is replay.py: in-place cell rewrites
+# grouped into scenarios; each scenario gets a fresh fake (fresh state, on
+# a port of its own) and a fresh HOME, so the scenarios run side by side,
+# E2E_JOBS at a time (8 unless set), longest first — the scheduler at the
+# end. Their legs mostly wait (the drains, the fake's wall-clock jobs, the
+# wizard's scan poll), so the battery takes about as long as its longest
+# scenario rather than all of them end to end. Each scenario's lines print
+# whole when it ends. The frame oracle is replay.py: in-place cell rewrites
 # make raw-stream greps lie, so anything mid-run is asserted by replaying
 # the captured stream (check_scan.py slices it through time).
 set -u
 cd "$(dirname "$0")/../.."
 E2E=test/e2e
 BIN="${BIN:-target/debug/mstream-player}"
+
+# The scenarios, by name (each is a function below); a name asked for
+# that is none of them stops the run before anything is built.
+ALL="A B C D E F G H T K K2 W M KM I J"
+for s in "$@"; do
+  case " $ALL " in *" $s "*) ;; *) echo "no scenario $s (the battery has $ALL)"; exit 2 ;; esac
+done
 
 # README law 3, checked before anything runs: a braced pattern list is a
 # list only as `expect`'s sole argument with a newline after the brace.
@@ -36,29 +50,49 @@ if [ ! -x "$BIN" ]; then
 fi
 
 WORK="$(mktemp -d)"
-trap 'kill $(cat "$WORK"/fake.pid 2>/dev/null) 2>/dev/null; rm -rf "$WORK"' EXIT
+# What is still running if the battery stops early: the scenarios'
+# subshells (and their legs) and their fakes. Each file is removed once
+# its process is done with, so a pid the OS has handed on is never hit.
+cleanup() {
+  local f
+  for f in "$WORK"/*.job "$WORK"/fake-*.pid; do
+    [ -f "$f" ] || continue
+    pkill -P "$(cat "$f")" 2>/dev/null
+    kill "$(cat "$f")" 2>/dev/null
+  done
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 FAILS=0
 
-port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'; }
-
-# Prints the port once the fake answers, or fails: callers run it in
-# $(...), where an exit would only end the subshell, so each checks the
-# status. Every probe is bounded — macOS drops a SYN to a port that is
-# bound but not listening yet instead of refusing it, and an unbounded
-# curl then hangs ~8 s a try, forty of them minutes (performance audit
-# #131, which also took the ~35 s bind-to-listen stall out of the fake).
+# Starts scenario $1's fake — its switches from the caller's env
+# (`FAKE_AUTH=1 start_fake G`) — and sets PORT once it answers; a fake
+# that never does is a failure. The fake binds a port the OS picks and
+# writes it down once it listens, so scenarios side by side are never
+# handed the same one. Every probe is still bounded — macOS drops a SYN to
+# a port that is bound but not listening yet instead of refusing it, and
+# an unbounded curl then hangs ~8 s a try, forty of them minutes
+# (performance audit #131, which also took the ~35 s bind-to-listen stall
+# out of the fake).
 start_fake() { # $1 = name
-  local p; p="$(port)"
-  python3 "$E2E/fake_mstream.py" "$p" >/dev/null 2>&1 & echo $! > "$WORK/fake.pid"
+  local portfile="$WORK/fake-$1.port" p
+  python3 "$E2E/fake_mstream.py" 0 "$portfile" >/dev/null 2>&1 & echo $! > "$WORK/fake-$1.pid"
   for _ in $(seq 1 40); do
-    curl -s --connect-timeout 1 -m 2 -o /dev/null "http://127.0.0.1:$p/api/v1/ping" && { echo "$p"; return 0; }
+    if [ -s "$portfile" ]; then
+      p="$(cat "$portfile")"
+      curl -s --connect-timeout 1 -m 2 -o /dev/null "http://127.0.0.1:$p/api/v1/ping" && { PORT="$p"; return 0; }
+    fi
     sleep 0.25
   done
-  echo "FAIL fake $1 never answered on :$p" >&2
+  echo "FAIL fake $1 never answered"; FAILS=$((FAILS+1))
   return 1
 }
 
-stop_fake() { kill "$(cat "$WORK/fake.pid" 2>/dev/null)" 2>/dev/null; sleep 0.2; }
+stop_fake() { # $1 = name
+  [ -f "$WORK/fake-$1.pid" ] || return 0
+  kill "$(cat "$WORK/fake-$1.pid")" 2>/dev/null
+  rm -f "$WORK/fake-$1.pid"
+}
 
 fake_state() { curl -s "http://127.0.0.1:$1/_state"; }
 
@@ -76,10 +110,13 @@ assert() { # $1 label, $2 python expr over WORK/PORT env
   if python3 -c "$2"; then echo "PASS $1"; else echo "FAIL $1"; FAILS=$((FAILS+1)); fi
 }
 
-# ── Scenario A: the full English walk, then the QR pages on its session ──
-PORT="$(start_fake A)" || exit 1
-ARGS=(setup --server "http://127.0.0.1:$PORT")
+# The wizard legs' music folder, shared by A to E.
 mkdir -p "$WORK/music"
+
+# ── Scenario A: the full English walk, then the QR pages on its session ──
+scenario_A() {
+start_fake A || return
+ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg drive-en drive-en.exp "$WORK/h1" "$WORK/drive-en.out" env WIZMUSIC="$WORK/music"
 assert "server state: user + folder" "
 import json,urllib.request
@@ -96,16 +133,18 @@ raw=open('$WORK/qr-pixel.out','rb').read()
 assert b'1337;File=' in raw, 'no iTerm2 image escape in the stream'
 "
 leg qr-buttons qr-buttons.exp "$WORK/h1" "$WORK/qr-buttons.out" env MSTREAM_NO_GRAPHICS=1 MSTREAM_NO_OPEN=1
-stop_fake
+}
 
 # ── Scenario B: the same walk auf Deutsch ────────────────────────────────
-PORT="$(start_fake B)" || exit 1
+scenario_B() {
+start_fake B || return
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg drive-de drive-de.exp "$WORK/h2" "$WORK/drive-de.out" env WIZMUSIC="$WORK/music"
-stop_fake
+}
 
 # ── Scenario C: quit before the login, reopen, finish (seeding) ─────────
-PORT="$(start_fake C)" || exit 1
+scenario_C() {
+start_fake C || return
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg reopen-phase1 reopen.exp "$WORK/h3" "$WORK/reopen1.out" env WIZMUSIC="$WORK/music"
 mkdir -p "$WORK/music2"
@@ -116,10 +155,11 @@ s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert len(s['directories'])==2, f'directories: {s[\"directories\"]}'
 assert s['users'], 'no user after reopen'
 "
-stop_fake
+}
 
 # ── Scenario D: public mode still shows the code ─────────────────────────
-PORT="$(start_fake D)" || exit 1
+scenario_D() {
+start_fake D || return
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg skip-public skip.exp "$WORK/h4" "$WORK/skip.out" env WIZMUSIC="$WORK/music"
 assert "public-mode Done renders the half-block code" "
@@ -130,10 +170,11 @@ open('$WORK/skip.cut','wb').write(cut)
 out=subprocess.run(['python3','$E2E/replay.py','$WORK/skip.cut','56','100'],capture_output=True,text=True).stdout
 assert out.count('█')>10, 'no code on the public-mode Done page'
 "
-stop_fake
+}
 
 # ── Scenario E: click-to-rename on a fresh row ───────────────────────────
-PORT="$(start_fake E)" || exit 1
+scenario_E() {
+start_fake E || return
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg rename rename.exp "$WORK/h5" "$WORK/rename.out" env WIZMUSIC="$WORK/music"
 assert "the mouse rename landed" "
@@ -144,10 +185,11 @@ open('$WORK/rename.cut','wb').write(cut)
 out=subprocess.run(['python3','$E2E/replay.py','$WORK/rename.cut','40','100'],capture_output=True,text=True).stdout
 assert 'mediax' in out, 'renamed row not found'
 "
-stop_fake
+}
 
 # ── Scenario F: the scan widget's whole choreography ─────────────────────
-PORT="$(start_fake F)" || exit 1
+scenario_F() {
+start_fake F || return
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg scan scan.exp "$WORK/h6" "$WORK/scan.out"
 if python3 "$E2E/check_scan.py" "$WORK/scan.out" "$E2E/replay.py"; then
@@ -155,13 +197,14 @@ if python3 "$E2E/check_scan.py" "$WORK/scan.out" "$E2E/replay.py"; then
 else
   echo "FAIL scan widget states"; FAILS=$((FAILS+1))
 fi
-stop_fake
+}
 
 # ── Scenario G: the admin hub signs in when the server asks it to ────────
 # A fake with the auth wall up and one account: the tokenless pre-flight
 # ping is a 401, the sign-in page comes first, the room after; the second
 # run on the same HOME rides the kept session straight into the room.
-PORT="$(FAKE_AUTH=1 start_fake G)" || exit 1
+scenario_G() {
+FAKE_AUTH=1 start_fake G || return
 curl -s -o /dev/null -X PUT -H 'Content-Type: application/json'   -d '{"username":"alice","password":"hunter2","admin":true}'   "http://127.0.0.1:$PORT/api/v1/admin/users"
 ARGS=(admin --server "http://127.0.0.1:$PORT")
 leg admin-signin admin-signin.exp "$WORK/h7" "$WORK/admin-signin.out"
@@ -174,12 +217,13 @@ cfg=list(pathlib.Path('$WORK/h7').rglob('config.toml'))
 assert cfg and 'alice' in cfg[0].read_text(), 'the server entry does not name the account'
 "
 leg admin-room admin-room.exp "$WORK/h7" "$WORK/admin-room.out"
-stop_fake
+}
 
 # ── Scenario H: the GUI player with no server — the demo seat, the Now Playing keys
 # No fake at all: the review's key-routing bug (a digit on the Now Playing
 # screen drove the nav) showed with no server, and nothing automated
 # launched the GUI until this leg.
+scenario_H() {
 ARGS=(gui)
 leg gui-now gui-now.exp "$WORK/h8" "$WORK/gui-now.out"
 # The Admin tab on the same seat: M opens it on its no-session sentence,
@@ -188,6 +232,7 @@ leg gui-admin gui-admin.exp "$WORK/h10" "$WORK/gui-admin.out"
 # The Discover room's gate on the same seat: with no server the row is
 # absent, G opens nothing and the Library keeps the keys.
 leg gui-discover gui-discover.exp "$WORK/h11" "$WORK/gui-discover.out"
+}
 
 # ── Scenario T: the GUI's Discover room against the fake's taste route ───
 # The gate open (the ping advertises discoveryTaste): the nav grows its
@@ -196,7 +241,8 @@ leg gui-discover gui-discover.exp "$WORK/h11" "$WORK/gui-discover.out"
 # fake counts the asks: the room must have asked the route itself — and
 # its peers half, whose Connected servers tile fetches its cover from the
 # peer through the federation art proxy by the row's `albumArt`.
-PORT="$(FAKE_TASTE=1 start_fake T)"
+scenario_T() {
+FAKE_TASTE=1 start_fake T || return
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
 leg gui-discover-room gui-discover-room.exp "$WORK/h12" "$WORK/gui-discover-room.out"
 # The row itself, replayed (law 1): the ping's frame — the one that first
@@ -241,7 +287,7 @@ s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert s['peer_art_paths'], s
 assert all(urllib.parse.parse_qs(urllib.parse.urlsplit(p).query).get('compress') == ['l'] for p in s['peer_art_paths']), s
 "
-stop_fake
+}
 
 # ── Scenario K: Keep a copy, end to end, against the fake's plug-ins ─────
 # The five-part gate open (the ping's `discoveryPlugins` and `noUpload:
@@ -252,7 +298,8 @@ stop_fake
 # room's poll walks it to done, `C` lists it in the Copies modal
 # (docs/ux-contracts/discovery-page.md, clauses 100-141).
 # check_keep.py replays the stream frame by frame for those states.
-PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake K)"
+scenario_K() {
+FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake K || return
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
 leg gui-discover-keep gui-discover-keep.exp "$WORK/h13" "$WORK/gui-discover-keep.out"
 if python3 "$E2E/check_keep.py" "$WORK/gui-discover-keep.out" "$E2E/replay.py" 30 100; then
@@ -278,14 +325,15 @@ s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert len(s['lookup_sizes']) >= 2 and all(0 < n <= 100 for n in s['lookup_sizes']), s['lookup_sizes']
 assert s['cancels'] == 0 and s['clears'] == 0, s
 "
-stop_fake
+}
 
 # ── Scenario K2: Keep a copy against a server from before the pin ────────
 # The same leg against FAKE_NO_PIN=1: mStream before 2026-10-21, whose jobs
 # route's strict body refuses `destination` (Joi's 400). The start is asked
 # once more without the key and runs unpinned, as such a server runs every
 # copy (discovery-page clause 145) — the same states, the same Copies.
-PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 FAKE_NO_PIN=1 start_fake K2)"
+scenario_K2() {
+FAKE_TASTE=1 FAKE_PLUGINS=1 FAKE_NO_PIN=1 start_fake K2 || return
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
 leg gui-discover-keep-no-pin gui-discover-keep.exp "$WORK/h16" "$WORK/gui-discover-keep-no-pin.out"
 if python3 "$E2E/check_keep.py" "$WORK/gui-discover-keep-no-pin.out" "$E2E/replay.py" 30 100; then
@@ -301,7 +349,7 @@ assert s['job_answers'] == [400, 202], s['job_answers']
 assert s['job_starts'][1]['scope'] == 'album' and s['job_starts'][1]['recommendation'] == s['job_starts'][0]['recommendation'], s['job_starts']
 assert [j['state'] for j in s['jobs']] == ['done'], s['jobs']
 "
-stop_fake
+}
 
 # ── Scenario W: Where copies land, the start's pinned destination ────────
 # The same gate as K, on a place seeded with a base folder (older data: the
@@ -321,7 +369,8 @@ stop_fake
 # redraws from the answer (docs/ux-contracts/discovery-page.md, clauses
 # 105, 142-148).
 # check_dest.py replays the stream frame by frame for those states.
-PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake W)"
+scenario_W() {
+FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake W || return
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
 leg gui-discover-dest gui-discover-dest.exp "$WORK/h15" "$WORK/gui-discover-dest.out" env FAKE_URL="http://127.0.0.1:$PORT"
 if python3 "$E2E/check_dest.py" "$WORK/gui-discover-dest.out" "$E2E/replay.py" 30 100; then
@@ -339,7 +388,7 @@ assert len(s['job_starts']) == 1, s['job_starts']
 assert s['job_starts'][0]['destination'] == {'vpath': 'copies', 'base': '', 'layout': 'from-peers/{{ALBUMARTIST}}/{{ALBUM}}'}, s['job_starts'][0]
 assert s['job_answers'] == ['destination_changed'] and s['jobs'] == [], (s['job_answers'], s['jobs'])
 "
-stop_fake
+}
 
 # ── Scenario M: Apple Terminal's mouse dialect, the release echo ─────────
 # The GUI spawned with TERM_PROGRAM=Apple_Terminal and every click sent as
@@ -351,7 +400,8 @@ stop_fake
 # queue empty, nothing playing (docs/ux-contracts/discovery-page.md,
 # clauses 48, 102 and 103). check_echo.py replays the stream between the
 # leg's marks.
-PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake M)"
+scenario_M() {
+FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake M || return
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
 leg gui-discover-echo gui-discover-echo.exp "$WORK/h14" "$WORK/gui-discover-echo.out"
 if python3 "$E2E/check_echo.py" "$WORK/gui-discover-echo.out" "$E2E/replay.py" 30 100; then
@@ -359,7 +409,7 @@ if python3 "$E2E/check_echo.py" "$WORK/gui-discover-echo.out" "$E2E/replay.py" 3
 else
   echo "FAIL the release echo: the tile's list and the sheet stay, nothing pressed"; FAILS=$((FAILS+1))
 fi
-stop_fake
+}
 
 # ── Scenario KM: Keep a copy by the pointer, in Apple Terminal's dialect ──
 # The same dialect as M: the tile's list opens Keep a copy, and every
@@ -370,7 +420,8 @@ stop_fake
 # nothing (docs/ui-kit.md, Modal; docs/ux-contracts/discovery-page.md,
 # clauses 106–110). check_keep_mouse.py replays the stream at the leg's
 # marks; the fake says each click acted once.
-PORT="$(FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake KM)"
+scenario_KM() {
+FAKE_TASTE=1 FAKE_PLUGINS=1 start_fake KM || return
 ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
 leg gui-discover-keep-mouse gui-discover-keep-mouse.exp "$WORK/h17" "$WORK/gui-discover-keep-mouse.out"
 if python3 "$E2E/check_keep_mouse.py" "$WORK/gui-discover-keep-mouse.out" "$E2E/replay.py" 30 100; then
@@ -386,13 +437,14 @@ assert s['cancels'] == 1, s['cancels']
 assert s.get('destination_puts', []) == [], s.get('destination_puts')
 assert [j['state'] for j in s['jobs']] == ['cancelled'], s['jobs']
 "
-stop_fake
+}
 
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──
 # No fake mStream at all: the page talks to a board, and the board is the
 # fake behind MSTREAM_DEVICE_FAKE. The image is a merged one in miniature —
 # the two image headers and the app description the page reads the version
 # from (src/device/firmware.rs).
+scenario_I() {
 python3 - "$WORK/fw.bin" <<'PY'
 import struct, sys
 desc = bytearray(256)
@@ -420,13 +472,15 @@ env['MSTREAM_DEVICE_FAKE'] = 'busy'
 out = subprocess.run(['$BIN', 'device', 'flash', '--yes', '--firmware', '$WORK/fw.bin'], capture_output=True, text=True, env=env)
 assert out.returncode == 1 and 'in use' in out.stderr, (out.returncode, out.stdout, out.stderr)
 "
+}
 
 # ── Scenario J: the SD-card transfer's routes, and its hidden command ────
 # The fake's made-up library (FAKE_LIBRARY=1) answers the routes a card sync
 # reads. The sync itself needs a card in a reader, which CI has none of, so
 # `device card-sync` is held only to refusing a volume that isn't one: it
 # lists the volumes and opens nothing.
-PORT="$(FAKE_LIBRARY=1 start_fake J)" || exit 1
+scenario_J() {
+FAKE_LIBRARY=1 start_fake J || return
 assert "the fake serves a card sync's routes" "
 import json, urllib.request, urllib.error
 base = 'http://127.0.0.1:$PORT'
@@ -449,13 +503,76 @@ assert st == 206 and b == bytes([0xff, 0xfb, 0x90, 0x40]), (st, b)
 st, h, b = ask('/transcode/Rock/Artist%20C/Album%20D/01.wav?codec=opus&bitrate=192k')
 assert h['Content-Type'] == 'audio/ogg' and b[:4] == b'OggS', h
 "
-stop_fake
+stop_fake J
 assert "device card-sync refuses a volume that isn't one" "
 import os, subprocess
 env = dict(os.environ, HOME='$WORK/h18')
 out = subprocess.run(['$BIN', 'device', 'card-sync', '$WORK/no-such-card', '--dry-run'], capture_output=True, text=True, env=env)
 assert out.returncode == 2 and 'volume' in out.stderr, (out.returncode, out.stdout, out.stderr)
 "
+}
+
+# ── The scheduler ────────────────────────────────────────────────────────
+# Each scenario above runs in a subshell of its own, its lines kept in
+# WORK/<name>.log; run_one stops its fake however it ended and leaves
+# "<failures> <seconds>" in WORK/<name>.done. They start longest first, so
+# no long one is left running alone at the end, and print as they end.
+# Measured side by side (2026-11-10, Linux, 8 at a time): A 35 s, KM 29,
+# W 27, K and K2 23, F 21, C 20, M 19, H 16, B 13, E 11, D and I 10, G 9,
+# T 8, J 1 — 39 s in all, against 289 s one after another (J measured
+# 2026-11-11, when it joined the battery).
+LONGEST_FIRST="A KM W K K2 F C M H B E D I G T J"
+JOBS="${E2E_JOBS:-8}"
+[ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
+
+run_one() { # $1 = name
+  FAILS=0
+  local t0=$SECONDS
+  "scenario_$1"
+  stop_fake "$1"
+  echo "$FAILS $((SECONDS - t0))" > "$WORK/$1.done.tmp" && mv "$WORK/$1.done.tmp" "$WORK/$1.done"
+}
+
+count() { echo $#; }
+
+# Prints and counts each running scenario that has ended.
+reap() {
+  local s still="" fails secs
+  for s in $RUNNING; do
+    if [ -f "$WORK/$s.done" ]; then
+      read -r fails secs < "$WORK/$s.done"
+    elif kill -0 "$(cat "$WORK/$s.job")" 2>/dev/null; then
+      still="$still $s"
+      continue
+    elif [ -f "$WORK/$s.done" ]; then
+      # It wrote its summary and ended between the two looks above.
+      read -r fails secs < "$WORK/$s.done"
+    else
+      fails=1 secs="?"
+      echo "FAIL scenario $s ended before its summary" >> "$WORK/$s.log"
+    fi
+    wait "$(cat "$WORK/$s.job")" 2>/dev/null
+    rm -f "$WORK/$s.job"
+    echo "── Scenario $s (${secs}s)"
+    cat "$WORK/$s.log"
+    FAILS=$((FAILS + fails))
+    DONE=$((DONE + 1))
+  done
+  RUNNING="$still"
+}
+
+WANT=" ${*:-$ALL} "
+RUNNING=""
+DONE=0
+T0=$SECONDS
+for s in $LONGEST_FIRST; do
+  case "$WANT" in *" $s "*) ;; *) continue ;; esac
+  while [ "$(count $RUNNING)" -ge "$JOBS" ]; do sleep 0.2; reap; done
+  ( run_one "$s" ) > "$WORK/$s.log" 2>&1 &
+  echo $! > "$WORK/$s.job"
+  RUNNING="$RUNNING $s"
+done
+while [ -n "$RUNNING" ]; do sleep 0.2; reap; done
 
 echo
-if [ "$FAILS" -eq 0 ]; then echo "e2e: ALL PASS"; else echo "e2e: $FAILS FAILURE(S)"; exit 1; fi
+if [ "$FAILS" -eq 0 ]; then echo "e2e: ALL PASS ($DONE scenarios, $((SECONDS - T0))s)"; else echo "e2e: $FAILS FAILURE(S)"; exit 1; fi
