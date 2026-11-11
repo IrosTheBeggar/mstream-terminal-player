@@ -166,6 +166,10 @@ pub enum EmptyQueueStart {
     Random,
     /// "Let me choose": the library, under a banner.
     Pick,
+    /// "Recently played": the last songs played on the DJ's server, offered
+    /// in a list — each start asks which, so what is remembered is the way
+    /// to start, never a song.
+    Recent,
 }
 
 /// Which way the genre filter cuts. The filter's SWITCH is a field of its
@@ -214,20 +218,24 @@ impl EmptyQueueStart {
             EmptyQueueStart::Ask => "ask",
             EmptyQueueStart::Random => "random",
             EmptyQueueStart::Pick => "pick",
+            EmptyQueueStart::Recent => "recent",
         }
     }
     pub fn from_label(raw: &str) -> Self {
         match raw {
             "random" => EmptyQueueStart::Random,
             "pick" => EmptyQueueStart::Pick,
+            "recent" => EmptyQueueStart::Recent,
             _ => EmptyQueueStart::Ask,
         }
     }
+    /// The TUI row's ←→: the three answers its chooser has. Recently
+    /// played is the GUI's list; from it the walk goes on to Ask.
     pub fn next(self) -> Self {
         match self {
             EmptyQueueStart::Ask => EmptyQueueStart::Random,
             EmptyQueueStart::Random => EmptyQueueStart::Pick,
-            EmptyQueueStart::Pick => EmptyQueueStart::Ask,
+            EmptyQueueStart::Pick | EmptyQueueStart::Recent => EmptyQueueStart::Ask,
         }
     }
 }
@@ -271,6 +279,10 @@ pub struct Settings {
     pub min_seconds: u32,
     pub max_seconds: u32,
     pub allow_unknown_length: bool,
+    /// Smart filters: the browse lists' mood filter, kept to for every
+    /// pick. Nothing chosen is the filter off; the level is kept either
+    /// way, for when a mood comes.
+    pub moods: MoodFilter,
     pub keyword_filter: bool,
     pub keywords: Vec<String>,
     /// The library fallbacks: 1–10 or zero for no floor; the genre filter —
@@ -279,6 +291,9 @@ pub struct Settings {
     pub genre_filter: bool,
     pub genre_mode: GenreMode,
     pub genres: Vec<String>,
+    /// Which genre links the list matches: the files' tags, the discovery
+    /// model's, or both (the default, and all an older server knows).
+    pub genre_source: GenreSource,
 }
 
 /// The bounds the room's controls move within, and the server's own caps.
@@ -294,9 +309,13 @@ pub const BPM_WIDE_EXTRA: u32 = 2;
 pub const SONIC_MIN_SIMILARITY: f64 = 0.30;
 pub const SONIC_MAX_SIMILARITY: f64 = 0.80;
 pub const DEFAULT_SONIC_MIN_SIMILARITY: f64 = 0.55;
-/// The strictness bar's step.
+/// The TUI's strictness step; the GUI's bar moves in hundredths.
 pub const SONIC_STEP: f64 = 0.05;
-pub const LENGTH_RAIL_SECONDS: u32 = 1200;
+/// "No maximum": a day, the server's own cap on a length bound.
+pub const LENGTH_RAIL_SECONDS: u32 = 86400;
+/// The top of the TUI's length bars, and what "no maximum" was in a file
+/// written before the window took any length: 20 minutes.
+pub const LENGTH_LEGACY_RAIL_SECONDS: u32 = 1200;
 pub const LENGTH_STEP_SECONDS: u32 = 15;
 pub const KEYWORDS_MAX: usize = 50;
 /// The genre picker's cap (clause 48).
@@ -312,12 +331,63 @@ impl Default for Settings {
     }
 }
 
-/// A cosine floor rounded to the bar's step and held inside the band.
+/// A cosine floor in hundredths, held inside the band.
 pub fn clamp_similarity(raw: f64) -> f64 {
     let raw = if raw.is_finite() { raw } else { DEFAULT_SONIC_MIN_SIMILARITY };
-    ((raw.clamp(SONIC_MIN_SIMILARITY, SONIC_MAX_SIMILARITY) / SONIC_STEP).round() * SONIC_STEP * 100.0)
-        .round()
-        / 100.0
+    (raw.clamp(SONIC_MIN_SIMILARITY, SONIC_MAX_SIMILARITY) * 100.0).round() / 100.0
+}
+
+/// A track length for a bound or a row: m:ss, h:mm:ss from an hour up.
+pub fn fmt_length(seconds: u32) -> String {
+    let (h, m, s) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+/// A typed length read to the second: `2:00`, `1:02:30`, or bare seconds
+/// (`90`). `None` for anything else — an empty field is the caller's "no
+/// limit", not a length — and for more than a day, the server's cap.
+pub fn parse_length(text: &str) -> Option<u32> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.len() > 3 || parts.iter().any(|p| p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let n: Vec<u32> = parts.iter().map(|p| p.parse().ok()).collect::<Option<_>>()?;
+    let seconds = match n.as_slice() {
+        [s] => *s,
+        [m, s] if *s < 60 => m * 60 + s,
+        [h, m, s] if *m < 60 && *s < 60 => h * 3600 + m * 60 + s,
+        _ => return None,
+    };
+    (seconds <= LENGTH_RAIL_SECONDS).then_some(seconds)
+}
+
+/// The DJ's genre source from a kept word: unset, or a word this build
+/// does not know, is both — the list as every server has always matched it.
+pub fn genre_source_from(name: Option<&str>) -> GenreSource {
+    match name {
+        Some("tag") => GenreSource::Tag,
+        Some("model") => GenreSource::Model,
+        _ => GenreSource::Both,
+    }
+}
+
+/// A mood filter from the words a config keeps; a word a scale does not
+/// have, or a tag nobody knows, changes nothing.
+pub fn moods_from(valence: &str, energy: &str, voice: &str, tags: &[String], level: &str) -> MoodFilter {
+    let mut filter = MoodFilter::NONE
+        .press(MoodScale::Valence, valence)
+        .press(MoodScale::Energy, energy)
+        .press(MoodScale::Voice, voice);
+    for tag in tags {
+        if !filter.has_tag(tag) {
+            filter = filter.toggle_tag(tag);
+        }
+    }
+    filter.with_level(MoodLevel::from_name(level))
 }
 
 impl Settings {
@@ -333,7 +403,15 @@ impl Settings {
         let bpm = prefs.bpm || (continuity && prefs.tempo_tolerance.is_some_and(|t| t > 0));
         let harmonic =
             prefs.harmonic || (continuity && prefs.key_matching.as_deref().is_some_and(|k| k != "off"));
-        let max_seconds = prefs.max_seconds.clamp(0, LENGTH_RAIL_SECONDS);
+        // A maximum at the "no maximum" of the version that wrote the file
+        // is still none: an older file's 20:00 is the end of the bar it was
+        // set on, not a cap. Zero is none too.
+        let no_max = prefs.length_ceiling.unwrap_or(LENGTH_LEGACY_RAIL_SECONDS);
+        let max_seconds = if prefs.max_seconds > 0 && prefs.max_seconds < no_max {
+            prefs.max_seconds.min(LENGTH_RAIL_SECONDS)
+        } else {
+            LENGTH_RAIL_SECONDS
+        };
         Settings {
             songs_per_fetch: prefs.songs_per_fetch.clamp(1, SONGS_PER_FETCH_MAX),
             sonic: prefs.sonic,
@@ -348,6 +426,13 @@ impl Settings {
             min_seconds: prefs.min_seconds.min(max_seconds),
             max_seconds,
             allow_unknown_length: prefs.allow_unknown_length,
+            moods: moods_from(
+                &prefs.mood_valence,
+                &prefs.mood_energy,
+                &prefs.mood_voice,
+                &prefs.mood_tags,
+                &prefs.mood_level,
+            ),
             keyword_filter: prefs.keyword_filter,
             keywords: prefs
                 .keywords
@@ -362,6 +447,7 @@ impl Settings {
             genre_filter: prefs.genre_filter.unwrap_or(prefs.genre_mode != "off"),
             genre_mode: GenreMode::from_label(&prefs.genre_mode),
             genres: prefs.genres.clone(),
+            genre_source: genre_source_from(prefs.genre_source.as_deref()),
         }
     }
 
@@ -379,13 +465,22 @@ impl Settings {
             length: self.length,
             min_seconds: self.min_seconds,
             max_seconds: self.max_seconds,
+            // What "no maximum" is in this file, for the next reader.
+            length_ceiling: Some(LENGTH_RAIL_SECONDS),
             allow_unknown_length: self.allow_unknown_length,
+            mood_valence: self.moods.value_of(MoodScale::Valence).unwrap_or_default().to_string(),
+            mood_energy: self.moods.value_of(MoodScale::Energy).unwrap_or_default().to_string(),
+            mood_voice: self.moods.value_of(MoodScale::Voice).unwrap_or_default().to_string(),
+            mood_tags: self.moods.tags().into_iter().map(str::to_string).collect(),
+            mood_level: self.moods.level().as_str().to_string(),
             keyword_filter: self.keyword_filter,
             keywords: self.keywords.clone(),
             min_rating: self.min_rating,
             genre_filter: Some(self.genre_filter),
             genre_mode: self.genre_mode.label().to_string(),
             genres: self.genres.clone(),
+            // Both is the default and writes no key.
+            genre_source: (self.genre_source != GenreSource::Both).then(|| self.genre_source.as_str().to_string()),
             // Only the room's own settings are here; whatever a newer
             // player wrote alongside them is held by the loaded prefs and
             // put back by `PlayerPrefs::adopt`. The legacy keys stay gone.
@@ -396,7 +491,7 @@ impl Settings {
     /// The length window's words (clause 47): a rail means unbounded, so a
     /// bare 0:00–20:00 never looks like a constraint.
     pub fn length_words(&self) -> String {
-        let fmt = |s: u32| format!("{}:{:02}", s / 60, s % 60);
+        let fmt = fmt_length;
         match (self.min_seconds > 0, self.max_seconds < LENGTH_RAIL_SECONDS) {
             (false, false) => "Any length".to_string(),
             (true, false) => format!("Over {}", fmt(self.min_seconds)),
@@ -404,11 +499,22 @@ impl Settings {
             (true, true) => format!("{} to {}", fmt(self.min_seconds), fmt(self.max_seconds)),
         }
     }
+
+    /// The length window as it is sent: `None` while the switch is off or
+    /// both bounds are on their rails; a bound on its rail is `None`.
+    pub fn length_bounds(&self) -> Option<(Option<u32>, Option<u32>)> {
+        if !self.length {
+            return None;
+        }
+        let min = (self.min_seconds > 0).then_some(self.min_seconds);
+        let max = (self.max_seconds < LENGTH_RAIL_SECONDS).then_some(self.max_seconds);
+        (min.is_some() || max.is_some()).then_some((min, max))
+    }
 }
 
 // ── Composition ─────────────────────────────────────────────────────────────
 
-use crate::api::types::{BpmWindow, RandomSongRequest, Track};
+use crate::api::types::{BpmWindow, GenreSource, MoodFilter, MoodLevel, MoodScale, RandomSongRequest, Track};
 
 /// The rules of the DJ's library, resolved from its server entry with the
 /// session-wide settings behind it (clause 51), and what the server is.
@@ -422,6 +528,8 @@ pub struct LibraryFilters {
     pub genre_filter: bool,
     pub genre_mode: GenreMode,
     pub genres: Vec<String>,
+    /// Which genre links the list matches (`genreSource`); both sends none.
+    pub genre_source: GenreSource,
     /// A federated peer: a key or a guest has no stars, so no rating goes
     /// (clause 6).
     pub is_peer: bool,
@@ -448,6 +556,10 @@ impl LibraryFilters {
                 Some(raw) => GenreMode::from_label(raw),
             },
             genres: own.genres.clone().unwrap_or_else(|| settings.genres.clone()),
+            genre_source: match own.genre_source.as_deref() {
+                None => settings.genre_source,
+                some => genre_source_from(some),
+            },
             is_peer,
         }
     }
@@ -484,6 +596,10 @@ pub struct Ask {
     /// and learned back from a refusal (clauses 25, 27). `None`, or a
     /// string that does not read as a version, hides nothing.
     pub server_version: Option<String>,
+    /// The server says it has mood scores to filter by (`moodFilters`):
+    /// `moods` goes only to one that does — the route refuses a key it
+    /// does not know, and scores nobody has filter nothing.
+    pub mood_scores: bool,
 }
 
 impl Ask {
@@ -504,6 +620,10 @@ impl Ask {
         if lib.genre_filter && !lib.genres.is_empty() && takes(FLOOR_FILTERS) {
             r.genres = lib.genres.clone();
             r.genre_mode = Some(lib.genre_mode.label().to_string());
+            // Left out, the list matches both kinds — as before the key.
+            if takes(FLOOR_GENRE_SOURCE) {
+                r.genre_source = lib.genre_source.api_value().map(str::to_string);
+            }
         }
         if s.length && takes(FLOOR_LENGTH) {
             if s.min_seconds > 0 {
@@ -515,6 +635,11 @@ impl Ask {
             if (r.min_duration.is_some() || r.max_duration.is_some()) && s.allow_unknown_length {
                 r.allow_unknown_duration = Some(true);
             }
+        }
+        // Smart filters: a base condition like the length window — the
+        // opener keeps to it too.
+        if self.mood_scores && !s.moods.is_empty() {
+            r.moods = Some(s.moods);
         }
         if self.opener {
             return r;
@@ -634,6 +759,16 @@ pub const FLOOR_FILTERS: (u32, u32, u32) = (6, 7, 1);
 pub const FLOOR_SONIC: (u32, u32, u32) = (6, 15, 2);
 pub const FLOOR_LENGTH: (u32, u32, u32) = (6, 25, 0);
 pub const FLOOR_BATCH: (u32, u32, u32) = (6, 26, 0);
+/// random-songs' `genreSource` (mStream #1102).
+pub const FLOOR_GENRE_SOURCE: (u32, u32, u32) = (6, 32, 2);
+
+/// A floor as the room names it: "6.25" for 6.25.0, "6.7.1" as it is.
+pub fn floor_label(floor: (u32, u32, u32)) -> String {
+    match floor {
+        (major, minor, 0) => format!("{major}.{minor}"),
+        (major, minor, patch) => format!("{major}.{minor}.{patch}"),
+    }
+}
 
 /// True when a server is KNOWN to predate `floor` — an unknown version
 /// hides nothing.
@@ -794,6 +929,7 @@ mod tests {
             recent_artists: vec!["Alpha".into(), "Beta".into(), "Gamma".into()],
             opener: false,
             server_version: None,
+            mood_scores: false,
         }
     }
 
@@ -906,6 +1042,7 @@ mod tests {
             genre_filter: true,
             genre_mode: GenreMode::Blacklist,
             genres: vec!["Podcast".into()],
+            genre_source: GenreSource::Both,
             is_peer: false,
         };
         a.sonic_seeds = vec!["lib/a.mp3".into()];
@@ -968,6 +1105,7 @@ mod tests {
             genre_filter: None,
             genre_mode: None,
             genres: None,
+            genre_source: None,
         };
         let lib = LibraryFilters::resolve(&s, &own, false);
         assert_eq!(lib.sources_off, vec!["Kids"]);
@@ -1091,9 +1229,17 @@ mod tests {
         assert_eq!(s.songs_per_fetch, SONGS_PER_FETCH_MAX);
         assert_eq!(s.bpm_tolerance, BPM_TOLERANCE_MIN);
         assert_eq!(s.sonic_min_similarity, DEFAULT_SONIC_MIN_SIMILARITY);
-        assert_eq!(s.max_seconds, LENGTH_RAIL_SECONDS);
-        assert_eq!(s.min_seconds, LENGTH_RAIL_SECONDS, "the floor cannot pass the ceiling");
+        assert_eq!(s.max_seconds, LENGTH_RAIL_SECONDS, "past the old bar's end is no maximum");
+        assert_eq!(s.min_seconds, 5000, "a floor under the ceiling stands");
         assert_eq!(s.min_rating, RATING_MAX);
+        let crossed = crate::config::AutoDjPrefs {
+            min_seconds: 900,
+            max_seconds: 600,
+            length_ceiling: Some(LENGTH_RAIL_SECONDS),
+            ..Default::default()
+        };
+        let s = Settings::from_prefs(&crossed, "");
+        assert_eq!((s.min_seconds, s.max_seconds), (600, 600), "the floor cannot pass the ceiling");
         assert_eq!(s.sonic_anchor, SonicAnchor::Rolling);
     }
 
@@ -1108,6 +1254,161 @@ mod tests {
         assert_eq!(s.length_words(), "1:30 to 8:00");
         s.min_seconds = 0;
         assert_eq!(s.length_words(), "Under 8:00");
+    }
+
+    #[test]
+    fn a_length_is_typed_and_read_to_the_second() {
+        assert_eq!(parse_length("2:00"), Some(120));
+        assert_eq!(parse_length(" 90 "), Some(90), "bare seconds");
+        assert_eq!(parse_length("1:02:30"), Some(3750));
+        assert_eq!(parse_length("0"), Some(0));
+        assert_eq!(parse_length("24:00:00"), Some(LENGTH_RAIL_SECONDS), "a day, the server's cap");
+        for junk in ["", "  ", "2:7x", "9:99", "1:60:00", "1:2:3:4", ":30", "2:", "24:00:01", "-5", "1.5"] {
+            assert_eq!(parse_length(junk), None, "{junk:?}");
+        }
+        assert_eq!(fmt_length(59), "0:59");
+        assert_eq!(fmt_length(120), "2:00");
+        assert_eq!(fmt_length(3750), "1:02:30", "h:mm:ss from an hour up");
+        assert_eq!(parse_length(&fmt_length(86399)), Some(86399), "what is written reads back");
+        // The floors as the room names them.
+        assert_eq!(floor_label(FLOOR_LENGTH), "6.25");
+        assert_eq!(floor_label(FLOOR_FILTERS), "6.7.1");
+    }
+
+    #[test]
+    fn the_length_window_reaches_a_day_and_an_older_files_end_of_bar_is_no_maximum() {
+        // A file from before the window took any length: 20:00 was the end
+        // of the bar it was set on, never a cap.
+        let old = crate::config::AutoDjPrefs { length: true, min_seconds: 120, max_seconds: 1200, ..Default::default() };
+        let s = Settings::from_prefs(&old, "");
+        assert_eq!(s.max_seconds, LENGTH_RAIL_SECONDS);
+        assert_eq!(s.length_bounds(), Some((Some(120), None)));
+        let body = json(&ask(s.clone()));
+        assert_eq!(body["minDuration"], 120);
+        assert!(body.get("maxDuration").is_none());
+        // Written now, the file says what its "no maximum" is — and twenty
+        // minutes set since is a bound like any other.
+        assert_eq!(s.to_prefs().length_ceiling, Some(LENGTH_RAIL_SECONDS));
+        let mut s = Settings::default();
+        s.length = true;
+        s.max_seconds = 1200;
+        let back = Settings::from_prefs(&s.to_prefs(), "");
+        assert_eq!(back.length_bounds(), Some((None, Some(1200))));
+        assert_eq!(json(&ask(back))["maxDuration"], 1200);
+        // Past an hour, to the second.
+        s.min_seconds = 3750;
+        s.max_seconds = 7205;
+        assert_eq!(Settings::from_prefs(&s.to_prefs(), "").length_bounds(), Some((Some(3750), Some(7205))));
+        // Zero is no maximum too; and the switch off is no window at all.
+        let zero = crate::config::AutoDjPrefs {
+            length: true,
+            max_seconds: 0,
+            length_ceiling: Some(LENGTH_RAIL_SECONDS),
+            ..Default::default()
+        };
+        assert_eq!(Settings::from_prefs(&zero, "").length_bounds(), None);
+        s.length = false;
+        assert_eq!(s.length_bounds(), None);
+    }
+
+    #[test]
+    fn smart_filters_ride_every_pick_and_the_opener_where_the_server_has_scores() {
+        let mut s = Settings::default();
+        s.moods = MoodFilter::NONE
+            .press(MoodScale::Energy, "relaxed")
+            .toggle_tag("acoustic")
+            .with_level(MoodLevel::Strict);
+        let mut a = ask(s.clone());
+        assert!(json(&a).get("moods").is_none(), "a server that never said it has scores is not sent the key");
+        a.mood_scores = true;
+        assert_eq!(
+            json(&a)["moods"],
+            serde_json::json!({ "energy": "relaxed", "tags": ["acoustic"], "threshold": 0.7 }),
+            "the browse lists' wire form"
+        );
+        a.opener = true;
+        assert!(json(&a).get("moods").is_some(), "a base condition: the opener keeps to it");
+        // Nothing chosen is the filter off — a level alone raises no bar.
+        a.settings.moods = MoodFilter::NONE.with_level(MoodLevel::Loose);
+        assert!(json(&a).get("moods").is_none());
+        // Kept in the file as words, and read back whole.
+        let prefs = s.to_prefs();
+        assert_eq!((prefs.mood_energy.as_str(), prefs.mood_level.as_str()), ("relaxed", "strict"));
+        assert_eq!(prefs.mood_tags, vec!["acoustic"]);
+        assert_eq!(Settings::from_prefs(&prefs, "").moods, s.moods);
+        // A word a scale does not have, or a tag nobody knows, changes nothing.
+        let junk = crate::config::AutoDjPrefs {
+            mood_valence: "ecstatic".into(),
+            mood_tags: vec!["party".into(), "nope".into(), "party".into()],
+            mood_level: "wild".into(),
+            ..Default::default()
+        };
+        assert_eq!(Settings::from_prefs(&junk, "").moods, MoodFilter::NONE.toggle_tag("party"));
+        assert!(Settings::default().moods.is_empty(), "off on a fresh install");
+    }
+
+    #[test]
+    fn the_genre_kind_goes_only_beside_a_list_and_only_where_the_server_takes_it() {
+        let mut a = ask(Settings::default());
+        a.library.genre_filter = true;
+        a.library.genres = vec!["Dub".into()];
+        a.library.genre_source = GenreSource::Model;
+        assert_eq!(json(&a)["genreSource"], "model");
+        a.library.genre_source = GenreSource::Tag;
+        assert_eq!(json(&a)["genreSource"], "tag");
+        a.library.genre_source = GenreSource::Both;
+        assert!(json(&a).get("genreSource").is_none(), "both is the list as every server has matched it");
+        // Known to predate the key (6.32.2): the list goes, the kind stays home.
+        a.library.genre_source = GenreSource::Model;
+        a.server_version = Some("6.32.1".into());
+        let body = json(&a);
+        assert!(body.get("genreSource").is_none() && body.get("genres").is_some(), "{body}");
+        a.server_version = Some("6.32.2".into());
+        assert_eq!(json(&a)["genreSource"], "model");
+        a.library.genres.clear();
+        assert!(json(&a).get("genreSource").is_none(), "no list, no kind");
+
+        // An entry's own kind stands over the fallback; unset is both, and
+        // both writes no key.
+        let mut s = Settings::default();
+        assert_eq!(s.genre_source, GenreSource::Both);
+        assert!(s.to_prefs().genre_source.is_none());
+        s.genre_source = GenreSource::Tag;
+        assert_eq!(s.to_prefs().genre_source.as_deref(), Some("tag"));
+        assert_eq!(Settings::from_prefs(&s.to_prefs(), "").genre_source, GenreSource::Tag);
+        let own = crate::config::DjLibraryOverrides { genre_source: Some("model".into()), ..Default::default() };
+        assert_eq!(LibraryFilters::resolve(&s, &own, false).genre_source, GenreSource::Model);
+        assert_eq!(LibraryFilters::resolve(&s, &Default::default(), false).genre_source, GenreSource::Tag);
+        let odd = crate::config::DjLibraryOverrides { genre_source: Some("moods".into()), ..Default::default() };
+        assert_eq!(LibraryFilters::resolve(&s, &odd, false).genre_source, GenreSource::Both, "a word nobody knows");
+    }
+
+    #[test]
+    fn the_strictness_keeps_hundredths_inside_its_band() {
+        assert_eq!(clamp_similarity(0.56), 0.56, "the sheet's bar moves in points");
+        assert_eq!(clamp_similarity(0.5649), 0.56);
+        assert_eq!(clamp_similarity(0.9), SONIC_MAX_SIMILARITY);
+        assert_eq!(clamp_similarity(0.1), SONIC_MIN_SIMILARITY);
+        let mut a = ask(Settings::default());
+        a.sonic_seeds = vec!["lib/a.mp3".into()];
+        a.settings.sonic_min_similarity = 0.62;
+        assert_eq!(json(&a)["minSimilarity"], 0.62);
+    }
+
+    #[test]
+    fn recently_played_is_a_fourth_way_to_start_and_the_tuis_walk_passes_it() {
+        assert_eq!(EmptyQueueStart::from_label("recent"), EmptyQueueStart::Recent);
+        assert_eq!(EmptyQueueStart::Recent.label(), "recent");
+        let mut s = Settings::default();
+        s.empty_queue = EmptyQueueStart::Recent;
+        assert_eq!(Settings::from_prefs(&s.to_prefs(), "").empty_queue, EmptyQueueStart::Recent);
+        // The TUI's row walks the three answers its chooser has.
+        let walk: Vec<_> = std::iter::successors(Some(EmptyQueueStart::Ask), |c| Some(c.next())).take(4).collect();
+        assert_eq!(
+            walk,
+            vec![EmptyQueueStart::Ask, EmptyQueueStart::Random, EmptyQueueStart::Pick, EmptyQueueStart::Ask]
+        );
+        assert_eq!(EmptyQueueStart::Recent.next(), EmptyQueueStart::Ask);
     }
 
     #[test]

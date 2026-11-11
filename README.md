@@ -911,27 +911,41 @@ steer.
 
 Auto DJ keeps the music going: when the queue has nothing left after the
 track that is playing, it asks the server for the next songs and adds them.
-It is **on or off, per server**: press `A` (or click the bar's `auto-dj`
-control) to arm it for the server you are browsing; press it again to switch
-it off; press it while browsing another server to move it there. Its picks
-wear a badge in the queue. Armed on an empty queue it asks how to start —
-**Surprise me** (a random song under your filters), **Choose a song** (pick
-one from the library), or it waits for you to queue something.
+It is **on or off**: click the bar's `auto-dj` button (or press `A`) to
+start it, and again to stop it — Stop always stops, wherever the DJ is
+running. Its picks wear a badge in the queue. Started on an empty queue it
+asks for a **first song** — **Random** (a song under your filters),
+**Choose** (pick one from the library) or **Recently played** (one of the
+last twenty songs played on that server); **Remember** keeps the answer,
+and Esc leaves the DJ off.
 
 The settings live in the **Auto DJ room** — in the GUI under TOOLS in the
-nav (or `D`), in the classic player on the Auto-DJ tab of the full-screen
-view (`0`, then across):
+nav (or `D`). The room is one row per setting, each showing its value and
+opening one small sheet; **Start** / **Stop** sits on top and is the status:
 
-| Setting | |
+| Row | |
 |---|---|
-| **Songs per fetch** | how many the DJ adds at a time (mStream 6.26 and later; one before). |
-| **Sonic similarity** | only pick songs that *sound* like the session, with a strictness and an anchor — follow the mood as it drifts, or hold the song you started from. Needs the server's discovery index. |
-| **BPM continuity** · **Harmonic mixing** | stay near the tempo, with a tolerance; stay in a compatible key (the Camelot wheel's neighbours). |
-| **Minimum rating** · **Track length** | skip anything rated below, or outside a length window. |
-| **Genres** | a whitelist or a blacklist of the server's genres. |
-| **Keyword filter** | words a title, artist or album must not contain. |
-| **Sources** | which of the server's libraries the DJ may draw from. |
-| **Preview** | three picks with the current settings, none of them queued. |
+| **Play from** | which server the DJ picks from, and which of its folders. Start goes to this server whichever one you are browsing; it is remembered. (Shown once there is more than one server or folder to choose.) |
+| **First song** | what Start does with nothing queued: Ask · Random · Choose · Recently played. |
+| **Batch** | how many songs the DJ adds at a time (mStream 6.26 and later; one before). |
+| **Sonic similarity** | only pick songs that *sound* like the session: how close a match, and whether to **Drift** with the mood or **Stay close** to the song you started from. Needs the server's discovery index. |
+| **Smart filters** | the mood filter — happy · sad, energetic · relaxed, vocal · instrumental, tags — where the server has mood scores for its songs. |
+| **Genres** | **Only** these genres, or **Skip** them; and, where the server has both, whether to match generated genres, the files' tags, or either (mStream 6.32.2 and later). |
+| **Rating** · **Length** | skip anything rated below; keep to a length window, typed to the second (`2:00`, `90`, `1:02:30`). |
+| **Beat matching** · **Harmonic mixing** | prefer the tempo near the current song's, within a tolerance; prefer a key that mixes well (the Camelot wheel's neighbours). |
+| **Skip words** | words a title, artist, album or path must not contain. |
+| **Artist cooldown** | keep the last few artists out of the next picks. |
+| **Preview picks** | on the title row: three picks with the current settings, none of them queued. |
+
+A row the server cannot do stays where it is, greyed, and says why — "Needs
+server 6.25+", "Discovery off", "Still scanning", "Not on peers". The
+chevron half of the bar's button (`▴`) opens **quick config**: the DJ's
+server, sonic similarity and smart filters without leaving the room you
+are in.
+
+The classic player keeps these settings on the Auto-DJ tab of its
+full-screen view (`0`, then across) as a list of rows; `A` there starts
+the DJ on the server you are on.
 
 The rules are kept per server, with the global settings behind them. A
 server that does not know a setting is told once: the DJ learns which keys
