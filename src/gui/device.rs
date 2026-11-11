@@ -464,7 +464,9 @@ pub(crate) fn draw_quit_gate(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let gold = Style::default().fg(th().gold);
     let mut lines: Vec<Option<Line<'static>>> = Vec::new();
     let text = |lines: &mut Vec<Option<Line<'static>>>, words: String, style: Style| {
-        for line in crate::kit::wrap_words(&words, text_w) {
+        // Whole in every language: a Japanese or Chinese sentence has no
+        // spaces to break at, and wrap_words would clip it.
+        for line in crate::kit::wrap_whole(&words, text_w) {
             lines.push(Some(Line::from(Span::styled(line, style))));
         }
     };
@@ -621,22 +623,26 @@ pub(crate) fn frame(gui: &mut Gui) -> Duties {
     }
     let Some(page) = gui.device.page.as_mut() else { return Duties { over: false, news } };
     let over = HostedRoom::after_frame(page);
-    end_if_finished(gui);
-    Duties { over: over && gui.screen == Screen::Device && gui.device.at.is_some(), news }
+    // An end found after the draw changes the screen: the next pass draws
+    // the Library at once, not at the gated loop's next redraw.
+    let left = end_if_finished(gui);
+    Duties { over: over && gui.screen == Screen::Device && gui.device.at.is_some(), news: news || left }
 }
 
 /// The page ended itself — Esc, once its worker let every port go (clause
 /// 7): the screen goes back to the Library, which lets the page go.
-fn end_if_finished(gui: &mut Gui) {
+/// True when it did.
+fn end_if_finished(gui: &mut Gui) -> bool {
     let ended = gui.device.page.as_ref().is_some_and(|page| Hosted::finished(page).is_some());
     if !ended {
-        return;
+        return false;
     }
     if gui.screen == Screen::Device {
         gui.act(Act::Screen(Screen::Library));
     } else {
         close(gui);
     }
+    true
 }
 
 /// What the page asked of the GUI for a card: its add-server form, or a
@@ -1081,7 +1087,9 @@ mod tests {
         let text = all(&render_at(&mut gui, 100, 30));
         assert!(text.contains("letting the USB ports go…"), "{text}");
         ends(&gui).released();
-        frame(&mut gui);
+        // The end is found after the draw: news, so a gated loop draws the
+        // Library on its next pass, not up to a second later.
+        assert!(super::frame(&mut gui).news, "the screen changed after the draw");
         assert_eq!(gui.screen, Screen::Library, "the page's end, seen by the frame");
         assert!(gui.device.page.is_none() && gui.device.parting.is_none(), "every port free: nothing kept");
 
@@ -1714,8 +1722,7 @@ mod tests {
         key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(quit_gate_open(&gui));
         let text = all(&render_at(&mut gui, 90, 20));
-        assert!(!quit_gate_open(&gui), "dropped:
-{text}");
+        assert!(!quit_gate_open(&gui), "dropped:\n{text}");
         let flow = key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
         assert_eq!(flow, super::super::Flow::Quit);
 
@@ -1731,6 +1738,24 @@ mod tests {
         assert!(!quit_gate_open(&gui), "nothing left to ask about");
         let flow = key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
         assert_eq!(flow, super::super::Flow::Quit, "q is q again");
+    }
+
+    /// The gate's sentences show whole in Japanese and Chinese, whose
+    /// sentences have no spaces a word wrap could break at: wrapped by
+    /// word, the Japanese body was one line of 82 cells, clipped in a box
+    /// of 70.
+    #[test]
+    fn the_quit_gates_words_show_whole_in_japanese_and_chinese() {
+        let Some(code) = crate::setup::tests::in_own_process(&["ja", "zh"]) else { return };
+        let (mut gui, _worker) = syncing_gui();
+        key_in(&mut gui, KeyCode::Char('q'), KeyModifiers::NONE);
+        let buf = render_at(&mut gui, 100, 30);
+        let rows: Vec<String> = (0..30).map(|y| row(&buf, y).replace(' ', "")).collect();
+        let body = t!("dev.card.quit_body", s = SAVE_WITHIN.as_secs()).to_string();
+        for line in crate::kit::wrap_whole(&body, 70) {
+            let line = line.replace(' ', "");
+            assert!(rows.iter().any(|r| r.contains(&line)), "{code}: {line:?} whole:\n{}", all(&buf));
+        }
     }
 
     #[test]
