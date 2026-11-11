@@ -172,7 +172,9 @@ pub(crate) trait Volumes: Send + Sync {
 /// the peers' budget, each session's clock and ids.
 pub(crate) trait Home: Send + Sync {
     fn cards(&self) -> Cards;
-    fn save_cards(&self, cards: &Cards) -> Result<(), String>;
+    /// `cards.json` changed by `change` alone, made to what it holds now
+    /// ([`Cards::update`]): never a copy read before written back whole.
+    fn update_cards(&self, change: &mut dyn FnMut(&mut Cards)) -> Result<(), String>;
     fn plays(&self) -> Rc<dyn history::Store>;
     fn federation(&self, cards: Vec<PathBuf>) -> Result<Federation, String>;
     fn envs(&self) -> Box<dyn FnMut() -> Env>;
@@ -205,8 +207,8 @@ impl Home for ConfigHome {
         Cards::load()
     }
 
-    fn save_cards(&self, cards: &Cards) -> Result<(), String> {
-        cards.save()
+    fn update_cards(&self, change: &mut dyn FnMut(&mut Cards)) -> Result<(), String> {
+        Cards::update(change)
     }
 
     fn plays(&self) -> Rc<dyn history::Store> {
@@ -1290,18 +1292,15 @@ impl Worker {
             Cmd::Hide { key } => {
                 let serial = self.slot(&key).and_then(|s| s.view.found.volume.serial.clone());
                 if let Some(serial) = serial {
-                    let mut cards = self.setup.home.cards();
-                    cards.hide(&serial.to_string());
-                    let _ = self.setup.home.save_cards(&cards);
+                    let serial = serial.to_string();
+                    let _ = self.setup.home.update_cards(&mut |cards| cards.hide(&serial));
                     self.slots.retain(|s| s.view.key != key);
                     self.tell(Event::Gone { key });
                 }
             }
             Cmd::ShowHidden => {
-                let mut cards = self.setup.home.cards();
-                if !cards.hidden.is_empty() {
-                    cards.show_hidden();
-                    let _ = self.setup.home.save_cards(&cards);
+                if !self.setup.home.cards().hidden.is_empty() {
+                    let _ = self.setup.home.update_cards(&mut Cards::show_hidden);
                     self.watch();
                 }
             }
@@ -1310,12 +1309,13 @@ impl Worker {
                 if let Some(name) = facts.map(|f| f.name().unwrap_or("").to_string()) {
                     self.job(&key, Job::SetUp, move |card, home, _| {
                         let ask = setup::Ask { label: name, new_identity: true };
-                        let mut cards = home.cards();
+                        let before = home.cards();
+                        let mut cards = before.clone();
                         let mut envs = home.envs();
                         let done = setup::set_up(card, &ask, &mut *envs, &mut cards, &mut |_| {});
                         let done = done.map(|_| ()).map_err(|stop| stop.to_string());
                         if done.is_ok() {
-                            let _ = home.save_cards(&cards);
+                            let _ = keep_cards(home, &before, &cards);
                         }
                         JobDone::SetUp(done)
                     });
@@ -1336,9 +1336,8 @@ impl Worker {
             Cmd::LeaveOut { key, peer } => {
                 let id = self.slot(&key).and_then(|s| s.view.facts()).and_then(|f| f.root);
                 if let Some((id, ..)) = id {
-                    let mut cards = self.setup.home.cards();
-                    cards.leave_out(id, peer);
-                    if let Err(why) = self.setup.home.save_cards(&cards) {
+                    let left = self.setup.home.update_cards(&mut |cards| cards.leave_out(id, peer));
+                    if let Err(why) = left {
                         self.tell(Event::Note(Note::Failed { why }));
                     }
                 }
@@ -1490,12 +1489,13 @@ impl Worker {
         let servers = self.servers.clone();
         self.job(key, Job::SetUp, move |card, home, _| {
             let ask = setup::Ask { label: want.name.trim().to_string(), new_identity: false };
-            let mut cards = home.cards();
+            let before = home.cards();
+            let mut cards = before.clone();
             let mut envs = home.envs();
             if let Err(stop) = setup::set_up(card, &ask, &mut *envs, &mut cards, &mut |_| {}) {
                 return JobDone::SetUp(Err(stop.to_string()));
             }
-            let _ = home.save_cards(&cards);
+            let _ = keep_cards(home, &before, &cards);
             let link = want.server.as_ref().and_then(|id| servers.iter().find(|s| s.id == *id));
             JobDone::SetUp(store(card, home, &want, link))
         });
@@ -2313,6 +2313,9 @@ fn planned(synced: &sync::Synced, now: u64) -> Next {
         sync::End::Halted(sync::Halt::Server(why)) => {
             Next::Unreached { asked: now, why: why.clone() }
         }
+        // Another run of this process holds the card: a dry run never holds
+        // it, nor is refused for it; the card is still to be asked.
+        sync::End::Halted(sync::Halt::Card(Stop::Busy)) => Next::Asking,
         sync::End::Halted(halt) if synced.summary.is_none() => Next::Refused(halt.to_string()),
         _ => {
             let Some(s) = &synced.summary else { return Next::Unasked };
@@ -2412,6 +2415,12 @@ fn store(
     Ok(())
 }
 
+/// What a job changed of `cards.json` (`before` to `after`), made to what
+/// it holds now.
+fn keep_cards(home: &dyn Home, before: &Cards, after: &Cards) -> Result<(), String> {
+    home.update_cards(&mut |now| after.rebase(before, now))
+}
+
 /// What a sync runs on: the card's volume, the computer, the card's
 /// server, and what was read off the card.
 #[derive(Clone, Copy)]
@@ -2472,7 +2481,10 @@ fn run_sync(
         same_server: same_server(facts, Some(link), allow.take_over),
         ..sync::Ask::default()
     };
-    let mut cards = home.cards();
+    // What the run changes of cards.json, made to the file as it is at the
+    // run's end: a sync of hours never writes back the copy it began with.
+    let before = home.cards();
+    let mut cards = before.clone();
     let mut envs = home.envs();
     let space = found.volume.space;
     let mut say = |event: RunEvent| {
@@ -2486,7 +2498,7 @@ fn run_sync(
     }
     let kept = synced.summary.as_ref().and_then(|s| s.set.as_ref()).is_some_and(|s| s.written);
     if matches!(synced.end, sync::End::Ran(_)) || kept {
-        let _ = home.save_cards(&cards);
+        let _ = keep_cards(home, &before, &cards);
     }
     // The stronger gate counts by library: each removal's library, from the
     // card's ledger.

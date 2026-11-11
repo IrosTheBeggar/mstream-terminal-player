@@ -864,12 +864,13 @@ pub(crate) fn command(
             return 2;
         }
     };
-    let mut cards = Cards::load();
+    let before = Cards::load();
+    let mut cards = before.clone();
     let code = on(&found, volume, join, dry_run, &mut cards, &mut Env::system, out, err);
     if code == 0
         && join.is_some()
         && !dry_run
-        && let Err(e) = cards.save()
+        && let Err(e) = Cards::update(&mut |now| cards.rebase(&before, now))
     {
         let _ = writeln!(err, "mstream-player: {e}");
     }

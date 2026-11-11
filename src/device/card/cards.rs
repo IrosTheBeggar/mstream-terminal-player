@@ -20,6 +20,7 @@
 //! written over. Every member this player doesn't know is kept.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use serde_json::{Map, Value, json};
 
@@ -28,6 +29,9 @@ use super::state::{Copied, from_hex, hex};
 
 /// The file's schema.
 pub(crate) const VERSION: u64 = 1;
+
+/// One change to the file at a time in this process ([`Cards::update`]).
+static WRITING: Mutex<()> = Mutex::new(());
 
 /// The members of a card's entry this player reads and writes.
 const KNOWN: [&str; 8] =
@@ -188,6 +192,80 @@ impl Cards {
         crate::config::save_cards_file(&self.text())
     }
 
+    /// `change` made to what the file holds now, and saved: reloaded under
+    /// one lock for this process, so two jobs (a sync of two hours and the
+    /// listener's hiding a volume meanwhile) never write back a stale copy.
+    /// Another program (the command line) writes it whole too: what it saved
+    /// is reloaded here, before the change, not overwritten.
+    pub(crate) fn update(change: &mut dyn FnMut(&mut Cards)) -> Result<(), String> {
+        let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut now = Cards::load();
+        change(&mut now);
+        now.save()
+    }
+
+    /// What changed from `before` to `self`, made to `onto` (the file as it
+    /// is now): each card's members that changed, the sets' tables merged as
+    /// [`Cards::mirror`] merges them, the volumes hidden or shown, and the
+    /// file's other members. What `onto` has that neither touched stays.
+    pub(crate) fn rebase(&self, before: &Cards, onto: &mut Cards) {
+        for id in before.cards.keys().filter(|id| !self.cards.contains_key(id)) {
+            onto.cards.remove(id);
+        }
+        for (id, after) in &self.cards {
+            let was = before.cards.get(id).cloned().unwrap_or_default();
+            if *after == was && before.cards.contains_key(id) {
+                continue;
+            }
+            let seen = onto.cards.entry(*id).or_default();
+            if after.label != was.label {
+                seen.label = after.label.clone();
+            }
+            if after.last_seen != was.last_seen {
+                seen.last_seen = after.last_seen.max(seen.last_seen);
+            }
+            if (after.generation, after.commit_id) != (was.generation, was.commit_id) {
+                (seen.generation, seen.commit_id) = (after.generation, after.commit_id);
+            }
+            if after.set != was.set {
+                seen.set = after.set;
+            }
+            if (after.server.as_str(), after.synced) != (was.server.as_str(), was.synced) {
+                seen.server = after.server.clone();
+                seen.synced = after.synced;
+            }
+            for peer in after.left_out.iter().filter(|p| !was.left_out.contains(p)) {
+                if !seen.left_out.contains(peer) {
+                    seen.left_out.push(*peer);
+                }
+            }
+            seen.left_out.retain(|p| !was.left_out.contains(p) || after.left_out.contains(p));
+            for (name, value) in &after.keep {
+                if was.keep.get(name) != Some(value) {
+                    seen.keep.insert(name.clone(), value.clone());
+                }
+            }
+        }
+        for (id, set) in &self.sets {
+            if before.sets.get(id) != Some(set) {
+                let merged = match onto.sets.get(id) {
+                    Some(kept) => span::merge(set, kept),
+                    None => set.clone(),
+                };
+                onto.sets.insert(*id, merged);
+            }
+        }
+        for serial in self.hidden.iter().filter(|h| !before.hidden.contains(h)) {
+            onto.hide(serial);
+        }
+        onto.hidden.retain(|h| !before.hidden.contains(h) || self.hidden.contains(h));
+        for (name, value) in &self.keep {
+            if before.keep.get(name) != Some(value) {
+                onto.keep.insert(name.clone(), value.clone());
+            }
+        }
+    }
+
     /// The second sign of a copied card: this computer saw the card id at
     /// this generation with another commit.
     pub(crate) fn diverged(&self, card_id: u64, generation: u32, commit_id: u64) -> Option<Copied> {
@@ -344,6 +422,44 @@ mod tests {
         let mut shown = read.clone();
         shown.show_hidden();
         assert!(!shown.text().contains("hidden"));
+    }
+
+    /// The review's TV4: a sync of hours began with one copy of the file;
+    /// meanwhile a volume was hidden, a peer left out and another card seen.
+    /// Its end makes its own changes alone to the file as it is then.
+    #[test]
+    fn a_long_jobs_changes_are_made_to_the_file_as_it_is_at_its_end() {
+        let mut before = Cards::default();
+        before.saw(9, "Car", 1, 1, 100);
+        before.hide("0BAD-F00D");
+        // The run's copy: the card synced, its label changed.
+        let mut after = before.clone();
+        after.saw(9, "Car music", 5, 2, 200);
+        after.synced(9, "Home", 5);
+        // The file meanwhile: another volume hidden, the first shown again,
+        // a peer left out of card 9, card 8 seen.
+        let mut now = before.clone();
+        now.show_hidden();
+        now.hide("1A2B-3C4D");
+        now.leave_out(9, 4);
+        now.saw(8, "Gym", 3, 1, 50);
+        after.rebase(&before, &mut now);
+        let car = &now.cards[&9];
+        let fields = (car.label.as_str(), car.generation, car.commit_id, car.server.as_str(), car.synced);
+        assert_eq!(fields, ("Car music", 2, 200, "Home", 5));
+        assert_eq!(car.left_out, [4], "the peer left out meanwhile stays");
+        assert_eq!(now.cards[&8].label, "Gym", "the card seen meanwhile stays");
+        assert_eq!(now.hidden, ["1A2B-3C4D"], "what was shown meanwhile stays shown");
+
+        // A change of the job's own: a volume shown, a peer left out.
+        let mut job = now.clone();
+        job.show_hidden();
+        job.leave_out(8, 2);
+        let mut file = now.clone();
+        file.hide("0000-0001");
+        job.rebase(&now, &mut file);
+        assert_eq!(file.hidden, ["0000-0001"], "shown by the job; hidden since, kept");
+        assert_eq!(file.cards[&8].left_out, [2]);
     }
 
     #[test]

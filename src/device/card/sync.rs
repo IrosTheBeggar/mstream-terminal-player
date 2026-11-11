@@ -2094,7 +2094,8 @@ fn on(
             return 2;
         }
     };
-    let mut cards = Cards::load();
+    let before = Cards::load();
+    let mut cards = before.clone();
     let synced = {
         let mut rate = Rate::default();
         let mut say = |e: Event| {
@@ -2114,7 +2115,7 @@ fn on(
     let _ = writeln!(out, "{}", printed.unwrap_or_default());
     let kept = synced.summary.as_ref().and_then(|s| s.set.as_ref()).is_some_and(|s| s.written);
     if (matches!(synced.end, End::Ran(_)) || kept)
-        && let Err(e) = cards.save()
+        && let Err(e) = Cards::update(&mut |now| cards.rebase(&before, now))
     {
         let _ = writeln!(err, "mstream-player: {e}");
     }

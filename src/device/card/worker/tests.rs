@@ -96,8 +96,8 @@ impl Home for Here {
         self.cards.lock().unwrap().clone()
     }
 
-    fn save_cards(&self, cards: &Cards) -> Result<(), String> {
-        *self.cards.lock().unwrap() = cards.clone();
+    fn update_cards(&self, change: &mut dyn FnMut(&mut Cards)) -> Result<(), String> {
+        change(&mut self.cards.lock().unwrap());
         Ok(())
     }
 
@@ -1061,6 +1061,16 @@ fn a_lapsed_sign_in_is_the_apis_401_and_no_other_word() {
         resume_at: None,
     };
     assert_eq!(super::planned(&refused, 0), Next::SignIn { plays: 0 });
+    // A card another run holds is still to be asked, never refused.
+    let busy = sync::Synced {
+        summary: None,
+        end: sync::End::Halted(sync::Halt::Card(Stop::Busy)),
+        notes: Vec::new(),
+        plays: None,
+        peers: Vec::new(),
+        resume_at: None,
+    };
+    assert_eq!(super::planned(&busy, 0), Next::Asking);
     // A 403, and words that merely hold "sign", are not.
     for other in [
         crate::api::ApiError::Forbidden("transfer".into()).to_string(),
