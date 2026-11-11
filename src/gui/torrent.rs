@@ -4001,7 +4001,10 @@ mod tests {
         paste(&mut gui, &dir.to_string_lossy());
         settle(&mut gui, |gui| gui.torrent.picker.is_some());
         let typed = gui.torrent.picker.as_ref().map(|p| p.text.value().to_string()).unwrap_or_default();
-        assert!(typed.ends_with(&format!("paste-{}/", std::process::id())), "{typed}");
+        // The folder and a separator after it: the platform's own, `\` on
+        // Windows.
+        let folder = format!("paste-{}{}", std::process::id(), std::path::MAIN_SEPARATOR);
+        assert!(typed.ends_with(&folder), "{typed}");
         assert_eq!(gui.torrent.refusal, None, "the last paste's words go with the next");
         assert!(!wants_paste(&gui), "the picker's box takes its own, typed");
         gui.torrent.picker = None;
@@ -4017,6 +4020,23 @@ mod tests {
         paste(&mut gui, MAGNET);
         assert!(gui.torrent.file.is_some(), "and one that arrives is dropped");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_opens_the_picker_with_the_separator_its_path_uses() {
+        // Read off the reply itself, so both spellings are tried on every
+        // platform: a Windows path keeps its backslash, and a separator
+        // already at the end is not doubled.
+        let mut gui = ready_gui(&["Music"]);
+        for (path, typed) in [
+            (r"C:\Music\Drops", r"C:\Music\Drops\"),
+            (r"C:\Music\Drops\", r"C:\Music\Drops\"),
+            ("/home/vela/Drops", "/home/vela/Drops/"),
+            ("/home/vela/Drops/", "/home/vela/Drops/"),
+        ] {
+            apply_reply(&mut gui, Reply::Loaded { path: path.into(), result: Ok(Loaded::Dir) });
+            assert_eq!(gui.torrent.picker.as_ref().map(|p| p.text.value()), Some(typed), "{path}");
+        }
     }
 
     #[test]
