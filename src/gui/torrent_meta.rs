@@ -55,6 +55,173 @@ pub(crate) fn extract_torrent_name(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&hay[start..start + len]).into_owned()
 }
 
+/// How deep a bencoded value may nest before the walk gives up: a real
+/// torrent's file tree is a few folders deep, and a crafted one must not
+/// recurse the stack away.
+const BEN_DEPTH: usize = 64;
+
+/// A cursor over bencoded bytes — just enough to walk a `.torrent` to its
+/// file list: integers, byte strings, and skipping whatever else is there.
+struct Ben<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Ben<'a> {
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.at).copied()
+    }
+
+    /// Step over `byte` if it is next.
+    fn eat(&mut self, byte: u8) -> bool {
+        let is = self.peek() == Some(byte);
+        if is {
+            self.at += 1;
+        }
+        is
+    }
+
+    /// `i<digits>e`.
+    fn int(&mut self) -> Option<i64> {
+        if !self.eat(b'i') {
+            return None;
+        }
+        let end = self.at + self.bytes[self.at..].iter().take(24).position(|b| *b == b'e')?;
+        let n = std::str::from_utf8(&self.bytes[self.at..end]).ok()?.parse().ok()?;
+        self.at = end + 1;
+        Some(n)
+    }
+
+    /// `<len>:<bytes>`.
+    fn string(&mut self) -> Option<&'a [u8]> {
+        let colon = self.at + self.bytes[self.at..].iter().take(12).position(|b| *b == b':')?;
+        let len: usize = std::str::from_utf8(&self.bytes[self.at..colon]).ok()?.parse().ok()?;
+        let start = colon + 1;
+        let end = start.checked_add(len).filter(|end| *end <= self.bytes.len())?;
+        self.at = end;
+        Some(&self.bytes[start..end])
+    }
+
+    /// Step over one value of any kind.
+    fn skip(&mut self, depth: usize) -> Option<()> {
+        match self.peek()? {
+            b'i' => self.int().map(|_| ()),
+            b'l' | b'd' if depth < BEN_DEPTH => {
+                let dict = self.peek() == Some(b'd');
+                self.at += 1;
+                while !self.eat(b'e') {
+                    if dict {
+                        self.string()?;
+                    }
+                    self.skip(depth + 1)?;
+                }
+                Some(())
+            }
+            b'0'..=b'9' => self.string().map(|_| ()),
+            _ => None,
+        }
+    }
+
+    /// Walk a dict's entries: `each` is given the key with the cursor on
+    /// its value, and must step over that value.
+    fn dict(&mut self, mut each: impl FnMut(&mut Self, &'a [u8]) -> Option<()>) -> Option<()> {
+        if !self.eat(b'd') {
+            return None;
+        }
+        while !self.eat(b'e') {
+            let key = self.string()?;
+            each(self, key)?;
+        }
+        Some(())
+    }
+}
+
+/// One entry of a v1 `files` list: its length, unless it is a padding
+/// file (BEP 47's `attr` carrying `p`), which holds nothing to listen to.
+fn ben_file(ben: &mut Ben) -> Option<Option<u64>> {
+    let (mut length, mut pad) = (None, false);
+    ben.dict(|ben, key| match key {
+        b"length" => {
+            length = ben.int().and_then(|n| u64::try_from(n).ok());
+            length.map(|_| ())
+        }
+        b"attr" => {
+            pad = ben.string()?.contains(&b'p');
+            Some(())
+        }
+        _ => ben.skip(1),
+    })?;
+    Some(length.filter(|_| !pad))
+}
+
+/// A v2 `file tree`: folders are dicts of names, and a file is the dict
+/// under the empty name, carrying its `length`.
+fn ben_tree(ben: &mut Ben, depth: usize, files: &mut u64, total: &mut u64) -> Option<()> {
+    if depth >= BEN_DEPTH {
+        return None;
+    }
+    ben.dict(|ben, key| {
+        if key.is_empty() {
+            ben.dict(|ben, key| match key {
+                b"length" => {
+                    let length = u64::try_from(ben.int()?).ok()?;
+                    *files += 1;
+                    *total = total.saturating_add(length);
+                    Some(())
+                }
+                _ => ben.skip(depth + 1),
+            })
+        } else {
+            ben_tree(ben, depth + 1, files, total)
+        }
+    })
+}
+
+/// What a `.torrent` says it holds: how many files, and their bytes all
+/// told — the v1 file list (padding files left out), a lone file's
+/// length, or a v2 file tree. `None` when the walk finds none of them:
+/// the card then shows the name alone.
+pub(crate) fn torrent_facts(bytes: &[u8]) -> Option<(u64, u64)> {
+    let mut ben = Ben { bytes, at: 0 };
+    let mut facts = None;
+    ben.dict(|ben, key| {
+        if key != b"info" {
+            return ben.skip(0);
+        }
+        let (mut single, mut listed, mut tree) = (None, None, None);
+        ben.dict(|ben, key| match key {
+            b"length" => {
+                single = u64::try_from(ben.int()?).ok();
+                Some(())
+            }
+            b"files" => {
+                if !ben.eat(b'l') {
+                    return None;
+                }
+                let (mut files, mut total) = (0u64, 0u64);
+                while !ben.eat(b'e') {
+                    if let Some(length) = ben_file(ben)? {
+                        files += 1;
+                        total = total.saturating_add(length);
+                    }
+                }
+                listed = Some((files, total));
+                Some(())
+            }
+            b"file tree" => {
+                let (mut files, mut total) = (0u64, 0u64);
+                ben_tree(ben, 1, &mut files, &mut total)?;
+                tree = Some((files, total));
+                Some(())
+            }
+            _ => ben.skip(1),
+        })?;
+        facts = listed.or(tree).or(single.map(|length| (1, length)));
+        Some(())
+    });
+    facts.filter(|(files, _)| *files > 0)
+}
+
 // ── The magnet link ─────────────────────────────────────────────────────────
 
 /// The `(key, value)` pairs of a magnet's query, decoded the way a URI
@@ -441,6 +608,52 @@ mod tests {
         assert_eq!(extract_torrent_name(&torrent("Fläche")), "Fläche", "utf-8 names survive");
         assert_eq!(extract_torrent_name(b"d4:infodee"), "", "no name, no guess");
         assert_eq!(extract_torrent_name(b"not bencode"), "");
+    }
+
+    #[test]
+    fn the_file_list_says_how_many_files_and_how_big() {
+        // One file: its own length.
+        assert_eq!(torrent_facts(b"d4:infod6:lengthi1234e4:name3:odd12:piece lengthi16384eee"), Some((1, 1234)));
+        // A v1 file list, whatever stands before `info` or beside the
+        // lengths; a padding file (BEP 47) holds nothing and is not counted.
+        let listed = b"d8:announce17:http://t.example/7:comment2:hi4:infod5:filesl\
+            d6:lengthi700e4:pathl2:cd6:01.mp3ee\
+            d4:attr1:p6:lengthi324e4:pathl4:.pad3:324ee\
+            d6:lengthi300e4:pathl6:02.mp3ee\
+            e4:name5:Album12:piece lengthi16384e6:pieces0:ee";
+        assert_eq!(torrent_facts(listed), Some((2, 1000)));
+        // A v2 file tree: a file is the dict under the empty name, in
+        // folders as deep as they go.
+        let tree = b"d4:infod9:file treed2:cdd6:01.mp3d0:d6:lengthi700e11:pieces root0:eee\
+            6:02.mp3d0:d6:lengthi300eeee4:name5:Album12:meta versioni2eee";
+        assert_eq!(torrent_facts(tree), Some((2, 1000)));
+        // A hybrid carries both: the list is the one counted, its pads out.
+        let hybrid = b"d4:infod9:file treed6:01.mp3d0:d6:lengthi700eeee5:filesl\
+            d6:lengthi700e4:pathl6:01.mp3ee\
+            d4:attr1:p6:lengthi324e4:pathl4:.padeee4:name5:Albumee";
+        assert_eq!(torrent_facts(hybrid), Some((1, 700)));
+
+        // Nothing to go by says nothing — never a guess, never a panic.
+        for junk in [
+            &b""[..],
+            b"not bencode",
+            b"d4:infodee",
+            b"d4:infod5:filesleee",
+            b"d4:infod6:lengthi-5eee",
+            b"d4:infod5:filesld6:lengthi12e4:pathl",
+            b"d4:infod6:length9999999999999999999999:xee",
+            b"d4:infod5:filesli1eeee",
+        ] {
+            assert_eq!(torrent_facts(junk), None, "{:?}", String::from_utf8_lossy(junk));
+        }
+        // A tree nested past any real folder's depth is given up on, not
+        // walked the stack away.
+        let mut deep = b"d4:infod9:file tree".to_vec();
+        deep.extend(b"d1:a".repeat(5000));
+        assert_eq!(torrent_facts(&deep), None);
+        let mut skipped = b"d1:a".to_vec();
+        skipped.extend(b"l".repeat(5000));
+        assert_eq!(torrent_facts(&skipped), None, "nor a list nested that deep before `info`");
     }
 
     #[test]

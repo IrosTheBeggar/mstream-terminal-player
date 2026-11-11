@@ -293,7 +293,11 @@ holding the keys — a paste is the way in — and give them back once a song
 is found or on Esc; add-from-youtube clauses 11 and 31 and its 2026-11-03
 log. Its sheets are the model for a text input in a modal: the bordered
 card, ACCENT with the caret while it has the keys, its label DIM over
-it — clauses 16 and 53.)
+it — clauses 16 and 53. Add torrent's link box is the same card but
+keeps the rule: the room opens with the hand stowed, and a paste is
+taken whole wherever the hand is — add-torrent clause 6; its Metadata
+and Destination sheets and its typed picker wear the card too, clause
+16.)
 **The caret blinks in the GUI player** (2026-09-23): the `Surface` keeps a
 blink clock — `caret_touch()` on every key and click, `caret()` answers
 the phase as a field draws (half a second on, half off, `CARET_BLINK`,

@@ -298,34 +298,8 @@ pub(crate) enum Act {
     FormCancel,
     QrClose,
     // ── Add torrent (see gui::torrent) ──────────────────────────────────
-    /// A form row, clicked: the keyboard cursor lands there.
-    TorRow(torrent::Row),
-    /// The library picker's arrows (and the name, which cycles).
-    TorLib(i32),
-    /// The native file dialog (falls back to the typed picker), the typed
-    /// picker on purpose, drop the loaded file, the chip's two verbs.
-    TorPick,
-    TorType,
-    TorUnload,
-    TorHandOff,
-    TorDetect,
-    TorToggleRename,
-    TorToggleForce,
-    TorSubmit,
-    /// The file picker's controls.
-    TorPickerClose,
-    TorPickerSuggest(usize),
-    TorPickerScrollBy(i32),
-    TorPickerScrollTo(usize),
-    /// The partial-match picker: a location, download fresh, or back.
-    TorMatch(usize),
-    TorMatchFresh,
-    TorMatchClose,
-    /// The arrival chooser: add here, hand it on, the don't-ask box.
-    TorChooseAdd,
-    TorChooseHandOff,
-    TorChooseAsk,
-    TorChooseClose,
+    /// The room's controls, its list's and its sheets'.
+    Tor(torrent::TorAct),
     // ── Discover (see gui::discover) ────────────────────────────────────
     /// The Discover room's own pointer ways: its tabs, rows and their
     /// verbs, the two dropdowns, a lead's menu, the seeds modal, the card.
@@ -619,7 +593,8 @@ pub(crate) struct Gui {
     sonic: sonic::SonicUi,
     /// The playlists room: its dialogs and the two levels' wheels.
     playlists: playlists::PlaylistsUi,
-    /// The Add-torrent room: its form, picker, chooser and threads.
+    /// The Add-torrent room: its form, its sheets, what it sent and its
+    /// threads.
     torrent: torrent::TorrentUi,
     /// Add from YouTube: the server's facts, the job tracker, the room's
     /// form and its list, the sheets and windows over them.
@@ -3121,8 +3096,9 @@ struct Ctx {
     channels: Channels,
     saver: tui::QueueSaver,
     hand: bool,
-    /// Bracketed paste is on: while Add from YouTube's room or Files window
-    /// is up, a paste comes whole, for its link field ([`Host::paste`]).
+    /// Bracketed paste is on: while Add from YouTube's room or Files
+    /// window is up, or Add torrent's room, a paste comes whole, for its
+    /// link field ([`Host::paste`]).
     paste: bool,
     /// Two clocks behind the brisk wait (`kit::pace`): the workers'
     /// requests the App sends, and the side threads' calls — a sign-in, a
@@ -3348,9 +3324,10 @@ where
         host.pointer(ctx.hand);
     }
     // Bracketed paste follows what is up, the hand's way: on while Add
-    // from YouTube's link field wants a paste, off once it doesn't — so a
-    // room left by any road turns it off with no bookkeeping.
-    let paste = ytdl::wants_paste(gui);
+    // from YouTube's link field or Add torrent's room wants a paste, off
+    // once neither does — so a room left by any road turns it off with no
+    // bookkeeping.
+    let paste = ytdl::wants_paste(gui) || torrent::wants_paste(gui);
     if paste != ctx.paste {
         ctx.paste = paste;
         host.paste(paste);
@@ -3569,12 +3546,16 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             gui.ytdl.on_resize();
         }
         // A paste, whole: bracketed paste is on only while Add from
-        // YouTube's link field wants one (the window hands its clipboard
-        // over the same way, `Face::takes_paste`).
+        // YouTube's link field or Add torrent's room wants one (the window
+        // hands its clipboard over the same way, `Face::takes_paste`).
         TermEvent::Paste(text) => {
             gui.ui.dismiss_tooltip();
             gui.ui.caret_touch();
-            ytdl::paste(gui, &text);
+            if torrent::wants_paste(gui) {
+                torrent::paste(gui, &text);
+            } else {
+                ytdl::paste(gui, &text);
+            }
         }
         _ => {}
     }
@@ -3930,6 +3911,12 @@ impl Gui {
             dj::wheel(self, delta);
             return;
         }
+        // Add torrent's typed picker scrolls its suggestions under the
+        // wheel, a modal like the DJ's layers.
+        if self.torrent.picker.is_some() {
+            torrent::wheel(self, delta);
+            return;
+        }
         // The Admin screen's log scrolls under the wheel; a wheel over the
         // hosted room reached the room through `admin::pointer`.
         if self.screen == Screen::Admin {
@@ -3979,9 +3966,9 @@ impl Gui {
             NavId::Playlists => playlists::wheel(self, delta),
             // Settings scrolls nothing itself; its Manage-servers room's
             // list does. The Auto DJ room's sheets and lists scroll (its
-            // rows never do), and the Add-torrent room's file picker; Add
-            // from YouTube's windows took the wheel above, and its room
-            // scrolls its list.
+            // rows never do); Add torrent's typed picker and Add from
+            // YouTube's windows took the wheel above, and each of those
+            // two rooms scrolls its list.
             NavId::Settings => {
                 if self.in_settings_room(SettingsRoom::Servers) {
                     servers::wheel(self, delta)
@@ -4226,10 +4213,10 @@ impl window::face::Face for GuiFace {
         self.gui.ui.caret_at()
     }
 
-    /// Add from YouTube's room or Files window wants the clipboard whole,
-    /// caret or not.
+    /// Add from YouTube's room or Files window, or Add torrent's room,
+    /// wants the clipboard whole, caret or not.
     fn takes_paste(&self) -> bool {
-        ytdl::wants_paste(&self.gui)
+        ytdl::wants_paste(&self.gui) || torrent::wants_paste(&self.gui)
     }
 
     fn set_composition(&mut self, text: &str) {
