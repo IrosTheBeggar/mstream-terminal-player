@@ -300,7 +300,7 @@ const WORKER_GONE: &str = "the card transfer stopped unexpectedly: nothing more 
 const NOT_SAVED: &str = "settings written, but not its libraries, server or peers: no server saved here is this card's";
 
 /// Read, and its server asked or not to be asked: nothing pending.
-fn settled(card: &CardView) -> bool {
+pub(crate) fn settled(card: &CardView) -> bool {
     card.read != Read::Reading && card.busy.is_none() && card.next != Next::Asking
 }
 

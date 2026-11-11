@@ -497,6 +497,7 @@ fn the_waveforms_counts_are_told_every_so_often_and_their_phase_at_once() {
         view,
         look_again: false,
         reopen: false,
+        unopened: 0,
         synced_with: None,
         told: None,
         retry: None,
@@ -920,6 +921,7 @@ fn running_at(scratch: &Scratch, phase: Phase) -> (Worker, Arc<Shelf>, String, A
         view,
         look_again: false,
         reopen: false,
+        unopened: 0,
         synced_with: None,
         told: None,
         retry: None,
@@ -995,6 +997,7 @@ fn a_card_taken_out_in_its_sync_keeps_its_tab_marked_out() {
         view,
         look_again: false,
         reopen: false,
+        unopened: 0,
         synced_with: None,
         told: None,
         retry: None,
@@ -1053,6 +1056,7 @@ fn a_sync_takes_the_server_its_settings_chose_and_leaves_out_the_peers_left_out(
         view,
         look_again: false,
         reopen: false,
+        unopened: 0,
         synced_with: None,
         told: None,
         retry: None,
@@ -1451,6 +1455,7 @@ fn another_card_in_the_reader_of_one_taken_out_mid_sync_is_its_own_subject() {
         view,
         look_again: false,
         reopen: false,
+        unopened: 0,
         synced_with: None,
         told: None,
         retry: None,
@@ -1857,6 +1862,40 @@ fn a_job_that_cant_open_its_card_fails_as_that_job_and_a_look_tries_again() {
     }
     rig.until("read again", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
     assert!(matches!(rig.card(&key).read, Read::Read(_)));
+}
+
+/// A card whose look never opens it is looked at again a few times, then
+/// read as failed with the reason: the card says why, and the command
+/// line's wait ends (`settled`), never two minutes of looking. A look that
+/// reads it starts the count again (the last review's Z3).
+#[test]
+fn a_card_that_never_opens_is_looked_at_again_a_few_times_then_reads_as_failed() {
+    let scratch = Scratch::new("worker-never-opens");
+    let (mut worker, _shelf, key, _stop) = running_at(&scratch, Phase::Copying);
+    worker.running = None;
+    worker.slots[0].view.run = None;
+    let unopened = |worker: &mut Worker| {
+        worker.slots[0].view.busy = Some(Job::Look);
+        worker.done(&key, JobDone::Unopened);
+        // The next look at the readers takes the word, as it looks.
+        std::mem::take(&mut worker.slots[0].reopen)
+    };
+    for n in 1..=REOPENS {
+        assert!(unopened(&mut worker), "look {n}: looked at again");
+        let view = &worker.slots[0].view;
+        assert_eq!((&view.read, view.busy), (&Read::Reading, None), "look {n}");
+        assert!(!crate::device::card::lines::settled(view), "look {n}: the command line waits");
+    }
+    assert!(!unopened(&mut worker), "no more");
+    let view = &worker.slots[0].view;
+    assert_eq!((&view.read, view.busy), (&Read::Failed(UNOPENED.into()), None));
+    assert!(crate::device::card::lines::settled(view), "the command line's wait ends");
+
+    // Read once, the count starts again.
+    worker.slots[0].view.busy = Some(Job::Look);
+    worker.done(&key, JobDone::Read(Err("a read fault".into())));
+    assert!(unopened(&mut worker), "looked at again after a read");
+    assert_eq!(worker.slots[0].unopened, 1);
 }
 
 /// The review's smaller items: a read that failed lets what waited for it

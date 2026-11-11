@@ -3232,3 +3232,8 @@ setting no locale, prints in English.
     later. The words for the card contract (the firmware repo's
     docs/METADATA.md 2.12.7 and 2.20.6, item 11) are proposed to it again
     with the ranges.
+  - **A card that never opened was looked at again for ever.** A look that
+    can't open the card is tried again at the next look at the readers
+    three times now; the fourth reads as failed, "the volume can't be
+    opened", so the card says why and the command line's wait ends at
+    once instead of after its two minutes.

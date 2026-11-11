@@ -1029,7 +1029,7 @@ pub(crate) enum JobDone {
     Ejected(Result<(), String>),
     Synced(Box<Finished>),
     /// A look that couldn't open the card: tried again at the next look at
-    /// the readers.
+    /// the readers, a few times ([`REOPENS`]).
     Unopened,
 }
 
@@ -1070,8 +1070,10 @@ struct Slot {
     /// Read again once the job on it is done.
     look_again: bool,
     /// Its look couldn't open the card: read again at the next look at the
-    /// readers, while it is still listed.
+    /// readers, while it is still listed. And the looks in a row that
+    /// couldn't ([`REOPENS`]).
     reopen: bool,
+    unopened: u32,
     /// The server link its last sync ran with (its id and sign-in): a sync
     /// paused for the sign-in goes on only under another.
     synced_with: Option<(String, Option<String>)>,
@@ -1220,6 +1222,7 @@ impl Worker {
                 view,
                 look_again: false,
                 reopen: false,
+                unopened: 0,
                 synced_with: None,
                 told: None,
                 retry: None,
@@ -1909,6 +1912,7 @@ impl Worker {
         match done {
             JobDone::Read(read) => {
                 let Some(slot) = self.slot(key) else { return };
+                slot.unopened = 0;
                 match read {
                     Ok(facts) => {
                         let first = slot.view.read == Read::Reading;
@@ -1941,10 +1945,15 @@ impl Worker {
                 }
             }
             JobDone::Unopened => {
-                if let Some(slot) = self.slot(key) {
-                    slot.view.busy = None;
-                    slot.reopen = true;
+                let Some(slot) = self.slot(key) else { return };
+                // Looked at again a few times; then a read that failed, so
+                // the card says why and the command line's wait ends.
+                if slot.unopened >= REOPENS {
+                    return self.done(key, JobDone::Read(Err(UNOPENED.into())));
                 }
+                slot.unopened += 1;
+                slot.view.busy = None;
+                slot.reopen = true;
             }
             JobDone::Looked(next) => {
                 if let Some(slot) = self.slot(key) {
@@ -2315,9 +2324,14 @@ fn failed(job: Job, why: String) -> JobDone {
 /// Why a job's card couldn't be opened.
 pub(crate) const UNOPENED: &str = "the volume can't be opened";
 
+/// The looks at the readers that look again at a card whose look couldn't
+/// open it; the next that can't is a read that failed ([`UNOPENED`]).
+const REOPENS: u32 = 3;
+
 /// A job whose card couldn't be opened (taken out or remounted as the job
 /// began): that job's own failure, with its note. A look's is no failed
-/// read: the card is looked at again at the next look at the readers.
+/// read: the card is looked at again at the next look at the readers, a
+/// few times ([`REOPENS`]).
 fn unopened(job: Job) -> JobDone {
     match job {
         Job::Look => JobDone::Unopened,
