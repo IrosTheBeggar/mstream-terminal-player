@@ -448,7 +448,9 @@ fn a_move_cut_at_any_write_of_the_target_card_claims_nothing_it_doesnt_hold() {
     let at = w.scratch.0.clone();
     let copy = |name: &str| -> FatSim {
         copy_dir(&two.root(), &at.join(name));
-        FatSim::new(&at.join(name), 0x2222_0002)
+        let sim = FatSim::new(&at.join(name), 0x2222_0002);
+        sim.keep_listings();
+        sim
     };
     let whole = copy("whole");
     let before = whole.log().len();
@@ -742,7 +744,9 @@ fn the_sync_that_lets_another_cards_files_go_cut_at_any_write_loses_none_of_its_
     let at = w.scratch.0.clone();
     let copy = |name: &str| -> FatSim {
         copy_dir(&one.root(), &at.join(name));
-        FatSim::new(&at.join(name), 0x1111_0001)
+        let sim = FatSim::new(&at.join(name), 0x1111_0001);
+        sim.keep_listings();
+        sim
     };
     let whole = copy("whole");
     let before = whole.log().len();

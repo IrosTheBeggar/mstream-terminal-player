@@ -1141,6 +1141,7 @@ fn cut_card(
     let dir = Scratch::new("cut");
     copy_tree(base, &dir.0);
     let card = FatSim::new(&dir.0, SERIAL);
+    card.keep_listings();
     card.cut_at(n, how);
     let _ = sync(&card, wanted, server, 2);
     card.replug();
@@ -1216,6 +1217,7 @@ fn a_card_swapped_mid_run_is_never_written() {
         copy_tree(&theirs.0, &other.0);
         let before = FatSim::new(&other.0, 0x0BAD_CAFE).image();
         let card = FatSim::new(&dir.0, SERIAL);
+        card.keep_listings();
         card.swap_after(after, &other.0, 0x0BAD_CAFE);
         let ran = sync(&card, &wanted, &mut server, 2);
         // Swapped before a write of the run's own: it stops there, or, when
@@ -2683,6 +2685,7 @@ fn every_cut_of_a_run_that_names_its_files_ahead_of_the_fetch_is_finished() {
         let dir = Scratch::new("waves-long");
         copy_tree(&base.0, &dir.0);
         let card = FatSim::new(&dir.0, SERIAL);
+        card.keep_listings();
         card.cut_at(n, how);
         let _ = sync_with(&card, &wanted, &mut server, &mut long(), rare.clone(), answers, 2);
         card.replug();
@@ -2789,6 +2792,7 @@ fn every_cut_of_a_run_that_only_adds_waves_is_finished() {
         let dir = Scratch::new("waves-only");
         copy_tree(&base.0, &dir.0);
         let card = FatSim::new(&dir.0, SERIAL);
+        card.keep_listings();
         card.cut_at(n, how);
         let _ = sync(&card, &wanted, &mut server, 7);
         card.replug();
@@ -3454,6 +3458,7 @@ fn every_cut_of_a_run_that_only_adds_moods_is_finished() {
         let dir = Scratch::new("moods-only");
         copy_tree(&base.0, &dir.0);
         let card = FatSim::new(&dir.0, SERIAL);
+        card.keep_listings();
         card.cut_at(n, how);
         let hooks = &mut Extras::scored(&wanted);
         let _ = sync_with(&card, &wanted, &mut server, hooks, knobs(), Answers::default(), 7);
@@ -3499,6 +3504,7 @@ fn every_cut_of_a_run_that_fetches_a_file_again_keeps_its_scores() {
         let dir = Scratch::new("moods-again-cut");
         copy_tree(&base.0, &dir.0);
         let card = FatSim::new(&dir.0, SERIAL);
+        card.keep_listings();
         card.cut_at(n, how);
         let hooks = &mut Extras::default();
         let (ran, _) = sync_with(&card, &wanted, &mut server, hooks, knobs(), Answers::default(), 7);
@@ -3736,6 +3742,7 @@ fn every_cut_inside_a_large_files_pieces_is_finished() {
             let dir = Scratch::new("pieces-cut");
             copy_tree(&base.0, &dir.0);
             let card = FatSim::new(&dir.0, SERIAL);
+            card.keep_listings();
             card.cut_at(n, Cut::Fail);
             let _ = run(&card, &mut server);
             card.replug();
