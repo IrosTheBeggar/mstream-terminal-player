@@ -1783,6 +1783,49 @@ fn a_card_whose_serial_comes_late_keeps_its_slot_under_the_key_with_it() {
     assert!(!rig.card(&with_serial).out, "never taken out");
 }
 
+/// A slot keyed by its path alone is re-keyed only while the card with
+/// the serial is the card it read (the last review's Z6): another card put
+/// in that reader, its root another card id, is another card. The slot is
+/// taken out and the card put in gets a slot of its own, never the read,
+/// the sheets and the gates of the one before.
+#[test]
+fn a_card_with_a_serial_where_a_card_without_one_was_is_another_card_unless_it_is_the_same() {
+    let scratch = Scratch::new("worker-rekey-other");
+    let (mut rig, path_key, serial, _fake) = unserialled(&scratch);
+    let read_before = rig.card(&path_key).facts().and_then(|f| f.root).map(|r| r.0);
+    assert!(read_before.is_some(), "the slot read the card's root");
+    // Another card at that path: set up anew, another id; the OS lists it
+    // with a serial, its label and size as the one before.
+    let sim = FatSim::new(&scratch.0.join("card"), SERIAL);
+    let ask = setup::Ask { label: "Gym".into(), new_identity: true };
+    setup::set_up(&sim, &ask, &mut envs_from(9), &mut Cards::default(), &mut |_| {}).expect("set up anew");
+    rig.shelf.relist(&path_key, |f| f.volume.serial = serial.clone());
+    let with_serial = format!("{path_key}#{}", serial.expect("a serial"));
+    let (wanted, old) = (with_serial.clone(), path_key.clone());
+    rig.until("the card put in, read as its own", |f| {
+        let new = f.cards.iter().any(|c| c.key == wanted && c.facts().is_some());
+        new && !f.cards.iter().any(|c| c.key == old && !c.out)
+    });
+    assert_eq!(rig.fold.key_now(&path_key), path_key, "never re-keyed");
+    let read_now = rig.card(&with_serial).facts().and_then(|f| f.root).map(|r| r.0);
+    assert!(read_now.is_some() && read_now != read_before, "its own root: {read_now:?}");
+
+    // What a listing says of a card but its serial: its filesystem, its
+    // size and its label, one that came late saying nothing.
+    let card = volume_at(&scratch.0.join("card"), Fs::Fat32, SERIAL).volume;
+    let with = |change: &dyn Fn(&mut volume::Volume)| {
+        let mut v = card.clone();
+        change(&mut v);
+        v
+    };
+    assert!(listed_alike(&card, &card));
+    assert!(!listed_alike(&card, &with(&|v| v.label = "OTHER".into())), "another label");
+    assert!(!listed_alike(&card, &with(&|v| v.space.as_mut().unwrap().size += 1)), "another size");
+    assert!(!listed_alike(&card, &with(&|v| v.fs = Fs::Fat16)), "another filesystem");
+    assert!(listed_alike(&with(&|v| v.label.clear()), &card), "a label that came late");
+    assert!(listed_alike(&card, &with(&|v| v.space.as_mut().unwrap().free = 1)), "its free space moves");
+}
+
 /// The second review's C1-6: a card is the card with no serial too. Another
 /// card put in the same reader (no serial either: the same key) before the
 /// slot is read again isn't the one *Send the plays* was asked of: the job

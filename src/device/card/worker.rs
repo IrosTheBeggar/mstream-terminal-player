@@ -166,11 +166,13 @@ pub(crate) trait Volumes: Send + Sync {
     /// The volume `found` names as it is now, looked at again: accepted, at
     /// the same place, with the same serial (its free space, its refusals
     /// as they are now); None when the card isn't that one any more. One
-    /// listed with no serial is the one listed there with a serial now, as
-    /// the worker re-keys its slot ([`Event::Rekeyed`]).
+    /// listed with no serial is the one listed there with a serial now
+    /// when the listing still says the card it was ([`listed_alike`]), as
+    /// the worker re-keys its slot ([`Event::Rekeyed`]); the job's session
+    /// checks its root's card id.
     fn again(&self, found: &Found) -> Option<Found> {
         let now = self.find().ok()?;
-        let late = |f: &Found| found.volume.serial.is_none() && f.volume.fs == found.volume.fs;
+        let late = |f: &Found| found.volume.serial.is_none() && listed_alike(&found.volume, &f.volume);
         let same = |f: &Found| same_volume(f, found) || late(f);
         now.into_iter().find(|f| f.volume.path == found.volume.path && same(f) && f.accepted())
     }
@@ -1244,6 +1246,11 @@ impl Worker {
     /// late), its key its path alone, that `found` lists now with one: the
     /// slot takes the key with the serial, and stays the same card, its run
     /// and its queue place with it. Never one taken out, nor two of a kind.
+    /// Only while it is the card the slot read: its root's card id, when the
+    /// slot read one, else the listing's label and size ([`listed_alike`]).
+    /// Another card in that reader by then is another card: the slot is
+    /// taken out (the look at the readers finds it gone) and the card put
+    /// in gets a slot of its own.
     fn serial_came(&mut self, found: &Found) {
         if found.volume.serial.is_none() {
             return;
@@ -1252,11 +1259,22 @@ impl Worker {
         if self.slots.iter().any(|s| s.view.key == key) {
             return;
         }
-        let same = |s: &&mut Slot| {
+        let same = |s: &Slot| {
             let was = &s.view.found.volume;
             s.view.key == path && !s.view.out && was.serial.is_none() && was.fs == found.volume.fs
         };
-        let Some(slot) = self.slots.iter_mut().find(same) else { return };
+        let Some(at) = self.slots.iter().position(same) else { return };
+        let slot = &self.slots[at];
+        if !listed_alike(&slot.view.found.volume, &found.volume) {
+            return;
+        }
+        if let Some(card_id) = slot.view.facts().and_then(|f| f.root).map(|r| r.0) {
+            let card = self.setup.volumes.open(found);
+            if card.and_then(|c| volume::root_card_id(&*c)) != Some(card_id) {
+                return;
+            }
+        }
+        let slot = &mut self.slots[at];
         slot.view.key = key.clone();
         slot.view.found.volume.serial = found.volume.serial.clone();
         if let Some(running) = self.running.as_mut().filter(|r| r.key == path) {
@@ -2452,6 +2470,18 @@ fn signed_out(why: &str) -> bool {
 /// reader has another).
 fn same_volume(a: &Found, b: &Found) -> bool {
     a.volume.serial == b.volume.serial && a.volume.fs == b.volume.fs
+}
+
+/// `now`, listed at the place `was` was, by all a listing says of a card
+/// but its serial: its filesystem, its size, and its label (one that came
+/// as late as the serial, none before, says nothing).
+fn listed_alike(was: &volume::Volume, now: &volume::Volume) -> bool {
+    let size = |v: &volume::Volume| v.space.as_ref().map(|s| s.size);
+    let sizes = match (size(was), size(now)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    was.fs == now.fs && sizes && (was.label.is_empty() || was.label == now.label)
 }
 
 /// The card's server for this computer (clause 3a): the saved server whose

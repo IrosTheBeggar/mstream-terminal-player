@@ -851,6 +851,22 @@ pub(crate) fn head_of(card: &dyn CardFs, path: &str) -> io::Result<Option<Head>>
     Ok(Some((head, item.size)))
 }
 
+/// The card id of the card's root, by its manifests alone (2.5.4's
+/// election, no companion read): None for a card with no root.
+pub(crate) fn root_card_id(card: &dyn CardFs) -> Option<u64> {
+    let read = |name: &str| card.read(&format!("/.mstream/{name}"), MAX_FILE).ok().flatten();
+    let valid = |name| read(name).and_then(|b| Manifest::read(&b, msmf::Uses::ALL).ok());
+    let (bin, tmp) = (valid("manifest.bin"), valid("manifest.tmp"));
+    let Election { pick, .. } =
+        msmf::elect(bin.as_ref().map(Manifest::candidate), tmp.as_ref().map(Manifest::candidate));
+    let manifest = match pick {
+        Pick::Bin => bin,
+        Pick::Tmp => tmp,
+        Pick::None => None,
+    };
+    manifest.map(|m| m.header.card_id)
+}
+
 /// 2.5.4: both roots validated, the election, then the companions the
 /// winner names, each valid only when it validates and matches its entry.
 /// `read` gives a file whole, `head` a waveform index's [`head_of`].

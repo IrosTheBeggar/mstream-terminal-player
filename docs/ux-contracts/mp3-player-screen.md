@@ -3246,3 +3246,9 @@ setting no locale, prints in English.
     its 30 days counted from when this computer first held it (kept with
     it in the outbox, `heldAt`; one kept before has it from the next
     sync). A `bad-time` for a start truly ahead still drops it at once.
+  - **A card with no serial took on any card with one.** A slot keyed by
+    its reader's path was re-keyed to whatever card the OS then listed
+    there with a serial. It is re-keyed only while that card is the one
+    it read: its root's card id when it read one, else the listing's
+    label and size. Another card is another card: the slot is taken out
+    and the card put in gets a tab of its own.
