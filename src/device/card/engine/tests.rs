@@ -4418,6 +4418,35 @@ fn a_cut_runs_leftovers_go_first_and_only_as_listed() {
     assert_eq!(kept.as_deref(), Some(b"the listener's own now".as_slice()));
 }
 
+/// Every cut of a run that finds a cut run's leftover (deleted ahead of the
+/// plan that replaces the one naming it), each rename also between its two
+/// directory writes: the next run finishes as the uncut run did, and the
+/// leftover is gone.
+#[test]
+fn every_cut_of_a_run_with_a_cut_runs_leftover_is_finished() {
+    let base = Scratch::new("leftover-cut-base");
+    let (card, wanted, mut server) = first(&base.0);
+    with_leftover(&base.0, &card);
+    drop(card);
+    let whole = Scratch::new("leftover-cut-whole");
+    copy_tree(&base.0, &whole.0);
+    let card = FatSim::new(&whole.0, SERIAL);
+    sync(&card, &wanted, &mut server, 2).expect("uncut");
+    let writes = card.log();
+    let want = finished(&card);
+    assert!(writes.iter().any(|w| w == "delete /music/Gone/x.mp3"), "{writes:?}");
+    for (n, how) in cuts_of(&writes, writes.len()) {
+        let what = format!("cut at write {n} ({how:?}, {})", writes[n as usize - 1]);
+        let (_dir, card) = cut_card(&base.0, n, how, &wanted, &mut server);
+        assert!(look(&card).root.is_some(), "{what}: a root");
+        let outcome = recover(&card, &wanted, &mut server, 3).ran;
+        let outcome = outcome.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(outcome.verified, Ok(()), "{what}");
+        assert_eq!(finished(&card), want, "{what}");
+        assert_eq!(card.read("/music/Gone/x.mp3", 1 << 20).unwrap(), None, "{what}");
+    }
+}
+
 /// 2.12.3 at a collision: the plan on the card is written again at once,
 /// without the write whose name the listener's file has, so a cut before
 /// the next checkpoint never leaves that file named as the run's work.
@@ -4437,6 +4466,31 @@ fn a_collision_leaves_the_plan_on_the_card_without_its_write() {
     let log = card.log()[start..].to_vec();
     let plans = log.iter().filter(|l| l.starts_with("rename /.mstream/pending.tmp")).count();
     assert_eq!(plans, 2, "step 6's, and the one written at the collision: {log:?}");
+
+    // The card pulled at the write after that plan: the plan on it has no op
+    // at the listener's file, and the next run leaves that file be.
+    let renames = log.iter().enumerate().filter(|(_, l)| l.starts_with("rename /.mstream/pending.tmp"));
+    let (at, _) = renames.last().unwrap();
+    // Counted from where the run starts, as `start` was.
+    let n = (at + 2) as u64;
+    let dir = Scratch::new("collision-plan-cut");
+    let (card, wanted, mut server) = first(&dir.0);
+    let mut wanted = wanted;
+    server.add(from, six.clone());
+    wanted.files.push(track(from, &six, 401));
+    let (session, plan) = plan_of(&card, &wanted, &mut server, Answers::default(), knobs());
+    let theirs = "/music/Alex Artist/First Album/03 - SIX.MP3";
+    put(&dir.0, theirs, &corpus("latin1.mp3"), LATER);
+    assert_eq!(card.log().len(), start, "the same writes before the run");
+    card.cut_at(n, Cut::Fail);
+    assert!(session.run(plan, &mut server, &mut NoHooks, &mut |_| {}).is_err(), "cut");
+    card.replug();
+    let pending = look(&card).pending.expect("the plan written at the collision");
+    let six_at = |o: &&Op| o.path.eq_ignore_ascii_case("Alex Artist/First Album/03 - Six.mp3");
+    assert_eq!(pending.ops.iter().filter(six_at).count(), 0, "{:?}", pending.ops);
+    let outcome = recover(&card, &wanted, &mut server, 3).ran.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(outcome.verified, Ok(()));
+    assert_eq!(card.read(theirs, 1 << 20).unwrap(), Some(corpus("latin1.mp3")), "the listener's file");
 }
 
 /// A write whose target the run spared at step 7 (a delete there found the
