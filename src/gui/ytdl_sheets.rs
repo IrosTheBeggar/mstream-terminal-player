@@ -59,11 +59,18 @@ pub(super) fn sheet_room(gui: &Gui, area: Rect) -> usize {
 /// border — what is beneath inert (the kit's Modal), a click outside it
 /// `away`. Returns its rect.
 pub(super) fn open_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect, rows: u16, away: Act) -> Rect {
+    open_sheet_anchored(frame, gui, area, rows, rows, away)
+}
+
+/// [`open_sheet`] for a sheet whose rows come and go as it is used (a
+/// path's suggestions): it stands where it would at `most` rows and grows
+/// downward from there, so its title and its first rows hold one spot.
+pub(super) fn open_sheet_anchored(frame: &mut Frame, gui: &mut Gui, area: Rect, rows: u16, most: u16, away: Act) -> Rect {
     // The controls this sheet draws are the only ones live under it.
     gui.ytdl.drawn.clear();
     gui.ui.clear_registries();
     gui.ui.click(area, away);
-    let rect = sheet_rect(gui, area, rows + 2);
+    let rect = Rect { height: rows.min(most) + 2, ..sheet_rect(gui, area, most.max(rows) + 2) };
     gui.ui.overlay(rect);
     gui.ui.modal_over();
     keep::modal_box(frame, rect);

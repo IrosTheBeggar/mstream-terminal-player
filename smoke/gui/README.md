@@ -166,6 +166,28 @@ url = "http://127.0.0.1:3041"
   (`Change format and retry · Dismiss`) and a live stream has no warning
   ahead of time.
 
+- `torrent` — Add torrent (add-torrent contract) against whatever ONE server
+  the rig's `gui-config` names by its address, with a library `"Music"` —
+  the YouTube rig does. No torrent client is needed and nothing is ever
+  added: the pass stops short of the primary. The nav's `Add torrent` row,
+  lit; the two
+  boxes with `or` between them and no `Paste` (a terminal reads no
+  clipboard); the gate's standing, or the server's own reason under the
+  title; a bracketed paste of a magnet link with the hand stowed — the
+  link's box, its own name, `Metadata` and `Destination`, no checkbox, and
+  none of its letters taken for a key; `x`; a bracketed paste of a
+  `.torrent`'s path (written into the rig's folder), as a terminal delivers
+  a dropped file — the card with `3 files · 12 MB`, its ways, the checkbox;
+  `e` for the Metadata sheet, a word typed, the row and the destination
+  following; `l` for the Destination sheet; `x`, then `t` for the typed
+  picker. `Auto-detect metadata` and a live `Add torrent ▸` are checked to
+  stand exactly where the server takes torrents. And the list, which only
+  an add writes a row to: the pass writes two rows into this server's slot
+  of `gui-config/torrents.json` before the player starts and sees them
+  under the form; ↓ walks the hand to the first, `x` takes it off the list
+  and off the file, Enter on the other opens its library in Files. The
+  file is put back as it was.
+
 ```sh
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py direct
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py mixed
@@ -174,6 +196,7 @@ MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py library
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py actions
 MSTREAM_RIG_DIR=/path/to/yt-rig python3 -u smoke/gui/ptygui.py ytdl
 MSTREAM_RIG_DIR=/path/to/old-yt-rig MSTREAM_YT_OLDER=1 python3 -u smoke/gui/ptygui.py ytdl
+MSTREAM_RIG_DIR=/path/to/yt-rig python3 -u smoke/gui/ptygui.py torrent
 ```
 
 The worker-level leg of the same rig is the ignored test in `src/tui/worker.rs`:

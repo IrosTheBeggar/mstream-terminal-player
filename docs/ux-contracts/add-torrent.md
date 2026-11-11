@@ -6,7 +6,8 @@
 | **Server API** | `GET /api/v1/torrent/preflight?path=` (active · clientType · displayName · noUpload · userAllowed · reason) · `GET /api/v1/torrent/path-templates` · `POST /api/v1/torrent/auto-detect` (multipart) · `POST /api/v1/torrent/seed-existing` (multipart) · `POST /api/v1/torrent/add` (multipart: vpath · subPath · directoryName · renameRoot · exactly one of magnet / torrentFile) |
 | **Already in this repo** | nothing before this slice — no torrent client surface existed; all five client calls, the multipart body and the metadata parser are new (`src/api/mod.rs`, `src/gui/torrent_meta.rs`). The kit brought the modal, the line editor, the wizard's path-completion machinery and the servers room's thread-and-reply pattern |
 | **Target surface** | the GUI player — a Library nav room under TOOLS (a room off Settings until 2026-11-09), plus `mstream-player gui --torrent <file-or-magnet>` for torrents arriving from the OS (`src/gui/torrent.rs`) |
-| **Status** | contract extracted 2026-08-31; the five open questions settled and the room implemented 2026-09-01 (decisions in the deviations log); the room moved from Settings into the nav 2026-11-09 (decision 5 amended) |
+| **Design** | the canvas "Add torrent · GUI" (2026-11-10): Add from YouTube's shapes for a torrent — one centred block, the two ways in as two boxes, the file a card, `Metadata` and `Destination` rows that each open a sheet, the primary under the form, what was sent under that. Its six open questions are settled below as its boards drew them |
+| **Status** | contract extracted 2026-08-31; the five open questions settled and the room implemented 2026-09-01 (decisions in the deviations log); the room moved from Settings into the nav 2026-11-09 (decision 5 amended); the room rebuilt to its canvas 2026-11-10 (the canvas's decisions and the log's entries of that day) |
 
 ## Intent
 
@@ -63,6 +64,45 @@ metadata → destination → options → submit. Everything below the source
 stays hidden until a source is real: a picked file, or a magnet with a
 valid infohash.
 
+*Here, since 2026-11-10 (the canvas):* one block, centred in the room, 56
+cells at most (47 at 100 columns with the queue open). Top to bottom:
+
+- **The title row** — the name BOLD; at its right end the gate's standing
+  (`Transmission · ready`, DIM) or, where the room is too short for the
+  tall primary, the primary as a slab.
+- **The gate's words**, when it has any, under the title in place of the
+  blank row: that the server is being asked (ACCENT), why it can't take
+  one — its own reason, whole, GOLD — or that there is no server. Four rows
+  at most.
+- **No source yet: the two boxes.** A tall frame the block's width,
+  `Choose a .torrent file…` (the native dialog); `type a path ▸` at the
+  right under it; the record's `or` between two rules; then the link's
+  band — a bordered box, `Paste a magnet link`, and `Paste` beside it where
+  the build can read the clipboard (the window; never a terminal).
+- **A file in hand: its card** in the boxes' place — the name BOLD, `[X]`
+  to let it go, and under the name what it holds (`12 files · 356 MB`,
+  read from the file; left out where the list can't be read). Under the
+  card its ways, TEXT with a DIM `·` between them: `Auto-detect metadata`
+  (where the server takes torrents) and `Open in another app`; then how
+  the last auto-detect came out.
+- **A link in hand: the link's band** alone, its own name (`dn`) DIM under
+  it.
+- **Two rows that each open a sheet**: `Metadata` — artist · album · year,
+  or GOLD `! type the details` where the name gave neither artist nor
+  album — and `Destination` — the landing place as crumbs, the library
+  first; it is the folders between that give way (`Music › … › Album`),
+  never the library. Then, for a file, `[ ] Force fresh download`.
+- **The primary**, tall and the block's width, `Add torrent ▸`; under it
+  `checking for files already on the server…` while the check is out, or
+  the last refusal, GOLD, whole, on as many rows as it needs.
+- **What was sent**, `FROM TORRENTS`: a row for each torrent this player
+  handed this server from this account, newest first — ✓, the folder, the
+  folder it sits in, when. Nothing is drawn until there is one.
+
+Short of rows the blanks give way — the one under the title, then the
+form's from the bottom up, then the one over the list — until the list
+has three rows.
+
 ## Behavior contract
 
 ### The source
@@ -80,7 +120,16 @@ valid infohash.
    invalid one is marked in place, not at submit.
 5. Once a file is loaded, the magnet field's spot shows the **file chip
    and the hand-off** instead (clause 60) — the two sources never show
-   together.
+   together. *Here: the file's card takes both boxes' place, the hand-off
+   a way under it; a link in hand takes them the same way.*
+6. *Here:* **a paste is taken whole**, wherever the hand is, while nothing
+   stands over the room: a `magnet:` link fills the link box (and lets a
+   loaded file go) — one that is no magnet puts the hand on the box to
+   mend it; anything else is read as a path, since a file dropped on a
+   terminal arrives as one, and loaded — a folder opens the typed picker
+   on itself, and what is no torrent says so under the two boxes. Over a
+   sheet a paste is its box's own, typed. While a check or an add is out
+   a paste waits with the rest of the form.
 
 ### Metadata and the destination
 
@@ -92,6 +141,10 @@ valid infohash.
 11. **Auto-detect** (file sources, when the server offers it) asks
     `/torrent/auto-detect` and applies the answer, saying how sure it is
     ("detected" vs "best guess"); a miss says the server found nothing.
+    *Here: the answer stands under the card's ways and in the Metadata
+    sheet until the source changes — "Metadata detected" in the OK
+    colour, a guess or a miss GOLD behind its `!`. A server that takes no
+    torrents is not offered the question.*
 12. The **destination path autofills** from the library's template
     (`{{ARTIST}}/{{ALBUM}}` and friends), resolved client-side with the
     server's own sanitizer mirrored — the preview must match what
@@ -99,11 +152,20 @@ valid infohash.
 13. **Editing the path by hand is sticky**: metadata edits stop
     recomputing it. A fresh source resets the stickiness.
 14. The **preview line** shows the real landing spot:
-    `/<vpath>/<path>/<contents>`.
+    `/<vpath>/<path>/<contents>`. *Here: in the Destination sheet, under
+    the path's box; the page's row shows the same place as crumbs.*
 15. **Rename root folder** is ON by default — the whole point of the
     resolved path is that the folder matches it, and a scene-release name
     rarely does. A rename that fails after a successful add is a warning,
-    not a failure.
+    not a failure. *Here: a checkbox in the Destination sheet, what it does
+    DIM under it.*
+16. *Here:* **Metadata** is a sheet of three bordered boxes — ARTIST,
+    ALBUM, YEAR on one row — with `Auto-detect metadata` at its foot where
+    the server can be asked, and `[ Done ]`. **Destination** is a sheet:
+    the libraries as radios where the server has more than one, the PATH's
+    box, the preview, how a hand edit behaves, the rename checkbox,
+    `[ Done ]`; its title wears the place. Both edit the form as they are
+    used: `[ Done ]`, Enter, Esc and a click outside all only close them.
 
 ### Submit and the seed-existing check
 
@@ -119,11 +181,24 @@ valid infohash.
     - **partial_match** — some files exist elsewhere: the **match
       picker** (clause 21).
     - **no_match** (or anything unrecognized) — fall through to add.
+
+    *Here:* what went well is the note's and a row in the list — an add,
+    and a torrent now seeding from disk (the server names its library
+    alone, so its row carries the torrent's own name). A torrent the
+    client already had leaves no row. **A refusal keeps the form** and
+    stands under the primary in the server's words, whole — the seed
+    check's, the add's, a form that can't be sent — until the form
+    changes or the next press goes out. While either call is out the
+    primary reads `Adding…` and nothing on the form acts.
 21. The **match picker** lists each candidate location
     (`vpath/relativePath`, matched-of-total, missing count) — choosing
     one adds the torrent AT that location (seed what's there, fetch only
     what's missing); the last row is always **download fresh** at the
-    typed path.
+    typed path. *Here: a sheet — each place on two rows (its crumbs, then
+    how many files are there and how many would download), the fresh
+    download last with the destination under it. The dot is the choice in
+    the making: a click or ↑ ↓ moves it, `[ Add torrent ]` or Enter takes
+    it, Esc backs out with nothing added. Five places at most.*
 22. `/torrent/add` answers with the torrent's name and where files will
     land; a duplicate is its own wording ("already added"), not an error.
 23. *(Record split, settled here for the webapp's side: this surface also
@@ -156,6 +231,19 @@ valid infohash.
 
 ## Wording
 
+*(2026-11-10, the canvas.)* The page shows words; the tips line names
+their keys. Three more of the record's keys came over from its ten
+`.arb` files — `torrentMetadataLabel`, `torrentDestinationLabel` and
+`torrentOr` (`gui.tor.metadata`, `gui.tor.destination`, `gui.tor.or`).
+New here, in the same ten languages: `gui.tor.paste_link` ("Paste a
+magnet link", each language's Add from YouTube placeholder with the
+record's word for the link), `gui.tor.list_title` ("From torrents", beside
+"From YouTube"), the card's `gui.tor.files_*` plural family and the tips
+line's `gui.tips.tor_ready`. `Paste`, `Done`, "type the details", "Show
+in folder" and the composed tips' pieces are Add from YouTube's own.
+Gone, with the label column they named: `gui.tor.hint`, `gui.tor.source`,
+`gui.tor.magnet` and `gui.tips.tor_library`.
+
 The record's `torrent*` and `settingsTorrent*` keys were carried over
 from all ten `.arb` files into `locales/*.yml` (`gui.tor.*`, `gui.set.*`);
 the strings new to this surface — the gate's standing, the picker, the
@@ -184,16 +272,18 @@ is that same `TORRENT`) — the owner's choice over an abbreviated verb,
 
 | Record | Here |
 |---|---|
-| System file picker, typed, starting in Downloads | The **native file dialog** first — the wizard's own backends (`src/setup/picker.rs`) grown a file-typed sibling: osascript `choose file of type {"torrent"}` on macOS (an NSOpenPanel from a terminal process never fronts), rfd's IFileOpenDialog on Windows, the XDG portal through ashpd on Linux — each filtered to `.torrent` / `application/x-bittorrent` and started in `~/Downloads`, run on a thread so the loop stays live. Where no dialog can open (SSH, no session bus, a refused osascript) the room says so and falls back to the kit's **path modal for files** (the wizard's typed completion re-drawn): the line editor starts in `~/Downloads/`, suggestions are that folder's sub-folders and `.torrent` files only, Tab completes, Enter descends or loads — also reachable on purpose (`t`, "type a path"), and the place a dropped file's path lands. The structural gate stays (clause 3) whichever road the file took. |
-| Magnet TextField | The kit line input as a 1-row field; live infohash mark at the row's right edge (clause 4) |
+| The screen's column of fields | **One centred block** (see States & flows): the two boxes, the card, two rows that open sheets, the primary under them, what was sent under that |
+| System file picker, typed, starting in Downloads | The **native file dialog** first — the tall frame `Choose a .torrent file…`, its letter `b` — the wizard's own backends (`src/setup/picker.rs`) grown a file-typed sibling: osascript `choose file of type {"torrent"}` on macOS (an NSOpenPanel from a terminal process never fronts), rfd's IFileOpenDialog on Windows, the XDG portal through ashpd on Linux — each filtered to `.torrent` / `application/x-bittorrent` and started in `~/Downloads`, run on a thread so the loop stays live. Where no dialog can open (SSH, no session bus, a refused osascript) the room says so and falls back to the kit's **path modal for files** (the wizard's typed completion re-drawn): the line editor starts in `~/Downloads/`, suggestions are that folder's sub-folders and `.torrent` files only, Tab completes, Enter descends or loads — also reachable on purpose (`type a path ▸` under the frame, its letter `t`). A dropped file's path lands in the room itself: a whole paste loads it (clause 6). The structural gate stays (clause 3) whichever road the file took. Since 2026-11-10 the typed road is a sheet: the path's bordered box, the folder's sub-folders DIM behind a `▸` and its `.torrent` files under it, six at a time; it stands where it would with its list full and grows downward, so the box holds one spot |
+| Magnet TextField | The link's band: the kit's bordered box, `Paste a magnet link`, with `Paste` beside it where the build can read the clipboard (the window; a terminal draws none and its box takes the band). ACCENT with the caret while it has the hand; `[X]` clears it. The live infohash mark is a GOLD line under the band (clause 4) |
 | Opened-with (intents) | The **CLI seam**: `mstream-player gui --torrent <file-or-magnet>` as the `IncomingTorrent` equivalent — the chooser / ask-me flow rides it unchanged, and the arrival is logged |
 | OS registration (manifest) | The **Phase-8 installers'** job: macOS document types + `magnet:` URL scheme on the .app, Windows file association, Linux `.desktop` MimeType — all launching the seam above. The app ships the seam; the installers ship the claim. |
 | Android "open by default" settings screen | **Not ported** — no OS screen to open from a terminal app; the row returns with the installers (deviations) |
 | Hand-off chooser (ACTION_VIEW) | `open` / `xdg-open` / `start` on the file, **staged** into the player's own temp folder — which doubles as the loop guard: an arrival from that folder is our own file coming back, i.e. this player is the default app, and the room says so instead of offering the hand-off again |
-| Preflight banner | The sonic room's pattern inverted: the nav row always stands (no ping flag exists; the Settings doorway did the same); the room itself banners the server's reason in gold, and the primary is disabled with the reason on its tip |
-| Chooser + match-picker sheets | Kit modals (the sonic menu's shape) |
-| Snackbars | The note line |
-| Material TextFields, 56 px each | **1-row fields** (label column + value, the caret marking the focused one — the Settings rows' grammar). The kit's 3-row input cards would need 24 rows for the form alone; at the 100×24 floor the whole room — gate, source, metadata, destination, options, the tall primary — fits its 14 content rows exactly, and breathes at 18 |
+| Preflight banner | The sonic room's pattern inverted: the nav row always stands (no ping flag exists; the Settings doorway did the same); the room itself says the server's reason in gold under its title — whole, on as many rows as it needs, four at most — and the primary is off with the reason on its tip. The form stays usable: a torrent that can't go to this server can still be handed on |
+| Chooser + match-picker sheets | **Sheets**, Add from YouTube's (66 cells, standing where a room's window does): Torrent received — what arrived BOLD, the question, `Add to mStream ▸` (the primary) and `Open in another app` side by side (one over the other where a language's words are wider than half the sheet), the don't-ask box; Files already exist — clause 21 |
+| Snackbars | The note line for what went well; a refusal on the page, whole (clause 20) |
+| Material TextFields, 56 px each | **Two rows that each open a sheet** of the kit's bordered boxes (clause 16). Until 2026-11-10 they were 1-row fields in a label column — chosen for the 24-row floor, which the rows keep: at 100×24 the title row holds the primary and the list keeps four rows |
+| (none: the screen pops) | **What was sent** — the list under the form (decision 6 of the canvas's) |
 
 ## Decisions on the open questions (2026-09-01)
 
@@ -214,6 +304,35 @@ is that same `TORRENT`) — the owner's choice over an abbreviated verb,
    Discover — past the digits, the pointer's, with no letter of its own —
    and the `--torrent` seam stays; Settings keeps TORRENTS and the ask-me
    switch alone.
+
+## Decisions on the canvas's open questions (2026-11-10)
+
+The canvas left six to the owner; the owner said "Build it", and each is
+built as its boards drew it.
+
+1. **The list is this player's own record.** The record has none, and the
+   server keeps no list a user can read (`/admin/torrent/list` is the
+   admin's). `torrents.json` in the config folder holds, per server and
+   account, the last fifty torrents this player sent: the name, the
+   library, the folder, when. A row's Enter or click opens its folder in
+   Files; `x` takes the row off. It says what was sent, never how far the
+   download is. *Open still: an admin's rows could follow the download
+   from the list the Admin tab reads.*
+2. **The card says how many files and how big**, read from the `.torrent`
+   here (`torrent_meta::torrent_facts`: the v1 file list with its padding
+   files left out, a lone file's length, or a v2 file tree). The record
+   shows neither. A link has no file list: its own name stands instead.
+3. **`Paste` stands in the window build only**, as in Add from YouTube. A
+   file dropped on the window is still not handled by any room.
+4. **`Force fresh download` stays on the page; `Rename the torrent's root
+   folder` is the Destination sheet's.**
+5. **The rows read `Metadata` and `Destination`**, the record's words for
+   this screen (Add from YouTube's says `Saves to`).
+6. **Files already exist takes a choice and a button** (clause 21): a
+   click on a place only moves the dot.
+
+Mine, where the canvas named none: the letters `e` (Metadata) and `l`
+(Destination) beside the room's `b t x o d`.
 
 ## Deviations log
 
@@ -284,3 +403,64 @@ is that same `TORRENT`) — the owner's choice over an abbreviated verb,
   — and opening it asks the gate as before. Where no verb fits the row's
   twelve cells (de es fr it pl pt ru) it reads `+ Torrent`, the GUI's add
   sign for the verb — the owner's choice (Wording).
+- **2026-11-10 — The room rebuilt to its canvas** ("Add torrent · GUI").
+  The label column is gone: States & flows, clauses 5, 6, 11, 14–16, 20
+  and 21, the translation notes and the canvas's decisions above say what
+  stands in its place. The gate, the parser, the template resolver, the
+  seed check's taxonomy, the hand-off and the `--torrent` seam are
+  untouched. The tests' boards are the canvas's seventeen, written from
+  its own files cell for cell with their tokens; none needed a patch.
+- **2026-11-10 — What the rebuild mends.** Read off the old room's own
+  frames at 100×30 with the queue open: `[ ] Force fresh download` was
+  not drawn at all (the second checkbox did not fit beside the first in
+  the room's 47 cells); `Open in another app · Auto-detect metadata` ran
+  through the queue's rule; the preview lost its start, and with it the
+  library, once library and path passed 19 characters; the match picker
+  drew `Download fresh anyway` on its bottom border; the gate's "asking
+  whether this server takes torrents…" was cut at 32 cells beside the
+  title; the two longest refusals (about 180 and 250 characters) went to
+  the bar's one-row note; a link pasted in a terminal with the hand stowed
+  arrived as keys, its `t` opening the typed picker; and the wheel never
+  reached the typed picker's suggestions, a modal's (the hub hands it
+  over now, as it does the DJ's layers').
+- **2026-11-10 — The hand.** The room still opens with it stowed. ↓ picks
+  it up: the file's box, `type a path ▸`, the link's box — or, a source in
+  hand, its card (or its link), its ways, `Metadata`, `Destination`, the
+  checkbox, the primary — then the list's rows; Enter does the stop's own
+  act, Esc stows. The hand down and a source in hand, Enter is the
+  primary's. The link's box takes what is typed while it has the hand;
+  Enter there moves on. A letter acts where its control is drawn; the
+  capitals of the room's own letters are the room's too. The queue panel
+  holding the keys, the room yields every one.
+- **2026-11-10 — A name that says nothing.** The canvas's NoDetails board
+  shows a file whose name gives neither artist nor album, `Metadata`
+  pointing at its sheet in GOLD and the primary off. By the record's
+  parser a name with no artist in it is taken whole as the album, so the
+  board's state is a torrent — or far more often a link — that carries
+  no name at all; a named one adds under its own name, as on the phone.
+- **2026-11-10 — Torrent received keeps its hand down** until a walking
+  key picks it up, on the primary: the sheet opens as its board drew it,
+  and Enter adds. Space ticks the don't-ask box wherever the hand is.
+- **2026-11-10 — No server at all** says so under the title, DIM, on its
+  two rows; beside the title the sentence was cut.
+- **2026-11-10 — Where a paste arrives as keys.** A Windows console
+  delivers a paste as typed keys, never whole (Add from YouTube's
+  `whole_pastes`). There the room opens with the hand on the link's box
+  while it has no source, so a pasted link lands in it rather than among
+  the room's letters; everywhere else the hand is stowed, as the canvas
+  drew it. And Enter in the link's box, on text that is no link at all,
+  reads it as the path it must be and loads the file — the whole paste's
+  own rule, for a path that was typed.
+- **2026-11-10 — What a run has shown, and what none has.** The pty smoke
+  (`smoke/gui/scenario_torrent.py`) walks the page on a real server with
+  no torrent client: both whole pastes, the card's facts, the two sheets,
+  the typed picker, the server's own refusal under the title — and the
+  list, from two rows the pass writes into `torrents.json` itself: read
+  when the room opens, one taken off the list and off the file with `x`,
+  the other opened in Files. (Under test the list is memory's alone, so
+  the file's own round trip is this run's to show.) The window build was
+  looked at on macOS: Torrent received over Files, the room, both sheets.
+  No run has reached a server that takes torrents — no rig has a client,
+  and mStream's test helpers script none — so the add itself, the seed
+  check's outcomes, a refusal's real words and a row arriving in the list
+  are the unit tests' alone, through the answers they hand the room.

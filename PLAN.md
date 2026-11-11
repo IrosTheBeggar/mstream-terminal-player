@@ -2319,6 +2319,32 @@ a LATER secondary screen (party view), Columns retired.
   lock lasts from the gate's yes until the board's write has ended; leaving
   keeps a page that saw a board aside until its worker says every port is
   free. The standalone `device flash` is the same page at 72×24.
+- **Add torrent, the redesign ✅ 2026-11-10** — the owner asked for the
+  same treatment for the torrent room, approved the canvas "Add torrent ·
+  GUI" (claude.ai artifact `4TpN68uakPtxhqL7kWqk9Z`, eighteen boards) and
+  said build it. Add from YouTube's shapes for a torrent: one block,
+  centred, at most 56 cells; the two ways in as two boxes with the
+  record's `or` between — a tall frame for the file dialog with `type a
+  path ▸` under it, and the link's box with `Paste` beside it in the
+  window flavour; a loaded file a card with what it holds
+  (`torrent_meta::torrent_facts`, a bencode walk of the file list) and
+  its ways under it; `Metadata` and `Destination` rows that each open a
+  sheet (the library leads the destination and never gives way);
+  `Force fresh download` a checkbox on the page; the primary tall under
+  the form, a slab on the title row at the 100 × 24 floor; under it what
+  this player sent this server, kept in `torrents.json` beside
+  `ytdl.json`; a refusal on the page, whole, under the primary. A paste
+  is taken whole wherever the hand is (`torrent::wants_paste`): a magnet
+  link fills the box, anything else is read as a path and loaded. The
+  three windows are sheets. It mends what the old room's own frames
+  showed at 100 × 30 with the queue open — the second checkbox not drawn
+  at all, the ways through the queue's rule, the preview without its
+  library, `Download fresh anyway` on a border, refusals cut to the note's
+  one row, a pasted link read as keys, the typed picker's dead wheel
+  (docs/ux-contracts/add-torrent.md, the 2026-11-10 entries). The acts
+  are one `Act::Tor(TorAct)`. `smoke/gui/scenario_torrent.py` walks the
+  page on a pty; no rig has a torrent client, so the add itself is the
+  unit tests' alone.
 - **Add from YouTube, the redesign ✅ 2026-11-10** (the entry under this
   one is the first build) — the owner asked for a better way to add a
   video, approved the canvas "Add from YouTube · GUI" (claude.ai artifact

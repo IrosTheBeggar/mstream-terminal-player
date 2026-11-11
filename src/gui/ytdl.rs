@@ -730,6 +730,8 @@ pub(crate) struct YtUi {
     /// A paste arrives whole (bracketed paste, or the window's clipboard):
     /// the link field gives the keys back once a song is found. Not on
     /// Windows' console, where a paste is typed — the field keeps them.
+    /// (Add torrent's room goes by it too: where a paste is typed it opens
+    /// with the hand on its link box.)
     pub whole_pastes: bool,
     /// The local zone, for the list's dates; read once.
     zone: Option<Option<crate::admin::tz::Zone>>,
@@ -776,6 +778,14 @@ impl YtUi {
 
     pub(super) fn now(&self) -> i64 {
         self.clock.now_ms()
+    }
+
+    /// A test's hand on the clock and the zone: stopped at `ms`, in UTC,
+    /// so a row's age reads the same wherever the test runs.
+    #[cfg(test)]
+    pub(crate) fn stop_clock(&mut self, ms: i64) {
+        self.clock = YtClock(Some(Rc::new(Cell::new(ms))));
+        self.zone = Some(None);
     }
 
     pub(crate) fn jobs(&self) -> Option<&Jobs> {
@@ -2646,7 +2656,7 @@ fn mark(job: &Job) -> (&'static str, Style) {
 }
 
 /// How long ago, for a row: just now, minutes, hours, else the day.
-fn ago(gui: &mut Gui, then: i64, now: i64) -> String {
+pub(super) fn ago(gui: &mut Gui, then: i64, now: i64) -> String {
     let secs = (now - then).max(0) / 1000;
     if secs < 60 {
         return t!("gui.ytdl.list.just_now").to_string();
@@ -3538,7 +3548,7 @@ fn list_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
 /// A paste as the link field takes it: the first non-blank line, controls
 /// and the invisible format characters copied text carries left out, at
 /// most [`PASTE_MAX`] characters.
-fn clean_paste(text: &str) -> String {
+pub(super) fn clean_paste(text: &str) -> String {
     let line = text.split(['\n', '\r', '\u{2028}', '\u{2029}']).map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
     line.chars()
         .map(|c| if c == '\t' { ' ' } else { c })

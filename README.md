@@ -509,6 +509,13 @@ opens in its own window instead (see [Two flavours](#two-flavours)).
   it right there. The list under the form follows each add to the end and
   keeps what came in. (The cover is YouTube's own thumbnail for the video,
   which the player asks YouTube's image host for itself.)
+- **Add torrent** hands the server a `.torrent` or a magnet link: choose
+  the file, or paste the link — or the path of a file dropped on the
+  terminal — and the room shows what it holds (how many files, how big),
+  the artist, album and year it read from the name, and where it will
+  land. `Metadata` and `Destination` each open a sheet; `Add torrent` is
+  under them. What you sent stays listed under the form, and a refusal
+  stays on the page in the server's own words.
 - **Settings**: crossfade, gapless, resume the queue at launch, torrents,
   and **keyboard hints** (off by default — the footer names the keys when
   it is on). The GUI speaks the ten locales the wizard does, from your

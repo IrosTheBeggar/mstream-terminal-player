@@ -1102,63 +1102,82 @@ pub fn ytdl_path() -> Result<PathBuf, String> {
 /// The version `ytdl.json` is written at.
 const YTDL_VERSION: u64 = 1;
 
-/// The slot one server and account keep in `ytdl.json`: the server's
-/// identity — never the address it is reached at, which for a tunnel
-/// changes per dial — and the account, since a server lists only the
-/// caller's own jobs, so another account's saved there would read as gone.
-fn ytdl_slot(identity: &str, username: Option<&str>) -> String {
+/// `torrents.json` — what Add torrent sent, the last ones per server and
+/// account, beside `ytdl.json` and as disposable: a corrupt file, or one
+/// of another version, is ignored, never repaired — the next save
+/// replaces it.
+pub fn torrents_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("torrents.json"))
+}
+
+/// The version `torrents.json` is written at.
+const TORRENTS_VERSION: u64 = 1;
+
+/// The slot one server and account keep in a slots file (`ytdl.json`,
+/// `torrents.json`): the server's identity — never the address it is
+/// reached at, which for a tunnel changes per dial — and the account,
+/// since a server lists only the caller's own jobs, so another account's
+/// saved there would read as gone.
+fn slot_key(identity: &str, username: Option<&str>) -> String {
     format!("{}\n{}", identity.trim_end_matches('/'), username.unwrap_or(""))
 }
 
-/// The file as it stands, or a fresh one when there is none or none this
-/// build reads.
-fn read_ytdl_file() -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let path = ytdl_path()?;
-    let text = match fs::read_to_string(&path) {
+/// A slots file as it stands, or a fresh one when there is none or none
+/// this build reads.
+fn read_slots_file(path: &Path, version: u64) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("could not read {}: {e}", path.display())),
     };
     match serde_json::from_str(&text) {
-        Ok(serde_json::Value::Object(file))
-            if file.get("version").and_then(serde_json::Value::as_u64) == Some(YTDL_VERSION) =>
-        {
+        Ok(serde_json::Value::Object(file)) if file.get("version").and_then(serde_json::Value::as_u64) == Some(version) => {
             Ok(file)
         }
         _ => {
             let mut file = serde_json::Map::new();
-            file.insert("version".into(), YTDL_VERSION.into());
+            file.insert("version".into(), version.into());
             Ok(file)
         }
     }
 }
 
-/// One server and account's slot: `None` when the file holds none for
-/// them, or one this build cannot read.
-pub fn load_ytdl_slot<T: serde::de::DeserializeOwned>(
+/// One server and account's slot of a slots file: `None` when the file
+/// holds none for them, or one this build cannot read.
+fn load_slot<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    version: u64,
     identity: &str,
     username: Option<&str>,
 ) -> Result<Option<T>, String> {
-    let file = read_ytdl_file()?;
-    let slot = file.get("servers").and_then(|servers| servers.get(ytdl_slot(identity, username)));
+    let file = read_slots_file(path, version)?;
+    let slot = file.get("servers").and_then(|servers| servers.get(slot_key(identity, username)));
     Ok(slot.and_then(|slot| serde_json::from_value(slot.clone()).ok()))
 }
 
 /// Write one server and account's slot (`None` drops it), merged into the
 /// file as it stands just before: a second player sharing the directory —
 /// a `--torrent` window, another build — keeps its servers' slots, and
-/// whatever else a newer build keeps there.
-pub fn save_ytdl_slot<T: Serialize>(identity: &str, username: Option<&str>, slot: Option<&T>) -> Result<(), String> {
-    let mut file = read_ytdl_file()?;
+/// whatever else a newer build keeps there. `what` names the slot's
+/// contents in a failure's words.
+fn save_slot<T: Serialize>(
+    path: &Path,
+    version: u64,
+    what: &str,
+    identity: &str,
+    username: Option<&str>,
+    slot: Option<&T>,
+) -> Result<(), String> {
+    let mut file = read_slots_file(path, version)?;
     let servers = file.entry("servers").or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if !servers.is_object() {
         *servers = serde_json::Value::Object(serde_json::Map::new());
     }
     if let Some(servers) = servers.as_object_mut() {
-        let key = ytdl_slot(identity, username);
+        let key = slot_key(identity, username);
         match slot {
             Some(slot) => {
-                let value = serde_json::to_value(slot).map_err(|e| format!("could not encode the YouTube jobs: {e}"))?;
+                let value = serde_json::to_value(slot).map_err(|e| format!("could not encode {what}: {e}"))?;
                 servers.insert(key, value);
             }
             None => {
@@ -1166,8 +1185,37 @@ pub fn save_ytdl_slot<T: Serialize>(identity: &str, username: Option<&str>, slot
             }
         }
     }
-    let body = serde_json::to_string(&file).map_err(|e| format!("could not encode the YouTube jobs: {e}"))?;
-    write_atomic(&ytdl_path()?, &body, false)
+    let body = serde_json::to_string(&file).map_err(|e| format!("could not encode {what}: {e}"))?;
+    write_atomic(path, &body, false)
+}
+
+/// One server and account's slot of `ytdl.json`: `None` when the file
+/// holds none for them, or one this build cannot read.
+pub fn load_ytdl_slot<T: serde::de::DeserializeOwned>(
+    identity: &str,
+    username: Option<&str>,
+) -> Result<Option<T>, String> {
+    load_slot(&ytdl_path()?, YTDL_VERSION, identity, username)
+}
+
+/// Write one server and account's slot of `ytdl.json` (`None` drops it),
+/// merged into the file as it stands just before.
+pub fn save_ytdl_slot<T: Serialize>(identity: &str, username: Option<&str>, slot: Option<&T>) -> Result<(), String> {
+    save_slot(&ytdl_path()?, YTDL_VERSION, "the YouTube jobs", identity, username, slot)
+}
+
+/// One server and account's slot of `torrents.json`.
+pub fn load_torrent_slot<T: serde::de::DeserializeOwned>(
+    identity: &str,
+    username: Option<&str>,
+) -> Result<Option<T>, String> {
+    load_slot(&torrents_path()?, TORRENTS_VERSION, identity, username)
+}
+
+/// Write one server and account's slot of `torrents.json` (`None` drops
+/// it), merged into the file as it stands just before.
+pub fn save_torrent_slot<T: Serialize>(identity: &str, username: Option<&str>, slot: Option<&T>) -> Result<(), String> {
+    save_slot(&torrents_path()?, TORRENTS_VERSION, "the torrents sent", identity, username, slot)
 }
 
 /// Drop the saved queue: a cleared queue must not come back on the next

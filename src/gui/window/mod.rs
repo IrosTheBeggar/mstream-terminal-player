@@ -1341,8 +1341,8 @@ impl App {
         }
         if input::is_paste(&raw) {
             // Whole, for a face that takes it so — Add from YouTube's link
-            // field, caret or not: typed, a link's letters would be the
-            // room's keys once the field gave them back.
+            // field or Add torrent's room, caret or not: typed, a link's
+            // letters would be the room's keys.
             if self.face.takes_paste() {
                 let Some(text) = clipboard_text() else { return };
                 self.feed(event_loop, TermEvent::Paste(text));
