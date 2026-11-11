@@ -1594,8 +1594,10 @@ comes from the cache, or a download, beside them.
       server says.
     - The wait is 30 days from the play's start, by this computer's clock;
       after that the server's answer stands. A start more than 5 minutes
-      ahead of this computer's clock is past its wait at once, whatever
-      the server's reason: no wait mends the player's clock.
+      ahead of this computer's clock says nothing of the play's age (this
+      computer's clock may be the slow one): its 30 days count from when
+      this computer first held the play. A `bad-time` for such a start is
+      dropped at once, as above.
     - Details' log and the command line say how many wait and why, in the
       run's own words ("2 plays wait: the server doesn't know their tracks,
       and no listing says they are gone (a scan may be under way)"; "1 play
@@ -3237,3 +3239,10 @@ setting no locale, prints in English.
     three times now; the fourth reads as failed, "the volume can't be
     opened", so the card says why and the command line's wait ends at
     once instead of after its two minutes.
+  - **A slow clock here settled a fresh play.** A start more than 5
+    minutes ahead of this computer's clock was past its wait at once, so
+    with this computer's clock slow a fresh play turned away as a track
+    a scanning server doesn't know was dropped. Such a play waits now,
+    its 30 days counted from when this computer first held it (kept with
+    it in the outbox, `heldAt`; one kept before has it from the next
+    sync). A `bad-time` for a start truly ahead still drops it at once.

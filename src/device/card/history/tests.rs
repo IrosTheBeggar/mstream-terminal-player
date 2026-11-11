@@ -777,24 +777,26 @@ fn a_time_the_server_refuses_waits_while_this_computers_clock_finds_it_recent() 
 }
 
 /// A play whose start is further ahead of this computer's clock than a
-/// server takes is past its wait, whatever the server's reason: no wait
-/// mends the player's clock. Turned away as a track the server doesn't
-/// know, on a listing that can't be trusted, it settles as the server says
-/// instead of holding its mark for good; and a scan's listing that lacks
-/// its path doesn't keep it from being sent (A2).
+/// server takes says nothing of its age: this computer's clock may be the
+/// slow one. Turned away as a track the server doesn't know, it waits as
+/// any such play does, and a scan's listing that lacks its path keeps it
+/// unsent; its 30 days count from when this computer first held it
+/// (`heldAt` in the outbox; an entry without one, from the post that
+/// finds it so), and past them it is sent and settles as the server says
+/// (the last review's Z5; A2 settled it at once).
 #[test]
-fn a_play_started_ahead_of_this_computers_clock_settles_as_the_server_says() {
+fn a_play_started_ahead_of_this_computers_clock_waits_from_when_it_was_first_held() {
     let scratch = Scratch::new("ahead");
     let empty = card(&scratch, Golden::One, &[]);
     let root = root_of(&empty);
     let ahead = play_of(&root, "Artist/Album/01 - Title.mp3", ONE, EPOCH_1, 1);
     std::fs::write(scratch.0.join("card/.player/plays.jnl"), log_bytes(&[ahead])).unwrap();
     let start = ahead.started_at / 1000;
-    let run = |now: u64| {
+    let run = |store: &Rc<MemStore>, now: u64| {
         let mut m = Mstream::default();
         m.reject.insert(ahead.id(), "unknown-track");
         let (client, fake) = server(m);
-        let mut history = History::new(Rc::new(MemStore::default()), false, none());
+        let mut history = History::new(store.clone(), false, none());
         history.look(&empty, Some(&root), 0);
         // A scan's listing that lacks the path.
         history.listing(&talk(HOME), &listing_of(&["Music/elsewhere.mp3"]), None, false);
@@ -803,12 +805,44 @@ fn a_play_started_ahead_of_this_computers_clock_settles_as_the_server_says() {
         let t = &history.tally;
         ((t.rejected, t.unknown, t.waiting, posts), history.marks())
     };
-    assert_eq!(run(start + DAY), ((0, 1, 1, 0), vec![]), "a day old: it waits for the scan, unsent");
-    let allowed = "4 minutes ahead: within the server's allowance";
-    assert_eq!(run(start - 240), ((0, 1, 1, 0), vec![]), "{allowed}");
+    let fresh = || Rc::new(MemStore::default());
+    let waits = ((0, 1, 1, 0), vec![]);
     let settled = ((1, 0, 0, 1), vec![ack(ONE, EPOCH_1, 1)]);
-    assert_eq!(run(start - 600), settled, "10 minutes ahead: sent, and settled as it says");
-    assert_eq!(run(start - 400 * DAY), settled, "a year ahead");
+    assert_eq!(run(&fresh(), start + DAY), waits, "a day old: it waits for the scan, unsent");
+    assert_eq!(run(&fresh(), start - 240), waits, "4 minutes ahead: within the server's allowance");
+    assert_eq!(run(&fresh(), start - 600), waits, "10 minutes ahead: this computer's clock may be slow");
+
+    // A year ahead: held from the first post, 30 days at most.
+    let store = fresh();
+    let first = start - 400 * DAY;
+    assert_eq!(run(&store, first), waits, "a year ahead, first held now");
+    let held = store.outbox().cards[&CARD_ID].plays[0].held_at;
+    assert_eq!(held, Some(first * 1000), "kept with the play");
+    assert_eq!(run(&store, first + 29 * DAY), waits, "held 29 days");
+    assert_eq!(store.outbox().cards[&CARD_ID].plays[0].held_at, held, "the first hold stays");
+    assert_eq!(run(&store, first + 31 * DAY), settled, "held 31 days: sent, and settled as it says");
+
+    // An entry without the time (an older outbox) counts from the post
+    // that finds it so.
+    let store = fresh();
+    assert_eq!(run(&store, first), waits);
+    let mut text: Value = serde_json::from_str(store.text.borrow().as_deref().unwrap()).unwrap();
+    let mut stripped = 0;
+    fn strip(v: &mut Value, n: &mut usize) {
+        match v {
+            Value::Object(o) => {
+                *n += o.remove("heldAt").is_some() as usize;
+                o.values_mut().for_each(|v| strip(v, n));
+            }
+            Value::Array(a) => a.iter_mut().for_each(|v| strip(v, n)),
+            _ => {}
+        }
+    }
+    strip(&mut text, &mut stripped);
+    assert_eq!(stripped, 1);
+    *store.text.borrow_mut() = Some(text.to_string());
+    assert_eq!(run(&store, first + 31 * DAY), waits, "held from now on");
+    assert_eq!(run(&store, first + 62 * DAY), settled, "and 30 days on, past its wait");
 }
 
 /// The plays alone take the card's word that it is for someone else, and

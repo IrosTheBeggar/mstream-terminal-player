@@ -55,7 +55,9 @@
 //! - a server whose clock is off refuses a start its own clock finds ahead
 //!   or too old: the play waits while this computer's clock finds the
 //!   start recent, and settles when it is truly ahead;
-//! - either waits 30 days from its start at most ([`WAIT_MS`]).
+//! - either waits 30 days from its start at most ([`WAIT_MS`]); a start
+//!   ahead of this computer's clock (its clock slow, or the player's
+//!   wrong) from when this computer first held the play instead.
 //!
 //! A play the server's schema refuses is never sent and settles as one not
 //! sent: it would fail every batch it rode in. One it refuses that this
@@ -212,6 +214,11 @@ pub(crate) struct Owed {
     pub(crate) pause_count: u16,
     /// A peer's track.
     pub(crate) track: Option<Snapshot>,
+    /// When this computer first held it, Unix ms (`heldAt`): the wait of a
+    /// start ahead of this computer's clock counts from it ([`past_wait`]).
+    /// None until a post first holds it: an entry without one counts from
+    /// then.
+    pub(crate) held_at: Option<u64>,
 }
 
 impl Owed {
@@ -241,6 +248,7 @@ impl Owed {
             source: if p.source <= 3 { p.source } else { 0 },
             pause_count: p.pause_count,
             track,
+            held_at: None,
         }
     }
 
@@ -307,6 +315,9 @@ impl Owed {
             out["track"] = json!({"title": t.title, "artist": t.artist, "album": t.album,
                                   "durationMs": t.duration_ms, "hash": t.hash});
         }
+        if let Some(held) = self.held_at {
+            out["heldAt"] = held.into();
+        }
         out
     }
 
@@ -349,6 +360,7 @@ impl Owed {
             source: code("source", &["other", "manual", "shuffle", "autodj"])? as u8,
             pause_count: number("pauseCount").and_then(|n| u16::try_from(n).ok())?,
             track,
+            held_at: number("heldAt"),
         };
         // An id that isn't its key's is no play this player made.
         let key = (owed.device_id, owed.epoch, owed.seq);
@@ -729,12 +741,17 @@ fn bad_request(e: &ApiError) -> bool {
     matches!(e, ApiError::Server { status: 400, .. })
 }
 
-/// The play started more than [`WAIT_MS`] ago, by a clock at `now_ms`, or
-/// starts further ahead of it than a server takes ([`AHEAD_MS`]): a start
-/// the player's own clock got wrong, which no wait mends. Either settles as
-/// the server says.
+/// The play started more than [`WAIT_MS`] ago, by a clock at `now_ms`: it
+/// settles as the server says. A start further ahead of that clock than a
+/// server takes ([`AHEAD_MS`]) says nothing of the play's age (this
+/// computer's clock may be slow, as the player's may be fast): its wait
+/// counts from when this computer first held the play, or from now. A
+/// server's `bad-time` for such a start settles it at once all the same
+/// ([`History::passing`]).
 fn past_wait(o: &Owed, now_ms: u64) -> bool {
-    o.started_at.saturating_add(WAIT_MS) < now_ms || o.started_at > now_ms.saturating_add(AHEAD_MS)
+    let ahead = o.started_at > now_ms.saturating_add(AHEAD_MS);
+    let from = if ahead { o.held_at.unwrap_or(now_ms) } else { o.started_at };
+    from.saturating_add(WAIT_MS) < now_ms
 }
 
 /// One card's plays through a run: looked at once, then remapped and
@@ -1176,6 +1193,17 @@ impl History {
             return;
         }
         self.forget_passed(talk);
+        // A play first held by this post: its wait, for a start ahead of
+        // this computer's clock, counts from now ([`past_wait`]).
+        let now_ms = now.saturating_mul(1000);
+        let mut held = false;
+        for o in self.owing.plays.iter_mut().filter(|o| o.held_at.is_none()) {
+            o.held_at = Some(now_ms);
+            held = true;
+        }
+        if held {
+            self.save();
+        }
         if due.is_empty() {
             return;
         }
@@ -1208,7 +1236,6 @@ impl History {
         // its scan hasn't reached. That play isn't sent: it waits for a
         // listing that can be trusted. One past its wait goes all the same,
         // and its answer settles it.
-        let now_ms = now.saturating_mul(1000);
         let (mut unknown, mut mistimed) = (HashSet::<String>::new(), HashSet::<String>::new());
         if !self.trusted && let Some(absent) = &self.absent {
             let lacked = |o: &&Owed| absent.contains(&o.id) && !past_wait(o, now_ms);
