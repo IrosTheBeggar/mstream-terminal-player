@@ -983,6 +983,31 @@ fn a_peers_only_run_keeps_a_stopped_runs_plan_for_the_next() {
     assert_eq!((ran(&next).written, ran(&next).verified.clone()), (1, Ok(())));
 }
 
+/// The server's vectors don't come and the peer's do: the index is made of
+/// the peer's rows alone, and owed, so the next run makes it whole.
+#[test]
+fn an_index_made_without_an_origin_whose_vectors_failed_is_owed() {
+    let scratch = Scratch::new("peer-dj-owed");
+    let sim = card(&scratch);
+    let (base, fake, _peer, dial) = world(true, false, folk());
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fed = fed(&scratch, &clock, dial, Ffmpeg::Given(None));
+    let mut envs = envs();
+    fake.lock().unwrap().embeddings_say = Some("500 Internal Server Error");
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!(ran(&synced).verified, Ok(()));
+    let made = look(&sim).root.unwrap().manifest.autodj;
+    assert!(made.is_some(), "an index of the peer's rows: {:?}", synced.notes);
+    assert!(State::of(&look(&sim).state).unwrap().autodj_owed, "{:?}", synced.notes);
+
+    fake.lock().unwrap().embeddings_say = None;
+    let synced = sync_fed(&sim, &base, &rock_and_folk(), &fed, &mut envs);
+    assert_eq!(ran(&synced).verified, Ok(()));
+    let again = look(&sim).root.unwrap().manifest.autodj;
+    assert!(again.is_some() && again != made, "made again, whole: {:?}", synced.notes);
+    assert!(!State::of(&look(&sim).state).unwrap().autodj_owed);
+}
+
 /// A peer's file the player can't play: with no ffmpeg on this computer it
 /// is skipped and listed; with one, the peer's bytes come whole, are made
 /// into Opus here, held to their length and given back their cover.

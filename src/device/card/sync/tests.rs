@@ -1102,6 +1102,109 @@ fn a_stop_in_the_auto_dj_step_keeps_the_cards_index() {
     assert!(dj_owed(&sim), "a stop that kept it owes it");
 }
 
+/// A stop in the Auto DJ step where the card's index no longer holds (a
+/// file it maps is another recording now): no index, since a stale one is
+/// worse than none, but owed, so the next run makes it, a 304 too.
+#[test]
+fn a_stop_in_the_auto_dj_step_drops_an_index_that_no_longer_holds_and_owes_it() {
+    let scratch = Scratch::new("dj-stop-stale");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    assert!(autodj_named(&sim).is_some());
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut lib = fake.lock().unwrap();
+        lib.tracks[0].bytes = corpus("cbr.mp3");
+        lib.revision = "1:7:1790000000007:6".into();
+        lib.stop_at_embeddings = Some(stop.clone());
+    }
+    let synced = sync_now(&sim, &base, &Ask { stop: Some(stop), ..Ask::default() }, &mut envs).0;
+    assert_eq!(ran(&synced).written, 1, "{:?}", ran(&synced).report);
+    assert_eq!(autodj_named(&sim), None, "{:?}", synced.notes);
+    assert!(dj_owed(&sim), "dropped at a stop: owed");
+
+    fake.lock().unwrap().stop_at_embeddings = None;
+    let synced = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(synced.summary.as_ref().unwrap().listed, Listed::NotModified);
+    assert!(autodj_named(&sim).is_some(), "made at a 304: {:?}", synced.notes);
+    assert!(!dj_owed(&sim));
+}
+
+/// A checkpoint's index may be of files its run replaced since: from a root
+/// that isn't a run's end, vectors that don't come keep no index.
+#[test]
+fn a_checkpoints_index_is_never_kept_for_vectors_that_dont_come() {
+    let scratch = Scratch::new("dj-checkpoint");
+    let sim = card(&scratch);
+    let (base, fake) = server();
+    let mut envs = envs();
+    ran(&sync_now(&sim, &base, &rock(), &mut envs).0);
+    let index = autodj_named(&sim);
+    assert!(index.is_some());
+
+    // One recording replaced, one more: stopped once the first is in.
+    fake.lock().unwrap().tracks[0].bytes = corpus("cbr.mp3");
+    one_more_track(&fake, 6);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ask = Ask { stop: Some(stop.clone()), ..Ask::default() };
+    let mut said = |e: Event| {
+        if matches!(e, Event::Wrote { .. }) {
+            stop.store(true, Ordering::SeqCst);
+        }
+    };
+    let parked = sync_saying(&sim, &base, &ask, &mut said);
+    assert_eq!(ran(&parked).parked.as_deref(), Some(STOPPED));
+    let root = look(&sim).root.unwrap();
+    assert!(!root.manifest.is_final());
+    assert_eq!(root.manifest.autodj, index, "the checkpoint names the index made before");
+
+    // The next run, the vectors down: the checkpoint's index isn't kept.
+    fake.lock().unwrap().embeddings_say = Some("500 Internal Server Error");
+    let synced = sync_now(&sim, &base, &Ask::default(), &mut envs).0;
+    assert_eq!(ran(&synced).verified, Ok(()));
+    assert_eq!(autodj_named(&sim), None, "{:?}", synced.notes);
+    assert!(dj_owed(&sim));
+}
+
+/// The card's index holds only for the files it was made from as they were:
+/// a retag (title, artists, BPM, key, analysis) under the same recording, a
+/// recording replaced, or a path gone, and it doesn't.
+#[test]
+fn an_index_holds_only_for_its_files_as_they_were() {
+    let file = |path: &str, title: &str| FileIn {
+        path: path.into(),
+        hash: [7; 16],
+        title: title.into(),
+        artists: vec!["An Artist".into()],
+        bpm10: 1200,
+        camelot: 8,
+        analysed: true,
+    };
+    let files = vec![file("A/01.mp3", "One"), file("A/02.mp3", "Two")];
+    let before: HashMap<String, FileIn> = files.iter().map(|f| (f.path.clone(), f.clone())).collect();
+    let mapped: Vec<u64> = files.iter().map(|f| path_hash(&f.path)).collect();
+    assert!(maps_unchanged(&mapped, &files, &before));
+    let mut more = files.clone();
+    more.push(file("A/03.mp3", "Three"));
+    assert!(maps_unchanged(&mapped, &more, &before), "a file it doesn't map");
+    let changes: [fn(&mut FileIn); 6] = [
+        |f| f.title = "Two (retagged)".into(),
+        |f| f.artists = vec!["Another".into()],
+        |f| f.bpm10 = 1250,
+        |f| f.camelot = 9,
+        |f| f.analysed = false,
+        |f| f.hash = [8; 16],
+    ];
+    for (n, change) in changes.iter().enumerate() {
+        let mut now = files.clone();
+        change(&mut now[1]);
+        assert!(!maps_unchanged(&mapped, &now, &before), "change {n}");
+    }
+    assert!(!maps_unchanged(&mapped, &files[..1], &before), "a path gone");
+}
+
 /// How many times the fake's `stats/plays` was asked.
 fn play_posts(fake: &Fake) -> usize {
     fake.lock().unwrap().asked.iter().filter(|a| a.ends_with("/stats/plays")).count()

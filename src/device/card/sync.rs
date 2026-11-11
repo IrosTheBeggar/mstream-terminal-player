@@ -804,8 +804,9 @@ fn prepare(
         tags.records.iter().filter_map(of).collect()
     });
     let old_fingerprint = old_files.as_deref().map(fingerprint);
-    let old_hashes: HashMap<String, [u8; 16]> =
-        old_files.into_iter().flatten().map(|f| (f.path, f.hash)).collect();
+    let old_files: HashMap<String, FileIn> =
+        old_files.into_iter().flatten().map(|f| (f.path.clone(), f)).collect();
+    let old_final = root.manifest.is_final();
     // A root that isn't a run's end (a cut or parked run's checkpoint), a
     // run's plan still on the card, or a ledger that can't be read: the
     // card's rows don't stand for the selection a 304 would say is the
@@ -1158,7 +1159,8 @@ fn prepare(
             _ => None,
         },
         old_fingerprint,
-        old_hashes,
+        old_files,
+        old_final,
         dj_owed,
         dj_owing: None,
         refresh: listed == Listed::Whole || some_peer_read(&summary.peers),
@@ -1478,9 +1480,13 @@ struct SyncHooks {
     /// The key of the files of the root the run began from: those its Auto
     /// DJ index was built from, and its mood tails asked for.
     old_fingerprint: Option<u64>,
-    /// Those files' canonical hashes, by card path: what tells the card's
-    /// index still holds for a commit's files ([`SyncHooks::index_holds`]).
-    old_hashes: HashMap<String, [u8; 16]>,
+    /// Those files, by card path, as the index was made from them: what
+    /// tells the card's index still holds for a commit's files
+    /// ([`SyncHooks::index_holds`]).
+    old_files: HashMap<String, FileIn>,
+    /// The root the run began from is a run's end: a checkpoint's index may
+    /// be of files the cut run replaced since, and holds for none.
+    old_final: bool,
     /// The card's state says its index is owed ([`State::autodj_owed`]): a
     /// fetch or a stop kept the old one for files it wasn't made for, so
     /// this run makes it again, whatever else changed.
@@ -1570,19 +1576,20 @@ impl SyncHooks {
 
     /// The card's index (`old`) still holds for the commit's `files`: they
     /// are the files it was built from, or every card path it maps (DJPH) is
-    /// a file of the commit whose recording is the one it had then. Files
-    /// the commit adds have no neighbours in it, as a file with no vector
-    /// has none; nothing it says is wrong.
+    /// a file of the commit as it was then ([`maps_unchanged`]). Files the
+    /// commit adds have no neighbours in it, as a file with no vector has
+    /// none; nothing it says is wrong. A root that isn't a run's end holds
+    /// none: its run may have replaced a file since its index was made.
     fn index_holds(&self, old: &[u8], files: &[FileIn]) -> bool {
+        if !self.old_final {
+            return false;
+        }
         if self.same_files(files) {
             return true;
         }
         let Ok(table) = Table::open(old) else { return false };
-        let unchanged: HashSet<u64> = (files.iter())
-            .filter(|f| self.old_hashes.get(&f.path) == Some(&f.hash))
-            .map(|f| path_hash(&f.path))
-            .collect();
-        table.paths().iter().all(|(hash, _)| unchanged.contains(hash))
+        let mapped: Vec<u64> = table.paths().iter().map(|(hash, _)| *hash).collect();
+        maps_unchanged(&mapped, files, &self.old_files)
     }
 
     /// The listener's stop is set.
@@ -1647,12 +1654,31 @@ impl SyncHooks {
                 }
                 AutoDj::Same
             }
+            // A stale index is worse than none (the player trusts it):
+            // dropped, and owed, so the next run makes it, a 304 too.
             false => {
                 self.notes.push(format!("no Auto DJ index: {why}"));
+                if owed {
+                    self.dj_owing = Some(true);
+                }
                 AutoDj::None
             }
         }
     }
+}
+
+/// Every card path an index maps (`mapped`, path hashes) is a file of
+/// `files` exactly as it was in `before`, the files the index was made from:
+/// its recording, and the title, artists, BPM, key and analysis its DJRF row
+/// keeps (AUTODJ-INDEX 8.7: no reader checks them, so the writer must). A
+/// path no longer on the card fails it too: a changed DJPH is a new file
+/// (7.3).
+fn maps_unchanged(mapped: &[u64], files: &[FileIn], before: &HashMap<String, FileIn>) -> bool {
+    let unchanged: HashSet<u64> = (files.iter())
+        .filter(|f| before.get(&f.path) == Some(*f))
+        .map(|f| path_hash(&f.path))
+        .collect();
+    mapped.iter().all(|hash| unchanged.contains(hash))
 }
 
 /// Paths of an origin's asked for in one go, between two looks at the
@@ -1849,6 +1875,9 @@ impl Hooks for SyncHooks {
         let mut vectors = HashMap::new();
         let mut why_none: Option<String> = None;
         let (mut dim, mut unusable) = (None, 0);
+        // An origin's vectors didn't come: an index made of the others' is
+        // owed.
+        let mut any_failed = false;
         for (o, server) in commit.origins.iter().enumerate() {
             let Some(server) = *server else { continue };
             let Some((client, gate)) = self.lists.get(o).cloned() else { continue };
@@ -1883,6 +1912,7 @@ impl Hooks for SyncHooks {
                     if holds {
                         return self.kept_or_none(true, !same, why);
                     }
+                    any_failed = true;
                     why_none.get_or_insert(why);
                     continue;
                 }
@@ -1915,7 +1945,9 @@ impl Hooks for SyncHooks {
             self.notes.push(format!("{n} tracks have no Auto DJ neighbours: their embeddings aren't usable"));
         }
         let Some(model) = model else {
-            if none_to_give {
+            if any_failed {
+                self.dj_owing = Some(true);
+            } else if none_to_give {
                 self.dj_owing = Some(false);
             }
             let why = why_none.unwrap_or_else(|| "no file on the card has an embedding yet".into());
@@ -1937,7 +1969,7 @@ impl Hooks for SyncHooks {
         let work = Work { stop: self.stop.as_deref(), done: Some(&done), ..Work::default() };
         let made = autodj::index(commit.device, &input, commit.old, &work);
         if matches!(made, Ok(Index::New { .. } | Index::Same)) {
-            self.dj_owing = Some(false);
+            self.dj_owing = Some(any_failed);
         }
         match made {
             Ok(Index::New { file, .. }) => AutoDj::New(file),
