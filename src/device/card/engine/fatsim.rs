@@ -545,6 +545,15 @@ impl LockFile for SimLock<'_> {
     }
 }
 
+impl Drop for SimLock<'_> {
+    /// Let go by hand, as the mounted card's lock is (`MountedLock`): a test
+    /// that spawns a process while another drops a run held the lock past
+    /// its handle.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 impl CardWrite for FatSim {
     fn key(&self) -> String {
         self.key.clone()
