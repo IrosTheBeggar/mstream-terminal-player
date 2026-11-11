@@ -183,7 +183,11 @@ spot shows, with no letter on screen, the door word a door rather than a
 key word; add-from-youtube clause 30 and its 2026-11-03 log — and its
 room's press: a nav room has no back for Esc to take, so while the press
 is out every typed key waits and Esc is the shell's, the nav's rows the
-way on; clause 20 and its 2026-11-09 log.)
+way on; clause 20 and its 2026-11-09 log. And since its 2026-11-10
+redesign that room draws no key words at all: its controls are words —
+with `▸` where they open something — and whole rows, the letters still
+acting only where their control is drawn and named on the tips line, by
+the key words the page shows without their key; clause 72.)
 
 ### Tabs
 One row, under the screen's state line (or first, on a page with none): the ACTIVE tab is a 1-row filled
@@ -286,8 +290,10 @@ the keys back to the screen. Unfocused it never steals a letter, so the
 room's single-key actions keep working around it. (A logged exception:
 Add from YouTube's room and Files window open with their link field
 holding the keys — a paste is the way in — and give them back once a song
-is found or on Esc; add-from-youtube clauses 10 and 31 and its 2026-11-03
-log.)
+is found or on Esc; add-from-youtube clauses 11 and 31 and its 2026-11-03
+log. Its sheets are the model for a text input in a modal: the bordered
+card, ACCENT with the caret while it has the keys, its label DIM over
+it — clauses 16 and 53.)
 **The caret blinks in the GUI player** (2026-09-23): the `Surface` keeps a
 blink clock — `caret_touch()` on every key and click, `caret()` answers
 the phase as a field draws (half a second on, half off, `CARET_BLINK`,
@@ -465,9 +471,10 @@ is DIM, glyph and label, with no click, no hover, no hand stop and no
 tooltip, the minimal-text waiver of the disabled control's tip; the
 group's other radio shows pressed, and the resting one wakes, still
 chosen if it was, when what it ranks by exists.) (Another: the Add from
-YouTube Files window's subfolders, `(•) Right here   ( ) Album …` —
-add-from-youtube clause 32 and its 2026-11-09 log — wear the Radio
-group's ACCENT `(•)`, a layout's dot, not the side-by-side OK.)
+YouTube Files window's subfolders, `(•) Right here   ( ) Album …` — in
+the sheet its `Saves here` row opens, two to a row; add-from-youtube
+clause 32 and its 2026-11-09 log — wear the Radio group's ACCENT `(•)`,
+a layout's dot, not the side-by-side OK.)
 
 ### List cursor
 **Selection is the KEYBOARD cursor, nothing more** — in every list of

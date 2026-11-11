@@ -2137,7 +2137,8 @@ fn fit(cell: (u32, u32), (cols, rows): (u16, u16)) -> PhysicalSize<u32> {
 /// is none or no clipboard to read. A clipboard per paste: the X11 one is
 /// a connection of its own, and a paste is rare enough to open it then.
 /// On a Wayland session this is XWayland's clipboard (Cargo.toml says why).
-fn clipboard_text() -> Option<String> {
+/// The GUI's Add from YouTube room reads it too, for its `Paste` button.
+pub(crate) fn clipboard_text() -> Option<String> {
     match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
         Ok(text) => Some(text),
         Err(e) => {

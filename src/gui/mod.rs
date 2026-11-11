@@ -45,6 +45,7 @@ mod torrent_meta;
 mod vizwin;
 mod ytdl;
 mod ytdl_here;
+mod ytdl_sheets;
 mod ytdl_where;
 // The GUI's own window: the desktop flavour's (`--features desktop`, or
 // `window` alone); the terminal releases are built without it.
@@ -327,7 +328,7 @@ pub(crate) enum Act {
     /// verbs, the two dropdowns, a lead's menu, the seeds modal, the card.
     Disc(discover::DiscAct),
     // ── Add from YouTube (see gui::ytdl) ────────────────────────────────
-    /// The room's controls, the From YouTube list's and the format list's.
+    /// The room's controls, its list's, its sheets' and its windows'.
     Yt(ytdl::YtAct),
     /// A modal's whole-screen backdrop: swallow the click.
     Guard,
@@ -618,7 +619,7 @@ pub(crate) struct Gui {
     /// The Add-torrent room: its form, picker, chooser and threads.
     torrent: torrent::TorrentUi,
     /// Add from YouTube: the server's facts, the job tracker, the room's
-    /// form and the From YouTube list.
+    /// form and its list, the sheets and windows over them.
     ytdl: ytdl::YtUi,
     /// The Auto DJ room: its cursor, the sheet over it, its lists and the
     /// bar's quick config.
@@ -2761,9 +2762,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if let Some(quit) = torrent::handle_key(gui, key) {
         return quit;
     }
-    // Add from YouTube's: the From YouTube list and the format list over
-    // the room, then the room itself — its link field and tags take the
-    // typed keys while they hold them, and its key words the rest.
+    // Add from YouTube's: its sheets and windows over the room or Files,
+    // then the room itself — its link field takes the typed keys while it
+    // holds them, its controls' letters and its list's keys the rest.
     if let Some(quit) = ytdl::handle_key(gui, key) {
         return quit;
     }
@@ -3455,9 +3456,7 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                 // A right click on a row is its sheet (entry point 1) —
                 // never through a modal, which owns the pointer whole.
                 MouseEventKind::Down(MouseButton::Right) => {
-                    // The From YouTube list is a modal with rows of its own:
-                    // a right click on one is its list (TermList L3).
-                    if (!gui.modal_open() || ytdl::list_open(gui))
+                    if !gui.modal_open()
                         && let Some(act) = gui.ui.hit_context(at)
                         && gui.act(act)
                     {
@@ -3508,6 +3507,7 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             gui.queue.on_resize();
             gui.actions.on_resize();
             gui.discover.on_resize();
+            gui.ytdl.on_resize();
         }
         // A paste, whole: bracketed paste is on only while Add from
         // YouTube's link field wants one (the window hands its clipboard
@@ -3869,8 +3869,8 @@ impl Gui {
             discover::wheel(self, delta);
             return;
         }
-        // The From YouTube list and Choose a folder scroll their own rows
-        // under the wheel.
+        // Add from YouTube's Choose a folder scrolls its own rows under
+        // the wheel.
         if ytdl::wheels(self) {
             ytdl::wheel(self, delta);
             return;
@@ -3906,7 +3906,7 @@ impl Gui {
             // list does. The Auto DJ room's sheets and lists scroll (its
             // rows never do), and the Add-torrent room's file picker; Add
             // from YouTube's windows took the wheel above, and its room
-            // scrolls nothing.
+            // scrolls its list.
             NavId::Settings => {
                 if self.in_settings_room(SettingsRoom::Servers) {
                     servers::wheel(self, delta)
@@ -3916,7 +3916,7 @@ impl Gui {
                 dj::wheel(self, delta);
             }
             NavId::Torrent => torrent::wheel(self, delta),
-            NavId::YouTube => {}
+            NavId::YouTube => ytdl::wheel_room(self, delta),
             NavId::Artists
             | NavId::Genres
             | NavId::Recent
@@ -4110,8 +4110,10 @@ impl GuiFace {
         // A window pass with nothing new skips its draw too; the window
         // says when its surface needs one anyway (`Host::must_draw`).
         ctx.gate = true;
-        // The window hands a paste over whole on every platform.
+        // The window hands a paste over whole on every platform, and
+        // reads its clipboard for Add from YouTube's `Paste` too.
         gui.ytdl.whole_pastes = true;
+        gui.ytdl.clipboard = Some(window::clipboard_text);
         GuiFace { gui, ctx }
     }
 }

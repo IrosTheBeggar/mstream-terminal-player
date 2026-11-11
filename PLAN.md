@@ -2319,6 +2319,44 @@ a LATER secondary screen (party view), Columns retired.
   lock lasts from the gate's yes until the board's write has ended; leaving
   keeps a page that saw a board aside until its worker says every port is
   free. The standalone `device flash` is the same page at 72×24.
+- **Add from YouTube, the redesign ✅ 2026-11-10** (the entry under this
+  one is the first build) — the owner asked for a better way to add a
+  video, approved the canvas "Add from YouTube · GUI" (claude.ai artifact
+  `JL4aG7b1Nut1YVSqLJcojQ`, sixteen boards) and said build it: the phone's
+  own shape in the GUI's cells. One block, centred, at most 56 cells: the
+  link in a bordered card with `Paste` beside it (the window flavour
+  reads its clipboard — `YtUi::clipboard`; a terminal cannot, so the
+  button is not drawn there); the found song a card — an 8 × 4 cover,
+  the title with `edit tags ▸`, the artist, album and year, YouTube's own
+  line — whose cover is YouTube's thumbnail for the video's id, fetched
+  from `i.ytimg.com` by the player on a thread of its own (`Work::Thumb`;
+  the id's letters make the address, never the server's answer) and cut
+  to its middle square; `Saves to` and `Format` as rows that each open a
+  sheet; the tall primary the block's width under the song, a slab on
+  the title row at the 100 × 24 floor; and the From YouTube list in the
+  room under the form — its window, the title row's word and the
+  tracker's `Summary` are gone, the Files door's `! failed` opens the
+  room. Three sheets (`gui/ytdl_sheets.rs`, a new file: the sheet's
+  frame, Edit tags as four bordered text boxes, Format as radios with
+  what each is good for; `gui/ytdl_where.rs`'s Saves to restyled as one,
+  its layouts in two columns; the Files window's `Saves here` sheet in
+  `gui/ytdl_here.rs`), standing where a room's window does so they cover
+  the block they were opened from. The Files window draws the same form
+  (`form_rows`, `draw_row`). The page's controls are words now, never a
+  key's letter — the letters still act where their control is drawn and
+  the tips line names them — so the page's words are each locale's key
+  words without their key, and the only new word in ten languages is
+  `Paste`; the limits, the first time's words, `Saves to`, the sheet's
+  title and Format's two lines are the phone's own strings. The contract
+  is amended clause by clause with a log of what the canvas's sample got
+  wrong against the kit's rules (`docs/ux-contracts/add-from-youtube.md`).
+  Tests: the canvas's fifteen boards are the tests' boards, written into
+  them from the canvas's own files cell for cell with their tokens
+  (`gui::ytdl` 44, `gui::ytdl_here` 18, `gui::ytdl_where` 10), and every
+  language drawn whole; `scenario_ytdl` walks the new room on a pty.
+  Left open: the cover is fetched only from YouTube (a server-side
+  thumbnail proxy would keep the player off YouTube's host altogether);
+  the list has no scrollbar; the TUI still gets nothing.
 - **Add from YouTube ✅ 2026-11-09** (built; the smoke still to run) —
   designed first (the canvas "Add from YouTube — webapp & desktop", its
   terminal page's five boards and its notes, the user's answers of

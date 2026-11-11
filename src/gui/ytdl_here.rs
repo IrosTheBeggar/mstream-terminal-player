@@ -4,14 +4,16 @@
 //! once a job into the folder on screen settles, the folder listed again
 //! with the new row under the cursor.
 //!
-//! Design: the canvas's TermFiles board (F1–F6, C1–C4, the door's spot at
-//! 80 and 47 cells). The window's form is the room's own [`Draft`], read
-//! through [`Form::Window`]: what the link came to draws with the room's
-//! rows ([`ytdl::stage_rows`], [`ytdl::draw_row`]); the place is `Into`
-//! the folder on screen, `s subfolders` opening its radios in place (not
-//! remembered); the primary is a bracketed `[ Add here ]` — `[ Add to
-//! library ]` past the folder itself — on the action row beside `MP3 ▾`.
-//! It closes once the server starts the job; a refusal stays inside.
+//! Design: the door is the earlier canvas's TermFiles board (F1, the
+//! spot at 80 and 47 cells); the window is the "Add from YouTube · GUI"
+//! canvas's Files board. The window's form is the room's own [`Draft`],
+//! read through [`Form::Window`], and it draws with the room's rows
+//! ([`ytdl::form_rows`], [`ytdl::draw_row`]): the link's band with
+//! `Paste`, the song's card, `Saves here` — whose sheet holds the
+//! subfolder radios, for this window only (not remembered) — and
+//! `Format`; the primary is a bracketed `[ Add here ]` — `[ Add to
+//! library ]` past the folder itself — at the bottom right. It closes
+//! once the server starts the job; a refusal stays inside.
 //!
 //! The door is drawn by [`draw_line`], one hook in `draw_files_bar`, so
 //! the browse bar's own line one is untouched where the door is absent: at
@@ -31,11 +33,11 @@ use crate::kit::{dim, width};
 use crate::tui::app::{Effect, Focus};
 use crate::tui::worker::{ApiCmd, Event};
 use crate::ytdl::jobs::{JobState, Origin};
-use crate::ytdl::{FolderSort, Target, Tone, YTDL_VARS, folder_target, layout_check, layout_problem, path_crumbs};
+use crate::ytdl::{FolderSort, Target, YTDL_VARS, folder_target, layout_check, layout_problem, path_crumbs};
 
 use super::keep;
-use super::ytdl::{self, Draft, Form, Keys, Row, Stage, YtAct, yt};
-use super::{Act, Gui, Screen, accent, bright_bold, put};
+use super::ytdl::{self, Draft, Form, Keys, Row, YtAct, yt};
+use super::{Act, Gui, Screen, accent, bright_bold, put, ytdl_sheets};
 
 /// The cells between the crumb and the door's word (the spot's gap).
 const SPOT_GAP: u16 = 3;
@@ -46,9 +48,6 @@ const CRUMB_FLOOR: usize = 12;
 const ADDED_SPOT_MS: i64 = 8_000;
 /// A re-list whose listing never came is given up after this long.
 const RELIST_MS: i64 = 30_000;
-/// The cells between the radios, and between key words on the action row.
-const GAP: u16 = 3;
-
 /// The door's and the window's controls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HereAct {
@@ -56,8 +55,10 @@ pub(crate) enum HereAct {
     Open,
     /// `Esc close` on the border.
     Close,
-    /// `s subfolders`: the radios, in place.
+    /// The `Saves here` row (`s`): its sheet, the subfolder radios.
     Subfolders,
+    /// The sheet's `[ Done ]` (Enter, Esc, a click outside it).
+    SheetDone,
     /// A radio: where under the folder the song goes.
     Sort(FolderSort),
     /// A click in Custom's field: it takes the keys.
@@ -76,7 +77,7 @@ struct Window {
     /// The folder it adds into, as the browse bar's path ("Music/Daft
     /// Punk"): its jobs' origin.
     folder: String,
-    /// `s subfolders` opened the radios (for this window only).
+    /// The `Saves here` sheet is up: the radios, for this window only.
     sorts: bool,
     sort: FolderSort,
     /// Custom's layout, and whether its line editor has the keys.
@@ -139,12 +140,6 @@ pub(crate) fn door_live(gui: &Gui) -> bool {
 
 pub(super) fn window_up(gui: &Gui) -> bool {
     gui.ytdl.here.window.is_some() && in_files(gui)
-}
-
-/// Nothing of the window's own has the keys (Custom's field): with the
-/// form's keys free too, its key words act.
-pub(super) fn keys_free(gui: &Gui) -> bool {
-    gui.ytdl.here.window.as_ref().is_none_or(|w| !w.custom_keys)
 }
 
 /// Another field of the window's took the keys: Custom's gives them up.
@@ -212,8 +207,8 @@ pub(crate) fn open(gui: &mut Gui) {
 }
 
 /// The window goes (Esc, its job started, the folder or the gate gone): a
-/// press still out goes on without it; the format list hung from its
-/// `MP3 ▾` goes with it.
+/// press still out goes on without it; a Format sheet opened from it goes
+/// with it.
 pub(super) fn close(gui: &mut Gui) {
     let ui = &mut gui.ytdl.here;
     if ui.window.take().is_some() {
@@ -241,7 +236,7 @@ pub(super) fn turn(gui: &mut Gui) -> bool {
     if let Some(work) = work {
         ytdl::send(gui, work);
     }
-    if window_up(gui) && (gui.ytdl.here.draft.found() || gui.ytdl.here.draft.tags_open) {
+    if window_up(gui) && (gui.ytdl.here.draft.found() || gui.ytdl.here.draft.manual) {
         let target = target(gui);
         let mut seq = gui.ytdl.seq;
         let work = gui.ytdl.here.draft.folder_work(&target, now, &mut seq);
@@ -250,6 +245,7 @@ pub(super) fn turn(gui: &mut Gui) -> bool {
             ytdl::send(gui, work);
             changed = true;
         }
+        ytdl::want_thumb(gui, Form::Window);
     }
     // A start this window pressed that the server refuses is shown inside
     // while it is up (and leaves no row).
@@ -378,8 +374,8 @@ fn spot(gui: &Gui) -> Spot {
 }
 
 /// The spot's word, its token, and what a click on it does: the door's
-/// word opens the window, `! failed` the From YouTube list; the job's
-/// other words only say.
+/// word opens the window, `! failed` the room, where its row is; the
+/// job's other words only say.
 fn spot_words(spot: Spot) -> (String, Style, Option<Act>) {
     match spot {
         Spot::Door => (t!("gui.ytdl.door").to_string(), accent(), Some(here(HereAct::Open))),
@@ -435,280 +431,91 @@ pub(super) fn draw_line(frame: &mut Frame, gui: &mut Gui, content: Rect) -> bool
 
 // ── The window ──────────────────────────────────────────────────────────────
 
-/// One line of the window, top to bottom.
-#[derive(Debug, Clone)]
-enum Line {
-    /// The link, `[X]` at the right while it holds anything.
-    Link,
-    /// The room's rows: what the link came to, a GOLD line, a key row.
-    Body(Row),
-    /// `( ) Right here   (•) Album   ( ) Artist / Album   ( ) Custom`.
-    Sorts,
-    /// Custom's line editor.
-    Custom,
-    /// The variables Custom takes.
-    Vars,
-    /// `Into` and the place (`None`: a layout that lands nowhere).
-    Into(Option<(Vec<String>, bool)>),
-    /// Why the primary is off, DIM, at the right.
-    Reason(String),
-    /// `MP3 ▾`, `f change format`, the primary.
-    Action,
+/// The Saves here sheet is up over the window.
+pub(super) fn sheet_up(gui: &Gui) -> bool {
+    window_up(gui) && gui.ytdl.here.window.as_ref().is_some_and(|w| w.sorts)
 }
 
-/// The window's lines for what the form holds now.
-fn lines(gui: &Gui, view: &ytdl::RoomView, room: usize) -> Vec<Line> {
-    let free = ytdl::form_free(gui, Form::Window);
-    let Some(w) = gui.ytdl.here.window.as_ref() else { return Vec::new() };
-    let mut out = vec![Line::Link];
-    let (stage, _) = ytdl::stage_rows(gui, Form::Window, view, room, free);
-    // F2: nothing yet — the place sits under the link's blank.
-    let lone = stage.len() == 1 && matches!(stage[0], Row::Blank);
-    out.extend(stage.into_iter().map(Line::Body));
-    if !lone {
-        out.push(Line::Body(Row::Blank));
-    }
-    let gold = |text: &str, out: &mut Vec<Line>| {
-        out.extend(ytdl::gold_rows(text, room).into_iter().map(|l| Line::Body(Row::Gold(l))));
-    };
-    if w.sorts {
-        out.push(Line::Sorts);
-        if w.sort == FolderSort::Custom {
-            out.push(Line::Custom);
-            let typed = w.custom.value();
-            if !typed.trim().is_empty()
-                && let Some(problem) = layout_problem(&layout_check(typed))
-            {
-                gold(&problem.text(), &mut out);
-            }
-            out.push(Line::Vars);
-        }
-    }
-    out.push(Line::Into(view.target.is_valid().then(|| (view.target.crumbs(), view.new_folder))));
-    match &view.no_mkdir {
-        // A subfolder the account can't make: its GOLD line, and Choose a
-        // folder in this window's place.
-        Some((line, _)) => {
-            gold(line, &mut out);
-            if free {
-                out.push(Line::Body(Row::Keys(vec![(t!("gui.ytdl.key.choose").to_string(), YtAct::Choose)], None)));
-            }
-        }
-        None => match &view.file_line {
-            Some((Tone::Warn | Tone::Refusal, text)) => gold(text, &mut out),
-            Some((_, text)) => {
-                out.extend(crate::kit::wrap_whole(text, room).into_iter().map(|l| Line::Body(Row::Plain(l, dim()))))
-            }
-            None => {}
-        },
-    }
-    // The server's refusal while the window stays (the 409 too), or why
-    // the primary is off.
-    match &view.above {
-        Some((Tone::Refusal | Tone::Warn, text)) => gold(text, &mut out),
-        Some((_, text)) => out.push(Line::Reason(text.clone())),
-        None => {}
-    }
-    if view.primary.is_some() {
-        out.push(Line::Body(Row::Blank));
-        out.push(Line::Action);
-    }
-    out
-}
-
-/// The lines a short frame gives up, in order: the blanks from the bottom
-/// up, then a tag's help line — never the place or the primary.
-fn give_way(mut lines: Vec<Line>, room: usize) -> Vec<Line> {
-    let mut i = lines.len();
-    while lines.len() > room && i > 0 {
-        i -= 1;
-        if matches!(lines[i], Line::Body(Row::Blank)) {
-            lines.remove(i);
-        }
-    }
-    if lines.len() > room {
-        lines.retain(|line| !matches!(line, Line::Body(Row::Help(_))));
-    }
-    lines
-}
-
-/// The window (F2–F6, C1–C4): 76 wide, banded in the room or centred over
-/// the frame, its title on the top border and `Esc close` on the bottom.
+/// The window (the canvas's Files board): 76 wide, banded in the room or
+/// centred over the frame, its title on the top border and `Esc close` on
+/// the bottom; inside, the room's own form — the link's band, the song's
+/// card, `Saves here` and `Format` — and one bracketed primary at the
+/// bottom right. Then the sheet `Saves here` opens, while it is up.
 pub(super) fn draw_window(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.ytdl.drawn.clear();
     let room = super::content_rect(area.width, area.height, gui.queue_open, gui.footer());
     let view = ytdl::form_view(gui, Form::Window);
     let text = usize::from(keep::KEEP_W.saturating_sub(4));
+    let mut rows = ytdl::form_rows(gui, Form::Window, &view, text);
+    // The blank under the link is the room's: here the song sits right
+    // under the card.
+    if matches!(rows.first(), Some(Row::Blank)) {
+        rows.remove(0);
+    }
+    let above = ytdl::above_rows(&view, text);
+    let action = if view.primary.is_some() { 2 } else { 0 };
     // From the top it anchors at down to the room's last row, rising
-    // toward row 1 only as far as it must (the window's own rule).
-    let rows = room.bottom().saturating_sub(area.y + 1).saturating_sub(2);
-    let lines = give_way(lines(gui, &view, text), usize::from(rows));
-    let (rect, band) = keep::window_rect(area, room, keep::KEEP_W, lines.len() as u16 + 2);
-    let (inner, _) = keep::open_window(frame, gui, area, rect, band);
+    // toward row 1 only as far as it must (the window's own rule): short
+    // of that the blanks give way from the bottom up — never the place or
+    // the primary.
+    let most = usize::from(room.bottom().saturating_sub(area.y + 1).saturating_sub(2));
+    while 3 + rows.len() + above.len() + action > most {
+        let Some(at) = rows.iter().rposition(|row| matches!(row, Row::Blank)) else { break };
+        rows.remove(at);
+    }
+    let total = 3 + rows.len() + above.len() + action;
+    let (rect, band) = keep::window_rect(area, room, keep::KEEP_W, total as u16 + 2);
+    let (inner, own) = keep::open_window(frame, gui, area, rect, band);
     keep::draw_borders(frame, gui, rect, &t!("gui.ytdl.room.title"), &t!("gui.discover.keep.esc_close"), here(HereAct::Close));
-    // The text's column, one in from the border's pad; right-hand words
-    // end one cell before the pad on the right (as the room's do).
-    let content = Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(1), height: inner.height };
-    // A press out: the key words stand, and do nothing (C4).
+    // The form's block: two cells in from each border.
+    let block = Rect { x: rect.x + 2, y: inner.y, width: rect.width.saturating_sub(4), height: inner.height };
+    let bottom = inner.bottom();
+    // A press out: the controls stand, and do nothing.
     gui.ytdl.quiet = gui.ytdl.here.draft.starting.is_some();
-    for (y, line) in (inner.y..inner.bottom()).zip(lines) {
-        draw_line_of(frame, gui, &view, content, y, line);
+    let keys = gui.ytdl.here.draft.keys == Keys::Link && !gui.ytdl.quiet && !sheet_up(gui);
+    let mut y = inner.y;
+    ytdl::draw_link_band(frame, gui, Form::Window, Rect { x: block.x, y, width: block.width, height: 3 }, keys);
+    y += 3;
+    let mut cover = None;
+    for row in rows {
+        if y >= bottom {
+            break;
+        }
+        if matches!(row, Row::Card(0) | Row::Reading(0)) && y + ytdl::COVER_H <= bottom {
+            cover = Some(Rect { x: block.x, y, width: ytdl::COVER_W, height: ytdl::COVER_H });
+        }
+        ytdl::draw_row(frame, gui, Form::Window, &view, block, y, row);
+        y += 1;
+    }
+    if let Some(rect) = cover {
+        ytdl::draw_cover(frame, gui, Form::Window, rect, Some(own));
+    }
+    // The server's refusal while the window stays (the 409 too), or why
+    // the primary is off.
+    for (words, style, right) in above {
+        if y >= bottom {
+            break;
+        }
+        let words = super::bar::clip(&words, text);
+        let at = if right { block.right().saturating_sub(width(&words) as u16) } else { block.x };
+        put(frame, at, y, &words, style);
+        y += 1;
+    }
+    if let Some((label, on)) = view.primary.clone().filter(|_| y + 1 < bottom) {
+        draw_primary(frame, gui, block, y + 1, &label, on);
     }
     gui.ytdl.quiet = false;
-}
-
-fn draw_line_of(frame: &mut Frame, gui: &mut Gui, view: &ytdl::RoomView, content: Rect, y: u16, line: Line) {
-    let x = content.x;
-    let end = content.right().saturating_sub(1);
-    let quiet = gui.ytdl.quiet;
-    let free = ytdl::form_free(gui, Form::Window);
-    match line {
-        Line::Link => draw_link(frame, gui, content, y),
-        Line::Body(row) => ytdl::draw_row(frame, gui, Form::Window, content, y, row),
-        Line::Sorts => {
-            let Some(w) = gui.ytdl.here.window.clone() else { return };
-            let (on_dot, off_dot) = dots();
-            let mut at = x;
-            for sort in FolderSort::ALL {
-                let label = sort.label().text();
-                let w_cells = 4 + width(&label) as u16;
-                if at + w_cells > end {
-                    break;
-                }
-                let on = w.sort == sort;
-                let cell = Rect { x: at, y, width: w_cells, height: 1 };
-                let hover = !quiet && gui.ui.hovers(cell);
-                put(frame, at, y, if on { on_dot } else { off_dot }, if on { accent() } else { dim() });
-                let style = match (hover, on) {
-                    (true, _) => bright_bold(),
-                    (false, true) => Style::default().add_modifier(Modifier::BOLD),
-                    (false, false) => Style::default(),
-                };
-                put(frame, at + 4, y, &label, style);
-                if !quiet {
-                    gui.ui.click(cell, here(HereAct::Sort(sort)));
-                }
-                at += w_cells + GAP;
-            }
-        }
-        Line::Custom => {
-            let Some(w) = gui.ytdl.here.window.clone() else { return };
-            let room = end.saturating_sub(x);
-            if w.custom_keys && !quiet {
-                super::text_field(frame, &mut gui.ui, x, y, w.custom.value(), w.custom.cursor(), room, Style::default());
-            } else {
-                put(frame, x, y, &super::clip_lead(w.custom.value(), usize::from(room)), Style::default());
-            }
-            if !quiet {
-                gui.ui.click(Rect { x, y, width: room, height: 1 }, here(HereAct::Custom));
-            }
-        }
-        Line::Vars => {
-            let mut at = x;
-            for (i, name) in YTDL_VARS.iter().enumerate() {
-                if i > 0 {
-                    put(frame, at, y, " · ", dim());
-                    at += 3;
-                }
-                let cell = Rect { x: at, y, width: width(name) as u16, height: 1 };
-                let lit = !quiet && gui.ui.hovers(cell);
-                put(frame, at, y, name, if lit { bright_bold() } else { dim() });
-                if !quiet {
-                    gui.ui.click(cell, here(HereAct::Var(i)));
-                }
-                at += cell.width;
-            }
-        }
-        Line::Into(place) => {
-            let lead = t!("gui.ytdl.here.into").to_string();
-            put(frame, x, y, &lead, dim());
-            let px = x + width(&lead) as u16 + 1;
-            let sorts = gui.ytdl.here.window.as_ref().is_some_and(|w| w.sorts);
-            let stop = if free && !sorts && view.primary.is_some() {
-                ytdl::key_word_right(frame, gui, content, y, "gui.ytdl.key.subfolders", YtAct::Here(HereAct::Subfolders))
-                    .saturating_sub(2)
-            } else {
-                end
-            };
-            match place {
-                Some((crumbs, new)) => {
-                    ytdl::draw_place(frame, px, y, &crumbs, new, usize::from(stop.saturating_sub(px)));
-                }
-                None => put(frame, px, y, super::discover::dash(), dim()),
-            }
-        }
-        Line::Reason(text) => {
-            let text = super::bar::clip(&text, usize::from(end.saturating_sub(x))).into_owned();
-            put(frame, super::right_at(content, &text), y, &text, dim());
-        }
-        Line::Action => draw_action(frame, gui, view, content, y),
+    if sheet_up(gui) {
+        draw_sheet(frame, gui, area, &view);
     }
 }
 
-/// `( )` and `(•)`, the legacy console's `(*)`.
-fn dots() -> (&'static str, &'static str) {
-    if crate::kit::theme::legacy_conhost() { ("(*)", "( )") } else { ("(•)", "( )") }
-}
-
-/// The link's row (F2, F3): the caret then the DIM placeholder while it has
-/// the keys and is empty; `[X]` DIM — DANGER under the pointer — once it
-/// holds anything; a click on the row takes the keys.
-fn draw_link(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
-    let quiet = gui.ytdl.quiet;
-    let draft = &gui.ytdl.here.draft;
-    let keys = draft.keys == Keys::Link && !quiet;
-    let value = draft.link.value().to_string();
-    let cursor = draft.link.cursor();
-    let x = content.x;
-    let x_at = Rect { x: content.right().saturating_sub(4), y, width: 3, height: 1 };
-    let room = x_at.x.saturating_sub(x + 1);
-    let placeholder = t!("gui.ytdl.room.paste").to_string();
-    if keys {
-        super::text_field(frame, &mut gui.ui, x, y, &value, cursor, room, Style::default());
-        if value.is_empty() {
-            put(frame, x + 1, y, &super::bar::clip(&placeholder, usize::from(room)), dim());
-        }
-    } else if value.is_empty() {
-        put(frame, x, y, &super::bar::clip(&placeholder, usize::from(room)), dim());
-    } else {
-        put(frame, x, y, &super::bar::clip(&value, usize::from(room)), Style::default());
-    }
-    if quiet {
-        if !value.is_empty() {
-            put(frame, x_at.x, y, "[X]", dim());
-        }
-        return;
-    }
-    gui.ui.click(Rect { x, y, width: x_at.right().saturating_sub(x), height: 1 }, yt(YtAct::Field));
-    if !value.is_empty() {
-        let style = if gui.ui.hovers(x_at) {
-            Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
-        } else {
-            dim()
-        };
-        put(frame, x_at.x, y, "[X]", style);
-        gui.ui.click(x_at, yt(YtAct::Clear));
-    }
-}
-
-/// The action row (F3, C3, C4): `MP3 ▾` — `f change format` beside it
-/// where a clash or a refusal asks for another format — and the one
-/// bracketed primary at the right: ACCENT BOLD, BRIGHT BOLD under the
-/// pointer; off, DIM, no click, its tooltip why.
-fn draw_action(frame: &mut Frame, gui: &mut Gui, view: &ytdl::RoomView, content: Rect, y: u16) {
-    let x = content.x;
-    let missing = matches!(view.stage, Stage::Failed { .. });
-    if !missing {
-        let w = ytdl::draw_format_control(frame, gui, Form::Window, x, y);
-        let clash = matches!(view.file_line, Some((Tone::Warn | Tone::Refusal, _)));
-        let formats = crate::ytdl::format_options(ytdl::facts(gui).and_then(|f| f.formats.as_deref())).len();
-        if (clash || view.refused_format) && formats > 1 && ytdl::form_free(gui, Form::Window) {
-            ytdl::key_word(frame, gui, x + w + GAP, y, "gui.ytdl.key.format", YtAct::Format);
-        }
-    }
-    let Some((label, on)) = view.primary.clone() else { return };
-    let w = width(&label) as u16;
-    let at = Rect { x: content.right().saturating_sub(1 + w), y, width: w, height: 1 };
+/// The one bracketed primary at the window's bottom right: ACCENT BOLD,
+/// BRIGHT BOLD under the pointer; off, DIM, no click — the row above it
+/// says why.
+fn draw_primary(frame: &mut Frame, gui: &mut Gui, block: Rect, y: u16, label: &str, on: bool) {
+    let w = width(label) as u16;
+    let at = Rect { x: block.right().saturating_sub(w), y, width: w, height: 1 };
     let quiet = gui.ytdl.quiet;
     let style = if !on || quiet {
         dim()
@@ -717,11 +524,83 @@ fn draw_action(frame: &mut Frame, gui: &mut Gui, view: &ytdl::RoomView, content:
     } else {
         accent().add_modifier(Modifier::BOLD)
     };
-    put(frame, at.x, y, &label, style);
-    // Off, it says why on the row above it (the room's way).
+    put(frame, at.x, y, label, style);
     if on && !quiet {
         gui.ui.click(at, yt(YtAct::Add));
     }
+}
+
+/// The sheet `Saves here` opens: where under the folder on screen the
+/// song goes — right here, or in folders its tags name — for this window
+/// only, never remembered. The place it makes on the title's own row;
+/// the radios in two columns; Custom's field a card with its variables
+/// under it; `[ Done ]`.
+fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect, view: &ytdl::RoomView) {
+    let Some(w) = gui.ytdl.here.window.clone() else { return };
+    let wide = ytdl_sheets::sheet_room(gui, area);
+    let custom = w.sort == FolderSort::Custom;
+    let typed = w.custom.value();
+    let problem: Vec<String> = (custom && !typed.trim().is_empty())
+        .then(|| layout_problem(&layout_check(typed)))
+        .flatten()
+        .map(|p| ytdl::gold_rows(&p.text(), wide))
+        .unwrap_or_default();
+    let radios = FolderSort::ALL.len().div_ceil(2) as u16;
+    let field = if custom { 1 + 3 + problem.len() as u16 + 1 } else { 0 };
+    let rect = ytdl_sheets::open_sheet(frame, gui, area, radios + field + 2, here(HereAct::SheetDone));
+    let title = t!(if is_here(gui, &view.target) { "gui.ytdl.here.saves_here" } else { "gui.ytdl.room.saves_to" }).to_string();
+    ytdl_sheets::sheet_title(frame, rect, &title, |frame, x, room| {
+        if view.target.is_valid() {
+            ytdl::draw_place(frame, x, rect.y, &view.target.crumbs(), view.new_folder, room)
+        } else {
+            let dash = super::discover::dash();
+            put(frame, x, rect.y, dash, dim());
+            width(dash) as u16
+        }
+    });
+    let (x, total) = ytdl_sheets::sheet_text(rect);
+    let end = x + total;
+    let half = total / 2 + 1;
+    let (dot_on, dot_off) = ytdl::dots();
+    let mut y = rect.y + 1;
+    for pair in FolderSort::ALL.chunks(2) {
+        for (sort, at) in pair.iter().zip([x, x + half]) {
+            let on = w.sort == *sort;
+            let cells = if at == x { half.saturating_sub(2) } else { end.saturating_sub(at) };
+            let pick = Rect { x: at, y, width: cells, height: 1 };
+            put(frame, at, y, if on { dot_on } else { dot_off }, if on { accent() } else { dim() });
+            let style = match (gui.ui.hovers(pick), on) {
+                (true, _) => bright_bold(),
+                (false, true) => Style::default().add_modifier(Modifier::BOLD),
+                (false, false) => Style::default(),
+            };
+            put(frame, at + 4, y, &super::bar::clip(&sort.label().text(), usize::from(cells.saturating_sub(4))), style);
+            gui.ui.click(pick, here(HereAct::Sort(*sort)));
+        }
+        y += 1;
+    }
+    if custom {
+        let card = Rect { x, y: y + 1, width: total, height: 3 };
+        ytdl_sheets::field_card(frame, gui, card, w.custom.value(), w.custom.cursor(), w.custom_keys, here(HereAct::Custom));
+        y += 4;
+        for line in &problem {
+            put(frame, x, y, &super::bar::clip(line, wide), Style::default().fg(th().gold));
+            y += 1;
+        }
+        let mut at = x;
+        for (i, name) in YTDL_VARS.iter().enumerate() {
+            if i > 0 {
+                put(frame, at, y, " · ", dim());
+                at += 3;
+            }
+            let cell = Rect { x: at, y, width: width(name) as u16, height: 1 };
+            put(frame, at, y, name, if gui.ui.hovers(cell) { bright_bold() } else { dim() });
+            gui.ui.click(cell, here(HereAct::Var(i)));
+            at += cell.width;
+        }
+        y += 1;
+    }
+    ytdl_sheets::bracket_button(frame, gui, rect.right().saturating_sub(3), y + 1, &t!("gui.ytdl.done"), true, here(HereAct::SheetDone));
 }
 
 // ── Acts and keys ───────────────────────────────────────────────────────────
@@ -735,6 +614,14 @@ pub(super) fn act(gui: &mut Gui, act: HereAct) {
         HereAct::Subfolders => {
             if let Some(w) = gui.ytdl.here.window.as_mut() {
                 w.sorts = true;
+                w.custom_keys = w.sort == FolderSort::Custom;
+                gui.ytdl.here.draft.keys = Keys::None;
+            }
+        }
+        HereAct::SheetDone => {
+            if let Some(w) = gui.ytdl.here.window.as_mut() {
+                w.sorts = false;
+                w.custom_keys = false;
             }
         }
         HereAct::Sort(sort) => pick_sort(gui, sort),
@@ -779,10 +666,39 @@ fn step_sort(gui: &mut Gui, delta: i32) {
     pick_sort(gui, FolderSort::ALL[next]);
 }
 
+/// The Saves here sheet's keys: ↑ ↓ or ← → move the dot (onto Custom,
+/// its field takes the keys — Enter or Esc gives them back, ↑ walks back
+/// up); Enter or Esc closes the sheet.
+fn sheet_key(gui: &mut Gui, key: KeyEvent) {
+    let custom = gui.ytdl.here.window.as_ref().is_some_and(|w| w.custom_keys);
+    if custom {
+        match key.code {
+            KeyCode::Enter | KeyCode::Esc => keys_taken(gui),
+            KeyCode::Up | KeyCode::BackTab => {
+                keys_taken(gui);
+                step_sort(gui, -1);
+            }
+            _ => {
+                let Some(w) = gui.ytdl.here.window.as_mut() else { return };
+                let changed = w.custom.handle_event(&TermEvent::Key(key)).is_some_and(|c| c.value);
+                if changed {
+                    gui.ytdl.here.draft.instead = None;
+                }
+            }
+        }
+        return;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => act(gui, HereAct::SheetDone),
+        KeyCode::Left | KeyCode::Up => step_sort(gui, -1),
+        KeyCode::Right | KeyCode::Down => step_sort(gui, 1),
+        _ => {}
+    }
+}
+
 /// The window's keys: it owns them all while it is up. Esc closes it —
-/// from the link and with the keys free; a tag or Custom's field gives
-/// them back first. While its press is out only Esc acts, and the press
-/// still goes through (C4).
+/// from the link and with the keys free. While its press is out only Esc
+/// acts, and the press still goes through.
 pub(super) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     let ctrl = key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     let now = gui.ytdl.now();
@@ -792,23 +708,8 @@ pub(super) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         }
         return false;
     }
-    let custom = gui.ytdl.here.window.as_ref().is_some_and(|w| w.custom_keys);
-    if custom {
-        match key.code {
-            // "Enter or Esc gives the keys back · then Enter adds" (C2).
-            KeyCode::Enter | KeyCode::Esc => keys_taken(gui),
-            KeyCode::Up | KeyCode::BackTab => {
-                keys_taken(gui);
-                step_sort(gui, -1);
-            }
-            _ => {
-                let Some(w) = gui.ytdl.here.window.as_mut() else { return false };
-                let changed = w.custom.handle_event(&TermEvent::Key(key)).is_some_and(|c| c.value);
-                if changed {
-                    gui.ytdl.here.draft.instead = None;
-                }
-            }
-        }
+    if sheet_up(gui) {
+        sheet_key(gui, key);
         return false;
     }
     match gui.ytdl.here.draft.keys {
@@ -818,63 +719,49 @@ pub(super) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {}
             _ => ytdl::link_typed(gui, Form::Window, key, now),
         },
-        Keys::Tag(field) => match key.code {
-            KeyCode::Esc => gui.ytdl.here.draft.keys = Keys::None,
-            KeyCode::Enter => ytdl::press(gui),
-            _ => ytdl::tag_typed(gui, Form::Window, field, key),
-        },
-        Keys::None => {
-            let sorts = gui.ytdl.here.window.as_ref().is_some_and(|w| w.sorts);
-            match key.code {
-                KeyCode::Esc => close(gui),
-                KeyCode::Enter => {
-                    let on = ytdl::form_view(gui, Form::Window).primary.is_some_and(|(_, on)| on);
-                    let draft = &gui.ytdl.here.draft;
-                    let idle = draft.parsed.kind == crate::ytdl::LinkKind::Video && matches!(draft.look, ytdl::Look::Idle);
-                    if on {
-                        ytdl::press(gui);
-                    } else if idle {
-                        ytdl::ask(gui);
-                    }
+        _ => match key.code {
+            KeyCode::Esc => close(gui),
+            KeyCode::Enter => {
+                let on = ytdl::form_view(gui, Form::Window).primary.is_some_and(|(_, on)| on);
+                let draft = &gui.ytdl.here.draft;
+                let idle = draft.parsed.kind == crate::ytdl::LinkKind::Video && matches!(draft.look, ytdl::Look::Idle);
+                if on {
+                    ytdl::press(gui);
+                } else if idle {
+                    ytdl::ask(gui);
                 }
-                // "↑ ↓ or ← → move the dot" (C1).
-                KeyCode::Left | KeyCode::Up if sorts => step_sort(gui, -1),
-                KeyCode::Right | KeyCode::Down if sorts => step_sort(gui, 1),
-                KeyCode::Down if gui.ytdl.here.draft.tags_open => {
-                    gui.ytdl.here.draft.keys = Keys::Tag(crate::ytdl::TagField::Title);
-                }
-                // A key acts only where its word stood; a capital is the
-                // window's too.
-                KeyCode::Char(c) if !ctrl => {
-                    let lower = c.to_ascii_lowercase();
-                    let drawn = gui.ytdl.drawn.iter().find(|(letter, _)| *letter == lower).map(|(_, act)| act.clone());
-                    if let Some(act) = drawn {
-                        return gui.act(yt(act));
-                    }
-                }
-                _ => {}
             }
-        }
+            // A key acts only where its control stood; a capital is the
+            // window's too.
+            KeyCode::Char(c) if !ctrl => {
+                let lower = c.to_ascii_lowercase();
+                let drawn = gui.ytdl.drawn.iter().find(|(letter, _)| *letter == lower).map(|(_, act)| act.clone());
+                if let Some(act) = drawn {
+                    return gui.act(yt(act));
+                }
+            }
+            _ => {}
+        },
     }
     false
 }
 
-/// The tips line while the window is up, as the boards' Keys lines read:
-/// Enter's primary first, the key words the frame drew, the paste, the
-/// way out — the radios' dot alone while they are open (C1), the format
-/// beside Add anyway over a clash (C3).
+/// The tips line while the window is up: Enter's primary first, the
+/// controls the frame drew by their key words, the paste, the way out —
+/// the radios' dot alone while the sheet is up.
 pub(super) fn tips(gui: &Gui) -> String {
     let close = t!("gui.tips.ytdl_close").to_string();
     if gui.ytdl.here.draft.starting.is_some() {
         return close;
     }
     if gui.ytdl.here.window.as_ref().is_some_and(|w| w.custom_keys) {
-        return t!("gui.tips.ytdl_here_layout").to_string();
+        return t!("gui.tips.ytdl_where_layout").to_string();
     }
-    match gui.ytdl.here.draft.keys {
-        Keys::Link => return t!("gui.tips.ytdl_here_field").to_string(),
-        Keys::Tag(_) => return t!("gui.tips.ytdl_tags").to_string(),
-        Keys::None => {}
+    if sheet_up(gui) {
+        return format!("{} · {close}", t!("gui.tips.ytdl_here_dot"));
+    }
+    if gui.ytdl.here.draft.keys == Keys::Link {
+        return t!("gui.tips.ytdl_here_field").to_string();
     }
     let view = ytdl::form_view(gui, Form::Window);
     let enter = view.primary.as_ref().is_some_and(|(_, on)| *on).then(|| {
@@ -887,15 +774,6 @@ pub(super) fn tips(gui: &Gui) -> String {
         };
         t!(key).to_string()
     });
-    let drew = |act: &YtAct| gui.ytdl.drawn.iter().any(|(_, a)| a == act);
-    if gui.ytdl.here.window.as_ref().is_some_and(|w| w.sorts) {
-        let parts = std::iter::once(t!("gui.tips.ytdl_here_dot").to_string()).chain(enter).chain([close]);
-        return parts.collect::<Vec<_>>().join(" · ");
-    }
-    if view.anyway || view.refused_format {
-        let format = drew(&YtAct::Format).then(|| t!("gui.ytdl.key.format").to_string());
-        return format.into_iter().chain(enter).chain([close]).collect::<Vec<_>>().join(" · ");
-    }
     let mut keys: Vec<String> = Vec::new();
     for (letter, act) in &gui.ytdl.drawn {
         let words = match act {
@@ -934,8 +812,7 @@ pub(crate) mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Position;
     use super::super::ytdl::tests::{
-        LINK, START, WATCH, advance, answer_folders, answer_lookup, assert_frame, at, buffer, english, key, lines,
-        one_more_time, seated, serve, shift, type_text,
+        Cells, LINK, START, WATCH, advance, answer_folders, answer_lookup, assert_frame, at, buffer, english, key, lines, one_more_time, seated, serve, shift, type_text,
     };
 
     const SONGS: [(&str, f64); 3] =
@@ -1107,132 +984,62 @@ pub(crate) mod tests {
         "#;
         pub(super) const F2: &str = r#"
             |╭─ Add from YouTube ───────────────────────────────────────────────────────╮
-            |│ ▏Paste a YouTube link                                                    │
+            |│ ╭──────────────────────────────────────────────────────────────────────╮ │
+            |│ │ ▏Paste a YouTube link                                                │ │
+            |│ ╰──────────────────────────────────────────────────────────────────────╯ │
             |│                                                                          │
-            |│ Into Music › Daft Punk                                                   │
+            |│ Saves here                                           Music › Daft Punk ▸ │
+            |│ Format                                                             MP3 ▸ │
             |╰────────────────────────────────────────────────────────────── Esc close ─╯
         "#;
         pub(super) const F2_RUNS: &[&str] = &[
-            "0:0-1:Accent", "0:3-18:Text:B", "0:20-75:Accent", "1:0-0:Accent", "1:2-2:Text", "1:3-22:Dim", "1:75-75:Accent",
-            "2:0-0:Accent", "2:75-75:Accent", "3:0-0:Accent", "3:2-5:Dim", "3:7-11:Text", "3:13-13:Dim", "3:15-23:Text",
-            "3:75-75:Accent", "4:0-62:Accent", "4:64-72:Dim", "4:74-75:Accent",
+            "0:0-1:Accent", "0:3-18:Text:B", "0:20-75:Accent", "1:0-75:Accent", "2:0-2:Accent", "2:4-4:Text",
+            "2:5-24:Dim", "2:73-75:Accent", "3:0-75:Accent", "4:0-75:Accent", "5:0-0:Accent", "5:2-59:Text",
+            "5:61-61:Dim", "5:63-71:Text", "5:73-73:Dim", "5:75-75:Accent", "6:0-0:Accent", "6:2-7:Text",
+            "6:69-73:Dim", "6:75-75:Accent", "7:0-62:Accent", "7:64-72:Dim", "7:74-75:Accent",
         ];
-        pub(super) const F3: &str = r#"
-            |╭─ Add from YouTube ───────────────────────────────────────────────────────╮
-            |│ https://youtu.be/FGBhQbmPwH8                                         [X] │
+        pub(super) const SHEET: &str = r#"
+            |╭─ Saves to · Music › Daft Punk › Discovery new ───────────────────────────╮
+            |│ ( ) Right here                       (•) Album                           │
+            |│ ( ) Artist / Album                   ( ) Custom                          │
             |│                                                                          │
-            |│ One More Time                                                            │
-            |│ Daft Punk · Discovery · 2001                                 e edit tags │
+            |│                                                                [ Done ]  │
+            |╰──────────────────────────────────────────────────────────────────────────╯
+        "#;
+        pub(super) const SHEET_RUNS: &[&str] = &[
+            "0:0-1:Accent", "0:3-10:Text:B", "0:12-12:Dim", "0:14-18:Text", "0:20-20:Dim", "0:22-30:Text",
+            "0:32-32:Dim", "0:34-42:Text", "0:44-46:Dim", "0:48-75:Accent", "1:0-0:Accent", "1:2-4:Dim",
+            "1:6-15:Text", "1:39-41:Accent", "1:43-47:Text:B", "1:75-75:Accent", "2:0-0:Accent", "2:2-4:Dim",
+            "2:6-19:Text", "2:39-41:Dim", "2:43-48:Text", "2:75-75:Accent", "3:0-75:Accent", "4:0-0:Accent",
+            "4:65-72:Accent:B", "4:75-75:Accent", "5:0-75:Accent",
+        ];
+        pub(super) const FILES: &str = r#"
+            |╭─ Add from YouTube ───────────────────────────────────────────────────────╮
+            |│ ╭────────────────────────────────────────────────────────────╮ ╭───────╮ │
+            |│ │ https://youtu.be/FGBhQbmPwH8                           [X] │ │ Paste │ │
+            |│ ╰────────────────────────────────────────────────────────────╯ ╰───────╯ │
+            |│ ╭──────╮ One More Time                                       edit tags ▸ │
+            |│ │      │ Daft Punk                                                       │
+            |│ │      │ Discovery · 2001                                                │
+            |│ ╰──────╯ YouTube · Daft Punk · 5:20                                      │
             |│ Tags from YouTube Music                                                  │
             |│                                                                          │
-            |│ Into Music › Daft Punk                                      s subfolders │
+            |│ Saves here                                           Music › Daft Punk ▸ │
+            |│ Format                                                             MP3 ▸ │
             |│                                                                          │
-            |│ MP3 ▾                                                       [ Add here ] │
+            |│                                                             [ Add here ] │
             |╰────────────────────────────────────────────────────────────── Esc close ─╯
         "#;
-        pub(super) const F3_RUNS: &[&str] = &[
-            "0:0-1:Accent", "0:3-18:Text:B", "0:20-75:Accent", "1:0-0:Accent", "1:2-29:Text", "1:71-73:Dim", "1:75-75:Accent",
-            "2:0-0:Accent", "2:75-75:Accent", "3:0-0:Accent", "3:2-14:Text:B", "3:75-75:Accent", "4:0-0:Accent", "4:2-29:Dim",
-            "4:63-73:Dim", "4:75-75:Accent", "5:0-0:Accent", "5:2-24:Dim", "5:75-75:Accent", "6:0-0:Accent", "6:75-75:Accent",
-            "7:0-0:Accent", "7:2-5:Dim", "7:7-11:Text", "7:13-13:Dim", "7:15-23:Text", "7:62-73:Dim", "7:75-75:Accent",
-            "8:0-0:Accent", "8:75-75:Accent", "9:0-0:Accent", "9:2-4:Text", "9:6-6:Dim", "9:62-73:Accent:B", "9:75-75:Accent",
-            "10:0-62:Accent", "10:64-72:Dim", "10:74-75:Accent",
-        ];
-        pub(super) const C1: &str = r#"
-            |╭─ Add from YouTube ───────────────────────────────────────────────────────╮
-            |│ https://youtu.be/FGBhQbmPwH8                                         [X] │
-            |│                                                                          │
-            |│ One More Time                                                            │
-            |│ Daft Punk · Discovery · 2001                                 e edit tags │
-            |│ Tags from YouTube Music                                                  │
-            |│                                                                          │
-            |│ ( ) Right here   (•) Album   ( ) Artist / Album   ( ) Custom             │
-            |│ Into Music › Daft Punk › Discovery new                                   │
-            |│                                                                          │
-            |│ MP3 ▾                                                 [ Add to library ] │
-            |╰────────────────────────────────────────────────────────────── Esc close ─╯
-        "#;
-        pub(super) const C1_RUNS: &[&str] = &[
-            "0:0-1:Accent", "0:3-18:Text:B", "0:20-75:Accent", "1:0-0:Accent", "1:2-29:Text", "1:71-73:Dim", "1:75-75:Accent",
-            "2:0-0:Accent", "2:75-75:Accent", "3:0-0:Accent", "3:2-14:Text:B", "3:75-75:Accent", "4:0-0:Accent", "4:2-29:Dim",
-            "4:63-73:Dim", "4:75-75:Accent", "5:0-0:Accent", "5:2-24:Dim", "5:75-75:Accent", "6:0-0:Accent", "6:75-75:Accent",
-            "7:0-0:Accent", "7:2-4:Dim", "7:6-15:Text", "7:19-21:Accent", "7:23-27:Text:B", "7:31-33:Dim", "7:35-48:Text",
-            "7:52-54:Dim", "7:56-61:Text", "7:75-75:Accent", "8:0-0:Accent", "8:2-5:Dim", "8:7-11:Text", "8:13-13:Dim",
-            "8:15-23:Text", "8:25-25:Dim", "8:27-35:Text", "8:37-39:Dim", "8:75-75:Accent", "9:0-0:Accent", "9:75-75:Accent",
-            "10:0-0:Accent", "10:2-4:Text", "10:6-6:Dim", "10:56-73:Accent:B", "10:75-75:Accent", "11:0-62:Accent",
-            "11:64-72:Dim", "11:74-75:Accent",
-        ];
-        pub(super) const C2: &str = r#"
-            |╭─ Add from YouTube ───────────────────────────────────────────────────────╮
-            |│ https://youtu.be/FGBhQbmPwH8                                         [X] │
-            |│                                                                          │
-            |│ One More Time                                                            │
-            |│ Daft Punk · Discovery · 2001                                             │
-            |│ Tags from YouTube Music                                                  │
-            |│                                                                          │
-            |│ ( ) Right here   ( ) Album   ( ) Artist / Album   (•) Custom             │
-            |│ {{YEAR}} - {{ALBUM}}▏                                                    │
-            |│ ARTIST · ALBUMARTIST · ALBUM · YEAR                                      │
-            |│ Into Music › Daft Punk › 2001 - Discovery new                            │
-            |│                                                                          │
-            |│ MP3 ▾                                                 [ Add to library ] │
-            |╰────────────────────────────────────────────────────────────── Esc close ─╯
-        "#;
-        pub(super) const C2_RUNS: &[&str] = &[
-            "0:0-1:Accent", "0:3-18:Text:B", "0:20-75:Accent", "1:0-0:Accent", "1:2-29:Text", "1:71-73:Dim", "1:75-75:Accent",
-            "2:0-0:Accent", "2:75-75:Accent", "3:0-0:Accent", "3:2-14:Text:B", "3:75-75:Accent", "4:0-0:Accent", "4:2-29:Dim",
-            "4:75-75:Accent", "5:0-0:Accent", "5:2-24:Dim", "5:75-75:Accent", "6:0-0:Accent", "6:75-75:Accent", "7:0-0:Accent",
-            "7:2-4:Dim", "7:6-15:Text", "7:19-21:Dim", "7:23-27:Text", "7:31-33:Dim", "7:35-48:Text", "7:52-54:Accent",
-            "7:56-61:Text:B", "7:75-75:Accent", "8:0-0:Accent", "8:2-21:Text", "8:22-22:Text", "8:75-75:Accent",
-            "9:0-0:Accent", "9:2-7:Dim", "9:9-9:Dim", "9:11-21:Dim", "9:23-23:Dim", "9:25-29:Dim", "9:31-31:Dim",
-            "9:33-36:Dim", "9:75-75:Accent", "10:0-0:Accent", "10:2-5:Dim", "10:7-11:Text", "10:13-13:Dim", "10:15-23:Text",
-            "10:25-25:Dim", "10:27-42:Text", "10:44-46:Dim", "10:75-75:Accent", "11:0-0:Accent", "11:75-75:Accent",
-            "12:0-0:Accent", "12:2-4:Text", "12:6-6:Dim", "12:56-73:Accent:B", "12:75-75:Accent", "13:0-62:Accent",
-            "13:64-72:Dim", "13:74-75:Accent",
-        ];
-        pub(super) const C3: &str = r#"
-            |╭─ Add from YouTube ───────────────────────────────────────────────────────╮
-            |│ https://youtu.be/FGBhQbmPwH8                                         [X] │
-            |│                                                                          │
-            |│ One More Time                                                            │
-            |│ Daft Punk · Discovery · 2001                                 e edit tags │
-            |│ Tags from YouTube Music                                                  │
-            |│                                                                          │
-            |│ Into Music › Daft Punk                                      s subfolders │
-            |│ ! Something like “One_More_Time.mp3” looks to be in this folder already. │
-            |│                                                                          │
-            |│ MP3 ▾   f change format                                   [ Add anyway ] │
-            |╰────────────────────────────────────────────────────────────── Esc close ─╯
-        "#;
-        pub(super) const C3_RUNS: &[&str] = &[
-            "0:0-1:Accent", "0:3-18:Text:B", "0:20-75:Accent", "1:0-0:Accent", "1:2-29:Text", "1:71-73:Dim", "1:75-75:Accent",
-            "2:0-0:Accent", "2:75-75:Accent", "3:0-0:Accent", "3:2-14:Text:B", "3:75-75:Accent", "4:0-0:Accent", "4:2-29:Dim",
-            "4:63-73:Dim", "4:75-75:Accent", "5:0-0:Accent", "5:2-24:Dim", "5:75-75:Accent", "6:0-0:Accent", "6:75-75:Accent",
-            "7:0-0:Accent", "7:2-5:Dim", "7:7-11:Text", "7:13-13:Dim", "7:15-23:Text", "7:62-73:Dim", "7:75-75:Accent",
-            "8:0-0:Accent", "8:2-73:Gold", "8:75-75:Accent", "9:0-0:Accent", "9:75-75:Accent", "10:0-0:Accent", "10:2-4:Text",
-            "10:6-6:Dim", "10:10-24:Dim", "10:60-73:Accent:B", "10:75-75:Accent", "11:0-62:Accent", "11:64-72:Dim",
-            "11:74-75:Accent",
-        ];
-        pub(super) const C4: &str = r#"
-            |╭─ Add from YouTube ───────────────────────────────────────────────────────╮
-            |│ https://youtu.be/FGBhQbmPwH8                                         [X] │
-            |│                                                                          │
-            |│ One More Time                                                            │
-            |│ Daft Punk · Discovery · 2001                                 e edit tags │
-            |│ Tags from YouTube Music                                                  │
-            |│                                                                          │
-            |│ Into Music › Daft Punk                                      s subfolders │
-            |│                                                                          │
-            |│ MP3 ▾                                                        [ Adding… ] │
-            |╰────────────────────────────────────────────────────────────── Esc close ─╯
-        "#;
-        pub(super) const C4_RUNS: &[&str] = &[
-            "0:0-1:Accent", "0:3-18:Text:B", "0:20-75:Accent", "1:0-0:Accent", "1:2-29:Text", "1:71-73:Dim", "1:75-75:Accent",
-            "2:0-0:Accent", "2:75-75:Accent", "3:0-0:Accent", "3:2-14:Text:B", "3:75-75:Accent", "4:0-0:Accent", "4:2-29:Dim",
-            "4:63-73:Dim", "4:75-75:Accent", "5:0-0:Accent", "5:2-24:Dim", "5:75-75:Accent", "6:0-0:Accent", "6:75-75:Accent",
-            "7:0-0:Accent", "7:2-5:Dim", "7:7-11:Text", "7:13-13:Dim", "7:15-23:Text", "7:62-73:Dim", "7:75-75:Accent",
-            "8:0-0:Accent", "8:75-75:Accent", "9:0-0:Accent", "9:2-4:Text", "9:6-6:Dim", "9:63-73:Dim", "9:75-75:Accent",
-            "10:0-62:Accent", "10:64-72:Dim", "10:74-75:Accent",
+        pub(super) const FILES_RUNS: &[&str] = &[
+            "0:0-1:Accent", "0:3-18:Text:B", "0:20-75:Accent", "1:0-0:Accent", "1:2-73:Dim", "1:75-75:Accent",
+            "2:0-0:Accent", "2:2-2:Dim", "2:4-31:Text", "2:59-73:Dim", "2:75-75:Accent", "3:0-0:Accent",
+            "3:2-73:Dim", "3:75-75:Accent", "4:0-0:Accent", "4:2-9:Dim", "4:11-23:Text:B", "4:63-73:Dim",
+            "4:75-75:Accent", "5:0-0:Accent", "5:2-9:Dim", "5:11-19:Text", "5:75-75:Accent", "6:0-0:Accent",
+            "6:2-26:Dim", "6:75-75:Accent", "7:0-0:Accent", "7:2-36:Dim", "7:75-75:Accent", "8:0-0:Accent",
+            "8:2-24:Dim", "8:75-75:Accent", "9:0-75:Accent", "10:0-0:Accent", "10:2-59:Text", "10:61-61:Dim",
+            "10:63-71:Text", "10:73-73:Dim", "10:75-75:Accent", "11:0-0:Accent", "11:2-7:Text", "11:69-73:Dim",
+            "11:75-75:Accent", "12:0-75:Accent", "13:0-0:Accent", "13:62-73:Accent:B", "13:75-75:Accent",
+            "14:0-62:Accent", "14:64-72:Dim", "14:74-75:Accent",
         ];
         pub(super) const F4: &str = r#"
             |◂ Files ▸ Music/Daft Punk   ✓ added                                     6 items
@@ -1392,21 +1199,55 @@ pub(crate) mod tests {
         let b = buffer(&mut gui, 100, 30);
         assert_frame(&b, (17, 2), 80, boards::SPOT_FAILED, &["0:0-0:Dim", "0:2-24:Dim", "0:28-35:Gold", "0:72-78:Dim"]);
         assert_eq!(gui.ui.hit(Position { x: 47, y: 2 }), Some(yt(YtAct::List)));
+        // `! failed` opens the room, where the row and its ways on are.
         gui.act(yt(YtAct::List));
-        assert!(ytdl::list_open(&gui), "the From YouTube list, over Files");
+        assert!(ytdl::in_room(&gui), "the room: its list has the row");
+        ytdl::poll(&mut gui);
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows.iter().any(|r| r.contains("From YouTube")), "{}", rows.join("\n"));
-        key(&mut gui, KeyCode::Esc);
+        assert!(rows.iter().any(|r| r.contains("! One More Time") && r.contains("failed")), "{}", rows.join("\n"));
+        gui.act(Act::Nav(super::super::FILES_NAV));
+        ytdl::poll(&mut gui);
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows[2].contains("add from YouTube"), "seen in the list: the door's word again\n{}", rows[2]);
+        assert!(rows[2].contains("add from YouTube"), "seen in the room: the door's word again\n{}", rows[2]);
     }
 
     // ── The window ─────────────────────────────────────────────────────────
 
-    /// F2: 76 wide, banded at x 19–94 over rows 6–10; the caret and the
-    /// placeholder; the bar's word steps aside while it is up; the room
-    /// beneath inert. Typing goes to the field — `q` doesn't quit — and Esc
-    /// closes.
+    /// Dump the window's frames for a look (`cargo test dump_files_window -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn dump_files_window() {
+        let _en = english();
+        let show = |name: &str, gui: &mut Gui, h: u16| {
+            eprintln!("== {name}");
+            for (y, row) in lines(&buffer(gui, 100, h)).iter().enumerate() {
+                eprintln!("{y:2} |{}", row.trim_end());
+            }
+        };
+        let mut gui = files_gui(1);
+        key(&mut gui, KeyCode::Char('y'));
+        show("empty", &mut gui, 30);
+        eprintln!("{}", super::super::ytdl::tests::board_of(&buffer(&mut gui, 100, 30), (19, 6), (76, 8), "F2"));
+        let mut gui = files_gui(1);
+        found_here(&mut gui, &[]);
+        show("found", &mut gui, 30);
+        show("floor", &mut gui, 24);
+        key(&mut gui, KeyCode::Char('s'));
+        key(&mut gui, KeyCode::Right);
+        settle(&mut gui);
+        let check = crate::ytdl::FolderCheck { known: true, new_segments: vec![1], deepest: Some("/Music/Daft Punk/".into()), files: None };
+        answer_folders(&mut gui, check);
+        show("sheet", &mut gui, 30);
+        eprintln!("{}", super::super::ytdl::tests::board_of(&buffer(&mut gui, 100, 30), (19, 12), (76, 6), "SHEET"));
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Down);
+        show("custom", &mut gui, 30);
+    }
+
+    /// Empty: 76 wide, banded at x 19–94 from row 6; the link's card with
+    /// the caret and the placeholder, where the song will save and as
+    /// what; the bar's word steps aside while it is up; the room beneath
+    /// inert. Typing goes to the field — `q` doesn't quit — and Esc closes.
     #[test]
     fn the_window_opens_empty_with_the_field_holding_the_keys() {
         let _en = english();
@@ -1417,13 +1258,14 @@ pub(crate) mod tests {
         assert!(rows[2].contains("◂ Files ▸ Music/Daft Punk") && rows[2].ends_with("5 items    "), "{}", rows[2]);
         assert!(!rows[2].contains("add from YouTube"), "the word steps aside");
         // The band clears the room's width on the window's rows.
-        for y in 6..=10 {
+        for y in 6..=13 {
             for x in [17, 18, 95, 96] {
                 assert_eq!(b[(x, y)].symbol(), " ", "the band at ({x}, {y})");
             }
         }
         assert_eq!(gui.ui.hit(Position { x: 30, y: 4 }), Some(Act::Guard), "beneath is inert");
-        assert_eq!(gui.ui.hit(Position { x: 85, y: 10 }), Some(here(HereAct::Close)), "Esc close on the border");
+        assert_eq!(gui.ui.hit(at(&rows, "Esc close")), Some(here(HereAct::Close)), "Esc close on the border");
+        assert_eq!(gui.ui.hit(at(&rows, "Saves here")), Some(yt(YtAct::Here(HereAct::Subfolders))), "the rows work before a link");
         assert_eq!(ytdl::tips(&gui), "a paste fills the link and looks it up · typing works too · Esc close");
         assert!(ytdl::wants_paste(&gui), "bracketed paste while the window is up");
         assert!(!super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
@@ -1433,64 +1275,78 @@ pub(crate) mod tests {
         assert!(!ytdl::wants_paste(&gui));
     }
 
-    /// F3: a paste fills the link and looks it up; found, the field gives
-    /// the keys back; every control the board draws clicks, and the tips
-    /// name its keys.
+    /// Files (the canvas's board): over the queue's 47-cell room the
+    /// window centres on the frame at x 12–87 — the room's own form inside
+    /// it: the link's band with `Paste`, the song's card, `Saves here` and
+    /// `Format`, one bracketed primary at the bottom right. Every control
+    /// clicks, and the tips name their keys.
     #[test]
-    fn a_found_song_is_the_board() {
+    fn a_found_song_is_the_files_board() {
         let _en = english();
         let mut gui = files_gui(1);
+        gui.queue_open = true;
+        gui.ytdl.clipboard = Some(|| Some(LINK.to_string()));
         found_here(&mut gui, &[]);
         assert_eq!(gui.ytdl.here.draft.keys, Keys::None);
-        let b = assert_window(&mut gui, (100, 30), (19, 6), boards::F3, boards::F3_RUNS);
+        let b = assert_window(&mut gui, (100, 30), (12, 6), boards::FILES, boards::FILES_RUNS);
         let rows = lines(&b);
         for (text, act) in [
-            ("e edit tags", YtAct::Edit),
-            ("s subfolders", YtAct::Here(HereAct::Subfolders)),
+            ("edit tags ▸", YtAct::Edit),
+            ("Saves here", YtAct::Here(HereAct::Subfolders)),
+            ("Music › Daft Punk ▸", YtAct::Here(HereAct::Subfolders)),
+            ("Format", YtAct::Format),
             ("[X]", YtAct::Clear),
-            ("MP3 ▾", YtAct::Format),
+            ("│ Paste │", YtAct::PasteClip),
             ("[ Add here ]", YtAct::Add),
         ] {
             assert_eq!(gui.ui.hit(at(&rows, text)), Some(yt(act)), "{text}");
         }
-        assert_eq!(gui.ui.hit(Position { x: 30, y: 7 }), Some(yt(YtAct::Field)), "the link row takes the keys");
+        assert_eq!(gui.ui.hit(Position { x: 30, y: 8 }), Some(yt(YtAct::Field)), "the link's card takes the keys");
         assert_eq!(
             ytdl::tips(&gui),
             "Enter add here · e edit tags · s subfolders · f format · a paste replaces the link · Esc close"
         );
-        // The format list rises from MP3 ▾.
-        key(&mut gui, KeyCode::Char('f'));
-        let rows = lines(&buffer(&mut gui, 100, 30));
-        let menu = at(&rows, "MP3  ");
-        assert_eq!(menu, Position { x: 24, y: 10 }, "the list rises from the control:\n{}", rows.join("\n"));
-        key(&mut gui, KeyCode::Esc);
-        assert!(window_up(&gui), "Esc closes the format list first");
+        // `Paste` pastes into the window's own link.
+        gui.act(yt(YtAct::Clear));
+        gui.act(yt(YtAct::PasteClip));
+        assert_eq!((gui.ytdl.here.draft.link.value(), gui.ytdl.draft.link.value()), (LINK, ""));
     }
 
-    /// F5 and F6: with the queue open (47 cells) the window centres over
-    /// the frame at x 12–87; at the 100 × 24 floor it stands on rows 3–13,
-    /// nothing given way.
+    /// With the queue folded the window is banded in the room at x 19–94;
+    /// at the 100 × 24 floor it stands on rows 3–17, nothing given way.
+    /// In a terminal — no clipboard to read — the link's card is the
+    /// window's whole width.
     #[test]
-    fn the_window_over_the_queue_and_at_the_floor() {
+    fn the_window_in_the_room_and_at_the_floor() {
         let _en = english();
         let mut gui = files_gui(1);
+        gui.ytdl.clipboard = Some(|| None);
         found_here(&mut gui, &[]);
-        gui.queue_open = true;
-        assert_window(&mut gui, (100, 30), (12, 6), boards::F3, boards::F3_RUNS);
-        gui.queue_open = false;
-        assert_window(&mut gui, (100, 24), (19, 3), boards::F3, boards::F3_RUNS);
+        assert_window(&mut gui, (100, 30), (19, 6), boards::FILES, boards::FILES_RUNS);
+        assert_window(&mut gui, (100, 24), (19, 3), boards::FILES, boards::FILES_RUNS);
+        gui.ytdl.clipboard = None;
+        let rows = lines(&buffer(&mut gui, 100, 30));
+        assert!(rows[7].starts_with_at(19, &format!("│ ╭{}╮ │", "─".repeat(70))), "{}", rows.join("\n"));
+        assert!(!rows.join("\n").contains("Paste"));
     }
 
-    /// C1 and C2: `s subfolders` opens the radios in place (not
-    /// remembered); ↑ ↓ or ← → move the dot; past Right here the primary
-    /// reads Add to library. Custom's field takes the keys, the variables
-    /// go in at its caret, Enter or Esc gives the keys back, then Enter adds.
+    /// `Saves here` (or `s`) opens its sheet: where under the folder the
+    /// song goes, as radios in two columns — for this window only. ↑ ↓ or
+    /// ← → move the dot; the place follows on the sheet's title and the
+    /// window's row; past Right here the primary reads Add to library.
+    /// Custom's field is a card that takes the keys, the variables go in
+    /// at its caret, a refused layout says so in GOLD. Enter or Esc closes
+    /// the sheet; then Enter adds.
     #[test]
-    fn subfolders_open_the_radios_in_place() {
+    fn saves_here_opens_its_sheet() {
         let _en = english();
         let mut gui = files_gui(1);
         found_here(&mut gui, &[]);
         key(&mut gui, KeyCode::Char('s'));
+        assert!(sheet_up(&gui) && ytdl::modal_open(&gui));
+        assert!(!ytdl::wants_paste(&gui), "a paste is the sheet's field's now, typed");
+        let rows = lines(&buffer(&mut gui, 100, 30));
+        assert_eq!(ytdl::tips(&gui), "↑ ↓ or ← → move the dot · Esc close");
         key(&mut gui, KeyCode::Right);
         settle(&mut gui);
         let check = crate::ytdl::FolderCheck {
@@ -1500,55 +1356,99 @@ pub(crate) mod tests {
             files: None,
         };
         answer_folders(&mut gui, check.clone());
-        let b = assert_window(&mut gui, (100, 30), (19, 6), boards::C1, boards::C1_RUNS);
+        let b = buffer(&mut gui, 100, 30);
+        // The window's own columns: nothing of it shows cut beside the sheet.
+        assert_frame(&b, (19, 12), 76, boards::SHEET, boards::SHEET_RUNS);
+        let _ = rows;
         let rows = lines(&b);
-        assert_eq!(gui.ui.hit(at(&rows, "Custom ")), Some(here(HereAct::Sort(FolderSort::Custom))));
-        assert_eq!(gui.ui.hit(at(&rows, "[ Add to library ]")), Some(yt(YtAct::Add)));
-        assert_eq!(ytdl::tips(&gui), "↑ ↓ or ← → move the dot · Enter add to library · Esc close");
+        assert_eq!(gui.ui.hit(at(&rows, "Custom")), Some(here(HereAct::Sort(FolderSort::Custom))));
+        assert_eq!(gui.ui.hit(at(&rows, "[ Done ]")), Some(here(HereAct::SheetDone)));
+        assert_eq!(gui.ui.hit(Position { x: 5, y: 3 }), Some(here(HereAct::SheetDone)), "a click outside closes it");
+        assert!(rows[19].contains("[ Add to library ]"), "the window's primary follows, beneath:\n{}", rows.join("\n"));
 
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Down);
-        assert!(!keys_free(&gui), "Custom's field took the keys");
+        assert!(gui.ytdl.here.window.as_ref().is_some_and(|w| w.sort == FolderSort::Custom && w.custom_keys), "Custom's field took the keys");
         gui.act(here(HereAct::Var(3)));
         type_text(&mut gui, " - ");
         gui.act(here(HereAct::Var(2)));
         settle(&mut gui);
         answer_folders(&mut gui, crate::ytdl::FolderCheck { new_segments: vec![1], ..check });
-        assert_window(&mut gui, (100, 30), (19, 6), boards::C2, boards::C2_RUNS);
-        assert_eq!(ytdl::tips(&gui), "type · Enter or Esc gives the keys back · then Enter adds");
+        let b = buffer(&mut gui, 100, 30);
+        let rows = lines(&b);
+        let text = rows.join("\n");
+        assert!(rows[9].starts_with_at(19, "╭─ Saves to · Music › Daft Punk › 2001 - Discovery new ─"), "{text}");
+        assert!(rows[14].starts_with_at(21, "│ {{YEAR}} - {{ALBUM}}▏") && b[(21, 13)].fg == th().accent, "the field's card, with the keys:\n{text}");
+        assert!(rows[16].starts_with_at(21, "ARTIST · ALBUMARTIST · ALBUM · YEAR"), "{text}");
+        assert_eq!(gui.ui.hit(at(&rows, "ALBUMARTIST")), Some(here(HereAct::Var(1))));
+        assert_eq!(ytdl::tips(&gui), "type · Enter or Esc gives the keys back");
         // A refused layout: its GOLD line under the field, the place a dash.
         let held = gui.ytdl.here.window.as_ref().unwrap().custom.clone();
         type_text(&mut gui, "/{{TITLE}}");
         let rows = lines(&buffer(&mut gui, 100, 30));
-        assert!(rows.iter().any(|r| r.contains("! Unknown variable {{TITLE}}. Use ARTIST, ALBUMARTIST, ALBUM, YEAR.")), "{}", rows.join("\n"));
-        assert!(rows.iter().any(|r| r.contains("│ Into —")), "{}", rows.join("\n"));
+        let text = rows.join("\n");
+        assert!(text.contains("! Unknown variable {{TITLE}}. Use ARTIST, ALBUMARTIST, ALBUM,") && text.contains("╭─ Saves to · — ─"), "{text}");
         gui.ytdl.here.window.as_mut().unwrap().custom = held;
         key(&mut gui, KeyCode::Esc);
-        assert!(keys_free(&gui) && window_up(&gui), "Esc gave the keys back; the window stays");
+        assert!(sheet_up(&gui), "Esc gave the keys back; the sheet stays");
+        key(&mut gui, KeyCode::Esc);
+        assert!(!sheet_up(&gui) && window_up(&gui), "then closes the sheet, not the window");
+        let rows = lines(&buffer(&mut gui, 100, 30));
+        assert!(rows.iter().any(|r| r.contains("Saves to") && r.contains("Music › Daft Punk › 2001 - Discovery new ▸")), "{}", rows.join("\n"));
         key(&mut gui, KeyCode::Enter);
         assert!(gui.ytdl.here.draft.starting.is_some(), "then Enter adds");
         let req = ytdl::tests::calls(&gui);
         assert!(req.iter().any(|c| matches!(c, Call::Mkdir { directory } if directory == "/Music/Daft Punk/2001 - Discovery/")), "{req:?}");
-        // Not remembered: the next window opens on Right here, closed.
+        // Not remembered: the next window opens on Right here, its sheet shut.
         close(&mut gui);
         key(&mut gui, KeyCode::Char('y'));
         let w = gui.ytdl.here.window.as_ref().unwrap();
         assert!(!w.sorts && w.sort == FolderSort::Here);
     }
 
-    /// C3: a predicted clash — GOLD under the place, `f change format` on
-    /// the action row, the primary Add anyway; the server's 409 refusal is
-    /// shown inside, the window staying.
+    /// Edit tags and Format open over the window as they do over the room,
+    /// for the window's own song; Esc closes the sheet first, then the
+    /// window.
+    #[test]
+    fn the_sheets_stand_over_the_window() {
+        let _en = english();
+        let mut gui = files_gui(1);
+        found_here(&mut gui, &[]);
+        key(&mut gui, KeyCode::Char('e'));
+        assert!(ytdl::tags_up(&gui) && window_up(&gui));
+        let rows = lines(&buffer(&mut gui, 100, 30));
+        let text = rows.join("\n");
+        assert!(rows[7].starts_with_at(19, "╭─ Edit tags ─") && rows[6].contains("─ Add from YouTube ─"), "over the window, on its columns:\n{text}");
+        assert!(rows[7].ends_with_at(95, "─╮") && rows[9].starts_with_at(21, &format!("╭{}╮", "─".repeat(70))), "the title's card its width:\n{text}");
+        type_text(&mut gui, "!");
+        assert_eq!((gui.ytdl.here.draft.tags().title.as_str(), gui.ytdl.draft.tags().title.as_str()), ("One More Time!", ""), "the window's song");
+        key(&mut gui, KeyCode::Esc);
+        assert!(!ytdl::tags_up(&gui) && window_up(&gui), "Esc closes the sheet first");
+        buffer(&mut gui, 100, 30);
+        key(&mut gui, KeyCode::Char('f'));
+        assert!(ytdl::formats_up(&gui));
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Enter);
+        assert_eq!((gui.ytdl.here.draft.codec.as_deref(), gui.ytdl.draft.codec.as_deref()), (Some("m4a"), None));
+        assert!(lines(&buffer(&mut gui, 100, 30))[17].contains("M4A ▸"), "the window's row follows");
+        key(&mut gui, KeyCode::Esc);
+        assert!(!window_up(&gui));
+    }
+
+    /// A predicted clash — GOLD under the rows, the primary Add anyway;
+    /// the server's 409 refusal is shown inside, the window staying.
     #[test]
     fn a_clash_and_the_servers_refusal_stay_inside() {
         let _en = english();
         let mut gui = files_gui(1);
         found_here(&mut gui, &["One_More_Time.mp3"]);
-        let b = assert_window(&mut gui, (100, 30), (19, 6), boards::C3, boards::C3_RUNS);
+        let b = buffer(&mut gui, 100, 30);
         let rows = lines(&b);
-        assert_eq!(gui.ui.hit(at(&rows, "f change format")), Some(yt(YtAct::Format)));
+        let text = rows.join("\n");
+        let clash = at(&rows, "! Something like “One_More_Time.mp3” looks to be in this folder already.");
+        assert_eq!((clash.x, clash.y, b[(clash.x, clash.y)].fg), (21, 18, th().gold), "under the two rows:\n{text}");
         assert_eq!(gui.ui.hit(at(&rows, "[ Add anyway ]")), Some(yt(YtAct::Add)));
-        assert_eq!(ytdl::tips(&gui), "f change format · Enter add anyway · Esc close");
+        assert_eq!(ytdl::tips(&gui), "Enter add anyway · e edit tags · s subfolders · f format · a paste replaces the link · Esc close");
         key(&mut gui, KeyCode::Enter);
         let mut reply = |call: &Call| match call {
             Call::Add(_) => Some(Answer::Add(Err(crate::api::ytdl::YtdlCallError::Answered {
@@ -1570,15 +1470,15 @@ pub(crate) mod tests {
             "the refusal inside:\n{}",
             rows.join("\n")
         );
-        assert!(rows.iter().any(|r| r.contains("MP3 ▾   f change format")), "{}", rows.join("\n"));
+        assert!(!rows.join("\n").contains("looks to be in this folder"), "the warning it confirms is gone");
         assert!(gui.ytdl.jobs().unwrap().jobs().is_empty(), "no row is left");
     }
 
-    /// The format list hung from the window's `MP3 ▾` goes with the window
-    /// (here a re-ping saying uploads are off), never left over Files to
-    /// take a pick for the room's form.
+    /// The Format sheet opened from the window goes with the window (here
+    /// a re-ping saying uploads are off), never left over Files to take a
+    /// pick for the room's form.
     #[test]
-    fn the_format_list_goes_with_the_window() {
+    fn the_format_sheet_goes_with_the_window() {
         let _en = english();
         let mut gui = files_gui(1);
         found_here(&mut gui, &[]);
@@ -1589,33 +1489,37 @@ pub(crate) mod tests {
         ytdl::observe(&mut gui, &super::super::ytdl::tests::connected(crate::api::types::Ping { no_upload: Some(true), ..ping(1) }));
         ytdl::poll(&mut gui);
         assert!(!window_up(&gui), "the gate closed the window");
-        assert!(gui.ytdl.formats.is_none(), "and the list hung from it");
+        assert!(gui.ytdl.formats.is_none(), "and the sheet over it");
         let codec = gui.ytdl.draft.codec.clone();
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Enter);
         assert_eq!(gui.ytdl.draft.codec, codec, "the room's format untouched");
     }
 
-    /// C4: Enter pressed — nothing moves, only the primary goes off: DIM,
-    /// no click and no hover, the key words do nothing; Esc closes and the
+    /// Enter pressed — nothing moves, only the primary goes off: DIM, no
+    /// click and no hover, the controls do nothing; Esc closes and the
     /// press still goes through, its word on the door.
     #[test]
     fn the_press_goes_quiet_and_esc_lets_it_through() {
         let _en = english();
         let mut gui = files_gui(1);
+        gui.ytdl.clipboard = Some(|| Some(LINK.to_string()));
         found_here(&mut gui, &[]);
         key(&mut gui, KeyCode::Enter);
-        pointer_at(&mut gui, 85, 15);
-        let b = assert_window(&mut gui, (100, 30), (19, 6), boards::C4, boards::C4_RUNS);
+        pointer_at(&mut gui, 85, 19);
+        let b = buffer(&mut gui, 100, 30);
         let rows = lines(&b);
-        for text in ["[ Adding… ]", "e edit tags", "s subfolders", "MP3", "[X]"] {
+        let primary = at(&rows, "[ Adding… ]");
+        assert_eq!((primary.x + 11, primary.y, b[(primary.x, primary.y)].fg), (93, 19, th().dim), "{}", rows.join("\n"));
+        for text in ["[ Adding… ]", "edit tags ▸", "Saves here", "Format", "[X]", "│ Paste │"] {
             assert_eq!(gui.ui.hit(at(&rows, text)), Some(Act::Guard), "{text} does nothing");
         }
-        assert_eq!(gui.ui.hit(Position { x: 85, y: 16 }), Some(here(HereAct::Close)));
+        assert_eq!(gui.ui.hit(at(&rows, "Esc close")), Some(here(HereAct::Close)));
         assert_eq!(ytdl::tips(&gui), "Esc close");
         key(&mut gui, KeyCode::Char('e'));
         assert!(!gui.ytdl.here.draft.tags_open, "keys wait for the server");
         shift(&mut gui, 'S');
+        assert!(!sheet_up(&gui));
         key(&mut gui, KeyCode::Esc);
         assert!(!window_up(&gui), "Esc closes");
         let mut reply = server("/Music/Daft Punk/", None);
@@ -1652,6 +1556,7 @@ pub(crate) mod tests {
         found_here(&mut gui, &[]);
         key(&mut gui, KeyCode::Char('s'));
         key(&mut gui, KeyCode::Right);
+        key(&mut gui, KeyCode::Enter);
         settle(&mut gui);
         answer_folders(
             &mut gui,
@@ -1692,9 +1597,9 @@ pub(crate) mod tests {
     }
 
     /// The room's other stages read the same inside the window: the
-    /// lookup out (ACCENT), a server that can't be reached (GOLD, `a try
-    /// again`), the tags as fields (the label ACCENT BOLD with the keys),
-    /// and why the primary is off on the row above it (DIM).
+    /// lookup out (ACCENT, beside the cover's slot), a server that can't
+    /// be reached (GOLD, `try again`), and why the primary is off on the
+    /// row above it (DIM).
     #[test]
     fn the_rooms_other_stages_read_the_same_in_the_window() {
         let _en = english();
@@ -1704,9 +1609,10 @@ pub(crate) mod tests {
         let b = buffer(&mut gui, 100, 30);
         let rows = lines(&b);
         let reading = at(&rows, "Reading the video…");
-        assert_eq!((reading.x, reading.y), (32, 9), "under the link's blank:\n{}", rows.join("\n"));
+        assert_eq!((reading.x, reading.y), (30, 10), "right under the link's card, past the slot:\n{}", rows.join("\n"));
         assert_eq!(b[(reading.x, reading.y)].fg, th().accent);
-        assert!(rows[11].contains("│ Into Music › Daft Punk"), "{}", rows.join("\n"));
+        assert!(rows[10].starts_with_at(21, "╭──────╮") && rows[15].starts_with_at(21, "Saves here"), "{}", rows.join("\n"));
+        assert_eq!(gui.ui.hit(at(&rows, "[ Add here ]")), Some(Act::Guard), "the primary is there, and off");
 
         let refused = crate::api::ytdl::YtdlCallError::Unanswered {
             why: crate::api::ytdl::NoAnswer::Refused,
@@ -1716,20 +1622,10 @@ pub(crate) mod tests {
         let b = buffer(&mut gui, 100, 30);
         let rows = lines(&b);
         let gold = at(&rows, "! Can't reach Home server.");
-        assert_eq!(b[(gold.x, gold.y)].fg, th().gold);
-        assert_eq!(gui.ui.hit(at(&rows, "a try again")), Some(yt(YtAct::Retry)));
-
-        let mut gui = files_gui(1);
-        found_here(&mut gui, &[]);
-        key(&mut gui, KeyCode::Char('e'));
-        let b = buffer(&mut gui, 100, 30);
-        let rows = lines(&b);
-        let title = at(&rows, "TITLE   One More Time");
-        assert_eq!((title.x, b[(title.x, title.y)].fg), (21, th().accent));
-        assert!(b[(title.x, title.y)].modifier.contains(Modifier::BOLD));
-        assert!(rows.iter().any(|r| r.contains("YEAR    2001")), "{}", rows.join("\n"));
-        key(&mut gui, KeyCode::Esc);
-        assert!(window_up(&gui), "Esc gives a tag's keys back first");
+        assert_eq!((gold.y, b[(gold.x, gold.y)].fg), (10, th().gold), "{}", rows.join("\n"));
+        let again = rows.iter().position(|r| r.starts_with_at(21, "try again")).expect("its way on, on a row of its own");
+        assert_eq!(gui.ui.hit(Position { x: 22, y: again as u16 }), Some(yt(YtAct::Retry)));
+        assert!(!rows.join("\n").contains("[ Add"), "no primary");
 
         // Already adding the same link to this folder: the primary off, why
         // on the row above it.
@@ -1742,7 +1638,7 @@ pub(crate) mod tests {
         let b = buffer(&mut gui, 100, 30);
         let rows = lines(&b);
         let why = at(&rows, "Already adding to this folder");
-        assert_eq!((why.x + 28, b[(why.x, why.y)].fg), (92, th().dim), "ending one cell in, DIM");
+        assert_eq!((why.x + 29, b[(why.x, why.y)].fg), (93, th().dim), "ending at the block's edge, DIM");
         let primary = at(&rows, "[ Add here ]");
         assert_eq!((primary.y, b[(primary.x, primary.y)].fg), (why.y + 2, th().dim), "off");
         assert_ne!(gui.ui.hit(primary), Some(yt(YtAct::Add)), "no click");
@@ -1770,7 +1666,7 @@ pub(crate) mod tests {
 
     /// The window keeps every key while it is up: D, T and A — with Shift
     /// or Caps Lock — neither open Auto DJ or Stats nor toggle the DJ, and
-    /// a capital of a word it drew is that word's (S: subfolders).
+    /// a capital of a control it drew is that control's (S: Saves here).
     #[test]
     fn the_windows_capitals_stay_in_it() {
         let _en = english();
@@ -1787,7 +1683,7 @@ pub(crate) mod tests {
             }
         }
         super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE));
-        assert!(gui.ytdl.here.window.as_ref().is_some_and(|w| w.sorts), "S is s subfolders");
+        assert!(sheet_up(&gui), "S is the Saves here row");
     }
 
     /// Every language's door words where the browse bar's give-way still
@@ -1809,18 +1705,20 @@ pub(crate) mod tests {
         }
     }
 
-    /// Every language drawn in the window (F3, then C1): the primary, the
-    /// key words and the four dots whole on their rows, the tips line in
-    /// the footer's 99 with Enter and Esc kept.
+    /// Every language drawn in the window, then its sheet: the primary,
+    /// the card's control, the two rows' labels and the four radios whole,
+    /// the tips line in the footer's 99 with Enter and Esc kept.
     #[test]
     fn every_locale_draws_the_window_whole() {
         let Some(code) = crate::setup::tests::in_own_process(&super::super::ytdl::tests::LOCALES) else { return };
         let whole = super::super::ytdl::tests::whole;
         let mut gui = files_gui(1);
+        gui.ytdl.clipboard = Some(|| None);
         found_here(&mut gui, &[]);
         let rows = lines(&buffer(&mut gui, 100, 30));
         let primary = format!("[ {} ]", t!("gui.ytdl.add.here"));
-        for words in [primary, t!("gui.ytdl.key.edit").to_string(), t!("gui.ytdl.key.subfolders").to_string()] {
+        let edit = ytdl::page_words(&t!("gui.ytdl.key.edit")).1.to_string();
+        for words in [primary, edit, t!("gui.ytdl.here.saves_here").to_string(), t!("gui.ytdl.room.format").to_string(), t!("gui.ytdl.room.paste_button").to_string()] {
             assert!(whole(&rows, &words, (19, 95)), "{code}: {words} whole:\n{}", rows.join("\n"));
         }
         let line = tips(&gui);
@@ -1828,12 +1726,11 @@ pub(crate) mod tests {
         assert!(line.starts_with(&*t!("gui.tips.ytdl_enter_here")) && line.ends_with(&*t!("gui.tips.ytdl_close")), "{code}: {line}");
         key(&mut gui, KeyCode::Char('s'));
         let rows = lines(&buffer(&mut gui, 100, 30));
-        let dots: Vec<String> = FolderSort::ALL.iter().map(|s| s.label().text()).collect();
-        let row = rows.iter().position(|r| whole(std::slice::from_ref(r), &dots[0], (19, 95)) && whole(std::slice::from_ref(r), &dots[3], (19, 95)));
-        let y = row.unwrap_or_else(|| panic!("{code}: the four dots not on one row:\n{}", rows.join("\n")));
-        for words in &dots {
-            assert!(whole(&rows[y..=y], words, (19, 95)), "{code}: {words} on the dots' row: {}", rows[y]);
+        for sort in FolderSort::ALL {
+            let words = sort.label().text();
+            assert!(whole(&rows, &words, (19, 95)), "{code}: {words} in the sheet:\n{}", rows.join("\n"));
         }
+        assert!(whole(&rows, &t!("gui.ytdl.done"), (19, 95)), "{code}: Done:\n{}", rows.join("\n"));
         assert!(width(&tips(&gui)) <= 99, "{code}");
     }
 }

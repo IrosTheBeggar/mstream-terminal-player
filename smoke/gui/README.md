@@ -144,16 +144,19 @@ url = "http://127.0.0.1:3041"
   Punk - Harder, Better, Faster, Stronger"); `"download": {"slowMs": 4000}`
   keeps `adding` on screen. Seed `gui-config/config.toml` with that server
   alone, and between runs delete `gui-config/ytdl.json` and every song but
-  Aerodynamic (the title row's `✓ added` lasts an hour; a song left behind is
-  a clash). The passes (`MSTREAM_YT_STEPS`, default all): `room` — Settings
-  with no doorway (TORRENTS over its switch alone), then the nav's `Add
-  YouTube` row under TOOLS, lit `▸ Add YouTube`, the title with no `◂`, a
-  bracketed paste, the cleaned tags, Enter, the title row's `adding` → `✓
-  added`, the note, the file on disk, Esc then `l` for the From YouTube
-  list; `refuse` — the same link again (warned of, then the 409 standing
-  alone), a live stream's warning, the bot check's failed lookup with a
-  title typed and the add failing in the server's words (`Try again ·
-  Dismiss`); `caps` — an Esc leaves nothing (a nav room has no way back),
+  Aerodynamic (a song left behind is a clash, and the list's own rows are
+  what the passes wait for). The passes (`MSTREAM_YT_STEPS`, default all):
+  `room` — Settings with no doorway (TORRENTS over its switch alone), then
+  the nav's `Add YouTube` row under TOOLS, lit `▸ Add YouTube`, the title
+  with no `◂`, the list and the limits in the room and no `Paste` (a
+  terminal reads no clipboard), a bracketed paste, the song's card and its
+  two rows, the three sheets by `e`, `d` and `f`, Enter, its `✓` row in
+  the list, the note, the file on disk, the form started over and `↓` on
+  the list; `refuse` — the same link again (warned of, then the 409
+  standing alone), a live stream's warning, the bot check's failed lookup
+  with a title typed in Edit tags and the add failing in the server's
+  words on its row (`Try again · Dismiss`); `caps` — an Esc leaves nothing
+  (a nav room has no way back),
   then `D` `T` `A` with nothing holding the keys stay in the room; `door`
   — no door at a library root, the door word on Discovery, `y`, a paste,
   `[ Add here ]`, the door's spot, the re-list with the new song under the

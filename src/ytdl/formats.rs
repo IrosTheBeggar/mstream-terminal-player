@@ -68,14 +68,6 @@ pub(crate) fn format_help(codec: &str) -> Option<Label> {
     Some(Label::new(key))
 }
 
-/// A download record's format, from its file's extension — the record
-/// keeps no codec ("MP3 · Oct 31"): `None` for a path with none.
-pub(crate) fn record_format(filepath: &str) -> Option<String> {
-    let name = filepath.rsplit(['/', '\\']).next().unwrap_or(filepath);
-    let (stem, ext) = name.rsplit_once('.')?;
-    (!stem.is_empty() && !ext.is_empty()).then(|| format_name(ext))
-}
-
 /// The extension the finished file gets: yt-dlp writes AAC into an .m4a
 /// (mStream's OUTPUT_EXT_MAP) and is asked for m4a when the codec is m4b;
 /// every other codec names its own.
@@ -167,17 +159,6 @@ mod tests {
         assert_eq!(keys, ["gui.ytdl.format.mp3", "gui.ytdl.format.m4a", "gui.ytdl.format.opus", "gui.ytdl.format.flac", "gui.ytdl.format.wav"]);
         assert_eq!(format_help("ogg"), None);
         assert_eq!(format_help("aac"), None);
-    }
-
-    #[test]
-    fn a_records_format_comes_from_its_extension() {
-        assert_eq!(record_format("Music/Daft Punk/One_More_Time.mp3").as_deref(), Some("MP3"));
-        assert_eq!(record_format("Mixes/Aerodynamic.opus").as_deref(), Some("Opus"));
-        assert_eq!(record_format("Mixes/x.M4A").as_deref(), Some("M4A"));
-        assert_eq!(record_format("Mixes/x.ogg").as_deref(), Some("OGG Vorbis"));
-        assert_eq!(record_format("Music/.hidden"), None);
-        assert_eq!(record_format("Music/No extension"), None);
-        assert_eq!(record_format("Music.d/file"), None, "a dot in a folder is no extension");
     }
 
     #[test]

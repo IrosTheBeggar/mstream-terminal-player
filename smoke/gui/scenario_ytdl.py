@@ -7,10 +7,12 @@ import os, json, time
 # library "Music" holding Daft Punk/Discovery/Aerodynamic.mp3. See README.md.
 #
 # MSTREAM_YT_STEPS picks the passes (comma list, default all):
-#   room   — the nav's Add YouTube row under TOOLS: paste, the found tags,
-#            Enter, the title-row word, the From YouTube list, the note
+#   room   — the nav's Add YouTube row under TOOLS: the list in the room,
+#            a paste, the song's card and its two rows, Enter, its row in
+#            the list, the note; then the three sheets
 #   refuse — the same link again (409 before downloading), a live stream,
-#            YouTube's bot check (the details typed by hand, then the add fails)
+#            YouTube's bot check (the details typed in Edit tags, then the
+#            add fails in the server's words on its row)
 #   caps   — D, T and A in the room never reach Auto DJ, Stats or the DJ
 #   door   — Files › Music › Daft Punk › Discovery: the door word, y, the
 #            window, a paste, Add here, the door's spot, the re-list
@@ -74,44 +76,62 @@ def run(Gui):
               "the title row, with no way back")
 
     if "room" in STEPS:
+        # The list is on the page, under the form; a terminal can't read
+        # the clipboard, so no Paste stands beside the link (clause 11).
+        check(g.find("FROM YOUTUBE") is not None, "the list is in the room")
+        check(g.find("One video per link") is not None, "the limits, before any link")
+        check(g.find("│ Paste │") is None, "no Paste in a terminal")
         paste(g, ONE_MORE_TIME)
         g.wait_for("One More Time", 15, "the found song")
         g.pump(1.5)
         g.dump("found")
+        # (An older server's lookup names no channel and no length: YouTube's
+        # line is the one word there.)
+        line = "YouTube" if OLDER else "YouTube · Daft Punk · 5:20"
+        for words in ("edit tags ▸", line, "Cleaned from", "Saves to", "Format", "Add to library ▸"):
+            check(g.find(words) is not None, f"the card and its rows: {words}")
+        # The three sheets, each by its key, each closed by Esc.
+        for key, title in (("e", "─ Edit tags ─"), ("d", "─ Saves to · "), ("f", "─ Format · ")):
+            g.key(key); g.pump(0.8)
+            g.dump(f"the sheet {key} opens")
+            check(g.find(title) is not None, f"{key} opens {title}")
+            g.key("\x1b"); g.pump(0.6)
+            check(g.find(title) is None, f"Esc closes {title}")
         g.key("\r")
         g.pump(0.4)
         g.dump("the press out")
-        g.wait_for("added", 40, "the job's word")
+        # The note says it landed (the server's record may list an earlier
+        # run's song by the same name: the row alone proves nothing).
+        g.wait_for("Added “One More Time”", 40, "the note")
         g.pump(1.0)
         g.dump("added")
+        check(g.find("✓ One More Time") is not None, "its row in the list")
         print("songs after:", songs(), flush=True)
         check(any("One_More_Time" in s or "One More Time" in s for s in songs()), "the song landed in the library")
-        # The form is fresh, the link field holding the keys for the next
-        # paste (E2): Esc gives them back, then l opens the list.
+        # The form started over, the link field holding the keys for the
+        # next paste: ↓ leaves it for the list, the held row a song's.
+        check(g.find("Paste a YouTube link") is not None, "the form started over")
+        g.key("\x1b[B"); g.pump(0.6)
+        g.dump("the list, its cursor up")
+        hit = g.find("✓ One More Time")
+        lit = g.screen.buffer[hit[0]][hit[1]]
+        check(lit.bg != "default" or lit.reverse, "the list's cursor on its first row")
         g.key("\x1b"); g.pump(0.4)
-        g.key("l"); g.pump(1.0)
-        g.dump("the From YouTube list")
-        check(g.find("From YouTube") is not None, "the list window is titled From YouTube")
-        g.key("\x1b"); g.pump(0.6)
-        g.dump("the list closed")
 
     if "refuse" in STEPS and OLDER:
         # The same link into the same folder: warned of ahead of time (C4),
         # Add anyway — the older server downloads, then won't replace.
         paste(g, ONE_MORE_TIME)
         g.wait_for("One More Time", 15)
-        g.wait_for("looks to be in this folder already", 10, "the clash warned of")
+        g.wait_for("Something like", 10, "the clash warned of")
         g.dump("older: the same link, the clash ahead of time")
+        check(g.find("Add anyway ▸") is not None, "older: the primary reads Add anyway")
         g.key("\r")
-        g.wait_for("! failed", 60, "the after-download clash")
+        g.wait_for("! One More Time", 60, "the after-download clash, on its row")
         g.pump(0.5)
         g.dump("older: the same link failed")
-        g.key("\x1b"); g.pump(0.4)
-        g.key("l"); g.pump(1.0)
-        g.dump("older: the list")
         check(g.find("nothing was") is not None and g.find("Change format and retry · Dismiss") is not None,
               "older: the after-download clash row, its way on a format")
-        g.key("\x1b"); g.pump(0.6)
         # A live stream: no isLive on this server, so no warning ahead of
         # time. (6.32's fake yt-dlp doesn't skip live streams, so the add
         # itself proves nothing here: not pressed.)
@@ -126,36 +146,40 @@ def run(Gui):
         # alone over the primary.
         paste(g, ONE_MORE_TIME)
         g.wait_for("One More Time", 15)
-        g.wait_for("looks to be in this folder already", 10, "the clash warned of")
+        g.wait_for("Something like", 10, "the clash warned of")
         g.dump("the same link: the clash ahead of time")
+        check(g.find("Add anyway ▸") is not None, "the primary reads Add anyway")
         g.key("\r")
-        g.wait_for("so nothing was added", 15, "the 409")
+        g.wait_for("nothing was added", 15, "the 409")
         g.pump(0.5)
         g.dump("the same link: the server refused it")
-        check(g.find("looks to be in this folder already") is None, "the 409 stands for the warning it confirms")
-        check(sum(1 for line in g.text() if "f change format" in line) == 1, "one f change format")
+        check(g.find("Something like") is None, "the 409 stands for the warning it confirms")
         paste(g, LIVE)
         g.wait_for("Live streams can't be saved", 15, "the live warning")
         g.pump(0.5)
         g.dump("a live stream")
-        # YouTube's bot check: the lookup fails, the tags open empty (B4),
-        # a title typed, Enter adds — and the add fails with the server's words.
+        # YouTube's bot check: the lookup fails — its words, `type the
+        # details ▸` and Add all the same; a title typed in Edit tags, Enter
+        # to close it, Enter to add — and the add fails in the server's
+        # words on its row.
         paste(g, BOT)
         g.wait_for("Couldn't read this video's details", 20, "the failed lookup")
         g.pump(0.5)
         g.dump("the bot check's lookup")
+        check(g.find("type the details ▸") is not None and g.find("Add to library ▸") is not None, "the details to type, Add on without them")
+        g.key("t"); g.pump(0.6)
+        check(g.find("─ Edit tags ─") is not None, "t opens Edit tags")
         for ch in "Some Song":
             g.key(ch)
+        g.key("\r"); g.pump(0.6)
+        g.dump("the typed details")
+        check(g.find("─ Edit tags ─") is None and g.find("Some Song") is not None, "Enter closes the sheet, the card has the title")
         g.key("\r")
-        g.wait_for("! failed", 40, "the title row's failed word")
+        g.wait_for("! Some Song", 40, "the failure, on its row")
         g.pump(0.5)
         g.dump("the bot check's add failed")
-        g.key("\x1b"); g.pump(0.4)
-        g.key("l"); g.pump(1.0)
-        g.dump("the list, with the failure")
-        check(g.find("the server said: “Sign in to confirm you're not a bot.") is not None, "the failure in the server's words")
+        check(g.find("the server said:") is not None and g.find("not a bot.") is not None, "the failure in the server's words")
         check(g.find("Try again · Dismiss") is not None, "the failure offers Try again and Dismiss")
-        g.key("\x1b"); g.pump(0.6)
 
     if "caps" in STEPS:
         # Nothing holds the keys: D, T and A are the room's to swallow, never

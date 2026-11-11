@@ -500,11 +500,15 @@ opens in its own window instead (see [Two flavours](#two-flavours)).
   server's play history, so Last played and Most played show your own
   listening.
 - **Add from YouTube**, on your own server where your account can add
-  files: the nav's Add YouTube room takes a pasted link, reads the
-  video's tags (tidied, every change undoable and every tag editable),
-  shows the folder the song goes to and asks the server to add it; on a
-  folder in Files, the browse bar's `add from YouTube` (or `y`) adds it
-  right there. A list follows each add to the end and keeps what came in.
+  files: the nav's Add YouTube room takes a pasted link (in the player's
+  own window a `Paste` button reads the clipboard) and shows the song it
+  makes as a card — the video's cover, its tags tidied, every change
+  undoable, `edit tags` a sheet of text boxes — with where it saves and
+  as what on a row each, and one button that asks the server to add it;
+  on a folder in Files, the browse bar's `add from YouTube` (or `y`) adds
+  it right there. The list under the form follows each add to the end and
+  keeps what came in. (The cover is YouTube's own thumbnail for the video,
+  which the player asks YouTube's image host for itself.)
 - **Settings**: crossfade, gapless, resume the queue at launch, torrents,
   and **keyboard hints** (off by default — the footer names the keys when
   it is on). The GUI speaks the ten locales the wizard does, from your
