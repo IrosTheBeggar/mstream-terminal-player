@@ -1018,7 +1018,22 @@ pub(crate) const AUDIO_THREAD: &str = "mstream-audio";
 pub fn panics_are_caught(thread: Option<&str>) -> bool {
     thread == Some(AUDIO_THREAD)
         || thread == Some(crate::engine::PREPARE_THREAD)
+        || device_thread(thread)
         || card_thread(thread)
+}
+
+/// The engine's device thread: every call it makes into the system's audio
+/// service is caught there and read as a failed open — cpal's WASAPI host
+/// panics its way out of an endpoint that vanished between two calls — so
+/// a device unplugged at the wrong moment costs a retry, not the screen.
+#[cfg(not(target_arch = "wasm32"))]
+fn device_thread(thread: Option<&str>) -> bool {
+    thread == Some(crate::engine::output::DEVICE_THREAD)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn device_thread(_thread: Option<&str>) -> bool {
+    false
 }
 
 /// A card transfer's job, fit, eject or sync thread: each catches its own
@@ -4135,6 +4150,9 @@ mod tests {
         // would tear the terminal down for a panic already handled — a
         // malformed file must cost a blend, not the screen (audit #32).
         assert!(panics_are_caught(Some(crate::engine::PREPARE_THREAD)));
+        // The device thread catches around every call into the audio
+        // backend: a panic under an open is a failed open.
+        assert!(panics_are_caught(Some(crate::engine::output::DEVICE_THREAD)));
         assert!(!panics_are_caught(Some("mstream-api")), "the api thread is not caught");
         // A card's job, fit, eject and sync threads catch theirs and end
         // with why: the hook leaves the screen alone there too.
