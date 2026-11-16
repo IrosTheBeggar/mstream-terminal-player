@@ -90,35 +90,66 @@ const BUSY_MAX: Duration = Duration::from_secs(30 * 60);
 /// How often a wait on another thread looks at the listener's stop.
 const LOOK: Duration = Duration::from_millis(100);
 
+/// The conversions running at once, among every source that takes its
+/// turns here.
+#[derive(Debug)]
+struct Turns {
+    running: Mutex<usize>,
+    freed: Condvar,
+}
+
 /// The conversions running in this process ([`TRANSCODES`] at most).
-static RUNNING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+static RUNNING: Turns = Turns::new();
 
-/// A conversion's turn, until it is dropped.
-struct Turn;
+impl Turns {
+    const fn new() -> Turns {
+        Turns { running: Mutex::new(0), freed: Condvar::new() }
+    }
 
-impl Turn {
+    /// Where a source's conversions take their turns: this process's.
+    #[cfg(not(test))]
+    fn of_a_source() -> &'static Turns {
+        &RUNNING
+    }
+
+    /// In a test, the source's own. A process syncs one card at a time,
+    /// from one source of this kind, so nothing else is on its turns. The
+    /// tests run their sources side by side in one process, and there a
+    /// source whose queue runs one conversion at a time waited for every
+    /// other test's conversions to end: four tests hold a turn for seconds
+    /// on purpose (a full queue is what they wait out), and
+    /// a_bulk_queue_is_asked_no_more_than_it_runs, which gives its second
+    /// conversion ten, timed out in about one run of the suite in three.
+    /// The process's own turns are still what
+    /// every_source_of_a_process_takes_its_turns_together takes.
+    #[cfg(test)]
+    fn of_a_source() -> &'static Turns {
+        Box::leak(Box::new(Turns::new()))
+    }
+
     /// Waits for a turn, while `limit` or more run (at most
     /// [`TRANSCODES`]); None once `stopped` says so first.
-    fn take(stopped: &dyn Fn() -> bool, limit: usize) -> Option<Turn> {
-        let (lock, cv) = &RUNNING;
-        let mut running = lock.lock().unwrap_or_else(|e| e.into_inner());
+    fn take(&'static self, stopped: &dyn Fn() -> bool, limit: usize) -> Option<Turn> {
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         while *running >= limit.clamp(1, TRANSCODES) {
             if stopped() {
                 return None;
             }
-            let wait = cv.wait_timeout(running, LOOK);
+            let wait = self.freed.wait_timeout(running, LOOK);
             running = wait.unwrap_or_else(|e| e.into_inner()).0;
         }
         *running += 1;
-        Some(Turn)
+        Some(Turn(self))
     }
 }
 
+/// A conversion's turn, until it is dropped.
+struct Turn(&'static Turns);
+
 impl Drop for Turn {
     fn drop(&mut self) {
-        let (lock, cv) = &RUNNING;
-        *lock.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
-        cv.notify_all();
+        *self.0.running.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.freed.notify_all();
     }
 }
 
@@ -241,6 +272,8 @@ struct Pace {
     limit: usize,
     max_channels: u32,
     busy_max: Duration,
+    /// Where the conversions take their turns.
+    turns: &'static Turns,
 }
 
 /// Makes one conversion: see the module's note. A conversion that fails
@@ -260,7 +293,7 @@ fn make_once(
     pace: Pace,
     stopped: &dyn Fn() -> bool,
 ) -> Result<Made, Failed> {
-    let Some(_turn) = Turn::take(stopped, pace.limit) else { return Err(skip("stopped")) };
+    let Some(_turn) = pace.turns.take(stopped, pace.limit) else { return Err(skip("stopped")) };
     let mut whole_before: Option<u64> = None;
     let mut why = String::new();
     // When the queue was first found full for this file, all its tries
@@ -1046,6 +1079,8 @@ pub(crate) struct Http {
     /// The server's bulk queue, and how many of its conversions it runs at
     /// once; None: a server without one.
     bulk: Option<u32>,
+    /// Where its conversions take their turns ([`Turns::of_a_source`]).
+    turns: &'static Turns,
 }
 
 impl Http {
@@ -1064,6 +1099,7 @@ impl Http {
             scratch: Scratch::new()?,
             made: 0,
             bulk: None,
+            turns: Turns::of_a_source(),
         })
     }
 
@@ -1082,7 +1118,7 @@ impl Http {
 
     fn pace(&self) -> Pace {
         let limit = self.bulk.map_or(TRANSCODES, |n| (n as usize).clamp(1, TRANSCODES));
-        Pace { limit, max_channels: self.max_channels, busy_max: self.busy_max }
+        Pace { limit, max_channels: self.max_channels, busy_max: self.busy_max, turns: self.turns }
     }
 
     /// The listener's stop: once set, a wait for a conversion's turn, for a
@@ -1406,8 +1442,8 @@ mod tests {
         http.bulk(Some(1));
         http.busy_max = Duration::from_secs(2);
         let file = wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 1);
-        // The clock from the first request: not the wait for this process's
-        // conversion turn before it (other tests convert too).
+        // The clock from the first request, which is when the queue first
+        // said it was full.
         let first = std::thread::spawn(move || {
             let asked = seen.recv_timeout(Duration::from_secs(60)).is_ok();
             (asked, Instant::now(), seen)
@@ -1454,8 +1490,7 @@ mod tests {
     fn the_listeners_stop_ends_the_wait_for_a_full_queue_and_skips_the_file() {
         let file = wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 1);
         // Made now, at the engine's turn: stopped once the queue was found
-        // full, in its wait (a turn of this process's may be waited for
-        // first, as other tests convert too).
+        // full, in its wait.
         let (base, seen) = full_for_good();
         let mut http = Http::new(Arc::new(Client::new(&base).unwrap()), 0, 2).unwrap();
         http.bulk(Some(1));
@@ -1493,8 +1528,9 @@ mod tests {
         drop(http);
         assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
         // A turn waited for: it ends at the stop too.
-        let held = Turn::take(&|| false, 1).expect("a turn");
-        assert!(Turn::take(&|| true, 1).is_none(), "a second, stopped, isn't waited for");
+        let turns = Turns::of_a_source();
+        let held = turns.take(&|| false, 1).expect("a turn");
+        assert!(turns.take(&|| true, 1).is_none(), "a second, stopped, isn't waited for");
         drop(held);
     }
 
@@ -1532,8 +1568,7 @@ mod tests {
             (1..=2).map(|n| wanted(&format!("lib/A/0{n}.wav"), Bytes::Converted(CONTAINER_OPUS), 1)).collect();
         http.lengths((1..=2).map(|n| (format!("lib/A/0{n}.wav"), 10_000)).collect());
         // Made ahead on two threads: the second isn't asked for while the
-        // first holds the server's one slot. (Other tests' conversions take
-        // this process's turns too: they can only hold the second back.)
+        // first holds the server's one slot.
         http.ahead(&files.iter().collect::<Vec<_>>());
         let first = seen.recv_timeout(Duration::from_secs(10)).expect("the first conversion asked");
         assert!(first.contains("&bulk=1"), "{first}");
@@ -1545,6 +1580,42 @@ mod tests {
         for file in &files {
             let mut into = Vec::new();
             http.fetch(file, &mut into).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(into, stream);
+        }
+    }
+
+    /// Outside a test every source takes its turns from the process's count
+    /// ([`Turns::of_a_source`]): handed it here, a source whose queue runs
+    /// one conversion at a time asks for none while another source's runs.
+    #[test]
+    fn every_source_of_a_process_takes_its_turns_together() {
+        let stream = opus_bytes(10_000, 2, true);
+        let file = wanted("lib/A/01.wav", Bytes::Converted(CONTAINER_OPUS), 1);
+        let source = |base: &str| {
+            let mut http = Http::new(Arc::new(Client::new(base).unwrap()), 0, 2).unwrap();
+            http.turns = &RUNNING;
+            http.lengths(HashMap::from([("lib/A/01.wav".to_string(), 10_000)]));
+            http
+        };
+        // One source's conversion, running until `open`.
+        let open = Arc::new(AtomicBool::new(false));
+        let (base, seen) = held_first(open.clone(), stream.clone());
+        let mut first = source(&base);
+        first.ahead(&[&file]);
+        seen.recv_timeout(Duration::from_secs(10)).expect("the first source's conversion asked");
+        // Another's, of a server that runs one at a time: not asked for
+        // while that one has the process's turn.
+        let (base, seen) = held_first(Arc::new(AtomicBool::new(true)), stream.clone());
+        let mut second = source(&base);
+        second.bulk(Some(1));
+        second.ahead(&[&file]);
+        let early = seen.recv_timeout(Duration::from_millis(600));
+        assert!(early.is_err(), "asked while another source's conversion runs: {early:?}");
+        open.store(true, Ordering::SeqCst);
+        seen.recv_timeout(Duration::from_secs(10)).expect("asked once the first had ended");
+        for http in [&mut first, &mut second] {
+            let mut into = Vec::new();
+            http.fetch(&file, &mut into).unwrap_or_else(|e| panic!("{e:?}"));
             assert_eq!(into, stream);
         }
     }
