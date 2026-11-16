@@ -334,8 +334,11 @@ opened, and the controls answer throughout. A default that is not ready
 yet (a headset still connecting) is tried again for half a minute. Pull the
 device it was playing on and it hops to whatever the system falls back to;
 when there is nothing to fall back to (the only headset switched off), it
-holds the moment and resumes as soon as any output returns. Each move is
-one line in the message bar, or on stderr in `serve` mode.
+holds the moment and resumes as soon as any output returns. A device that
+is still there and has stopped taking sound is opened afresh, and if that
+does not start it the player says the audio is lost and waits — it is said
+to be back only once sound is flowing again. Each move is one line in the
+message bar, or on stderr in `serve` mode.
 
 ## The progress bar
 

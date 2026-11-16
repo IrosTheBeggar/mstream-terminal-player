@@ -178,6 +178,17 @@ impl Pulse {
         }
     }
 
+    /// Whether the callback has asked for a buffer since it was last
+    /// expected to: a stream that is running, as against one just opened
+    /// or woken whose device is still coming up. What silence means turns
+    /// on it — the second kind has not asked *yet*; the first has stopped.
+    pub(crate) fn has_started(&self) -> bool {
+        match self.pulled.load(Ordering::Acquire) {
+            0 => false,
+            at => at - 1 >= self.expected.load(Ordering::Acquire),
+        }
+    }
+
     /// How long the callback has gone without finishing a pull, counted
     /// from when it was last expected to make one.
     pub(crate) fn quiet_for(&self) -> Duration {
@@ -245,7 +256,10 @@ pub(crate) struct Output {
     /// which is why a missing or broken device is still an error at launch
     /// — and the engine suspends it once nothing has needed it for a while.
     awake: bool,
-    stream: Stream,
+    /// `None` once the stream has been closed under an output that died
+    /// ([`Output::bury`]): the output is still what the next one is compared
+    /// with, and has nothing left to play, pause or wake.
+    stream: Option<Stream>,
 }
 
 /// The next stream's id. Zero is the bus's "nobody".
@@ -310,7 +324,8 @@ impl Output {
         if !self.awake || self.is_dead() || self.pulse.is_pulling() {
             return false;
         }
-        match self.stream.pause() {
+        let Some(stream) = &self.stream else { return false };
+        match stream.pause() {
             Ok(()) => {
                 self.awake = false;
                 true
@@ -331,7 +346,10 @@ impl Output {
         if self.awake {
             return;
         }
-        match self.stream.play() {
+        // Buried: there is nothing to wake, and a new stream is already
+        // the answer.
+        let Some(stream) = &self.stream else { return };
+        match stream.play() {
             Ok(()) => {
                 self.awake = true;
                 self.pulse.expect_from_now();
@@ -355,6 +373,26 @@ impl Output {
     /// a real unplug takes.
     pub(crate) fn pretend_dead(&self) {
         self.pulse.mark_gone();
+    }
+
+    /// Close the stream of an output that has said it died, and keep the
+    /// rest: its name and device are what the next stream is compared with,
+    /// and it stays the output in hand until one opens. A dead stream is
+    /// not merely useless. On ALSA cpal's thread goes on polling the device
+    /// that went and reports the same error every time round — two
+    /// thousand a second and a quarter of a core's work, with PulseAudio
+    /// killed under it — for as long as the stream is kept, which with
+    /// nothing else to play on is for as long as the outage lasts. Closed
+    /// on a thread of its own, like any other ([`retire`]). True when there
+    /// was a stream to close.
+    pub(crate) fn bury(&mut self) -> bool {
+        match self.stream.take() {
+            Some(stream) => {
+                retire(stream);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -759,8 +797,41 @@ fn open_device(
         default_at_open,
         pulse,
         awake: true,
-        stream: Stream::Device(stream),
+        stream: Some(Stream::Device(stream)),
     })
+}
+
+/// How many of a stream's errors are written down in any one second. One
+/// that is alive reports the odd underrun, and each is worth its line. One
+/// whose device went can report the same error every time its thread comes
+/// round — ALSA's does, two thousand times a second, until the stream is
+/// closed — and that many lines bury everything else the recorder holds.
+const ERRORS_A_SECOND: u32 = 5;
+
+/// What a stream's error callback has written down lately.
+struct Said {
+    /// When the second being counted began, on [`clock_ms`].
+    since: AtomicU64,
+    /// The errors heard in it, written down or not.
+    heard: AtomicU32,
+}
+
+impl Said {
+    fn new() -> Said {
+        Said { since: AtomicU64::new(0), heard: AtomicU32::new(0) }
+    }
+
+    /// One more error, heard at `now`: how many of the second before went
+    /// unwritten, if that second has just ended, and whether this one is
+    /// written down. Atomics only — it runs on the OS audio thread.
+    fn hear(&self, now: u64) -> (u32, bool) {
+        let mut unwritten = 0;
+        if now.saturating_sub(self.since.load(Ordering::Relaxed)) >= 1000 {
+            unwritten = self.heard.swap(0, Ordering::Relaxed).saturating_sub(ERRORS_A_SECOND);
+            self.since.store(now, Ordering::Relaxed);
+        }
+        (unwritten, self.heard.fetch_add(1, Ordering::Relaxed) < ERRORS_A_SECOND)
+    }
 }
 
 /// The error callback every stream carries: the death tripwire's trigger.
@@ -769,10 +840,19 @@ fn error_callback(
     pulse: Arc<Pulse>,
 ) -> impl FnMut(cpal::StreamError) + Clone + Send + 'static {
     let errors = Arc::new(AtomicU32::new(0));
+    let said = Arc::new(Said::new());
     move |err: cpal::StreamError| {
         // Runs on the OS audio thread: the recorder and an atomic, nothing
         // that can block or re-enter.
-        crate::stderrln!("[engine] output stream error on {heard_on}: {err}");
+        let (unwritten, written) = said.hear(clock_ms());
+        if unwritten > 0 {
+            crate::stderrln!(
+                "[engine] output stream errors on {heard_on}: {unwritten} more in that second, not shown"
+            );
+        }
+        if written {
+            crate::stderrln!("[engine] output stream error on {heard_on}: {err}");
+        }
         match err {
             cpal::StreamError::DeviceNotAvailable | cpal::StreamError::StreamInvalidated => {
                 pulse.mark_gone();
@@ -958,6 +1038,9 @@ pub(crate) mod stage {
         takes: Duration,
         /// Whether a stream opened from here on ever asks for a buffer.
         silent: bool,
+        /// Whether a stream opened from here on asks for one buffer and
+        /// then no more.
+        stalling: bool,
         /// How long closing a stream takes.
         closing_takes: Duration,
         /// The shape streams open in.
@@ -973,6 +1056,8 @@ pub(crate) mod stage {
         playing: AtomicBool,
         /// Stops asking for buffers, and says nothing.
         mute: AtomicBool,
+        /// Goes mute once it has asked for a buffer.
+        stalls: AtomicBool,
         closed: AtomicBool,
         pulse: Arc<Pulse>,
     }
@@ -987,6 +1072,7 @@ pub(crate) mod stage {
                 refuses: None,
                 takes: Duration::ZERO,
                 silent: false,
+                stalling: false,
                 closing_takes: Duration::ZERO,
                 shape: (NonZero::new(2).unwrap(), NonZero::new(44_100).unwrap()),
                 asked: 0,
@@ -1027,6 +1113,14 @@ pub(crate) mod stage {
             self.plot().silent = silent;
         }
 
+        /// Streams opened from here on ask for one buffer and then no more,
+        /// saying nothing — or play on, as streams do. A device that is
+        /// there and is not taking sound: a sink suspended under its
+        /// streams, an endpoint mid-change.
+        pub(crate) fn open_stalling(&self, stalling: bool) {
+            self.plot().stalling = stalling;
+        }
+
         /// Closing a stream takes this long from here on.
         pub(crate) fn closing_takes(&self, takes: Duration) {
             self.plot().closing_takes = takes;
@@ -1054,10 +1148,11 @@ pub(crate) mod stage {
             }
         }
 
-        /// The newest stream asks for buffers again, as one does when the
-        /// machine it runs on wakes.
+        /// The newest stream asks for buffers again, and goes on asking, as
+        /// one does when the machine it runs on wakes.
         pub(crate) fn speak_again(&self) {
             if let Some((_, flags)) = self.plot().streams.last() {
+                flags.stalls.store(false, Ordering::Release);
                 flags.mute.store(false, Ordering::Release);
             }
         }
@@ -1115,15 +1210,16 @@ pub(crate) mod stage {
             name: &str,
             default_at_open: Option<String>,
         ) -> Result<Output, String> {
-            let (shape, silent, closing_takes) = {
+            let (shape, silent, stalling, closing_takes) = {
                 let plot = self.plot();
-                (plot.shape, plot.silent, plot.closing_takes)
+                (plot.shape, plot.silent, plot.stalling, plot.closing_takes)
             };
             let id = next_id();
             let pulse = Arc::new(Pulse::new());
             let flags = Arc::new(Flags {
                 playing: AtomicBool::new(true),
                 mute: AtomicBool::new(silent),
+                stalls: AtomicBool::new(stalling),
                 closed: AtomicBool::new(false),
                 pulse: pulse.clone(),
             });
@@ -1140,7 +1236,7 @@ pub(crate) mod stage {
                 default_at_open,
                 pulse,
                 awake: true,
-                stream: Stream::Staged(puller),
+                stream: Some(Stream::Staged(puller)),
             })
         }
     }
@@ -1172,6 +1268,9 @@ pub(crate) mod stage {
                         && !theirs.mute.load(Ordering::Acquire);
                     if asks {
                         theirs.pulse.beat(|| bus.fill(id, shape, &mut buffer));
+                        if theirs.stalls.load(Ordering::Acquire) {
+                            theirs.mute.store(true, Ordering::Release);
+                        }
                     }
                     // A device's clock does not wait for a late callback:
                     // a pull that overran is followed by the ones it owes.
@@ -1233,10 +1332,12 @@ mod tests {
         let pulse = Pulse::new();
         let fresh = Duration::from_millis(80);
         assert!(!pulse.answers(fresh), "nothing has pulled yet");
+        assert!(!pulse.has_started());
         assert!(!pulse.first_pull_within(Duration::from_millis(20)));
 
         pulse.beat(|| {});
         assert!(pulse.answers(fresh), "a pull just made");
+        assert!(pulse.has_started());
         assert!(pulse.first_pull_within(Duration::ZERO));
         assert!(pulse.quiet_for() < fresh);
 
@@ -1245,18 +1346,40 @@ mod tests {
         std::thread::sleep(Duration::from_millis(120));
         assert!(!pulse.answers(fresh), "the last pull is too long ago");
         assert!(pulse.quiet_for() >= Duration::from_millis(100));
+        assert!(pulse.has_started(), "it had been asking: this silence is a stop");
 
         // Woken: the quiet is counted from the wake, not from before the
-        // sleep — but nothing has answered yet.
+        // sleep — but nothing has answered yet, and that silence is a
+        // device still starting.
         pulse.expect_from_now();
         assert!(pulse.quiet_for() < fresh);
         assert!(!pulse.answers(fresh));
+        assert!(!pulse.has_started());
 
         // Inside a pull the callback is there, however long the pull runs.
         pulse.beat(|| {
             std::thread::sleep(Duration::from_millis(120));
             assert!(pulse.answers(fresh), "mid-pull");
         });
+        assert!(pulse.has_started());
+    }
+
+    #[test]
+    fn a_stream_that_errors_without_end_is_written_down_a_few_times_a_second() {
+        // A dead ALSA stream: the same error every time cpal's thread comes
+        // round, three thousand of them in this second.
+        let said = Said::new();
+        let written = (0..3000u64).filter(|n| said.hear(5_000 + n / 3).1).count();
+        assert_eq!(written, ERRORS_A_SECOND as usize, "the second's first few");
+        // The next second says once how many the last one kept back, and
+        // is written down in its turn.
+        assert_eq!(said.hear(6_000), (3000 - ERRORS_A_SECOND, true));
+        assert_eq!(said.hear(6_001), (0, true));
+        // An underrun now and then is always written down, with nothing
+        // owed for the seconds between.
+        for second in 10..20 {
+            assert_eq!(said.hear(second * 1_000), (0, true));
+        }
     }
 
     #[test]
@@ -1319,8 +1442,20 @@ mod tests {
         stage.unplug();
         assert!(output.is_dead());
         assert!(!output.suspend(), "a dead stream is not suspended");
+
+        // Buried: the stream closes, on a thread of its own, and the output
+        // is still there to be asked about — with nothing left to wake.
+        assert!(output.bury(), "there was a stream to close");
+        let until = Instant::now() + Duration::from_secs(5);
+        while !stage.open_on().is_empty() {
+            assert!(Instant::now() < until, "the dead stream is still open");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!output.bury(), "and only the one");
+        output.wake();
+        assert!(output.is_dead());
+        assert_eq!(output.name(), "Speakers");
         drop(output);
-        assert!(stage.open_on().is_empty(), "the stream closed with its output");
 
         // A default that will not open: the spare carries the session when
         // other devices may be tried, and nothing does when they may not.
@@ -1330,12 +1465,28 @@ mod tests {
         let spare = backend.open(&bus, true).expect("the spare opens");
         assert_eq!(spare.name(), "Monitor");
         assert_eq!(spare.default_it_is_on(), None, "not the default's device");
+        assert_eq!(stage.open_on(), ["Monitor"]);
+        drop(spare);
+        assert!(stage.open_on().is_empty(), "a stream closes with its output");
 
         // A stream that never asks for a buffer is no output at all.
         stage.refuse(None);
         stage.open_silent(true);
         let silent = backend.open(&bus, true).err().expect("unproven");
         assert!(silent.contains("not answering"), "{silent}");
+
+        // One that asks for a buffer and then stalls is an output — it has
+        // shown it can ask — that goes quiet without a word, until it is
+        // told to speak.
+        stage.open_silent(false);
+        stage.open_stalling(true);
+        let stalled = backend.open(&bus, true).expect("one buffer is an open");
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(stalled.pulse().has_started());
+        assert!(!stalled.pulse().answers(Duration::from_millis(100)), "it asked once");
+        stage.speak_again();
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(stalled.pulse().answers(Duration::from_millis(100)), "and asks on when told to");
     }
 }
 

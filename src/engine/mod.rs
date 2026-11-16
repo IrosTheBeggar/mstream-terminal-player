@@ -1270,12 +1270,37 @@ const STALL_FORGIVEN: Duration = Duration::from_secs(120);
 /// anyone's patience.
 const CALLBACK_FRESH: Duration = Duration::from_millis(500);
 
-/// How long a seek waits for a callback that has not asked lately — one
-/// just woken, whose device is still starting — before it is refused.
+/// How long a seek waits for a callback that has not asked since its
+/// stream was opened or woken — its device still starting — before it is
+/// refused, counted from when it was expected to.
 #[cfg(not(test))]
 const CALLBACK_PATIENCE: Duration = Duration::from_secs(3);
 #[cfg(test)]
 const CALLBACK_PATIENCE: Duration = Duration::from_secs(1);
+
+/// How long after its last buffer a callback that *had* been asking is
+/// still waited for. A stream that is running asks every few tens of
+/// milliseconds; one silent for a second has stopped, and the device's
+/// patience is not owed to it. Twice [`CALLBACK_FRESH`], so a callback a
+/// busy machine made late is not taken for one that went away.
+#[cfg(not(test))]
+const CALLBACK_GAP: Duration = Duration::from_secs(1);
+/// Shorter than the test build's [`CALLBACK_PATIENCE`], so a test can tell
+/// which of the two a silence was given.
+#[cfg(test)]
+const CALLBACK_GAP: Duration = Duration::from_millis(700);
+
+/// How long a stream opened in place of one that had stopped asking must
+/// have been the output, still asking, before the listener is told the
+/// audio is back. A stream counts as open once it has asked for one
+/// buffer, and a device that is there and not taking sound — a sink
+/// suspended under its streams, an endpoint mid-change — gives every
+/// stream opened on it exactly that one. Asking within the second half of
+/// this is what a stream that plays does and one that stalled cannot.
+#[cfg(not(test))]
+const PROVEN: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const PROVEN: Duration = Duration::from_millis(300);
 
 /// How long an open may be out, with nothing to play on meanwhile, before
 /// the listener is told why it has gone quiet.
@@ -1361,6 +1386,10 @@ struct OutputWatch {
     /// Whether the current outage has been announced — once, not once
     /// per retry.
     outage_told: bool,
+    /// Set while the output in hand stands in for a stream that had stopped
+    /// asking and has yet to show that it plays ([`PROVEN`]): whether it is
+    /// on the device the old one was on. Nothing is said of it until then.
+    unproven: Option<bool>,
     /// When the stream was first seen to have stopped asking for buffers,
     /// and whether the second look agreed — see [`STALL_CONFIRM`].
     suspect_at: Option<Instant>,
@@ -1386,6 +1415,7 @@ impl OutputWatch {
             failed_at: None,
             failures: 0,
             outage_told: false,
+            unproven: None,
             suspect_at: None,
             quiet: false,
             stall_after: STALL,
@@ -1627,7 +1657,8 @@ impl Engine {
     fn rest_output(&self, s: &State) -> Option<bool> {
         if !s.at_rest() {
             let mut w = self.output.lock().unwrap();
-            if !w.out.is_awake() {
+            // A dead one has nothing to wake, tick after tick.
+            if !w.out.is_awake() && !w.out.is_dead() {
                 etrace!("output woken by the tick");
             }
             w.wake();
@@ -1689,13 +1720,31 @@ impl Engine {
         let mut w = self.output.lock().unwrap();
         let mut news: Option<DeviceNotice> = None;
 
+        // A stream that has said it died is closed here and now, whether or
+        // not anything opens in its place: kept, it is a thread reporting
+        // the same error for as long as the outage lasts
+        // ([`output::Output::bury`]).
+        if w.out.is_dead() && w.out.bury() {
+            etrace!("output on {} closed: its stream died", w.out.name());
+        }
+
         // An open that has answered.
         if let Some(answer) = w.desk.answer() {
             let why = w.asked_why.take();
             match answer {
+                // Opened for a stream that had stopped asking — which asks
+                // again by now, of its own accord, and has been called back
+                // if it had been called lost. The music is where it was;
+                // moving it to the new stream would be a second "back" for
+                // one silence, or a move nobody asked for.
+                Ok(fresh) if why == Some(Why::Quiet) && !w.unusable() => {
+                    etrace!("output on {} asks again: the new stream is let go", w.out.name());
+                    output::retire(fresh);
+                }
                 Ok(fresh) => {
-                    let text = self.adopt(&mut w, fresh, why);
-                    news = Some(DeviceNotice { text, lost: false });
+                    if let Some(text) = self.adopt(&mut w, fresh, why) {
+                        news = Some(DeviceNotice { text, lost: false });
+                    }
                 }
                 // The device thread has told the flight recorder why.
                 Err(_) => {
@@ -1734,8 +1783,37 @@ impl Engine {
             if was_quiet && !w.unusable() && std::mem::take(&mut w.outage_told) {
                 // The stream that had stopped asking asks again, of its
                 // own accord: what was called lost is back.
+                w.unproven = None;
                 let text = format!("audio is back on {}", w.out.name());
                 news = Some(DeviceNotice { text, lost: false });
+            } else if let Some(same_device) = w.unproven {
+                // The stream opened in place of one that went quiet, of
+                // which nothing has been said yet. It shows that it plays
+                // by going on asking. One that took its first buffer and
+                // stopped is the old silence on a new stream: the listener
+                // is told the sound is lost, once, and never that it is
+                // back.
+                let pulse = w.out.pulse();
+                let asking = w.out.is_awake() && pulse.answers(PROVEN / 2);
+                let stalled =
+                    w.out.is_awake() && !pulse.is_pulling() && pulse.quiet_for() >= STALL;
+                if w.unusable() {
+                    // Dead, or called quiet in its turn: the next stream's
+                    // to answer for.
+                } else if asking && w.adopted_at.elapsed() >= PROVEN {
+                    w.unproven = None;
+                    let name = w.out.name().to_string();
+                    etrace!("output on {name} is asking for sound");
+                    let text = if std::mem::take(&mut w.outage_told) || same_device {
+                        format!("audio is back on {name}")
+                    } else {
+                        format!("audio moved to {name}")
+                    };
+                    news = Some(DeviceNotice { text, lost: false });
+                } else if stalled && !std::mem::replace(&mut w.outage_told, true) {
+                    etrace!("output on {} asked for one buffer and no more", w.out.name());
+                    news = Some(DeviceNotice { text: OUTAGE.to_string(), lost: true });
+                }
             }
             if let Some(out_for) = w.desk.asked_for() {
                 // One at a time: the answer to this one comes first. If the
@@ -1801,8 +1879,15 @@ impl Engine {
     /// mid-ramp and a source appended for a gapless seam all carry on from
     /// the sample they stood at. The old stream is closed elsewhere — its
     /// close can wait on a callback that is in no hurry ([`output::retire`]).
-    /// Returns the news, for the listener.
-    fn adopt(&self, w: &mut OutputWatch, fresh: output::Output, why: Option<Why>) -> String {
+    /// Returns the news, for the listener, when there is any yet: a stream
+    /// that replaces one gone quiet has still to show that it plays
+    /// ([`PROVEN`]).
+    fn adopt(
+        &self,
+        w: &mut OutputWatch,
+        fresh: output::Output,
+        why: Option<Why>,
+    ) -> Option<String> {
         let name = fresh.name().to_string();
         // By identity, not by name: two endpoints are both "Speakers" on
         // Windows as often as not.
@@ -1820,16 +1905,23 @@ impl Engine {
         w.suspect_at = None;
         w.quiet = false;
         w.looked_at = now;
+        etrace!("output rebuilt on {name}");
         if why == Some(Why::Quiet) {
             w.stall_after = (w.stall_after * 2).min(STALL_MOST);
+            // Not news yet. The stream this one replaces had stopped asking
+            // and said nothing, and this one has asked for one buffer:
+            // whether it plays is still to be seen. An outage already told
+            // stays told meanwhile.
+            w.unproven = Some(same_device);
+            return None;
         }
+        w.unproven = None;
         let was_outage = std::mem::take(&mut w.outage_told);
-        etrace!("output rebuilt on {name}");
-        if was_outage || same_device {
+        Some(if was_outage || same_device {
             format!("audio is back on {name}")
         } else {
             format!("audio moved to {name}")
-        }
+        })
     }
 
     /// Whether the device callback is there to carry out a seek. rodio
@@ -1837,24 +1929,41 @@ impl Engine {
     /// without limit, so one placed against a callback that is not running
     /// never returns — and with it goes the thread that ticks and answers
     /// every command. A callback that asked for a buffer a moment ago is
-    /// there; one that has not — just woken, its device still starting —
-    /// is given [`CALLBACK_PATIENCE`] to show itself, and the seek is
-    /// refused if it does not.
+    /// there. One that has not asked since its stream was opened or woken
+    /// — its device still starting — is given [`CALLBACK_PATIENCE`] from
+    /// then to show itself; one that had been asking and has stopped, only
+    /// until its silence is [`CALLBACK_GAP`] long. The seek is refused if
+    /// it does not show.
     fn callback_answers(&self) -> bool {
-        let until = Instant::now() + CALLBACK_PATIENCE;
         loop {
             {
                 let w = self.output.lock().unwrap();
                 if w.unusable() {
                     return false;
                 }
-                if w.out.pulse().answers(CALLBACK_FRESH) {
+                let pulse = w.out.pulse();
+                if pulse.answers(CALLBACK_FRESH) {
                     return true;
                 }
-            }
-            if Instant::now() >= until {
-                etrace!("the device callback is not answering");
-                return false;
+                // Not there right now. A callback that has yet to ask since
+                // its stream was opened or woken may be a device still
+                // starting, and is waited for; one that had been asking and
+                // stopped is waited for no longer than it takes to be sure
+                // it has. This wait is made on the thread that ticks and
+                // answers every command, so it is as short as the answer
+                // allows — it used to be the starting device's patience
+                // whichever silence this was.
+                let quiet = pulse.quiet_for();
+                let started = pulse.has_started();
+                let patience = if started { CALLBACK_GAP } else { CALLBACK_PATIENCE };
+                if quiet >= patience {
+                    etrace!(
+                        "the device callback is not answering: {} ms since it {}",
+                        quiet.as_millis(),
+                        if started { "last asked" } else { "was expected to ask" }
+                    );
+                    return false;
+                }
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -5779,6 +5888,151 @@ mod tests {
     }
 
     #[test]
+    fn a_seek_against_a_stream_that_has_stopped_asking_is_refused_without_the_wait() {
+        // The patience a seek has for the device callback is for a stream
+        // just opened or woken, whose device is still starting. One that
+        // had been asking and stopped is not starting. It used to get the
+        // same patience all the same: against a sink suspended under its
+        // streams every seek held this thread — the one that ticks and
+        // answers every command — for three seconds before it was refused.
+        let (engine, stage) = staged("Speakers");
+        let track = staged_track("stopped-asking");
+        engine.play_source(track.clone(), None).unwrap();
+        tick_for(&engine, Duration::from_millis(400));
+
+        // Silent for longer than a running stream ever is: refused at once.
+        stage.go_quiet();
+        std::thread::sleep(CALLBACK_GAP + Duration::from_millis(100));
+        let started = Instant::now();
+        assert!(matches!(engine.seek(12.0), Err(EngineError::NoDevice(_))));
+        let took = started.elapsed();
+        assert!(took < CALLBACK_GAP / 4, "the seek waited {took:?} on a stream long silent");
+
+        // Silent for less, it may be a callback a busy machine made late:
+        // the seek waits out what is left of that second, and no more.
+        stage.speak_again();
+        tick_for(&engine, Duration::from_millis(300));
+        stage.go_quiet();
+        std::thread::sleep(CALLBACK_FRESH + Duration::from_millis(100));
+        let started = Instant::now();
+        assert!(matches!(engine.seek(12.0), Err(EngineError::NoDevice(_))));
+        let took = started.elapsed();
+        assert!(took < CALLBACK_GAP, "the seek waited {took:?}");
+        engine.stop();
+        let _ = std::fs::remove_file(&track);
+    }
+
+    #[test]
+    fn a_seek_on_a_stream_just_woken_waits_for_its_callback_and_lands() {
+        // The other silence: a paused player's stream put to sleep, asleep
+        // for longer than a running stream is ever silent. Woken for the
+        // seek, its callback has not asked yet — and is waited for, as a
+        // device that takes a moment to start again must be.
+        let (engine, _stage) = staged("Speakers");
+        let track = staged_track("woken-seek");
+        engine.play_source(track.clone(), None).unwrap();
+        tick_for(&engine, Duration::from_millis(400));
+        engine.pause();
+        tick_for(&engine, IDLE_PAUSED + CALLBACK_GAP + Duration::from_millis(400));
+        assert!(!engine.output_awake(), "paused long enough: the stream sleeps");
+
+        let seeker = engine.clone();
+        within(Duration::from_secs(5), move || seeker.seek(12.0)).expect("the seek lands");
+        assert!(engine.output_awake());
+        let sought = engine.status();
+        assert!(sought.paused, "still paused");
+        assert!((sought.position - 12.0).abs() < 0.5, "landed at {:.2}", sought.position);
+        engine.stop();
+        let _ = std::fs::remove_file(&track);
+    }
+
+    #[test]
+    fn a_stream_reopened_on_a_device_that_takes_no_sound_is_not_said_to_be_back() {
+        // A sink suspended under its streams, an endpoint mid-change: the
+        // stream stops asking, and every stream opened in its place asks
+        // for one buffer and stops in its turn. One buffer is an open, so
+        // each replacement was announced — "audio is back" every few
+        // seconds of a silence that never broke. A replacement says nothing
+        // now until it has gone on asking. When it has not, the listener is
+        // told once that the sound is lost, and that it is back when it is.
+        let (engine, stage) = staged("Speakers");
+        let track = staged_track("stalls-again");
+        engine.play_source(track.clone(), None).unwrap();
+        tick_for(&engine, Duration::from_millis(400));
+
+        stage.open_stalling(true);
+        stage.go_quiet();
+        std::thread::sleep(Duration::from_millis(80));
+        let stood = engine.status().position;
+        let watched = tick_until(&engine, |_, heard| !heard.is_empty());
+        assert_eq!(watched.said(), [OUTAGE], "lost, and nothing said before that");
+        assert!(watched.heard[0].lost);
+        assert_eq!(stage.asked(), 2, "one stream had been opened in its place");
+
+        // More are opened, ever more rarely, and none of them is news.
+        let watched = tick_until(&engine, |_, _| stage.asked() >= 3);
+        assert!(watched.heard.is_empty(), "said again: {:?}", watched.said());
+        tick_for(&engine, PROVEN * 2);
+        assert!(engine.take_device_notices().is_empty(), "one buffer is not the audio back");
+        let held = engine.status();
+        assert!(
+            held.position < stood + 0.2,
+            "the track kept its place: {stood:.2} then {:.2}",
+            held.position
+        );
+
+        // The device takes sound again. The stream in hand goes on asking,
+        // and that is the audio back.
+        stage.open_stalling(false);
+        stage.speak_again();
+        let watched = tick_until(&engine, settled_somewhere);
+        assert_eq!(watched.said(), ["audio is back on Speakers"]);
+        tick_for(&engine, Duration::from_millis(500));
+        assert!(engine.status().position > held.position + 0.2, "and it plays on");
+        engine.stop();
+        let _ = std::fs::remove_file(&track);
+    }
+
+    #[test]
+    fn a_stream_that_asks_again_while_its_replacement_opens_keeps_the_music() {
+        // The stream stops asking and a new one is asked for — and the
+        // device takes its time over that open, as one does around a change
+        // of endpoint. Meanwhile the old stream asks again. The music is on
+        // it, playing: the stream that then arrives is let go, and nothing
+        // is said, because nothing was lost for long enough to say so.
+        let (engine, stage) = staged("Speakers");
+        let track = staged_track("asked-again");
+        engine.play_source(track.clone(), None).unwrap();
+        tick_for(&engine, Duration::from_millis(400));
+
+        stage.opens_take(SLOW_OPEN / 2);
+        stage.go_quiet();
+        tick_until(&engine, |_, _| stage.asked() == 2);
+        // The open is still out: the newest stream is the one that went
+        // quiet.
+        stage.speak_again();
+        tick_for(&engine, SLOW_OPEN);
+        let until = Instant::now() + Duration::from_secs(5);
+        while stage.open_on().len() != 1 {
+            assert!(Instant::now() < until, "still open: {:?}", stage.open_on());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(engine.take_device_notices().is_empty(), "nothing to announce");
+        assert_eq!(stage.asked(), 2, "and nothing more opened");
+
+        // It is the old stream that plays: silencing the newest one — the
+        // one that was let go — changes nothing.
+        stage.go_quiet();
+        let from = engine.status().position;
+        tick_for(&engine, Duration::from_millis(500));
+        let played = engine.status();
+        assert!(played.playing && played.position > from + 0.2, "{from:.2} then {:.2}", played.position);
+        assert!(engine.take_device_notices().is_empty());
+        engine.stop();
+        let _ = std::fs::remove_file(&track);
+    }
+
+    #[test]
     fn with_nothing_to_play_on_the_engine_says_so_once_and_keeps_its_place() {
         // The device goes and nothing else will open. The engine holds the
         // track where it stood, says so once, and knocks until a device
@@ -5798,6 +6052,16 @@ mod tests {
         let waiting = engine.status();
         assert_eq!(waiting.file, track, "the track is still the track");
         assert_eq!(waiting.position, stood, "held where it stood");
+
+        // The stream that died was closed when it said so, not kept for as
+        // long as nothing opened in its place: on ALSA a dead stream's
+        // thread reports the same error two thousand times a second until
+        // it is closed.
+        let until = Instant::now() + Duration::from_secs(5);
+        while !stage.open_on().is_empty() {
+            assert!(Instant::now() < until, "the dead stream is still open");
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         // A seek meanwhile is refused at once, not parked — not even for
         // as long as a callback is given to show itself.
