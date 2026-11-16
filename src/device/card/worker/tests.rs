@@ -25,8 +25,11 @@ pub(crate) struct Shelf {
     /// Opening a card breaks the thread that asks (a fault of the worker's).
     breaks: AtomicBool,
     /// A card listed but not opened (taken out or remounted as a job
-    /// began), and how many times one was.
-    unopenable: AtomicBool,
+    /// began): how many opens are still to be refused, and how many times
+    /// a card was opened. Refusals are counted off, not held for a time: a
+    /// card that would not open until its test said so stayed shut for as
+    /// many of the worker's looks at the readers as the test took.
+    refuse: std::sync::atomic::AtomicUsize,
     opened: std::sync::atomic::AtomicUsize,
 }
 
@@ -56,7 +59,8 @@ impl Volumes for Shelf {
 
     fn open(&self, found: &Found) -> Option<Box<dyn CardWrite>> {
         assert!(!self.breaks.load(Ordering::SeqCst), "a test's fault in the worker");
-        if self.unopenable.load(Ordering::SeqCst) {
+        let refused = self.refuse.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1));
+        if refused.is_ok() {
             return None;
         }
         self.opened.fetch_add(1, Ordering::SeqCst);
@@ -1874,37 +1878,57 @@ fn a_sync_or_a_job_that_breaks_ends_with_why() {
 /// alike), never as a failed read; a look that can't open it is no failed
 /// read either, and the card is looked at again at the next look at the
 /// readers.
+///
+/// Each step's card is refused a counted number of opens. It used to stay
+/// shut from the test's first line until its last, and the worker gives a
+/// card that will not open [`REOPENS`] looks before it calls the read
+/// failed: the three this test makes on purpose (the one after the Apply,
+/// the one after the plays, and its own) were the whole allowance, so one
+/// look at the readers more while the test was between two steps, forty
+/// milliseconds apart here, and the read had failed.
 #[test]
 fn a_job_that_cant_open_its_card_fails_as_that_job_and_a_look_tries_again() {
     let scratch = Scratch::new("worker-unopened");
     let (mut rig, key, _fake, _sim) = with_card(&scratch);
-    rig.shelf.unopenable.store(true, Ordering::SeqCst);
     let unopened = Note::Failed { why: UNOPENED.into() };
     let failures = |f: &Fold| f.notes.iter().filter(|n| **n == unopened).count();
-    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(Want::of(&Facts::default(), None)) });
-    rig.until("Apply's own failure", |f| failures(f) == 1);
+    // The card read again and at rest, `times` since the test began: a
+    // look that reads it asks its server, and the answer is logged. And at
+    // every report on the way there, never a failed read.
     let wanted = key.clone();
-    rig.until("not busy", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
-    rig.send(Cmd::Plays { key: key.clone() });
-    rig.until("the plays' own failure", |f| failures(f) == 2);
-    assert!(matches!(rig.card(&key).read, Read::Read(_)), "no failed read: {:?}", rig.card(&key).read);
+    let asked = |f: &Fold| {
+        f.logs.iter().filter(|(k, item)| *k == wanted && matches!(item, LogItem::Asked { .. })).count()
+    };
+    let (asked_before, opened_before) = (asked(&rig.fold), rig.shelf.opened.load(Ordering::SeqCst));
+    let read_again = |f: &Fold, times: usize| {
+        let card = f.cards.iter().find(|c| c.key == wanted).expect("the card");
+        assert!(matches!(card.read, Read::Read(_)), "no failed read: {:?}", card.read);
+        asked(f) == asked_before + times && card.busy.is_none()
+    };
+    let opened = |rig: &Rig| rig.shelf.opened.load(Ordering::SeqCst) - opened_before;
 
-    // A look: nothing failed, and the card read again once it opens.
-    rig.until("not busy", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
-    let before = rig.shelf.opened.load(Ordering::SeqCst);
+    // Apply, and the look that follows a job: neither opens the card. The
+    // job fails as itself; the look fails nothing, and the next look at the
+    // readers opens the card and reads it.
+    rig.shelf.refuse.store(2, Ordering::SeqCst);
+    rig.send(Cmd::Apply { key: key.clone(), want: Box::new(Want::of(&Facts::default(), None)) });
+    rig.until("Apply's own failure, and the card read again", |f| read_again(f, 1) && failures(f) == 1);
+    assert_eq!(opened(&rig), 1, "by the look at the readers, and by nothing before it");
+
+    // The plays, the same.
+    rig.shelf.refuse.store(2, Ordering::SeqCst);
+    rig.send(Cmd::Plays { key: key.clone() });
+    rig.until("the plays' own failure, and the card read again", |f| read_again(f, 2) && failures(f) == 2);
+    assert_eq!(opened(&rig), 2);
+
+    // A look of its own: nothing failed, and the card read again once it
+    // opens.
+    rig.shelf.refuse.store(1, Ordering::SeqCst);
     rig.send(Cmd::Look { key: key.clone() });
-    rig.until("the look over", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
-    assert!(matches!(rig.card(&key).read, Read::Read(_)), "{:?}", rig.card(&key).read);
-    rig.shelf.unopenable.store(false, Ordering::SeqCst);
-    let t0 = Instant::now();
-    while rig.shelf.opened.load(Ordering::SeqCst) == before {
-        assert!(t0.elapsed() < Duration::from_secs(30), "the card was never looked at again");
-        if let Ok(event) = rig.events.recv_timeout(Duration::from_millis(50)) {
-            rig.fold.apply(event);
-        }
-    }
-    rig.until("read again", |f| f.cards.iter().any(|c| c.key == wanted && c.busy.is_none()));
-    assert!(matches!(rig.card(&key).read, Read::Read(_)));
+    rig.until("the card looked at again, and read", |f| read_again(f, 3));
+    assert_eq!(failures(&rig.fold), 2, "a look that can't open the card fails nothing");
+    assert_eq!(opened(&rig), 3);
+    assert_eq!(rig.shelf.refuse.load(Ordering::SeqCst), 0, "every refusal was met");
 }
 
 /// A card whose look never opens it is looked at again a few times, then
