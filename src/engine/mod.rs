@@ -5566,8 +5566,13 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let answered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = answered.clone();
+        // Made before the server starts rather than by its thread: a bound
+        // listener takes connections at once, and ninety seconds of samples
+        // are half a second's work in an unoptimised build — longer than the
+        // test build's open waits for an answer, so the first request went
+        // unanswered wherever the device opened quickly.
+        let body = Arc::new(wav_bytes(seconds));
         std::thread::spawn(move || {
-            let body = Arc::new(wav_bytes(seconds));
             for stream in listener.incoming().flatten() {
                 let (body, count) = (body.clone(), count.clone());
                 std::thread::spawn(move || {
