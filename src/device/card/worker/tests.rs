@@ -796,8 +796,11 @@ fn set_up_then_apply_write_the_cards_settings_and_nothing_else() {
     let mut rig = Rig::new(shelf);
     rig.send(Cmd::Servers(vec![home_server(&base)]));
     let wanted = key.clone();
-    rig.until("the new card read", |f| {
-        f.cards.iter().any(|c| c.key == wanted && c.facts().is_some())
+    // Read, and offered a server. The worker reads a card as soon as it is
+    // listed, and one read before it was told its servers has none to
+    // offer until they come and the card is looked at again.
+    rig.until("the new card read and offered a server", |f| {
+        f.cards.iter().any(|c| c.key == wanted && c.facts().is_some() && c.server.link().is_some())
     });
     let card = rig.card(&key);
     assert!(!card.facts().unwrap().set_up());
