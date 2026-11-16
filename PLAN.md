@@ -3912,9 +3912,10 @@ when keys are pressed in sequence against real replies. The first live run found
 - Linux binaries link ALSA dynamically (`libasound` required at runtime — already true today).
 - Download-on-enable adds a failure mode → covered by `serverAudioBinaryPath` + CLI fallback.
 - Two-repo version skew → covered by pinning + `apiVersion` check.
-- rodio device-hotplug behavior is deferred, not solved. Gapless is deferred no longer: Phase C
-  landed crossfade and true gapless, both opt-in — the default remains the compatible hard cut,
-  so finding #8's gap stands only where nobody asked for better.
+- A change of output device is the engine's to follow (`src/engine/output.rs`, and the appendix
+  on the device-switch freeze): no run has yet shown it on a real Windows endpoint change. Gapless
+  is deferred no longer: Phase C landed crossfade and true gapless, both opt-in — the default
+  remains the compatible hard cut, so finding #8's gap stands only where nobody asked for better.
 - **Iroh tunnel wire compatibility is unproven** (Phase A3): mStream's tunnel runs in-process via
   the `@number0/iroh` NAPI addon, and nothing in that repo tests a Rust `iroh` client against it —
   the only handshake test is Node-to-Node. Both sides are on the iroh 1.x line, which is
@@ -4357,3 +4358,85 @@ resampled since. A skipped pass leaves the picture board's covers as they were
   matched the ungated build's.
 - On the Albums wall of a real mStream (the demo music), all six cover pictures stayed on
   screen through 6 s of skipped passes and came back after a minimise. Checked by screenshot.
+
+## Appendix — The device-switch freeze (2026-11-15)
+
+**The report.** On the Windows desktop build, changing between headphones and speakers froze
+the player for a few minutes. Not reproduced here: this session had no Windows machine, and the
+Mac it ran on has one output device. What follows is from reading the engine against cpal
+0.17.3's WASAPI host, and from what could be measured on the Mac.
+
+**What the engine did.** Everything about a change of device happened on the engine's own
+thread — the TUI's and the GUI's audio worker, serve's request loop — the thread that ticks,
+sends status and runs every command:
+
+- It asked for the default device's identity once a second, inline.
+- On a change it opened the new device inline: the default, then a walk of every other device,
+  and for each device that refused its default config, every config the device lists. cpal's
+  WASAPI host lists every common rate in every sample format (about ninety), and each try
+  activates a client. A device caught mid-change refuses them all for the same reason.
+- It closed the old stream inline, with the state lock held. cpal's WASAPI stream joins its
+  thread; CoreAudio's stop waits for the callback.
+- It opened the playing track again over HTTP (up to `START_TIMEOUT`, 20 s, under the state
+  lock) and sought back to where the music stood. rodio performs a seek inside the device
+  callback and `try_seek` waits for it without limit.
+- On WASAPI a dead stream is often never reported. The stream thread waits without limit on an
+  event that a removed endpoint never signals again, and it leaves its loop on any error
+  without the "device not available" the engine's tripwire listened for. A seek against that
+  stream — the swap's own included — never returned.
+
+While any of that waited, the player sent no status and every command queued behind it.
+
+**The change.**
+
+- `engine/bus.rs`: the sound is the engine's, not the stream's. Players sit on a bus; a device
+  stream is a reader of it. A change of device gives the bus to the new stream: nothing is
+  opened again, nothing is sought, and a pause, a blend or a gapless seam carries through. A
+  stream of another shape gets every voice converted again from its own samples.
+- `engine/output.rs`, the device thread (`Desk`): every call into the audio service is made
+  there. The engine asks for an output and goes on ticking; a later tick adopts the answer. A
+  panic under a call (cpal's WASAPI host `expect`s through an endpoint that vanished) is a
+  failed open. A stream being closed goes to a thread of its own (`retire`).
+- The pulse: the callback notes when it last asked for a buffer. A stream that is awake,
+  outside any pull and silent for 3 s is replaced (`STALL`). A seek is refused, not parked,
+  when no callback is there to perform it. An open only counts once the stream has asked for
+  its first buffer (`FIRST_PULL`).
+- The walk is bounded: other devices only once the default has refused, at most six listed
+  configs per device (`OTHER_CONFIGS`), and no further config once a device has spent three
+  seconds refusing (`DEVICE_BUDGET`). A Bluetooth endpoint whose headset has gone, still
+  listed and still the default, refuses slowly: ninety configs of that is minutes, and the
+  likeliest shape of the report.
+- While a stream still plays, only the new default is tried (five tries over half a minute,
+  `MOVE_TRIES`), so a headset whose link is not up yet no longer strands the session on a
+  third device. A device that stands in for a default that would not open gives way when the
+  default opens.
+
+**What was run.**
+
+- `engine::tests`, on a stage (`output::stage`: devices made of threads, so the tests need no
+  sound card and run in CI on all three systems): a device that takes 1.5 s to open and as long
+  to close holds no tick; a pulled device; a stream that goes quiet without a word; a seek
+  against it; an outage; a device slow to open; a default that is not ready; one that never
+  opens; a stand-in, and the default coming to it; a device of another shape; a sleeping
+  stream; a watch that was itself held still. Thirteen runs of the engine's tests in a row,
+  five with every core busy twice over: no failure.
+- The Mac's own output, the tests marked "needs an audio device", one at a time
+  (`--test-threads=1`): 44 of 46 pass, and the other two need a live server. Run together they
+  fail as they do on main — six there, the same six and one more here, which still fails with
+  the pulse's watch switched off. CoreAudio calls every stream of a process from one thread,
+  some of these tests park it on a stalled download on purpose, and one more test in the set
+  moved which neighbour stands in the way.
+- `a_device_swap_does_not_fetch_the_track_again`, same Mac, a track streamed from a local
+  server and the device dropped at 40 s: 256 ms and two more requests to the server before;
+  57 ms and none after.
+- `mstream-player play <track> --seek-to 90 --drop-device-at 7` against demo.mstream.io, twice:
+  the device dropped at 93.1 s, the next status line half a second on at 93.6 s, the new stream
+  opened in 63 and 27 ms on the device thread, no line in the flight recorder for the track
+  being opened again, longest tick 0 ms. The same with a local file.
+- The window (`gui --window`, scripted): a track queued, played, paused.
+
+**What no run has shown.** A real endpoint change on Windows. To check there:
+`mstream-player play <library path> --test-seconds 120`, change the output while it plays, and
+read the `-- device: … --` line and the `longest tick` at the end; with
+`MSTREAM_ENGINE_TRACE=<file>` the file says how long each open took and what each device
+refused with.

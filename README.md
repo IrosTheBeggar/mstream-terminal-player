@@ -326,13 +326,16 @@ keeps all of it off.
 ### Output devices
 
 Playback follows the machine. Plug in headphones, pair a Bluetooth speaker,
-and the player moves to the new default within a second or so, picking the
-track back up at the position it stood — paused stays paused, the volume
-stays yours. Pull the device it was playing on and it hops to whatever the
-system falls back to; when there is nothing to fall back to (the only
-headset switched off), it holds the moment and resumes as soon as any
-output returns. Each move is one line in the message bar, or on stderr in
-`serve` mode.
+and the player moves to the new default within a second or so, the track
+going on from the sample it had reached — paused stays paused, the volume
+stays yours, a blend goes on blending. Nothing is fetched again for a move,
+and nothing waits for one: the old device plays on until the new one has
+opened, and the controls answer throughout. A default that is not ready
+yet (a headset still connecting) is tried again for half a minute. Pull the
+device it was playing on and it hops to whatever the system falls back to;
+when there is nothing to fall back to (the only headset switched off), it
+holds the moment and resumes as soon as any output returns. Each move is
+one line in the message bar, or on stderr in `serve` mode.
 
 ## The progress bar
 
@@ -1175,7 +1178,8 @@ afterwards.
   this unless `MSTREAM_LOG` names a file for them.
 - `MSTREAM_ENGINE_TRACE=/path/to/file` is the player's own flight recorder: one timestamped line
   per transition decision — plays, announcements, seeks and their clamps, prepares, open failures
-  with reasons, retries, handovers — plus every diagnostic the TUI kept off the screen. Each run
+  with reasons, retries, handovers, and every output device opened, how long it took and what a
+  device that refused said — plus every diagnostic the TUI kept off the screen. Each run
   appends and signs itself with a banner, so two players sharing one path interleave rather than
   overwrite each other.
 
@@ -1193,6 +1197,11 @@ mstream-player play --url C:\music\song.mp3                     # local file or 
 `play` is a one-shot smoke test with PASS/FAIL exit codes, useful for checking that a server,
 codec, or seek path actually works. Transcoding accepts `mp3` or `aac`; the server's default
 codec is often opus, which this player cannot decode, so a codec is always requested explicitly.
+
+It watches the output device as the player does. Change the output while it plays (`--test-seconds
+120` gives the time) and the move prints between the status lines; the last line before the
+verdict is the longest any tick of the engine took, which stays at a few milliseconds however
+long the device takes to change.
 
 ## Serve mode (jukebox engine)
 
