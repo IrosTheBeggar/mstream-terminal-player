@@ -638,8 +638,9 @@ assert out.returncode == 2 and 'volume' in out.stderr, (out.returncode, out.stdo
 # Measured side by side (2026-11-10, Linux, 8 at a time): A 35 s, KM 29,
 # W 27, K and K2 23, F 21, C 20, M 19, H 16, B 13, E 11, D and I 10, G 9,
 # T 8, J 1 — 39 s in all, against 289 s one after another (J measured
-# 2026-11-11, when it joined the battery).
-LONGEST_FIRST="A KM W K K2 P P2 F C M H B E D I G T J"
+# 2026-11-11, when it joined the battery). P2 about 60 s and P 45 joined
+# 2026-11-16 (macOS, the whole battery side by side): they lead.
+LONGEST_FIRST="P2 P A KM W K K2 F C M H B E D I G T J"
 JOBS="${E2E_JOBS:-8}"
 [ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
 

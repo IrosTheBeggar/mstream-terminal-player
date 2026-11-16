@@ -1150,12 +1150,13 @@ mod tests {
         let shown = draw(&mut gui);
         // M1, with the album's credit beside its name (the user's 2026-10-27
         // call): "◂ Albums" x 17–24, the name at 27, " — Boukmanflow", the
-        // word 3 cells after, the count right-aligned to x 96.
+        // word 3 cells after, the count ending one cell in, at x 95
+        // (browser-top-bar clause 1).
         assert_eq!(cells(&shown, 2, 17, 8), "◂ Albums");
         assert_eq!(cells(&shown, 2, 27, 28), "Borrowed Tapes — Boukmanflow");
         assert_eq!(cells(&shown, 2, 55, 14), "   keep a copy");
-        assert_eq!(cells(&shown, 2, 90, 7), "3 items");
-        assert!(cells(&shown, 2, 71, 19).trim().is_empty(), "{}", shown[2]);
+        assert_eq!(cells(&shown, 2, 89, 7), "3 items");
+        assert!(cells(&shown, 2, 71, 18).trim().is_empty(), "{}", shown[2]);
         // A click on its cells is `c` with the cursor stowed; the ACCENT at
         // rest.
         let buf = buffer(&mut gui, 100, 30);
@@ -1307,7 +1308,7 @@ mod tests {
         // x 61–73, the count right; the clause about playlists is gone.
         assert_eq!(cells(&shown, 2, 17, 41), "◂ Files ▸ peerlib/Boukmanflow · read-only");
         assert_eq!(cells(&shown, 2, 58, 14), "   keep a copy");
-        assert_eq!(cells(&shown, 2, 90, 7), "3 items");
+        assert_eq!(cells(&shown, 2, 89, 7), "3 items");
         assert!(!shown.join("\n").contains("playlists and ratings"));
         // Stowed, or on `..`: the open folder.
         gui.app.files.state.select(Some(0));
@@ -1359,7 +1360,7 @@ mod tests {
         apply(&mut gui, Event::Library { generation, dest: Tab::Library, node: LibraryNode::Artists(MoodFilter::NONE), data: LibraryData::Artists(vec!["ALM".into(), "Boukmanflow".into()]) });
         let shown = draw(&mut gui);
         assert_eq!(cells(&shown, 2, 17, 19), "Artists · read-only");
-        assert!(cells(&shown, 2, 57, 9).starts_with("2 items  "), "the count right-aligned, short of the panel: {}", shown[2]);
+        assert!(cells(&shown, 2, 56, 10).starts_with("2 items   "), "the count right-aligned, short of the panel: {}", shown[2]);
     }
 
     // ── The give-way (spec §4.1.4) ──────────────────────────────────────
@@ -1514,7 +1515,7 @@ mod tests {
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Down);
         let shown = draw(&mut gui);
-        assert_eq!(cells(&shown, 2, 17, 80), "◂ Files ▸ peerlib/Boukmanflow/Borrowed Tapes · read-only                 3 items");
+        assert_eq!(cells(&shown, 2, 17, 80), "◂ Files ▸ peerlib/Boukmanflow/Borrowed Tapes · read-only                3 items ");
     }
 
     #[test]
@@ -1581,8 +1582,8 @@ mod tests {
             let spot = super::cells(&t("gui.discover.keep.keep_word"));
             let albums = format!("◂ {}", t("gui.nav.albums"));
             let artists = format!("◂ {}", t("gui.nav.artists"));
-            let items = super::t!("gui.files.items", locale = code, count = 3).to_string();
-            let count = super::t!("gui.alb.count", locale = code, count = 4).to_string();
+            let items = crate::gui::discover::plural_in("gui.files.items", 3, code);
+            let count = crate::gui::discover::plural_in("gui.alb.count", 4, code);
             let files = t("gui.nav.files");
             let prefix = format!("{files} ▸ ");
             let tail = format!(" · {}", t("gui.srv.read_only"));
@@ -1626,7 +1627,7 @@ mod tests {
         let t = |key: &str| super::t!(key, locale = "de").to_string();
         let back = format!("◂ {}", t("gui.nav.albums"));
         let word = t("gui.discover.keep.keep_word");
-        let items = super::t!("gui.files.items", locale = "de", count = 3).to_string();
+        let items = crate::gui::discover::plural_in("gui.files.items", 3, "de");
         let head = Head::album_page(47, &back, "Borrowed Tapes", Some("Boukmanflow"), &items, super::cells(&word));
         let plan = super::fit(&head);
         assert_eq!((plan.short, plan.count, plan.credit.as_deref(), plan.spot), (false, false, None, true));
@@ -1915,7 +1916,7 @@ mod tests {
         let mut gui = peer_gui();
         album_page(&mut gui, tapes_node(AlbumCredit::Known("Boukmanflow".into())), tapes(Some("Boukmanflow")));
         let shown = draw(&mut gui);
-        assert_eq!(cells(&shown, 2, 17, 80), "< Albums  Borrowed Tapes - Boukmanflow   keep a copy                     3 items");
+        assert_eq!(cells(&shown, 2, 17, 80), "< Albums  Borrowed Tapes - Boukmanflow   keep a copy                    3 items ");
         let tracks = tapes(Some("Boukmanflow"));
         let account = json!({ "scope": "album", "stopped": null, "songs": { "total": 3,
             "copied": [{ "from": tracks[0].filepath, "filepath": "copies/a.mp3" }, { "from": tracks[1].filepath, "filepath": "copies/b.mp3" }],

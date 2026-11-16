@@ -13262,48 +13262,52 @@ pub(crate) mod tests {
 
     #[test]
     fn the_new_window_strings_fit_their_cells_in_every_locale() {
-        for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
-            let _locale = crate::setup::tests::in_locale(code);
-            let w = crate::kit::width;
-            // The folder primary with a two-digit count fits its 34 cells,
-            // or drops its count as an album's does; "Add folder" alone
-            // always fits.
-            let mut gui = peer_gui();
-            folder_window(&mut gui, "peerlib/Boukmanflow", Some(folder_files("peerlib/Boukmanflow", 99)));
-            let view = gui.app.keep_view().unwrap();
-            let primary = format!("[ {} ]", super::add_words(KeepVerb::Folder, &view));
-            assert!(w(&primary) <= super::PRIMARY_MAX, "{code}: {primary}");
-            assert!(w(&rust_i18n::t!("gui.discover.keep.add_folder")) + 4 <= super::PRIMARY_MAX, "{code}");
-            if code == "de" {
-                assert_eq!(primary, "[ Ordner hinzufügen · 99 Songs ]");
-            }
-            // The landings, the cap line, the chooser's words: the window's
-            // 72 text cells, the chooser's 76.
-            for words in [
-                super::choice_name(KeepChoice::Folder(FolderLanding::Mirror), &view),
-                super::choice_name(KeepChoice::Folder(FolderLanding::Into), &view),
-                super::choice_name(KeepChoice::Folder(FolderLanding::Tags), &view),
-                format!("! {}", super::cap_words(FolderCap { count: 99_999, cap: 10_000 })),
-                rust_i18n::t!("gui.discover.keep.leaves_out", albums = "Night Market Sampler · Singles").to_string(),
-            ] {
-                assert!(w(&words) <= 68, "{code}: {words}");
-            }
-            assert!(w(&rust_i18n::t!("gui.discover.keep.into_braces", folder = "Tapes {2019}")) <= 76, "{code}");
-            // The title on the top border, with its frame's cells.
-            assert!(w(&rust_i18n::t!("gui.discover.keep.into_title")) + 6 <= 80, "{code}");
-            // Every tips line the window and the chooser compose: 99 cells.
-            let mirror = rust_i18n::t!("gui.tips.discover_keep_choose").replace(&format!(" · {}", rust_i18n::t!("gui.tips.discover_keep_d")), "");
-            for line in [
-                mirror,
-                rust_i18n::t!("gui.tips.keep_into_field").to_string(),
-                rust_i18n::t!("gui.tips.keep_into_list").to_string(),
-                rust_i18n::t!("gui.tips.discover_dest_library").to_string(),
-            ] {
-                assert!(w(&line) <= 99, "{code}: {line}");
-            }
-            // The mirror's tips drop exactly "d where files land".
-            assert!(!super::tips(&gui).contains(&*rust_i18n::t!("gui.tips.discover_keep_d")), "{code}: {}", super::tips(&gui));
+        // Each language in a process of its own: the locale is the whole
+        // process's.
+        let Some(code) =
+            crate::setup::tests::in_own_process(&["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"])
+        else {
+            return;
+        };
+        let w = crate::kit::width;
+        // The folder primary with a two-digit count fits its 34 cells,
+        // or drops its count as an album's does; "Add folder" alone
+        // always fits.
+        let mut gui = peer_gui();
+        folder_window(&mut gui, "peerlib/Boukmanflow", Some(folder_files("peerlib/Boukmanflow", 99)));
+        let view = gui.app.keep_view().unwrap();
+        let primary = format!("[ {} ]", super::add_words(KeepVerb::Folder, &view));
+        assert!(w(&primary) <= super::PRIMARY_MAX, "{code}: {primary}");
+        assert!(w(&rust_i18n::t!("gui.discover.keep.add_folder")) + 4 <= super::PRIMARY_MAX, "{code}");
+        if code == "de" {
+            assert_eq!(primary, "[ Ordner hinzufügen · 99 Songs ]");
         }
+        // The landings, the cap line, the chooser's words: the window's
+        // 72 text cells, the chooser's 76.
+        for words in [
+            super::choice_name(KeepChoice::Folder(FolderLanding::Mirror), &view),
+            super::choice_name(KeepChoice::Folder(FolderLanding::Into), &view),
+            super::choice_name(KeepChoice::Folder(FolderLanding::Tags), &view),
+            format!("! {}", super::cap_words(FolderCap { count: 99_999, cap: 10_000 })),
+            rust_i18n::t!("gui.discover.keep.leaves_out", albums = "Night Market Sampler · Singles").to_string(),
+        ] {
+            assert!(w(&words) <= 68, "{code}: {words}");
+        }
+        assert!(w(&rust_i18n::t!("gui.discover.keep.into_braces", folder = "Tapes {2019}")) <= 76, "{code}");
+        // The title on the top border, with its frame's cells.
+        assert!(w(&rust_i18n::t!("gui.discover.keep.into_title")) + 6 <= 80, "{code}");
+        // Every tips line the window and the chooser compose: 99 cells.
+        let mirror = rust_i18n::t!("gui.tips.discover_keep_choose").replace(&format!(" · {}", rust_i18n::t!("gui.tips.discover_keep_d")), "");
+        for line in [
+            mirror,
+            rust_i18n::t!("gui.tips.keep_into_field").to_string(),
+            rust_i18n::t!("gui.tips.keep_into_list").to_string(),
+            rust_i18n::t!("gui.tips.discover_dest_library").to_string(),
+        ] {
+            assert!(w(&line) <= 99, "{code}: {line}");
+        }
+        // The mirror's tips drop exactly "d where files land".
+        assert!(!super::tips(&gui).contains(&*rust_i18n::t!("gui.tips.discover_keep_d")), "{code}: {}", super::tips(&gui));
     }
 
     #[test]

@@ -123,8 +123,8 @@ def rows_of(text):
 
 if leg == "files":
     # §4.5 / M4: the word 3 cells after the crumb, "read-only" alone, the
-    # count right-aligned; no "playlists and ratings" anywhere.
-    need("word", header("word") == " ▸ Files       │ ◂ Files ▸ peerlib/Boukmanflow · read-only   keep a copy                  3 items",
+    # count ending one cell in; no "playlists and ratings" anywhere.
+    need("word", header("word") == " ▸ Files       │ ◂ Files ▸ peerlib/Boukmanflow · read-only   keep a copy                 3 items",
          "the Files crumb's word")
     need("word", all(frame("word")[y][17:19] == "  " for y in (6, 7, 8)), "folder rows unmarked")
     need("word", not any("playlists and ratings" in l for l in frame("word")), "the cut clause drawn")
@@ -229,14 +229,14 @@ if leg == "files":
          and frame("kept")[8][17:] == "  Second Shift", "the folder rows' marks: their own folder copies only")
 else:
     # M1 with the credit (the user's 2026-10-27 call): "{album} — {credit}",
-    # the word 3 cells after it, the count right-aligned.
-    need("word", header("word") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   keep a copy                     3 items",
+    # the word 3 cells after it, the count ending one cell in.
+    need("word", header("word") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   keep a copy                    3 items",
          "the album page's credit and its word")
     need("word", [l[17:].rstrip() for l in frame("word")[5:9]] == [
         "  ..", "  Boukmanflow - Rooftop Cypher                                           0:12",
         "  Boukmanflow - Late Train Verse                                         0:08",
         "  Boukmanflow - Corner Store Loop                                        0:09"], "the page's rows, unmarked")
-    need("held", header("held") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow                                   3 items",
+    need("held", header("held") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow                                  3 items",
          "the word hidden while a row is held")
     # §6.3: the song window from a held row — its choices appended.
     song = rows_of("""
@@ -270,7 +270,7 @@ else:
     need("sheet", not any("from Stage Peer B" in l for l in sheet[8:22]), "a badge on the queue sheet")
     need("sheet", "keep a copy" not in sheet[2], "the header word drawn under the sheet")
     same("queue-song", window(frame("queue-song"), "Keep a copy"), song, "the queue item's song window (§4.8, W10)")
-    need("folded", header("folded") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   keep a copy                     3 items",
+    need("folded", header("folded") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   keep a copy                    3 items",
          "the word back once the row is stowed")
     # M2 / §6.2: album focus opened by the word.
     same("album", window(frame("album"), "Keep a copy"), rows_of("""
@@ -293,7 +293,7 @@ else:
          "the album's live state in the word's cells (x 58)")
     need("album-live", frame("album-live")[6][17:19] == "  " and frame("album-live")[8][17:19] == "  ",
          "rows marked by a live album copy")
-    need("album-kept", header("album-kept") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   ✓ kept                          3 items",
+    need("album-kept", header("album-kept") == "   Files       │ ◂ Albums  Borrowed Tapes — Boukmanflow   ✓ kept                         3 items",
          "the album's ✓ kept in the word's cells")
     # The queued Late Train Verse may still be playing (Linux keeps the
     # fake's empty stream at 0:00; macOS gives it up): the playing glyph
