@@ -31,7 +31,10 @@ seconds after a seek:
   when the rest landed in between, the download found no position named and woke nobody: the
   reader slept through its own bytes until the download ended.
 
-Neither 0.24.3, 0.24.4 nor upstream main (checked 2026-09-28) changes those files.
+Neither 0.24.3, 0.24.4 nor upstream main (checked 2026-09-28) changes those files. Nor do
+0.24.5 and 0.24.6 (checked 2026-11-15): dependency bumps (educe 0.8, parking_lot 0.13) and an
+outside `CancellationToken` on `Settings`, which `src/lib.rs` takes in one line where the stream
+starts, away from the read path.
 
 ## What differs from 0.24.2
 
