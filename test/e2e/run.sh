@@ -24,7 +24,7 @@ BIN="${BIN:-target/debug/mstream-player}"
 
 # The scenarios, by name (each is a function below); a name asked for
 # that is none of them stops the run before anything is built.
-ALL="A B C D E F G H T K K2 W M KM I J"
+ALL="A B C D E F G H T K K2 W M KM P P2 I J"
 for s in "$@"; do
   case " $ALL " in *" $s "*) ;; *) echo "no scenario $s (the battery has $ALL)"; exit 2 ;; esac
 done
@@ -92,6 +92,33 @@ stop_fake() { # $1 = name
   [ -f "$WORK/fake-$1.pid" ] || return 0
   kill "$(cat "$WORK/fake-$1.pid")" 2>/dev/null
   rm -f "$WORK/fake-$1.pid"
+}
+
+# A HOME whose player opens on Stage Peer B (the connected server the fake
+# own server on port $2 proxies), at its peerlib/Boukmanflow: the peer as
+# the most recent server, reached through its parent — the parent's entry
+# and token beside it, as a switch onto the peer leaves them.
+seed_peer_home() { # $1 = HOME, $2 = own server's port
+  mkdir -p "$1/player"
+  cat > "$1/player/config.toml" <<TOML
+[[server]]
+url = "mstream+peer://2@http://127.0.0.1:$2"
+last_path = "/peerlib/Boukmanflow"
+
+[server.peer]
+parent = "http://127.0.0.1:$2"
+id = 2
+name = "Stage Peer B"
+
+[[server]]
+url = "http://127.0.0.1:$2"
+username = "e2e"
+TOML
+  cat > "$1/player/credentials.toml" <<TOML
+[[token]]
+server = "http://127.0.0.1:$2"
+token = "fake-token"
+TOML
 }
 
 fake_state() { curl -s "http://127.0.0.1:$1/_state"; }
@@ -383,7 +410,7 @@ import json,urllib.request
 s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
 assert s['destination_puts'] == [{'destination': {'vpath': 'copies', 'base': '', 'layout': 'from-peers/{{ALBUMARTIST}}/{{ALBUM}}'}}], s['destination_puts']  # one PUT: the fold on open was no edit (Enter on the libraries sent nothing), the seeded base folder went into the layout, never sent as a base
 assert s['folder_lists'][-2:] == ['/copies', '/copies/from-peers'] and s['folder_lists'].count('/copies') == 1, s['folder_lists']  # after the Files pane's own: the root on opening the list, the picked folder, each once
-assert s['destination_gets'] == 3, s['destination_gets']  # the gate, the open, the 409's read again — never one a frame
+assert s['destination_gets'] == 4, s['destination_gets']  # the gate on Connected, the room's visit, the open, the 409's read again — never one a frame
 assert len(s['job_starts']) == 1, s['job_starts']
 assert s['job_starts'][0]['destination'] == {'vpath': 'copies', 'base': '', 'layout': 'from-peers/{{ALBUMARTIST}}/{{ALBUM}}'}, s['job_starts'][0]
 assert s['job_answers'] == ['destination_changed'] and s['jobs'] == [], (s['job_answers'], s['jobs'])
@@ -437,6 +464,97 @@ assert s['cancels'] == 1, s['cancels']
 assert s.get('destination_puts', []) == [], s.get('destination_puts')
 assert [j['state'] for j in s['jobs']] == ['cancelled'], s['jobs']
 "
+}
+
+# ── Scenario P: Keep a copy while browsing a connected server ────────────
+# Two fakes: Stage Peer B (FAKE_ROLE=peer, the keep-a-copy spec's §2
+# library) behind the own server's browse proxy (FAKE_PEER_URL, mStream's
+# federation-browse.js: the exact allowlist, the method and the JSON body
+# passed through), the own server's plug-ins as K's. The HOME opens on the
+# peer at peerlib/Boukmanflow (seed_peer_home). The Files leg keeps the open
+# folder by its header word, a held folder row Into a folder… through the
+# chooser, another By your layout, and opens Copies outside Discover; the
+# album leg keeps a held row, the queue item through its sheet, the album
+# page by its word (its credit on the header line), and opens the artist's
+# focus on his wall (docs/ux-contracts/discovery-page.md, clauses 150–172).
+# check_peer.py replays each stream at its marks; E2E_CAPTURES=DIR keeps
+# every mark's decoded frame there. Every copy lands in the fake's `copies`
+# library — no file is written anywhere.
+scenario_P() {
+FAKE_ROLE=peer start_fake P-peer || return
+PEER="$PORT"
+FAKE_TASTE=1 FAKE_PLUGINS=1 FAKE_PEER_URL="http://127.0.0.1:$PEER" start_fake P || return
+seed_peer_home "$WORK/h19" "$PORT"
+ARGS=(gui)
+leg gui-peer-files gui-peer-files.exp "$WORK/h19" "$WORK/gui-peer-files.out"
+if python3 "$E2E/check_peer.py" files "$WORK/gui-peer-files.out" "$E2E/replay.py" 30 100 "${E2E_CAPTURES:-}"; then
+  echo "PASS keep from a connected server's Files: the word, three landings, the chooser, Copies, kept"
+else
+  echo "FAIL keep from a connected server's Files: the word, three landings, the chooser, Copies, kept"; FAILS=$((FAILS+1))
+fi
+assert "three folder starts, each with its landing, to the own server's copies library" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+starts=s['job_starts']
+assert [b.get('scope') for b in starts] == ['folder'] * 3, starts
+peer={'id': 2, 'name': 'Stage Peer B'}
+assert [b['recommendation'] for b in starts] == [
+    {'filepath': 'peerlib/Boukmanflow', 'title': 'Boukmanflow', 'peer': peer, 'source': 'federation'},
+    {'filepath': 'peerlib/Boukmanflow/Borrowed Tapes', 'title': 'Borrowed Tapes', 'peer': peer, 'source': 'federation'},
+    {'filepath': 'peerlib/Boukmanflow/Harbour Lights', 'title': 'Harbour Lights', 'peer': peer, 'source': 'federation'}], starts
+assert 'landing' not in starts[0], starts[0]  # As on Stage Peer B: the route's default
+assert starts[1]['landing'] == {'vpath': 'copies', 'path': 'From Sam/Borrowed Tapes'}, starts[1]
+assert starts[2]['landing'] == {'tags': True}, starts[2]
+assert all(b['destination'] == {'vpath': 'copies', 'base': '', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'} for b in starts), starts
+assert s['job_answers'] == [202] * 3 and [j['state'] for j in s['jobs']] == ['done'] * 3, (s['job_answers'], s['jobs'])
+assert [j['result']['folder']['landed'] for j in s['jobs']] == ['copies/Boukmanflow', 'copies/From Sam/Borrowed Tapes', None], s['jobs']
+"
+assert "the peer was read through the proxy: one recursive listing a window, one tag batch, nothing off the allowlist" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+p=json.load(urllib.request.urlopen('http://127.0.0.1:$PEER/_state'))
+assert s['proxy_refused'] == [], s['proxy_refused']
+assert [b['directory'] for b in p['recursive_bodies']] == ['peerlib/Boukmanflow', 'peerlib/Boukmanflow/Borrowed Tapes', 'peerlib/Boukmanflow/Harbour Lights'], p['recursive_bodies']
+assert len(p['batch_bodies']) == 1 and len(p['batch_bodies'][0]) == 3, p['batch_bodies']  # the first By your layout, at most 100 songs
+assert s['folder_lists'] == ['/copies', '/copies/From Sam'], s['folder_lists']  # the chooser's list, asked of the own server
+assert s['lookup_sizes'] and all(0 < n <= 100 for n in s['lookup_sizes']), s['lookup_sizes']
+"
+stop_fake P-peer
+}
+
+# ── Scenario P2: the same pair, the album page, the queue and the wall ──
+# Fresh fakes of their own, so the album leg's copies are its own.
+scenario_P2() {
+FAKE_ROLE=peer start_fake P2-peer || return
+PEER="$PORT"
+FAKE_TASTE=1 FAKE_PLUGINS=1 FAKE_PEER_URL="http://127.0.0.1:$PEER" start_fake P2 || return
+seed_peer_home "$WORK/h20" "$PORT"
+ARGS=(gui)
+leg gui-peer-album gui-peer-album.exp "$WORK/h20" "$WORK/gui-peer-album.out"
+if python3 "$E2E/check_peer.py" album "$WORK/gui-peer-album.out" "$E2E/replay.py" 30 100 "${E2E_CAPTURES:-}"; then
+  echo "PASS keep from a connected server's album page, queue item and artist's wall"
+else
+  echo "FAIL keep from a connected server's album page, queue item and artist's wall"; FAILS=$((FAILS+1))
+fi
+assert "the queue item's song, then the album with the page's credit, to the own server's copies library" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+starts=s['job_starts']
+peer={'id': 2, 'name': 'Stage Peer B'}
+assert [b.get('scope') for b in starts] == [None, 'album'], starts
+# The queue item is no row of the album page on screen: no page credit
+# rides with it (its window finds the album's own).
+assert starts[0]['recommendation'] == {'filepath': 'peerlib/Boukmanflow/Borrowed Tapes/02 - Late Train Verse.mp3',
+    'title': 'Late Train Verse', 'artist': 'Boukmanflow', 'album': 'Borrowed Tapes',
+    'year': 2019, 'duration': 8.0, 'peer': peer, 'source': 'federation'}, starts[0]
+assert starts[1]['recommendation'] == {'album': 'Borrowed Tapes', 'albumArtist': 'Boukmanflow', 'artist': 'Boukmanflow',
+    'year': 2019, 'peer': peer, 'source': 'federation'}, starts[1]
+assert all(b['destination'] == {'vpath': 'copies', 'base': '', 'layout': '{{ALBUMARTIST}}/{{ALBUM}}'} for b in starts), starts
+assert [j['state'] for j in s['jobs']] == ['done', 'done'], s['jobs']
+assert s['proxy_refused'] == [], s['proxy_refused']
+assert s['lookup_sizes'] and all(0 < n <= 100 for n in s['lookup_sizes']), s['lookup_sizes']
+"
+stop_fake P2-peer
 }
 
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──
@@ -520,8 +638,9 @@ assert out.returncode == 2 and 'volume' in out.stderr, (out.returncode, out.stdo
 # Measured side by side (2026-11-10, Linux, 8 at a time): A 35 s, KM 29,
 # W 27, K and K2 23, F 21, C 20, M 19, H 16, B 13, E 11, D and I 10, G 9,
 # T 8, J 1 — 39 s in all, against 289 s one after another (J measured
-# 2026-11-11, when it joined the battery).
-LONGEST_FIRST="A KM W K K2 F C M H B E D I G T J"
+# 2026-11-11, when it joined the battery). P2 about 60 s and P 45 joined
+# 2026-11-16 (macOS, the whole battery side by side): they lead.
+LONGEST_FIRST="P2 P A KM W K K2 F C M H B E D I G T J"
 JOBS="${E2E_JOBS:-8}"
 [ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
 

@@ -973,9 +973,9 @@ mod tests {
     #[test]
     fn the_simple_upper_case_departs_from_std_only_where_std_gives_several() {
         // SpecialCasing.txt's upper cases of several code points, as std's
-        // Unicode 17 has them: a toolchain whose Unicode adds one fails
-        // here, on purpose, before a name is keyed by a guess; its simple
-        // mapping is to be looked up in UnicodeData.txt.
+        // Unicode 17 and 18 have them: a toolchain whose Unicode adds one
+        // fails here, on purpose, before a name is keyed by a guess; its
+        // simple mapping is to be looked up in UnicodeData.txt.
         let changed = |c: char| {
             let v = char::UNICODE_VERSION;
             format!(
@@ -984,7 +984,7 @@ mod tests {
                 c as u32, v.0, v.1, v.2
             )
         };
-        let several: &[(u32, u32)] = &[
+        let mut several: Vec<(u32, u32)> = vec![
             (0xDF, 0xDF), (0x149, 0x149), (0x1F0, 0x1F0), (0x390, 0x390), (0x3B0, 0x3B0),
             (0x587, 0x587), (0x1E96, 0x1E9A), (0x1F50, 0x1F50), (0x1F52, 0x1F52), (0x1F54, 0x1F54),
             (0x1F56, 0x1F56), (0x1F80, 0x1FAF), (0x1FB2, 0x1FB4), (0x1FB6, 0x1FB7), (0x1FBC, 0x1FBC),
@@ -992,6 +992,12 @@ mod tests {
             (0x1FE2, 0x1FE4), (0x1FE6, 0x1FE7), (0x1FF2, 0x1FF4), (0x1FF6, 0x1FF7), (0x1FFC, 0x1FFC),
             (0xFB00, 0xFB06), (0xFB13, 0xFB17),
         ];
+        // Unicode 18 (std's from Rust 1.100) adds U+1DF95, LATIN SMALL
+        // LIGATURE LONG S WITH DESCENDER S: "SS" as U+00DF's, and no simple
+        // upper case in UnicodeData.txt, so it stays itself.
+        if char::UNICODE_VERSION >= (18, 0, 0) {
+            several.push((0x1DF95, 0x1DF95));
+        }
         let mut departures = 0;
         for c in (0..=0x10FFFF).filter_map(char::from_u32) {
             let full: Vec<char> = c.to_uppercase().collect();
