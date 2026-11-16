@@ -1697,7 +1697,8 @@ fn dispatch_read(client: Option<Arc<Client>>, lanes: &Lanes, events: &Sender<Eve
 /// whatever came in behind it — on a thread of its own. Each change's event
 /// goes out before any read issued after it is even asked, so its answers
 /// land on the session the change made: the order the serial loop gave
-/// for free.
+/// for free. The covers a retarget moves onto its new client are asked
+/// after it too.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_changes(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
     let (runner, runner_lanes, runner_events) = (session.clone(), lanes.clone(), events.clone());
@@ -1730,15 +1731,22 @@ fn work_through(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
         let retarget = matches!(cmd, ApiCmd::Retarget { .. });
         let before = client.clone();
         let event = run_change(&mut client, cmd);
+        // The change's own event first, before anything is asked of the
+        // client it made. A retarget's waiting covers move onto that client
+        // just below and are asked there at once, on the lane's threads;
+        // sent after them, the Retargeted could reach the App behind an
+        // answer of theirs. The App reads the two in order: a path coming
+        // up forgives every cover that failed before it
+        // (`App::path_came_up`), so one that had just failed on the new
+        // path itself was forgiven with the rest and asked again at once.
+        let gone = event.is_some_and(|event| events.send(event).is_err());
         let mut slot = lock_session(session);
         if replaced(before.as_ref(), client.as_ref()) {
             lock_lanes(lanes).session_moved(client.clone(), retarget, events);
         }
         slot.client = client;
         drop(slot);
-        if let Some(event) = event
-            && events.send(event).is_err()
-        {
+        if gone {
             return;
         }
     }
@@ -4840,20 +4848,32 @@ mod tests {
         }
     }
 
-    /// A server whose covers each hang `hold` before a 404, counting the
-    /// asks it was sent; its ping answers at once.
-    fn hanging_art(hold: Duration) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    /// A server whose covers each hang until the flag it hands back is
+    /// raised, then 404, counting the asks it was sent; its ping answers at
+    /// once. Held by the test, not for a length of time: covers that let go
+    /// by themselves after a second and a half did so in the middle of
+    /// whatever a slow machine had not got to yet.
+    fn held_art() -> (String, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicBool>) {
+        use std::sync::atomic::Ordering::SeqCst;
         let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = asked.clone();
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (counter, released) = (asked.clone(), release.clone());
         let base = test_server(move |path| match path {
             "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
             p if p.starts_with("/album-art/") => {
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                (hold, "404 Not Found", "{}")
+                counter.fetch_add(1, SeqCst);
+                // Held on the request's own thread — and not for ever: a
+                // test that failed before raising the flag leaves these to
+                // run out by themselves.
+                let until = std::time::Instant::now() + Duration::from_secs(10);
+                while !released.load(SeqCst) && std::time::Instant::now() < until {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                (Duration::ZERO, "404 Not Found", "{}")
             }
             _ => (Duration::ZERO, "404 Not Found", "{}"),
         });
-        (base, asked)
+        (base, asked, release)
     }
 
     /// The next event that is not the tunnel sampler's.
@@ -4885,7 +4905,7 @@ mod tests {
         // the leftovers kept all six runners for twenty seconds an ask, each
         // still aimed at the server the user had left, and the new server's
         // covers waited behind them.
-        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let (old, asked_old, release) = held_art();
         let new = test_server(|path| match path {
             "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
             _ => (Duration::ZERO, "404 Not Found", "{}"),
@@ -4899,15 +4919,16 @@ mod tests {
 
         tx.send(connect_to(&new)).unwrap();
         assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
-        let asked = std::time::Instant::now();
+        // Answered while the old server still holds its six: it did not
+        // wait for them, since nothing lets them go until this has landed.
         tx.send(small_cover("new.jpeg")).unwrap();
         match next_answer(&events, Duration::from_secs(5)) {
             Event::AlbumArt { file, .. } => assert_eq!(file, "new.jpeg", "the new server's cover first"),
             other => panic!("unexpected {other:?}"),
         }
-        assert!(asked.elapsed() < Duration::from_millis(1000), "it did not wait: {:?}", asked.elapsed());
 
         // The six on the wire land; the fourteen that waited are never sent.
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
         for _ in 0..ART_LANE_WIDTH {
             assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
         }
@@ -4922,7 +4943,7 @@ mod tests {
         // The same server by another way: its claims stand in the App, so
         // what waited on the old path is asked on the new one, at once,
         // rather than behind the old path's six on the wire.
-        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let (old, asked_old, release) = held_art();
         let new = test_server(|path| match path {
             "/api/" => (Duration::ZERO, "200 OK", "{}"),
             _ => (Duration::ZERO, "404 Not Found", "{}"),
@@ -4934,7 +4955,6 @@ mod tests {
         assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
         twenty_covers_on(&tx, &asked_old);
 
-        let moved = std::time::Instant::now();
         tx.send(ApiCmd::Retarget {
             identity: old.clone(),
             server: new,
@@ -4944,14 +4964,22 @@ mod tests {
             local_token: None,
         })
         .unwrap();
-        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Retargeted { .. }));
+        // The move is told before any cover it moved answers. The App
+        // forgives what failed before a path came up, and a cover that
+        // fails on the new path is not one of those.
+        match next_answer(&events, Duration::from_secs(5)) {
+            Event::Retargeted { .. } => {}
+            other => panic!("the move was not the first thing told: {other:?}"),
+        }
+        // The fourteen that waited are answered while the old path still
+        // holds its six: behind those, none of them would answer at all.
         for _ in 0..20 - ART_LANE_WIDTH {
             match next_answer(&events, Duration::from_secs(5)) {
                 Event::AlbumArt { settled: true, .. } => {}
                 other => panic!("unexpected {other:?}"),
             }
         }
-        assert!(moved.elapsed() < Duration::from_millis(1000), "the new path answered them: {:?}", moved.elapsed());
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
         for _ in 0..ART_LANE_WIDTH {
             assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
         }
