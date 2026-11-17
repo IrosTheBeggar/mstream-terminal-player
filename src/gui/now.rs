@@ -95,10 +95,11 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
         tall_compact(frame, &mut gui.ui, x, y, next, TallKind::Strong, Act::Next);
     }
 
-    // The Auto-DJ tab's sources picker is the TUI's own overlay: the GUI
-    // draws its genre picker and chooser as kit modals; this one it lends
-    // from the view it reuses.
-    if gui.app.dj_panel.sources.is_some() {
+    // The Auto-DJ tab's pickers are the TUI's own overlay, lent from the
+    // view this screen reuses: its Sources row's and its Genres row's —
+    // the TUI's genre list, not the room's Genres sheet, which is a kit
+    // modal like the chooser.
+    if gui.app.dj_panel.sources.is_some() || gui.app.dj_panel.genres.is_some() {
         crate::tui::ui::render_dj_picker(frame, view, &gui.app);
     }
 
@@ -112,14 +113,30 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     }
 }
 
+/// The screen goes down — a tab, a nav row, the App leaving its view on
+/// its own — and the App's modes it serves go with it, as their Esc takes
+/// them: the keyword field (a word typed and not yet added is dropped) and
+/// the Auto-DJ tab's pickers (a switch already flipped stays). The TUI's
+/// view keeps every key while one is up, its way out included; here the
+/// pointer can take the screen down from under one, and the mode stayed
+/// up unseen, every later action falling into it — the Library's queue
+/// Clear among them. The room's Genres sheet keeps its own picker.
+pub(crate) fn leave(gui: &mut Gui) {
+    gui.app.dj_keyword = None;
+    gui.app.dj_panel.sources = None;
+    if gui.dj.sheet.is_none() {
+        gui.app.dj_panel.genres = None;
+    }
+}
+
 /// The screen's keys (contract clause 8): the TUI's full-screen keys,
 /// forwarded to the App with its `fullscreen` flag up, and the GUI's own
 /// transport letters. Returns true to quit.
 pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     // The App's own input modes first, the TUI keymap's way: the Auto-DJ
-    // tab's keyword field takes the letters, and its sources picker (the
-    // TUI's overlay, drawn here) takes the list keys — else Enter on those
-    // rows left a mode nothing could serve or leave.
+    // tab's keyword field takes the letters, and its sources and genre
+    // pickers (the TUI's overlay, drawn here) take the list keys — else
+    // Enter on those rows left a mode nothing could serve or leave.
     if gui.app.dj_keyword.is_some() {
         match key.code {
             KeyCode::Char(c) => gui.forward(Action::Input(c)),
@@ -130,7 +147,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         }
         return false;
     }
-    if gui.app.dj_panel.sources.is_some() {
+    if gui.app.dj_panel.sources.is_some() || gui.app.dj_panel.genres.is_some() {
         match key.code {
             KeyCode::Up => gui.forward(Action::Up),
             KeyCode::Down => gui.forward(Action::Down),
@@ -184,4 +201,166 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         _ => {}
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::super::{Act, FILES_NAV, Gui, Screen, handle_key, render};
+    use crate::api::types::{Genre, Track};
+    use crate::config::Config;
+    use crate::tui::app::{Action, App, DjRow, KnownServer, NowTab};
+    use crate::tui::worker::{DjServerInfo, Event};
+
+    const HOST: &str = "http://host:3000";
+
+    /// A connected session, its server saved and its probe answered with two
+    /// libraries: the Auto-DJ tab has its Genres, Keywords and Sources rows,
+    /// and a library switched off has an entry to be written to.
+    fn session() -> Gui {
+        let mut gui = Gui::new(Config::default(), false, App::new(Some(HOST.into()), None, None));
+        gui.app.connected = true;
+        gui.app.session.server = HOST.into();
+        gui.app.session.server_id = HOST.into();
+        gui.app.servers.push(KnownServer {
+            id: HOST.into(),
+            name: "host".into(),
+            token: None,
+            username: None,
+            self_signed: false,
+            peer: None,
+            pairing: None,
+            dj: Default::default(),
+        });
+        let info = DjServerInfo {
+            version: Some("6.33.1".into()),
+            discovery: true,
+            discovery_ready: Some(true),
+            libraries: vec!["Music".into(), "Pods".into()],
+            mood_filters: true,
+        };
+        let effects = gui.app.apply_event(Event::DjProbed { identity: HOST.into(), info: Some(info) });
+        gui.pend(effects);
+        gui
+    }
+
+    fn key(gui: &mut Gui, code: KeyCode) {
+        handle_key(gui, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn screen_text(gui: &mut Gui) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, gui)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        (0..area.height)
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Now Playing on its Auto-DJ tab, Enter on `row`: the mode that row opens.
+    fn open(gui: &mut Gui, row: DjRow) {
+        gui.act(Act::Screen(Screen::NowPlaying));
+        for _ in 0..8 {
+            if gui.app.now_tab() == NowTab::AutoDj {
+                break;
+            }
+            key(gui, KeyCode::Tab);
+        }
+        assert_eq!(gui.app.now_tab(), NowTab::AutoDj);
+        gui.app.dj_panel.row = gui.app.dj_panel.rows.iter().position(|r| *r == row).expect("the row is on the tab");
+        key(gui, KeyCode::Enter);
+    }
+
+    /// Whether one of the App's modes this screen serves is up.
+    fn a_mode_is_up(gui: &Gui) -> bool {
+        gui.app.dj_keyword.is_some() || gui.app.dj_panel.sources.is_some() || gui.app.dj_panel.genres.is_some()
+    }
+
+    #[test]
+    fn the_views_modes_go_down_with_the_screen_whichever_way_it_is_left() {
+        // The TUI's view keeps every key while a mode is up, its way out
+        // included; here the pointer takes the screen down from under one —
+        // the top bar's tabs, a nav row — and the mode stayed up unseen,
+        // taking every action after it: the Library's queue Clear did
+        // nothing.
+        let ways = [Act::Screen(Screen::Library), Act::Screen(Screen::Stats), Act::Nav(FILES_NAV)];
+        for row in [DjRow::Keywords, DjRow::Sources, DjRow::Genres] {
+            for way in ways.clone() {
+                let mut gui = session();
+                gui.app.replace_queue(vec![Track { filepath: "Music/a.mp3".into(), metadata: Default::default() }]);
+                open(&mut gui, row);
+                assert!(a_mode_is_up(&gui), "{row:?} opens its mode");
+                gui.act(way.clone());
+                assert_ne!(gui.screen, Screen::NowPlaying, "{way:?} leaves the screen");
+                assert!(!a_mode_is_up(&gui), "{row:?}'s mode goes down with the screen, by {way:?}");
+                gui.act(Act::QueueClear);
+                assert!(gui.app.queue.items.is_empty(), "{row:?}, {way:?}: the next action is the screen's own");
+            }
+        }
+    }
+
+    #[test]
+    fn leaving_keeps_what_the_modes_hold_as_their_esc_keeps_it() {
+        // A word typed and not added goes, as Esc drops it; a library
+        // switched off stays off — the picker wrote it as it flipped.
+        let mut gui = session();
+        open(&mut gui, DjRow::Keywords);
+        key(&mut gui, KeyCode::Char('l'));
+        key(&mut gui, KeyCode::Char('o'));
+        assert_eq!(gui.app.dj_keyword.as_deref(), Some("lo"));
+        gui.act(Act::Screen(Screen::Library));
+        assert!(gui.app.dj_keyword.is_none());
+        assert!(gui.app.dj.keywords.is_empty(), "the unfinished word was not added");
+
+        let mut gui = session();
+        open(&mut gui, DjRow::Sources);
+        key(&mut gui, KeyCode::Char(' '));
+        assert_eq!(gui.app.dj_sources_off(), ["Music"]);
+        gui.act(Act::Screen(Screen::Library));
+        assert!(gui.app.dj_panel.sources.is_none());
+        assert_eq!(gui.app.dj_sources_off(), ["Music"], "the switch stays where it was flipped");
+    }
+
+    #[test]
+    fn the_genres_row_opens_a_list_the_screen_draws_and_serves() {
+        // The tab's Genres row opens the TUI's genre list, not the room's
+        // Genres sheet. It was neither drawn here nor served: Space ticked
+        // genres nobody could see, and Esc left the screen with the list
+        // still up.
+        let mut gui = session();
+        open(&mut gui, DjRow::Genres);
+        assert!(gui.app.dj_panel.genres.is_some());
+        let text = screen_text(&mut gui);
+        assert!(text.contains("Genres ·") && text.contains("loading genres"), "drawn while it loads:\n{text}");
+        let effects = gui.app.apply_event(Event::Genres(vec![
+            Genre { name: "Ambient".into(), track_count: Some(4) },
+            Genre { name: "Techno".into(), track_count: Some(9) },
+        ]));
+        gui.pend(effects);
+        assert!(screen_text(&mut gui).contains("Techno"));
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Char(' '));
+        assert_eq!(gui.app.dj_library().genres, ["Techno"], "Space ticks the genre in hand");
+        key(&mut gui, KeyCode::Esc);
+        assert!(gui.app.dj_panel.genres.is_none(), "Esc closes the list");
+        assert_eq!(gui.screen, Screen::NowPlaying, "and stays on the screen");
+    }
+
+    #[test]
+    fn the_app_leaving_its_view_on_its_own_takes_the_modes_with_it() {
+        // However the App comes to drop its full-screen view (arming a pick
+        // does), the shell follows it to the Library, and the view's modes
+        // go with the view.
+        let mut gui = session();
+        open(&mut gui, DjRow::Keywords);
+        gui.app.fullscreen = false;
+        gui.forward(Action::Up);
+        assert_eq!(gui.screen, Screen::Library);
+        assert!(gui.app.dj_keyword.is_none());
+    }
 }

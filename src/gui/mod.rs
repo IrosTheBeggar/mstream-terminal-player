@@ -734,6 +734,7 @@ impl Gui {
     /// can see (now-playing contract, the states).
     fn sync_screen(&mut self) {
         if self.screen == Screen::NowPlaying && !self.app.fullscreen {
+            now::leave(self);
             self.screen = Screen::Library;
             self.active = match self.app.tab {
                 Tab::SonicPath => SONIC_NAV,
@@ -959,8 +960,12 @@ impl Gui {
                 self.screen = screen;
                 // The App's full-screen flag follows the screen, so its keys
                 // mean here what they mean in the TUI's view (now-playing
-                // contract, the states).
+                // contract, the states) — and the view's own modes go down
+                // with it.
                 self.app.fullscreen = screen == Screen::NowPlaying;
+                if was == Screen::NowPlaying && screen != Screen::NowPlaying {
+                    now::leave(self);
+                }
                 if screen != Screen::Library {
                     self.cursor = None;
                     self.servers.drop_open = false;
@@ -999,6 +1004,9 @@ impl Gui {
                 // again when its own row (or `G`) is pressed while it is up.
                 let was = (self.screen == Screen::Library).then_some(self.active);
                 // A nav row is the Library's: it brings that screen back.
+                if self.screen == Screen::NowPlaying {
+                    now::leave(self);
+                }
                 self.screen = Screen::Library;
                 self.app.fullscreen = false;
                 stats::close(self);

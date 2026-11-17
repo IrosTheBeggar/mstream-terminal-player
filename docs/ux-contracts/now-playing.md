@@ -38,7 +38,10 @@ pointer needs to drive the view: the transport under the cover.
   back; a tab that left with its track falls back to the Queue.
 - **The App's `fullscreen` flag is up while the screen is** and down when
   it leaves, so the App's full-screen semantics apply to every key here
-  exactly as in the TUI's view.
+  exactly as in the TUI's view. The App's input modes the screen serves —
+  the Auto-DJ tab's keyword field and its sources and genre pickers — go
+  down with it however it is left, as their Esc takes them: a word typed
+  and not yet added goes, a switch already flipped stays.
 
 ## Behavior contract
 
@@ -178,3 +181,15 @@ names the tab, `gui.tips.now` the keys on the footer (ten locales).
   are `gui.tips.now` (it names no tab) and the TUI keymap's key-4 line,
   which names the TUI browser's own Discover tab — a different thing that
   keeps its name.
+- **2026-11-17 — The view's modes go down with the screen.** The pointer
+  can take the screen down from under one of the App's modes — a top-bar
+  tab, a nav row, the App leaving its view on its own — and the mode
+  stayed up unseen, every later action falling into it (the Library's
+  queue Clear did nothing). They now close as their Esc closes them
+  (`now::leave`: `Act::Screen` off this screen, `Act::Nav`,
+  `sync_screen`). With it, the Auto-DJ tab's Genres row: it opens the
+  TUI's genre list, not the room's Genres sheet, and the 2026-09-26 fix
+  served only the keyword field and the sources picker — the list was
+  neither drawn nor served, so Space ticked genres nobody could see and
+  Esc left the screen with the list still up. It is lent as the sources
+  picker is now: drawn over the view, the list keys its own.
