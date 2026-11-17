@@ -309,7 +309,6 @@ impl Fed {
             (source.channels(), source.sample_rate(), source.total_duration());
         let per_block = (u128::from(rate.get()) * BLOCK.as_millis() / 1000).max(1) as usize;
         let block_len = per_block * usize::from(channels.get());
-        let rise_len = (u128::from(rate.get()) * RISE.as_millis() / 1000).max(1) as u32;
         let feed = Arc::new(Feed::new(channels, rate, download));
         let (blocks_tx, blocks) = mpsc::sync_channel(AHEAD);
         let (spare, spare_rx) = mpsc::sync_channel(AHEAD + 2);
@@ -339,14 +338,26 @@ impl Fed {
             })
             .map_err(|e| format!("the decode thread would not start: {e}"))?;
         let _ = feed.thread.set(thread.thread().clone());
-        Ok(Fed {
+        Ok(Fed::pulling(feed, blocks, spare, total))
+    }
+
+    /// The callback's end of `feed`: it takes what comes through `blocks`
+    /// and hands the spent ones back through `spare`.
+    fn pulling(
+        feed: Arc<Feed>,
+        blocks: Receiver<Block>,
+        spare: SyncSender<Vec<Sample>>,
+        total: Option<Duration>,
+    ) -> Fed {
+        let rise_len = (u128::from(feed.rate.get()) * RISE.as_millis() / 1000).max(1) as u32;
+        Fed {
+            channels: usize::from(feed.channels.get()),
             feed,
             blocks,
             spare,
             block: Vec::new(),
             at: 0,
             order: 0,
-            channels: usize::from(channels.get()),
             owed: 0,
             rise: 0,
             rise_len,
@@ -354,7 +365,7 @@ impl Fed {
             quiet: false,
             ended: false,
             total,
-        })
+        }
     }
 
     /// The engine's view of this source.
@@ -483,19 +494,24 @@ impl Source for Fed {
         }
         self.order = self.feed.ask(at);
         self.feed.played.store(self.feed.samples_at(at), Ordering::Relaxed);
-        // What is in hand and what waits was decoded for the old place.
-        // Letting it go also makes room, which is what a decode thread
-        // waiting to hand over a block is waiting for.
+        // What is in hand was decoded for the old place.
         let spent = std::mem::take(&mut self.block);
         self.give_back(spent);
         self.at = 0;
-        while let Ok(block) = self.blocks.try_recv() {
-            if let Block::Sound { samples, .. } = block {
-                self.give_back(samples);
-            }
-        }
         self.quiet = true;
         self.ended = false;
+        // So was what waits, and letting it go makes room, which is what a
+        // decode thread waiting to hand over a block is waiting for — but
+        // only as far as the first block made for this order. The thread
+        // is woken by the room, and can have taken the order up, sought
+        // and handed that block over while this is still looking through
+        // the old ones. It says where the decoder really is, and says it
+        // once; so does the end of the track, if that is what the seek
+        // found.
+        if let Took::End = self.take() {
+            self.ended = true;
+            self.feed.starved.store(false, Ordering::Relaxed);
+        }
         Ok(())
     }
 }
@@ -962,6 +978,16 @@ mod tests {
         sample as usize - 1
     }
 
+    /// The callback's end with no decode thread behind it: the test hands
+    /// the blocks over itself, in the order a race would have them come.
+    fn by_hand() -> (Fed, SyncSender<Block>) {
+        let (hand_over, blocks) = mpsc::sync_channel(AHEAD);
+        let (spare, _) = mpsc::sync_channel(AHEAD + 2);
+        let stereo = NonZero::new(2).unwrap();
+        let feed = Arc::new(Feed::new(stereo, NonZero::new(RATE).unwrap(), None));
+        (Fed::pulling(feed, blocks, spare, None), hand_over)
+    }
+
     #[test]
     fn what_the_callback_pulls_is_what_the_decoder_made_sample_for_sample() {
         let frames = PER_BLOCK * 7 + 33;
@@ -1129,6 +1155,40 @@ mod tests {
         assert!(from > 200 && from < RATE as usize * 3, "it went on from frame {from}");
         let position = fed.feed.position();
         assert!((position - (from + 1) as f64 / 8000.0).abs() < 1e-9, "at {position}");
+    }
+
+    #[test]
+    fn what_was_decoded_for_a_seek_while_it_was_still_being_placed_is_kept() {
+        // Placing a seek lets go of what waits, which makes room, and room
+        // is what a decode thread with a block to hand over is waiting
+        // for. Woken by it, the thread can take the order up, seek and
+        // hand over the first block of the new place while the callback is
+        // still looking through the old ones. Here the blocks lie as that
+        // leaves them: one of the old place, then the first for the order
+        // about to be placed — from a decoder that refused the seek, so it
+        // says where the decoder stands instead.
+        let (mut fed, hand_over) = by_hand();
+        let placed = fed.feed.orders() + 1;
+        hand_over.send(Block::Sound { order: 0, at: Some(0), samples: vec![1.0, -1.0] }).unwrap();
+        let stands = Block::Sound { order: placed, at: Some(1_000), samples: vec![501.0, -501.0] };
+        hand_over.send(stands).unwrap();
+
+        fed.try_seek(Duration::from_secs(30)).unwrap();
+        // Let go with the old one, it left the position reading the place
+        // that was asked for, for the rest of the track.
+        let position = fed.feed.position();
+        assert!((position - 1_000.0 / 16_000.0).abs() < 1e-9, "at {position}");
+        assert_eq!([fed.next(), fed.next()], [Some(501.0), Some(-501.0)]);
+        assert_eq!(fed.next(), Some(0.0), "and then it waits for the next block");
+
+        // The end of the track is said once. A seek to the end that let go
+        // of it left the track waiting for sound that was never to come.
+        let (mut fed, hand_over) = by_hand();
+        hand_over.send(Block::Sound { order: 0, at: Some(0), samples: vec![1.0, -1.0] }).unwrap();
+        hand_over.send(Block::End { order: fed.feed.orders() + 1 }).unwrap();
+        fed.try_seek(Duration::from_secs(30)).unwrap();
+        assert_eq!(fed.next(), None);
+        assert!(!fed.feed.is_starved(), "ended is not starved");
     }
 
     #[test]

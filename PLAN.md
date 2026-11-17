@@ -4575,6 +4575,21 @@ used to lose nothing; the refusal is still reported.
   its next span or with `None`. Nothing under "What was run" played a Vorbis file. The feed's
   tests have a source that hands itself over in packets, an empty one first: played from its
   first sample to its last, and sought before it has given one. Both failed without `Asked`.
+- A seek could let go of the first sound of the place it was sent to. Placing one, the
+  callback's end let go of everything that was waiting, which also makes room for a decode
+  thread waiting to hand a block over — and a thread woken by that room can take the order up,
+  seek and hand over the first block of the new place while the callback is still looking
+  through the old ones. That block says where the decoder really is, once. Gone with the rest,
+  a seek the decoder refused left the position reading the place that was asked for (how it was
+  found: one of the feed's tests read 30.02 s there, once, on a machine busy with another
+  build), a seek that landed started a block or more late with the position as far behind the
+  sound, and a seek to a track's end could lose the end and leave the track waiting for sound.
+  It takes the callback being held up for the moment it is looking, which a test thread is far
+  more often than a device's. `Fed::try_seek` looks through what waits the way a pull does now
+  (`take`), and keeps what was made for the order it has just placed. With that look made 5 ms
+  long on purpose, three of the feed's seek tests failed every time before, one of them with
+  the same 30.02 s, and none after; a test that hands the blocks over itself in that order
+  holds it without the delay.
 
 **What was run.**
 
