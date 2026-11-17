@@ -232,11 +232,11 @@ mod tests {
         let window: Vec<&str> = window_rows.iter().map(String::as_str).collect();
 
         let mut face: Box<dyn Face> = Box::new(stub);
-        let test_rows = face_rows(&mut *face, 20, 3).unwrap();
+        let test_rows = face_rows(&mut *face, 20, 3);
         assert_eq!(compare(&window, &test_rows), "EQUAL");
 
         let mut other: Box<dyn Face> = Box::new(StubFace { line: "another" });
-        let other_rows = face_rows(&mut *other, 20, 3).unwrap();
+        let other_rows = face_rows(&mut *other, 20, 3);
         assert!(compare(&window, &other_rows).starts_with("UNEQUAL from row 0"));
     }
 }

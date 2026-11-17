@@ -59,7 +59,7 @@ impl Volumes for Shelf {
 
     fn open(&self, found: &Found) -> Option<Box<dyn CardWrite>> {
         assert!(!self.breaks.load(Ordering::SeqCst), "a test's fault in the worker");
-        let refused = self.refuse.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1));
+        let refused = self.refuse.try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1));
         if refused.is_ok() {
             return None;
         }
