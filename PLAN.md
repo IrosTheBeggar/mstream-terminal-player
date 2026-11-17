@@ -4562,6 +4562,20 @@ part-way through, so the track stops a few tens of milliseconds short of the las
 came. A seek the decoder refuses loses up to the second that had been decoded ahead, where it
 used to lose nothing; the refusal is still reported.
 
+**Found after it merged (2026-11-17).**
+
+- Every Ogg Vorbis track ended as it started: `play` on one stood at 0.00 and said the track had
+  run out a tenth of a second in, and a queue skipped it. rodio's decoder gives the packet it
+  has in hand as its span and decodes the next only when a sample of it is asked for, and the
+  first packet of a Vorbis stream decodes to no samples. An empty span is rodio's word for a
+  source that has ended, and the converter that pins a source's format (`UniformSourceIterator`)
+  takes nothing of one and never asks. rodio's queue used to stand between the two, and it asks
+  whatever the span says. The decode thread reads its source through `Asked` now, which passes
+  an empty span on as a span of one frame: the frame is asked for, and the source answers with
+  its next span or with `None`. Nothing under "What was run" played a Vorbis file. The feed's
+  tests have a source that hands itself over in packets, an empty one first: played from its
+  first sample to its last, and sought before it has given one. Both failed without `Asked`.
+
 **What was run.**
 
 - `engine::feed`'s own tests (a source that says which frame each sample is from): what the
