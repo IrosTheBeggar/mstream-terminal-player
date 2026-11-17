@@ -4491,6 +4491,20 @@ read the `-- device: … --` line and the `longest tick` at the end; with
 `MSTREAM_ENGINE_TRACE=<file>` the file says how long each open took and what each device
 refused with.
 
+**Found in the stage's tests later (2026-11-17).** The macOS runner failed one of them once,
+`a_sleeping_stream_is_replaced_like_any_other…` ("and sleeps when nothing needs it"), on a
+branch that changes nothing on that path. Four places in the stage's tests ticked for the idle
+time and 300 to 400 ms more, and then expected the stream asleep. A suspend is refused while a
+pull is in flight and asked again at the next tick, which with a device's callback is a matter
+of microseconds. A stage's puller is an ordinary thread mixing in an unoptimized build. With a
+test suite running on every core beside it, one pull took as long as the 10 ms it is due in,
+the puller made the pulls it owed back to back, and the stream was found mid-pull at six ticks
+running, 45 ms apart (the engine's own trace, with a line added for each refusal). So run, the
+test failed 10 times in 288; with the tests waiting for the sleep
+(`tick_until(&engine, asleep)`), none in 288. Nothing in the engine changed: asking again at
+the next tick is what a refused suspend is for, and a device's callback is not a thread that
+waits its turn.
+
 ## Appendix — Decoding off the device callback (2026-11-16)
 
 **Why.** After the device-switch fix, a read-through of the threading (main `c012d72`) found one
@@ -4561,6 +4575,43 @@ source at 48 kHz stereo. A stall withholds up to a block and the packet the deco
 part-way through, so the track stops a few tens of milliseconds short of the last byte that
 came. A seek the decoder refuses loses up to the second that had been decoded ahead, where it
 used to lose nothing; the refusal is still reported.
+
+**Found after it merged (2026-11-17).**
+
+- Every Ogg Vorbis track ended as it started: `play` on one stood at 0.00 and said the track had
+  run out a tenth of a second in, and a queue skipped it. rodio's decoder gives the packet it
+  has in hand as its span and decodes the next only when a sample of it is asked for, and the
+  first packet of a Vorbis stream decodes to no samples. An empty span is rodio's word for a
+  source that has ended, and the converter that pins a source's format (`UniformSourceIterator`)
+  takes nothing of one and never asks. rodio's queue used to stand between the two, and it asks
+  whatever the span says. The decode thread reads its source through `Asked` now, which passes
+  an empty span on as a span of one frame: the frame is asked for, and the source answers with
+  its next span or with `None`. Nothing under "What was run" played a Vorbis file. The feed's
+  tests have a source that hands itself over in packets, an empty one first: played from its
+  first sample to its last, and sought before it has given one. Both failed without `Asked`.
+- A seek could let go of the first sound of the place it was sent to. Placing one, the
+  callback's end let go of everything that was waiting, which also makes room for a decode
+  thread waiting to hand a block over — and a thread woken by that room can take the order up,
+  seek and hand over the first block of the new place while the callback is still looking
+  through the old ones. That block says where the decoder really is, once. Gone with the rest,
+  a seek the decoder refused left the position reading the place that was asked for (how it was
+  found: one of the feed's tests read 30.02 s there, once, on a machine busy with another
+  build), a seek that landed started a block or more late with the position as far behind the
+  sound, and a seek to a track's end could lose the end and leave the track waiting for sound.
+  It takes the callback being held up for the moment it is looking, which a test thread is far
+  more often than a device's. `Fed::try_seek` looks through what waits the way a pull does now
+  (`take`), and keeps what was made for the order it has just placed. With that look made 5 ms
+  long on purpose, three of the feed's seek tests failed every time before, one of them with
+  the same 30.02 s, and none after; a test that hands the blocks over itself in that order
+  holds it without the delay.
+- The macOS runner failed one of the feed's tests ("the track never ended", the decoder that
+  panics) in main's own run after the merge and in the next two pull requests' runs, and
+  nowhere else. The test heard two of its three blocks and left the third to a five-second
+  wait that looks every 2 ms: 320 looks, 0.64 s as asked, and more than the five seconds once
+  a look takes 16 ms, which it can on a runner busy with three thousand other tests — the
+  tests beside it were done within a second, and it gave up at five. With the wait's sleep
+  made 16 ms on purpose it failed here with the same words, and alone. It hears all three
+  blocks first now, which waits for nothing that is already there.
 
 **What was run.**
 
