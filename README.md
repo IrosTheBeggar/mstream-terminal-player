@@ -85,7 +85,7 @@ To build it from source (or use `--features window` for `gui --window` without t
 empty command line):
 
 ```bash
-cargo install --git https://github.com/IrosTheBeggar/mstream-terminal-player --features desktop
+cargo install --locked --git https://github.com/IrosTheBeggar/mstream-terminal-player --features desktop
 ```
 
 ### Install the terminal player
@@ -142,8 +142,10 @@ glibc 2.31 or newer — Debian 11, Ubuntu 20.04, and the Pi and NAS images of th
 ALSA at runtime (`sudo apt install libasound2`). macOS quarantines binaries downloaded in a
 browser; the one-liner doesn't trip that, and the macOS binaries are signed and notarized. To
 build from source instead:
-`cargo install --git https://github.com/IrosTheBeggar/mstream-terminal-player`. Add
-`--features desktop` to build the window into it — the desktop player above.
+`cargo install --locked --git https://github.com/IrosTheBeggar/mstream-terminal-player`. Add
+`--features desktop` to build the window into it — the desktop player above. `--locked` builds
+the dependency versions the repository's `Cargo.lock` names, the ones CI tested; without it cargo
+takes the newest of each, and one dependency's breaking minor release is enough to stop the build.
 
 ## The player
 
