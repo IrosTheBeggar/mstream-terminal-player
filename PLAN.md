@@ -4590,6 +4590,14 @@ used to lose nothing; the refusal is still reported.
   long on purpose, three of the feed's seek tests failed every time before, one of them with
   the same 30.02 s, and none after; a test that hands the blocks over itself in that order
   holds it without the delay.
+- The macOS runner failed one of the feed's tests ("the track never ended", the decoder that
+  panics) in main's own run after the merge and in the next two pull requests' runs, and
+  nowhere else. The test heard two of its three blocks and left the third to a five-second
+  wait that looks every 2 ms: 320 looks, 0.64 s as asked, and more than the five seconds once
+  a look takes 16 ms, which it can on a runner busy with three thousand other tests — the
+  tests beside it were done within a second, and it gave up at five. With the wait's sleep
+  made 16 ms on purpose it failed here with the same words, and alone. It hears all three
+  blocks first now, which waits for nothing that is already there.
 
 **What was run.**
 

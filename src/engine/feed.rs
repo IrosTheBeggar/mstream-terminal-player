@@ -934,6 +934,10 @@ mod tests {
         heard
     }
 
+    /// Wait for something another thread is to do. It sleeps between
+    /// looks, and on a busy machine a sleep comes back far later than it
+    /// was asked to, so it is not for pulling sound that is already there:
+    /// a block is 320 looks ([`sound`] pulls that without a wait).
     fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
         let until = Instant::now() + Duration::from_secs(5);
         while !done() {
@@ -1199,9 +1203,10 @@ mod tests {
         script.panics_at.store(PER_BLOCK * 3, Ordering::Release);
         let mut fed = Fed::spawn(ramp, None).unwrap();
         decoded(&script, PER_BLOCK * 3);
-        // Everything decoded before it is still played.
-        let heard = sound(&mut fed, PER_BLOCK * 2 * 2);
-        assert_eq!(frame_of(heard[heard.len() - 2]), PER_BLOCK * 2 - 1);
+        // Everything decoded before it is still played: all three blocks,
+        // heard here and not left for the wait below to pull.
+        let heard = sound(&mut fed, PER_BLOCK * 3 * 2);
+        assert_eq!(frame_of(heard[heard.len() - 2]), PER_BLOCK * 3 - 1);
         wait_for("the track never ended", || fed.next().is_none());
         assert_eq!(fed.feed.failure().as_deref(), Some("a frame it could not decode"));
     }
