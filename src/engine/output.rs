@@ -312,14 +312,13 @@ impl Output {
     ///
     /// Never under a pull in flight. Pausing waits for the callback it
     /// interrupts — CoreAudio's AudioDeviceStop queues on the lock the IO
-    /// thread holds through the callback — and a pull can be stuck: a
-    /// track whose download stalled parks the callback in the decoder's
-    /// read until the network answers, audit #48's wait. The suspend held
-    /// the tick there, and every control queued behind it (review of
-    /// audit #75). A stream mid-pull is left running and asked again at a
-    /// later tick. A callback that is not pulling cannot start a pull that
-    /// blocks, as long as the engine is at rest: a paused player never
-    /// reads its decoder, and a stopped one has left the bus.
+    /// thread holds through the callback — so a stream mid-pull is left
+    /// running and asked again at a later tick. When the callback still
+    /// decoded, a pull could be stuck for as long as a download was (audit
+    /// #48's wait), and the suspend held the tick with it (review of audit
+    /// #75); a pull is a few microseconds of mixing now that the decoding
+    /// is a thread of its own (`engine::feed`), and this is the cheap side
+    /// of the same care.
     pub(crate) fn suspend(&mut self) -> bool {
         if !self.awake || self.is_dead() || self.pulse.is_pulling() {
             return false;

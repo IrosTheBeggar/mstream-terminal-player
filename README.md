@@ -340,6 +340,16 @@ does not start it the player says the audio is lost and waits — it is said
 to be back only once sound is flowing again. Each move is one line in the
 message bar, or on stderr in `serve` mode.
 
+### When the server goes quiet
+
+A track that is streaming can run out of sound before it runs out of track:
+the server stops answering, the Wi-Fi drops. The track waits where it stood
+— its position does not move for silence — and the rest of the player goes
+on as if nothing had happened. The controls answer, another track plays the
+moment you pick one, and a seek back into the part that has already arrived
+plays it at once. A seek ahead of the download lands when the sound does,
+and a track you leave lets go of its download.
+
 ## The progress bar
 
 On a server that can draw them, the bar *is* the track — its shape under the
@@ -1205,6 +1215,10 @@ It watches the output device as the player does. Change the output while it play
 120` gives the time) and the move prints between the status lines; the last line before the
 verdict is the longest any tick of the engine took, which stays at a few milliseconds however
 long the device takes to change.
+
+A status line ends in `(waiting for sound)` while the track is playing with nothing decoded to
+play: its download has stalled, or a seek has not landed yet. The position stands still until
+there is.
 
 ## Serve mode (jukebox engine)
 

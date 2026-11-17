@@ -22,6 +22,8 @@ pub(crate) struct SourceHandle {
     // mstream-player patch: see `want`.
     pub(super) want_tx: watch::Sender<u64>,
     pub(super) notify_read: NotifyRead,
+    // mstream-player patch: see `give_up_when`.
+    pub(super) give_up: GiveUp,
 }
 
 impl SourceHandle {
@@ -58,8 +60,25 @@ impl SourceHandle {
     // that lands after its reader has moved on wakes no later wait.
     fn wait_until_reached(&self, position: u64) {
         let downloaded = &self.downloaded;
-        self.position_reached
-            .wait_for_position_reached(position, || downloaded.reaches(position));
+        let give_up = &self.give_up;
+        self.position_reached.wait_for_position_reached(position, || {
+            downloaded.reaches(position) || give_up.now()
+        });
+    }
+
+    // mstream-player patch: a wait for the download can be told to stop waiting. A read or a
+    // seek that finds its bytes not yet downloaded parks until they are, and a download that
+    // has stalled reconnects for ever, so the thread that reads was parked for as long as the
+    // server took: it could not be given a seek to somewhere already downloaded, and it could
+    // not be let go. While `give_up` says so, a wait returns at once and the read or seek that
+    // made it fails; the `Nudge` handed back makes a wait already under way look again.
+    pub(crate) fn give_up_when(&mut self, give_up: Arc<dyn Fn() -> bool + Send + Sync>) -> Nudge {
+        self.give_up = GiveUp(Some(give_up));
+        Nudge(self.position_reached.clone())
+    }
+
+    pub(crate) fn gives_up(&self) -> bool {
+        self.give_up.now()
     }
 
     // mstream-player patch: tells the download that a read is about to wait at `position`,
@@ -102,6 +121,37 @@ impl SourceHandle {
     // request.
     fn request_seek(&self, position: u64) {
         self.seek_tx.send_replace(position);
+    }
+}
+
+// mstream-player patch: see `SourceHandle::give_up_when`.
+#[derive(Clone, Default)]
+pub(super) struct GiveUp(Option<Arc<dyn Fn() -> bool + Send + Sync>>);
+
+impl GiveUp {
+    fn now(&self) -> bool {
+        self.0.as_ref().is_some_and(|give_up| give_up())
+    }
+}
+
+impl Debug for GiveUp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "GiveUp(set)" } else { "GiveUp(unset)" })
+    }
+}
+
+/// Makes a read or a seek that is waiting on the download look again at whether it should
+/// give up: see [`StreamDownload::give_up_when`](crate::StreamDownload::give_up_when).
+// mstream-player patch.
+#[derive(Clone, Debug)]
+pub struct Nudge(PositionReached);
+
+impl Nudge {
+    /// Wake whatever is waiting on the download, so it asks its `give_up` again. It takes the
+    /// waiter's lock for a moment, which is what keeps a wait that is about to sleep from
+    /// missing it.
+    pub fn nudge(&self) {
+        self.0.nudge();
     }
 }
 
@@ -156,6 +206,14 @@ impl PositionReached {
     pub(super) fn notify_stream_done(&self) {
         let (mutex, cvar) = self.0.as_ref();
         mutex.lock().stream_done = true;
+        cvar.notify_all();
+    }
+
+    // mstream-player patch: see `Nudge`. The lock is taken and let go before the wake: a
+    // waiter checks its `reached` under it, so one that has checked is asleep by now.
+    fn nudge(&self) {
+        let (mutex, cvar) = self.0.as_ref();
+        drop(mutex.lock());
         cvar.notify_all();
     }
 

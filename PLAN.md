@@ -4490,3 +4490,104 @@ sink suspended, the server killed, the default changed — with no tick over 2 m
 read the `-- device: … --` line and the `longest tick` at the end; with
 `MSTREAM_ENGINE_TRACE=<file>` the file says how long each open took and what each device
 refused with.
+
+## Appendix — Decoding off the device callback (2026-11-16)
+
+**Why.** After the device-switch fix, a read-through of the threading (main `c012d72`) found one
+wait left on the path of the sound: the device callback still decoded, and a decoder reads — a
+file, or a download that may have nothing more to give yet. A throwaway test on a stage, against
+a server that sends the first three seconds of a track and holds the rest, measured what that
+meant:
+
+- The track stood at 2.77 s. A second track, wholly on disk, was installed, reported `playing`,
+  and stood at 0.00 in silence for as long as the first one's download was held: the callback
+  was parked in that read, and every other voice on the bus was behind the callback.
+- A seek had not returned after six seconds, and came back when the hold was released. rodio
+  performs a seek inside the callback and `try_seek` waits for it, so the seek waited as long
+  as the download did, on the thread that ticks and runs every command (the TUI's and the GUI's
+  audio worker, serve's request loop), whether it aimed at sound that had arrived or not.
+- stream-download reconnects a silent stream for ever, by design, so with a server that never
+  comes back both lasted until the player was restarted.
+
+On macOS a panic under the decoder, in the callback, aborted the process ("Rust panics must be
+rethrown, aborting"): the open is guarded against symphonia's panics on malformed files, the
+decode during playback was not.
+
+**The change.**
+
+- `engine/feed.rs`: each source is decoded by a thread of its own (`mstream-decode`), a second
+  ahead, into blocks of 20 ms that the callback takes without waiting (`Fed`). With no block to
+  take the callback plays silence, a whole frame at a time, and says so (`Feed::is_starved`,
+  `Engine::buffering`); the other voices play on. Sound that resumes after a silence rises over
+  5 ms. Everything the controls do — volume, pause, the fades, the visualizer's copy — is still
+  done in the callback, after the blocks, so none of it is a second late.
+- The position is the sound the device has been handed (`Feed::position`), counted by the
+  sample, and the engine reads it there. rodio's own count takes every sample that passes, the
+  silence included; a track that waits ten seconds for its download would have been ten
+  seconds further on.
+- A seek is an order. The callback notes it, drops what was decoded for the old place and goes
+  on in silence, showing where it aims; the decode thread seeks when it next looks, and what
+  the decoder made of it is waited for 150 ms on the engine's thread (`SEEK_ANSWER`), so a
+  refusal is still that seek's answer. A decoder that has not answered by then is waiting on
+  the network, and the seek stands.
+- A read that is waiting on a download gives up while there is an order its decoder has not
+  taken up (`Orders::unserved`, and `give_up_when` / `Nudge` in the vendored stream-download).
+  So a seek back into what has arrived plays at once however long the server stays away, and
+  a seek that is itself waiting on the network gives way to the one after it. A decoder pulled
+  out of a read may have taken part of a packet, so it seeks before it reads again — to where
+  it stood, if the seek it was pulled out for is refused. Only for a stream of known length:
+  one without may not be able to seek at all.
+- When nobody is listening to a source any more its download is cancelled, which ends a read
+  waiting on it: the decode thread, the connection and the spool file go then, not when the
+  server next answers.
+- A panic on a decode thread is caught there: the track ends, the next one plays, and the
+  panic hooks stand back for the thread's name.
+
+**What became unnecessary, and what was kept.** A pull can no longer be stuck on the network,
+which was the reason for three pieces of care: `Output::suspend` refusing a stream mid-pull,
+the watch's exemption for a pull in flight (`gone_quiet`), and the seek being made with the
+state lock let go (audit #48). All three are kept — a pull in flight is still a callback not to
+interrupt, and `try_seek` still waits a callback period — and their comments say what they are
+for now. Nothing was removed: each is a few lines, and none of them waits.
+
+**What a listener notices.** Nothing, until a download stalls. Then: the track waits where it
+stood, the controls answer, another track plays the moment it is picked, a seek back into what
+has arrived plays it, and `play` marks its status line `(waiting for sound)`. The TUI and the
+window do not say "buffering" yet; that is a choice of words and place for the owner.
+
+**What it costs.** A thread for each source that is open (the playing one, a prepared next,
+whatever is fading out), asleep whenever its second ahead is full; under half a megabyte a
+source at 48 kHz stereo. A stall withholds up to a block and the packet the decoder was
+part-way through, so the track stops a few tens of milliseconds short of the last byte that
+came. A seek the decoder refuses loses up to the second that had been decoded ahead, where it
+used to lose nothing; the refusal is still reported.
+
+**What was run.**
+
+- `engine::feed`'s own tests (a source that says which frame each sample is from): what the
+  callback pulls is what the decoder made, sample for sample; silence when nothing is decoded
+  and a position that stands still; a seek mid-frame, to a decode thread waiting for room, one
+  the decoder refuses; a decoder pulled out of a waiting read, and back where it stood when
+  the seek fails; a panic; the thread ending with its listener, in each place it can wait.
+- On the stage, against the server that holds a download. Three were written first and run on
+  main, where one failed and two never finished: the next track plays at pace with the first
+  one's download held; a seek into the gap returns in under a second, shows where it aims,
+  stays there, and plays when the rest arrives; a stop is a stop, the stream sleeps on time
+  and the next play sounds. Then: a seek back into what has downloaded plays with the download
+  still held; an MP3 seek waiting on a Range request gives way to the one after it; a stopped
+  track's connections close and do not come back. The cancel and the nudge were each taken
+  out again to see their tests fail.
+- macOS: `cargo test` 3090, `--features desktop` 3209, both wasm checks clean. The tests marked
+  "needs an audio device", on the Mac's own output and one at a time: 44 of 46, the other two
+  needing a live server — gapless seams, the loop seam, crossfades and the device swap among
+  them. One of them was about a pull stuck on the network keeping the stream awake; it now
+  says the stream sleeps with the download still held.
+- Linux, in Docker: `cargo test` 3091. The feed's tests then ran thirty times and the engine's
+  ten without a failure; in the three runs before those, one of the feed's tests failed once —
+  it waited for the decoder to get four blocks further when the decoder was already waiting
+  for room — and it waits for the decoder to come to rest now.
+- The real binary on the Mac's output: `play --drop-device-at 5` on a local file, PASS, longest
+  tick 0 ms; a stream from demo.mstream.io with a seek to 60 s, at 60.54 s half a second later;
+  and a local server holding everything past the first 500 KB — the position stood at 2.76 s
+  marked `(waiting for sound)`, a seek to 1.0 s with the server still silent was at 1.52 s
+  half a second later and ran dry again at 2.66 s, longest tick 0 ms.

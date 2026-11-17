@@ -1018,8 +1018,23 @@ pub(crate) const AUDIO_THREAD: &str = "mstream-audio";
 pub fn panics_are_caught(thread: Option<&str>) -> bool {
     thread == Some(AUDIO_THREAD)
         || thread == Some(crate::engine::PREPARE_THREAD)
+        || decode_thread(thread)
         || device_thread(thread)
         || card_thread(thread)
+}
+
+/// A track's decode thread: a panic under the decoder is caught there, the
+/// track ends, and the next one plays — a malformed file costs a track,
+/// not the screen. (In the device callback, where decoding used to
+/// happen, it cost the stream's thread, and on macOS the process.)
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_thread(thread: Option<&str>) -> bool {
+    thread == Some(crate::engine::feed::DECODE_THREAD)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_thread(_thread: Option<&str>) -> bool {
+    false
 }
 
 /// The engine's device thread: every call it makes into the system's audio
@@ -4161,6 +4176,9 @@ mod tests {
         // The device thread catches around every call into the audio
         // backend: a panic under an open is a failed open.
         assert!(panics_are_caught(Some(crate::engine::output::DEVICE_THREAD)));
+        // A decode thread catches around the decoder: a panic there ends
+        // the track it was decoding.
+        assert!(panics_are_caught(Some(crate::engine::feed::DECODE_THREAD)));
         assert!(!panics_are_caught(Some("mstream-api")), "the api thread is not caught");
         // A card's job, fit, eject and sync threads catch theirs and end
         // with why: the hook leaves the screen alone there too.
