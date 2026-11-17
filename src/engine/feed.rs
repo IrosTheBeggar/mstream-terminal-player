@@ -309,7 +309,6 @@ impl Fed {
             (source.channels(), source.sample_rate(), source.total_duration());
         let per_block = (u128::from(rate.get()) * BLOCK.as_millis() / 1000).max(1) as usize;
         let block_len = per_block * usize::from(channels.get());
-        let rise_len = (u128::from(rate.get()) * RISE.as_millis() / 1000).max(1) as u32;
         let feed = Arc::new(Feed::new(channels, rate, download));
         let (blocks_tx, blocks) = mpsc::sync_channel(AHEAD);
         let (spare, spare_rx) = mpsc::sync_channel(AHEAD + 2);
@@ -320,7 +319,7 @@ impl Fed {
                 // Pinned to the format it started in: a stream that changes
                 // rate or channels part-way is converted here, and the
                 // callback's end has one format to answer for.
-                let pinned = UniformSourceIterator::new(source, channels, rate);
+                let pinned = UniformSourceIterator::new(Asked(source), channels, rate);
                 let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     decode(pinned, &theirs, &blocks_tx, &spare_rx, block_len)
                 }));
@@ -339,14 +338,26 @@ impl Fed {
             })
             .map_err(|e| format!("the decode thread would not start: {e}"))?;
         let _ = feed.thread.set(thread.thread().clone());
-        Ok(Fed {
+        Ok(Fed::pulling(feed, blocks, spare, total))
+    }
+
+    /// The callback's end of `feed`: it takes what comes through `blocks`
+    /// and hands the spent ones back through `spare`.
+    fn pulling(
+        feed: Arc<Feed>,
+        blocks: Receiver<Block>,
+        spare: SyncSender<Vec<Sample>>,
+        total: Option<Duration>,
+    ) -> Fed {
+        let rise_len = (u128::from(feed.rate.get()) * RISE.as_millis() / 1000).max(1) as u32;
+        Fed {
+            channels: usize::from(feed.channels.get()),
             feed,
             blocks,
             spare,
             block: Vec::new(),
             at: 0,
             order: 0,
-            channels: usize::from(channels.get()),
             owed: 0,
             rise: 0,
             rise_len,
@@ -354,7 +365,7 @@ impl Fed {
             quiet: false,
             ended: false,
             total,
-        })
+        }
     }
 
     /// The engine's view of this source.
@@ -483,19 +494,24 @@ impl Source for Fed {
         }
         self.order = self.feed.ask(at);
         self.feed.played.store(self.feed.samples_at(at), Ordering::Relaxed);
-        // What is in hand and what waits was decoded for the old place.
-        // Letting it go also makes room, which is what a decode thread
-        // waiting to hand over a block is waiting for.
+        // What is in hand was decoded for the old place.
         let spent = std::mem::take(&mut self.block);
         self.give_back(spent);
         self.at = 0;
-        while let Ok(block) = self.blocks.try_recv() {
-            if let Block::Sound { samples, .. } = block {
-                self.give_back(samples);
-            }
-        }
         self.quiet = true;
         self.ended = false;
+        // So was what waits, and letting it go makes room, which is what a
+        // decode thread waiting to hand over a block is waiting for — but
+        // only as far as the first block made for this order. The thread
+        // is woken by the room, and can have taken the order up, sought
+        // and handed that block over while this is still looking through
+        // the old ones. It says where the decoder really is, and says it
+        // once; so does the end of the track, if that is what the seek
+        // found.
+        if let Took::End = self.take() {
+            self.ended = true;
+            self.feed.starved.store(false, Ordering::Relaxed);
+        }
         Ok(())
     }
 }
@@ -509,6 +525,71 @@ impl Drop for Fed {
         self.feed.wake();
         // The blocks' receiver goes with this: a decode thread waiting to
         // hand one over is told there is nobody to hand it to.
+    }
+}
+
+/// A source that is asked for its next sample even when it says the span it
+/// has is empty.
+///
+/// An empty span is rodio's word for a source that has ended
+/// ([`Source::current_span_len`]), and its converter takes it at that: a
+/// span's length is how much the converter takes before it asks again, and
+/// of an empty one it takes nothing — the source is never asked for a
+/// sample at all. rodio's own decoder says it of a track that has not
+/// begun. The span it reports is the packet it has in hand, it decodes the
+/// next one only when a sample of it is asked for, and the first packet of
+/// a Vorbis stream decodes to no samples: every Ogg Vorbis track was over
+/// as it started.
+///
+/// So an empty span goes on to the converter as a span of one frame. The
+/// frame is asked for, and the asking is what tells: the source finds its
+/// next span and says how long that really is, or it returns `None`, which
+/// is the end in anyone's words. One frame, because a span is whole frames
+/// and the shorter the one made up here, the sooner the source is asked
+/// for its own.
+struct Asked<S>(S);
+
+impl<S: Source> Iterator for Asked<S> {
+    type Item = Sample;
+
+    #[inline]
+    fn next(&mut self) -> Option<Sample> {
+        self.0.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl<S: Source> Source for Asked<S> {
+    #[inline]
+    fn current_span_len(&self) -> Option<usize> {
+        match self.0.current_span_len() {
+            Some(0) => Some(usize::from(self.0.channels().get())),
+            len => len,
+        }
+    }
+
+    #[inline]
+    fn channels(&self) -> ChannelCount {
+        self.0.channels()
+    }
+
+    #[inline]
+    fn sample_rate(&self) -> SampleRate {
+        self.0.sample_rate()
+    }
+
+    #[inline]
+    fn total_duration(&self) -> Option<Duration> {
+        self.0.total_duration()
+    }
+
+    #[inline]
+    fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
+        self.0.try_seek(at)
     }
 }
 
@@ -768,6 +849,67 @@ mod tests {
         }
     }
 
+    /// A ramp handed over the way rodio's decoder hands a track over: in
+    /// packets, each decoded only when a sample of it is asked for, the
+    /// span it reports being the packet in hand, the whole of it. It
+    /// starts with a packet of no samples in hand, as that decoder does on
+    /// a Vorbis stream, whose first packet decodes to nothing.
+    struct Packets {
+        ramp: Ramp,
+        /// The samples in the packet in hand, and how many have been taken.
+        len: usize,
+        taken: usize,
+        packets: usize,
+    }
+
+    impl Packets {
+        /// What the packets hold, in frames, turn about: a Vorbis stream
+        /// has short blocks and long ones.
+        const FRAMES: [usize; 2] = [64, 448];
+
+        fn of(ramp: Ramp) -> Packets {
+            Packets { ramp, len: 0, taken: 0, packets: 0 }
+        }
+    }
+
+    impl Iterator for Packets {
+        type Item = Sample;
+        fn next(&mut self) -> Option<Sample> {
+            if self.taken >= self.len {
+                // The next packet, if there is one: with none, what is in
+                // hand stays in hand.
+                let first = self.ramp.next()?;
+                self.len = Self::FRAMES[self.packets % 2] * 2;
+                self.packets += 1;
+                self.taken = 1;
+                return Some(first);
+            }
+            self.taken += 1;
+            self.ramp.next()
+        }
+    }
+
+    impl Source for Packets {
+        fn current_span_len(&self) -> Option<usize> {
+            Some(self.len)
+        }
+        fn channels(&self) -> ChannelCount {
+            self.ramp.channels()
+        }
+        fn sample_rate(&self) -> SampleRate {
+            self.ramp.sample_rate()
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            self.ramp.total_duration()
+        }
+        fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
+            self.ramp.try_seek(at)?;
+            // The packet in hand is of the place it has left.
+            self.taken = usize::MAX;
+            Ok(())
+        }
+    }
+
     const RATE: u32 = 8_000;
     /// One block of a ramp, in frames.
     const PER_BLOCK: usize = 160;
@@ -792,6 +934,10 @@ mod tests {
         heard
     }
 
+    /// Wait for something another thread is to do. It sleeps between
+    /// looks, and on a busy machine a sleep comes back far later than it
+    /// was asked to, so it is not for pulling sound that is already there:
+    /// a block is 320 looks ([`sound`] pulls that without a wait).
     fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
         let until = Instant::now() + Duration::from_secs(5);
         while !done() {
@@ -836,6 +982,16 @@ mod tests {
         sample as usize - 1
     }
 
+    /// The callback's end with no decode thread behind it: the test hands
+    /// the blocks over itself, in the order a race would have them come.
+    fn by_hand() -> (Fed, SyncSender<Block>) {
+        let (hand_over, blocks) = mpsc::sync_channel(AHEAD);
+        let (spare, _) = mpsc::sync_channel(AHEAD + 2);
+        let stereo = NonZero::new(2).unwrap();
+        let feed = Arc::new(Feed::new(stereo, NonZero::new(RATE).unwrap(), None));
+        (Fed::pulling(feed, blocks, spare, None), hand_over)
+    }
+
     #[test]
     fn what_the_callback_pulls_is_what_the_decoder_made_sample_for_sample() {
         let frames = PER_BLOCK * 7 + 33;
@@ -855,6 +1011,52 @@ mod tests {
         wait_for("the end never came", || fed.next().is_none());
         assert!(fed.next().is_none(), "and it stays ended");
         assert!(!fed.feed.is_starved(), "ended is not starved");
+    }
+
+    #[test]
+    fn a_track_that_starts_on_an_empty_span_is_played_from_its_first_sample_to_its_last() {
+        // Every Ogg Vorbis track: rodio's decoder has the stream's first
+        // packet in hand when it is handed over, and that packet decodes
+        // to nothing. An empty span is rodio's word for a source that has
+        // ended, and the track was taken at it — over as it began, with
+        // all of it still to come.
+        let frames = PER_BLOCK * 7 + 33;
+        let (ramp, script) = Ramp::of(frames);
+        let mut fed = Fed::spawn(Packets::of(ramp), None).unwrap();
+        decoded(&script, frames);
+
+        let heard = sound(&mut fed, frames * 2);
+        for (n, frame) in heard.chunks(2).enumerate() {
+            assert_eq!(frame, [(n + 1) as Sample, -((n + 1) as Sample)], "frame {n}");
+        }
+        assert!((fed.feed.position() - frames as f64 / 8000.0).abs() < 1e-9);
+        wait_for("the end never came", || fed.next().is_none());
+        assert!(fed.next().is_none(), "and it stays ended");
+    }
+
+    #[test]
+    fn a_seek_placed_before_such_a_track_gave_a_sample_lands_where_it_was_sent() {
+        // Nothing of the download has come when the seek is placed — a
+        // track resumed where it was left: the empty span is still what
+        // the source has in hand, and is no more its end after a seek than
+        // before one.
+        let (ramp, script, download) = Ramp::downloading(RATE as usize * 60);
+        script.held_at.store(0, Ordering::Release);
+        let mut fed = Fed::spawn(Packets::of(ramp), Some(download)).unwrap();
+        assert_eq!(fed.next(), Some(0.0), "nothing has come");
+
+        fed.try_seek(Duration::from_secs(30)).unwrap();
+        assert_eq!(fed.feed.answer_within(Duration::from_secs(2)), Some(Ok(())));
+        script.released.store(true, Ordering::Release);
+        let from = RATE as usize * 30;
+        decoded(&script, from + PER_BLOCK * 2);
+        let heard = sound(&mut fed, PER_BLOCK * 2);
+        for (n, frame) in heard.chunks(2).enumerate() {
+            let at = (from + n + 1) as Sample;
+            assert_eq!(frame, [at, -at], "frame {n} after the seek");
+        }
+        assert_eq!(*script.sought.lock().unwrap(), [from]);
+        assert!(!script.read_on_torn.load(Ordering::Acquire), "it read on from a read it gave up");
     }
 
     #[test]
@@ -960,6 +1162,40 @@ mod tests {
     }
 
     #[test]
+    fn what_was_decoded_for_a_seek_while_it_was_still_being_placed_is_kept() {
+        // Placing a seek lets go of what waits, which makes room, and room
+        // is what a decode thread with a block to hand over is waiting
+        // for. Woken by it, the thread can take the order up, seek and
+        // hand over the first block of the new place while the callback is
+        // still looking through the old ones. Here the blocks lie as that
+        // leaves them: one of the old place, then the first for the order
+        // about to be placed — from a decoder that refused the seek, so it
+        // says where the decoder stands instead.
+        let (mut fed, hand_over) = by_hand();
+        let placed = fed.feed.orders() + 1;
+        hand_over.send(Block::Sound { order: 0, at: Some(0), samples: vec![1.0, -1.0] }).unwrap();
+        let stands = Block::Sound { order: placed, at: Some(1_000), samples: vec![501.0, -501.0] };
+        hand_over.send(stands).unwrap();
+
+        fed.try_seek(Duration::from_secs(30)).unwrap();
+        // Let go with the old one, it left the position reading the place
+        // that was asked for, for the rest of the track.
+        let position = fed.feed.position();
+        assert!((position - 1_000.0 / 16_000.0).abs() < 1e-9, "at {position}");
+        assert_eq!([fed.next(), fed.next()], [Some(501.0), Some(-501.0)]);
+        assert_eq!(fed.next(), Some(0.0), "and then it waits for the next block");
+
+        // The end of the track is said once. A seek to the end that let go
+        // of it left the track waiting for sound that was never to come.
+        let (mut fed, hand_over) = by_hand();
+        hand_over.send(Block::Sound { order: 0, at: Some(0), samples: vec![1.0, -1.0] }).unwrap();
+        hand_over.send(Block::End { order: fed.feed.orders() + 1 }).unwrap();
+        fed.try_seek(Duration::from_secs(30)).unwrap();
+        assert_eq!(fed.next(), None);
+        assert!(!fed.feed.is_starved(), "ended is not starved");
+    }
+
+    #[test]
     fn a_decoder_that_panics_ends_its_track_and_nothing_else() {
         // symphonia has known panics on malformed files. In the callback a
         // panic took the stream's thread with it, and on macOS the process.
@@ -967,9 +1203,10 @@ mod tests {
         script.panics_at.store(PER_BLOCK * 3, Ordering::Release);
         let mut fed = Fed::spawn(ramp, None).unwrap();
         decoded(&script, PER_BLOCK * 3);
-        // Everything decoded before it is still played.
-        let heard = sound(&mut fed, PER_BLOCK * 2 * 2);
-        assert_eq!(frame_of(heard[heard.len() - 2]), PER_BLOCK * 2 - 1);
+        // Everything decoded before it is still played: all three blocks,
+        // heard here and not left for the wait below to pull.
+        let heard = sound(&mut fed, PER_BLOCK * 3 * 2);
+        assert_eq!(frame_of(heard[heard.len() - 2]), PER_BLOCK * 3 - 1);
         wait_for("the track never ended", || fed.next().is_none());
         assert_eq!(fed.feed.failure().as_deref(), Some("a frame it could not decode"));
     }
