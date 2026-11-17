@@ -2477,10 +2477,13 @@ pub(crate) fn reopen(gui: &mut Gui) {
     gui.pend(effects);
 }
 
-/// A pick armed from the room landed (or was refused): back to the room,
-/// which words a refusal on its next frame.
+/// A pick armed from the room landed (or was refused, or let go): back to
+/// the room, which words a refusal on its next frame. The Library comes
+/// back by the screens' own door, so the screen the pick was let go on goes
+/// with it: the full-screen view's keys, the Stats page, the Admin room and
+/// its log.
 pub(crate) fn returned(gui: &mut Gui) {
-    gui.screen = Screen::Library;
+    gui.act(Act::Screen(Screen::Library));
     gui.active = super::DISCOVER_NAV;
     gui.discover.stow();
 }
@@ -5205,6 +5208,70 @@ mod tests {
         assert!(all.contains("Pick a song to start from"), "the banner:\n{all}");
         key(&mut gui, KeyCode::Esc);
         assert_eq!((gui.active, gui.app.capture), (DISCOVER_NAV, None), "Esc goes home");
+    }
+
+    /// The pick's [X] on another screen goes home by the screens' own door
+    /// (clause 14, in the sonic room's grammar), so that screen goes with
+    /// it: from Now Playing the full-screen view's keys, from the Stats or
+    /// the Admin tab the page it hosted. Enter on Now Playing is the view's
+    /// own and lands no pick: the [X] is the way home from there.
+    #[test]
+    fn the_picks_x_on_another_screen_goes_home_by_the_screens_own_door() {
+        let _en = english();
+        for screen in [Screen::NowPlaying, Screen::Stats, Screen::Admin] {
+            let mut gui = answered_gui();
+            // A server nobody answers for: the page and the room open, and
+            // nothing a test does reaches out.
+            gui.app.session.server = "http://host.invalid:3000".into();
+            gui.app.session.server_id = "http://host.invalid:3000".into();
+            gui.act(Act::Disc(DiscAct::Choose));
+            gui.act(Act::Screen(screen));
+            assert_eq!(gui.app.fullscreen, screen == Screen::NowPlaying, "{screen:?}");
+            if screen == Screen::NowPlaying {
+                key(&mut gui, KeyCode::Enter);
+                assert!(gui.app.capture.is_some() && gui.screen == Screen::NowPlaying, "Enter is the view's");
+            }
+            // The [X] on the banner's row, under the top bar, clicked as the
+            // loop routes a click: past the tab's own page or room.
+            let rows = draw(&mut gui);
+            let x = rows[1].rfind("[X]").map(|i| rows[1][..i].chars().count() as u16 + 1);
+            let at = x.map(|x| Position { x, y: 1 });
+            assert_eq!(at.and_then(|at| gui.ui.hit(at)), Some(Act::CaptureCancel), "{screen:?}: the banner's [X]: {:?}", rows[1]);
+            mouse(&mut gui, MouseEventKind::Down(MouseButton::Left), at.unwrap());
+            mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), at.unwrap());
+            assert_eq!(gui.app.capture, None, "{screen:?}: the pick let go");
+            assert_eq!((gui.screen, gui.active), (Screen::Library, DISCOVER_NAV), "{screen:?}: home");
+            assert!(!gui.app.fullscreen, "{screen:?}: the Library's keys are the rooms' again");
+            assert!(gui.stats.page.is_none(), "{screen:?}: no Stats page left running");
+            assert!(gui.admin.room.is_none() && !gui.admin.log.running(), "{screen:?}: nor the Admin room and its log");
+        }
+    }
+
+    /// A pick lands where the songs are, in the Library's rooms — taken to
+    /// Now Playing it comes back by the screen's way out first — and the
+    /// landing goes home by the same door: the room, the song pinned and
+    /// asked with (clause 14), the full-screen view's keys let go.
+    #[test]
+    fn a_pick_taken_to_now_playing_and_back_lands_and_goes_home() {
+        let _en = english();
+        let mut gui = answered_gui();
+        let picked = crate::api::types::Track {
+            filepath: "music/picked.mp3".into(),
+            metadata: crate::api::types::TrackMetadata { title: Some("Picked".into()), ..Default::default() },
+        };
+        gui.app.files.set(vec![crate::tui::app::Entry::Track { label: "Picked".into(), track: Box::new(picked) }]);
+        gui.act(Act::Disc(DiscAct::Choose));
+        key(&mut gui, KeyCode::Char('0'));
+        assert!(gui.screen == Screen::NowPlaying && gui.app.fullscreen);
+        key(&mut gui, KeyCode::Char('0'));
+        assert_eq!((gui.screen, gui.active), (Screen::Library, FILES_NAV), "back where the pick was armed");
+        gui.pending.clear();
+        gui.act(Act::PaneRow(List::Files, 0, RowVerb::Open));
+        assert_eq!(gui.app.capture, None, "the pick landed");
+        assert_eq!((gui.screen, gui.active), (Screen::Library, DISCOVER_NAV), "home");
+        assert!(!gui.app.fullscreen);
+        assert!(gui.app.taste.pins.iter().any(|pin| pin.track.filepath == "music/picked.mp3"), "pinned");
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Taste { .. }))), "and asked with: {:?}", gui.pending);
     }
 
     #[test]

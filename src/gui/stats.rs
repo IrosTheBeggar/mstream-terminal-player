@@ -30,6 +30,10 @@ pub(crate) struct StatsUi {
     /// under it is not on screen: its clocks, its hover and its clicks
     /// are not the frame's (see [`on_screen`]).
     pub drawn: bool,
+    /// The page's first row as the last frame drew it: the row under the
+    /// top bar, or the one under a pick's banner while that stands there.
+    /// The rows above it are the GUI's (see [`pointer`]).
+    top: u16,
     /// A press began on the page: its drag and release are the page's.
     pressed: bool,
 }
@@ -96,6 +100,7 @@ pub(crate) fn reopen(gui: &mut Gui) {
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     gui.stats.drawn = true;
     let view = Rect { y: view.y + 1, height: view.height.saturating_sub(1), ..view };
+    gui.stats.top = view.y;
     match gui.stats.page.as_mut() {
         Some(page) => page::render_hosted(frame, page, view),
         None => {
@@ -147,10 +152,11 @@ pub(crate) fn tips(gui: &Gui) -> String {
     if page.modal_open() || page.sel.is_some() { hint } else { format!("{hint} · {back}") }
 }
 
-/// The pointer below the top bar, on the page's own surface — the hub's
+/// The pointer on the page's rows, below the top bar and below a pick's
+/// banner while one stands under it, on the page's own surface — the hub's
 /// own routine, so the two cannot drift apart (contract clause 5) — and
-/// the drag and release of a press that began on the page, even on the top
-/// bar's row, where a thumb dragged to the top overshoots: a release the
+/// the drag and release of a press that began on the page, even on the rows
+/// above, where a thumb dragged to the top overshoots: a release the
 /// page never saw would leave its held arrow stepping and its thumb
 /// following later drags. A GUI modal or the header's server menu owns the
 /// pointer while it is open, and the page lets go of it. True when the
@@ -176,7 +182,9 @@ pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
     if matches!(mouse.kind, MouseEventKind::Up(_)) {
         gui.stats.pressed = false;
     }
-    if (mouse.row == 0 && !held) || gui.modal_open() || gui.servers.drop_open {
+    // Above the page's rows the pointer is the GUI's: the top bar's row, and
+    // a pick's banner under it, whose [X] lets the pick go.
+    if (mouse.row < gui.stats.top && !held) || gui.modal_open() || gui.servers.drop_open {
         return false;
     }
     if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
