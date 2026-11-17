@@ -284,9 +284,6 @@ pub struct TasteState {
     /// The last capture pick the room refused, for the GUI to word once
     /// and take (clause 14).
     pub refused: Option<TastePinRefusal>,
-    /// The room's plug-ins — Keep a copy, the Copies list, Open elsewhere
-    /// (clauses 100–149) — reset with the answer.
-    pub keep: super::keep::KeepState,
 }
 
 impl TasteState {
@@ -485,6 +482,7 @@ impl App {
         let mut effects = self.taste_ask();
         // The plug-in gate is asked again with every visit (clause 101).
         if self.connected && self.capabilities.taste() {
+            self.keep_sync();
             effects.extend(self.keep_ask_gate());
         }
         effects
@@ -842,7 +840,7 @@ impl App {
     pub fn taste_album_node(&self, index: usize) -> Option<LibraryNode> {
         let album = self.taste.library.data.as_ref()?.albums.get(index)?;
         let name = album.name.clone().filter(|n| !n.is_empty())?;
-        Some(LibraryNode::Album { name, artist: None })
+        Some(LibraryNode::album(name, None))
     }
 
     /// An album row's `[+]` or `a` (clause 61, the webapp's album play
@@ -965,6 +963,8 @@ impl App {
     pub(crate) fn reset_taste(&mut self) {
         self.taste.reset();
         self.taste.generation = self.session_gen;
+        // The Connected servers rows' marks were the answer's.
+        self.keep_rows_reset();
     }
 
     /// The state belongs to the session it was filled under; a moved

@@ -1,0 +1,216 @@
+#!/usr/bin/expect -f
+# Keep a copy while browsing a connected server: the album page, the queue
+# item and the artist's wall (the keep-a-copy spec §4.2–§4.9, §5, §6.2–§6.4;
+# docs/ux-contracts/discovery-page.md, clauses 150–172), on the fakes and
+# the seeded HOME gui-peer-files.exp describes. At 100 × 30 with the queue
+# panel folded (Tab), `2` opens the Albums wall, ↓ picks the cursor up on
+# Borrowed Tapes and Enter opens its page; Esc stows the hand the wall
+# handed down, and the header line names the album and its credit — the
+# card's, the user's 2026-10-27 call — then the word (@@PA:word@@). ↓ ↓
+# holds Late Train Verse (the word goes, @@PA:held@@); `a` queues it (it
+# tries to play, and the fake streams nothing: the queue keeps it) and `c`
+# keeps the held row: the song window, its choices appended as the facts
+# landed (@@PA:song@@). Esc, Esc stows the row; Tab opens the queue panel,
+# the header line giving way in its 47 cells with the word kept
+# (@@PA:narrow@@). A click on the queue's row and ↓ hold it: `c` there does
+# nothing (C beside it clears the queue, @@PA:queue-c@@); `m` opens its
+# sheet, "Keep a copy…" in Add to playlist's slot (@@PA:sheet@@), and
+# `c` the song window on the track's own server (@@PA:queue-song@@) —
+# Enter starts the song copy. Esc, Tab folds the panel (@@PA:folded@@), `c`
+# keeps the album: album focus, Album chosen, Every album by its credit, the
+# box ticked (@@PA:album@@); Enter starts it with the page's credit, Esc
+# leaves it running — "copying…" in the word's place (@@PA:album-live@@) —
+# and the room's poll walks it to "✓ kept", its rows ✓ (@@PA:album-kept@@).
+# A click on the state opens its outcome (@@PA:state@@). `3` opens the
+# Artists list, ↓ ↓ Enter Boukmanflow's wall: the word after the count, the
+# kept card's year line "✓ kept" (@@PA:wall@@); `c` the artist focus — the
+# box alone, "Leaves out …" (@@PA:artist@@), ↑ unticks it
+# (@@PA:artist-unticked@@). Esc, `C` lists the two copies (@@PA:copies@@),
+# Esc, q quits. check_peer.py replays the stream at each mark; run.sh asks
+# the fake what was started: the song, then the album with its credit, both
+# to the fake's throwaway `copies` library. Gates on first-paint single
+# words only; each gate's braces span lines.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+# The pointer comes to rest at cell (x, y), 1-based as SGR counts; a click
+# is the press and the release where it rests.
+proc hover {x y} { send "\x1b\[<35;${x};${y}M" }
+proc click {x y} {
+    hover $x $y
+    drain 1
+    send "\x1b\[<0;${x};${y}M\x1b\[<0;${x};${y}m"
+}
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    "Harbour" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-PEER-FOLDER" 2 }
+}
+drain 2
+send "\t"
+drain 1
+send "2"
+expect {
+    "Split" {}
+    eof { puts "DIED-ON-WALL"; exit 7 }
+    timeout { fail "NO-ALBUMS-WALL" 3 }
+}
+drain 1
+send "\x1b\[B"
+drain 1
+send "\r"
+expect {
+    "Rooftop" {}
+    eof { puts "DIED-ON-ALBUM"; exit 8 }
+    timeout { fail "NO-ALBUM-PAGE" 4 }
+}
+drain 1
+send "\x1b"
+drain 2
+puts "@@PA:word@@"
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+puts "@@PA:held@@"
+send "a"
+drain 2
+send "c"
+expect {
+    "Add song" {}
+    eof { puts "DIED-ON-ROW"; exit 9 }
+    timeout { fail "NO-SONG-WINDOW" 10 }
+}
+drain 2
+puts "@@PA:song@@"
+send "\x1b"
+drain 1
+send "\x1b"
+drain 1
+send "\t"
+drain 2
+puts "@@PA:narrow@@"
+click 76 5
+drain 1
+send "\x1b\[B"
+drain 1
+send "c"
+drain 1
+puts "@@PA:queue-c@@"
+send "m"
+expect {
+    "Remove" {}
+    eof { puts "DIED-ON-M"; exit 11 }
+    timeout { fail "NO-QUEUE-SHEET" 12 }
+}
+drain 1
+puts "@@PA:sheet@@"
+send "c"
+expect {
+    "Add song" {}
+    eof { puts "DIED-ON-SHEET-C"; exit 13 }
+    timeout { fail "NO-QUEUE-SONG-WINDOW" 14 }
+}
+drain 2
+puts "@@PA:queue-song@@"
+send "\r"
+expect {
+    -re "(Waiting|Copying)" {}
+    eof { puts "DIED-ON-SONG"; exit 15 }
+    timeout { fail "NO-SONG-COPY" 16 }
+}
+drain 1
+send "\x1b"
+drain 1
+send "\t"
+drain 2
+puts "@@PA:folded@@"
+send "c"
+expect {
+    "Add album" {}
+    eof { puts "DIED-ON-WORD"; exit 17 }
+    timeout { fail "NO-ALBUM-WINDOW" 18 }
+}
+drain 2
+puts "@@PA:album@@"
+send "\r"
+expect {
+    -re "(Waiting|Copying)" {}
+    eof { puts "DIED-ON-ADD"; exit 19 }
+    timeout { fail "NO-ALBUM-COPY" 21 }
+}
+drain 1
+send "\x1b"
+drain 1
+puts "@@PA:album-live@@"
+# Queued a second, running six; the room's poll sees it end.
+drain 12
+puts "@@PA:album-kept@@"
+# "✓ kept" stands in the word's cells, x 58–63 on row 2.
+click 59 3
+expect {
+    "choose" {}
+    eof { puts "DIED-ON-STATE"; exit 22 }
+    timeout { fail "NO-OUTCOME" 23 }
+}
+drain 1
+puts "@@PA:state@@"
+send "\x1b"
+drain 1
+send "3"
+expect {
+    "ALM" {}
+    eof { puts "DIED-ON-ARTISTS"; exit 24 }
+    timeout { fail "NO-ARTISTS" 25 }
+}
+drain 1
+send "\x1b\[B"
+drain 1
+send "\x1b\[B"
+drain 1
+send "\r"
+expect {
+    "Night" {}
+    eof { puts "DIED-ON-ARTIST-WALL"; exit 26 }
+    timeout { fail "NO-ARTIST-WALL" 27 }
+}
+drain 2
+puts "@@PA:wall@@"
+send "c"
+expect {
+    "Leaves" {}
+    eof { puts "DIED-ON-ARTIST"; exit 28 }
+    timeout { fail "NO-ARTIST-WINDOW" 29 }
+}
+drain 1
+puts "@@PA:artist@@"
+send "\x1b\[A"
+drain 1
+puts "@@PA:artist-unticked@@"
+send "\x1b"
+drain 1
+send "C"
+expect {
+    "TITLE" {}
+    eof { puts "DIED-ON-COPIES"; exit 30 }
+    timeout { fail "NO-COPIES" 31 }
+}
+drain 1
+puts "@@PA:copies@@"
+send "\x1b"
+drain 1
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 32 }
+}
+catch wait result
+exit [lindex $result 3]

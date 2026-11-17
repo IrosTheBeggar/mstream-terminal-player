@@ -1978,7 +1978,7 @@ fn draw_verbs(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, narrow: b
     // clipped; the verbs give way from their tail only when even the
     // glyphs would not fit. Not while Keep a copy or the Copies list is up:
     // the window is the copy's one voice.
-    let speaks = gui.app.taste.keep.flow.is_some() || gui.discover.copies.is_some();
+    let speaks = gui.app.keep.flow.is_some() || gui.discover.copies.is_some();
     let indicator = gui.app.keep_indicator().filter(|_| !speaks);
     let room_for = |verbs: &[(String, DiscAct, &str)]| -> u16 {
         let used = width_of(verbs);
@@ -2139,7 +2139,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // Keep a copy and the Copies list stand over whatever else the room has
     // up (the tile's list): that draws without the pointer too.
     let pointer = gui.ui.pointer;
-    let window = gui.app.taste.keep.flow.is_some() || gui.discover.copies.is_some();
+    let window = gui.app.keep.flow.is_some() || gui.discover.copies.is_some();
     if window {
         gui.ui.pointer = None;
     }
@@ -2156,16 +2156,9 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if gui.discover.tile_list.is_some() {
         draw_tile_list(frame, gui, area);
     }
-    // Keep a copy and the Copies list centre in the room and clear its
-    // width on their rows (the band).
+    // Keep a copy and the Copies list draw over it at the shell's level
+    // (`keep_doors::draw_window`), whichever room they were asked from.
     gui.ui.pointer = pointer;
-    let room = super::content_rect(area.width, area.height, gui.queue_open, gui.footer());
-    if gui.app.taste.keep.flow.is_some() {
-        super::keep::draw(frame, gui, area, room);
-    }
-    if gui.discover.copies.is_some() {
-        super::keep::draw_copies(frame, gui, area, room);
-    }
 }
 
 /// The verbs a connected server's tile's list offers (clause 103): Play
@@ -2200,7 +2193,7 @@ fn tile_verb_words(gui: &Gui, verb: TileVerb, album: usize) -> (String, Option<&
     match verb {
         TileVerb::Play => (t!("gui.discover.tile_play").to_string(), None),
         TileVerb::Queue => (t!("gui.discover.tile_queue").to_string(), Some("a")),
-        TileVerb::Keep => (super::keep::ell(&t!("gui.act.keep_copy")), Some("c")),
+        TileVerb::Keep => (super::keep::ell(&t!("gui.act.keep_copy")), None),
         TileVerb::OpenOn(_) => {
             let server = gui.app.taste.peer_albums().get(album).map(|a| a.server.clone()).unwrap_or_default();
             (t!("gui.discover.tile_open_on", server = server).to_string(), None)
@@ -2255,6 +2248,8 @@ fn draw_tile_list(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let style = match (on, hover) {
             (true, _) => sel().add_modifier(Modifier::BOLD),
             (false, true) => bright_bold(),
+            // Keep a copy stands out in the accent, its key unnamed.
+            (false, false) if *verb == TileVerb::Keep => accent(),
             (false, false) => Style::default(),
         };
         let label = super::bar::clip(&label, usize::from(inner.width.saturating_sub(2))).into_owned();
@@ -2436,7 +2431,7 @@ pub(crate) fn modal_open(gui: &Gui) -> bool {
         || gui.discover.seeds.is_some()
         || gui.discover.tile_list.is_some()
         || gui.discover.copies.is_some()
-        || gui.app.taste.keep.flow.is_some()
+        || gui.app.keep.flow.is_some()
 }
 
 /// Everything hung over the room goes: the window's list, the seeds modal,
@@ -2628,7 +2623,7 @@ fn tile_verb(gui: &mut Gui, verb: TileVerb) {
         TileVerb::Queue => tile_act(gui, tile, RowVerb::Queue),
         TileVerb::Keep => super::keep::open(gui, KeepTarget::Tile(album)),
         TileVerb::OpenOn(index) => {
-            let Some(album) = gui.app.taste.peer_albums().get(album).map(|a| a.album.clone()) else { return };
+            let Some(album) = gui.app.taste.peer_albums().get(album).map(|a| (a.album.clone(), a.album_artist.clone())) else { return };
             open_on(gui, index, album);
         }
     }
@@ -2637,8 +2632,13 @@ fn tile_verb(gui: &mut Gui, verb: TileVerb) {
 /// "Open on {server}" (clause 103): the album as that server holds it —
 /// the session moves to the saved connected server, the Albums room opens,
 /// and the album opens there once that server answers.
-fn open_on(gui: &mut Gui, index: usize, album: String) {
-    gui.discover.open_on = Some(crate::tui::worker::LibraryNode::Album { name: album, artist: None });
+fn open_on(gui: &mut Gui, index: usize, (album, credit): (String, Option<String>)) {
+    // The tile's credit, where it knew one: the album page's opener
+    // (keep-a-copy spec §4.1.3, step 1).
+    let album_artist = credit.map(crate::api::types::AlbumCredit::Known).unwrap_or_default();
+    let compilation = crate::api::types::various_artists(album_artist.known());
+    gui.discover.open_on =
+        Some(crate::tui::worker::LibraryNode::Album { name: album, artist: None, album_artist, year: None, compilation });
     super::servers::switch_to(gui, index);
     if gui.app.connected {
         // The switch went nowhere (already there): nothing waits.
@@ -2673,7 +2673,7 @@ fn keep_key(gui: &mut Gui) -> bool {
             None => None,
         },
     };
-    let Some(target) = target.filter(|t| !gui.app.keep_choices(*t).is_empty()) else { return false };
+    let Some(target) = target.filter(|t| !gui.app.keep_choices(t.clone()).is_empty()) else { return false };
     super::keep::open(gui, target);
     true
 }
@@ -2833,7 +2833,7 @@ fn more(gui: &mut Gui, index: usize) {
             let origin = Origin { server: gui.app.origin().server, peer: Some(peer) };
             // A connected server's song: the sheet gains Keep a copy… and
             // Open elsewhere…, and names its server (clause 102).
-            super::actions::open_for(gui, origin, track, None);
+            super::actions::open_for(gui, origin, track, None, None);
             let pin = gui.app.keep_pin(KeepTarget::Row { group, row });
             if let Some(sheet) = gui.actions.sheet.as_mut() {
                 sheet.keep = pin;
@@ -2842,7 +2842,7 @@ fn more(gui: &mut Gui, index: usize) {
         }
         _ => return,
     };
-    super::actions::open_for(gui, origin, track, None);
+    super::actions::open_for(gui, origin, track, None, None);
 }
 
 /// A modal row, clicked or toggled by key (clause 13).
@@ -2928,18 +2928,14 @@ fn choose(gui: &mut Gui) {
 /// always show whole: over its list the wheel moves nothing, and not the
 /// table under it either.
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
-    // The Keep a copy modal and the tile's list hold their rows whole —
-    // Where copies land scrolls its folders; the Copies modal scrolls its
-    // own, a copy a notch.
-    if gui.app.taste.keep.flow.is_some() {
-        super::keep::dest_wheel(gui, delta);
+    // The Keep a copy and Copies modals scroll their own, as the shell
+    // scrolls them over any room — Where copies land its folders, the
+    // Copies modal a copy a notch; the tile's list holds its rows whole.
+    if super::keep_doors::window_open(gui) {
+        super::keep_doors::wheel(gui, delta);
         return;
     }
     if gui.discover.tile_list.is_some() {
-        return;
-    }
-    if gui.discover.copies.is_some() {
-        super::keep::copies_wheel(gui, delta);
         return;
     }
     if let Some(modal) = gui.discover.seeds.as_mut() {
@@ -2966,16 +2962,9 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if gui.screen != Screen::Library || gui.active != super::DISCOVER_NAV {
         return None;
     }
-    // The Keep a copy and Copies modals, then the tile's list, own the keys
-    // while up (clauses 103, 106, 117).
-    if gui.app.taste.keep.flow.is_some() {
-        super::keep::handle_key(gui, key);
-        return Some(false);
-    }
-    if gui.discover.copies.is_some() {
-        super::keep::copies_key(gui, key);
-        return Some(false);
-    }
+    // The tile's list owns the keys while up (clause 103) — the Keep a copy
+    // and Copies modals over it took theirs at the shell's level first
+    // (`keep_doors::window_key`).
     if let Some(list) = gui.discover.tile_list.clone() {
         tile_list_key(gui, key, list);
         return Some(false);
@@ -3130,7 +3119,7 @@ fn strip_key(gui: &mut Gui, key: KeyEvent, tiles: usize, rows: usize) -> Option<
         // Keep a copy in album focus, and a connected server's tile's list
         // (clause 103).
         KeyCode::Char('c') => {
-            if let Some(target) = tile_target(gui, index).filter(|t| !gui.app.keep_choices(*t).is_empty()) {
+            if let Some(target) = tile_target(gui, index).filter(|t| !gui.app.keep_choices(t.clone()).is_empty()) {
                 super::keep::open(gui, target);
             }
         }
@@ -3212,11 +3201,10 @@ fn seeds_key(gui: &mut Gui, key: KeyEvent) {
 /// works (clause 119): `c` only on a connected server's row or tile while
 /// the copy gate holds, `C` only while the indicator stands.
 pub(crate) fn tips(gui: &Gui) -> String {
-    if gui.app.taste.keep.flow.is_some() {
-        return super::keep::tips(gui);
-    }
-    if gui.discover.copies.is_some() {
-        return super::keep::copies_tips(gui);
+    // The Keep a copy and Copies modals' own lines, as the shell draws them
+    // over any room (`keep_doors::tips`).
+    if gui.app.keep.flow.is_some() || gui.discover.copies.is_some() {
+        return super::keep_doors::tips(gui);
     }
     if let Some(list) = &gui.discover.tile_list {
         let keep = tile_list_at(gui, list).is_some_and(|(_, album)| tile_verbs(gui, album).contains(&TileVerb::Keep));
@@ -4281,7 +4269,7 @@ mod tests {
         assert_eq!(gui.active, super::super::ALBUMS_NAV);
         assert!(matches!(
             gui.app.library_stack.here(),
-            crate::tui::worker::LibraryNode::Album { name, artist } if name == "Night Album" && artist.is_none()
+            crate::tui::worker::LibraryNode::Album { name, artist, .. } if name == "Night Album" && artist.is_none()
         ));
     }
 
@@ -4662,7 +4650,7 @@ mod tests {
         assert_eq!(gui.active, super::super::ALBUMS_NAV);
         assert!(matches!(
             gui.app.library_stack.here(),
-            crate::tui::worker::LibraryNode::Album { name, artist } if name == "Night Album" && artist.is_none()
+            crate::tui::worker::LibraryNode::Album { name, artist, .. } if name == "Night Album" && artist.is_none()
         ));
         // And Enter by key, the hand on the tile: the same drill.
         let mut gui = answered_gui();
@@ -4919,7 +4907,7 @@ mod tests {
             "nothing played: {:?}",
             gui.pending
         );
-        assert!(gui.discover.tile_list.is_none() && gui.app.taste.keep.flow.is_none());
+        assert!(gui.discover.tile_list.is_none() && gui.app.keep.flow.is_none());
         // The next click is real again: a click outside the sheet closes it.
         mouse(&mut gui, MouseEventKind::Down(MouseButton::Left), Position { x: 2, y: 2 });
         mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), Position { x: 2, y: 2 });

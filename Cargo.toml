@@ -181,12 +181,17 @@ miniz_oxide = "0.8"
 # Native-only — the wasm build has no wizard (rust-i18n itself is a plain
 # dependency: the shared App's notes go through t!() on every target).
 sys-locale = "0.3"
-rodio = { version = "0.22", features = ["symphonia-all"] }
+# rodio brings cpal with it (0.23 is 0.22 moved to cpal 0.18, and nothing
+# else), and the engine makes its own cpal calls through `rodio::cpal`
+# (src/engine/output.rs): a rodio bump that moves cpal is an engine change,
+# read against cpal's UPGRADING.md and its hosts, not a version number.
+rodio = { version = "0.23", features = ["symphonia-all"] }
 tiny_http = "0.12"
-# Held at 0.5 on purpose: rodio 0.22 decodes through symphonia 0.5.x, and a
-# direct 0.6 dep would compile a second symphonia tree whose format support
-# differs from what playback actually uses. Bump together with rodio.
-# (Checked 2026-07-31: symphonia 0.6.0 still has no opus decoder, so the
+# Held at 0.5 on purpose: rodio 0.23 decodes through symphonia 0.5.x (it
+# asks for 0.5.5), and a direct 0.6 dep would compile a second symphonia
+# tree whose format support differs from what playback actually uses. Bump
+# together with rodio.
+# (Checked 2026-11-16: symphonia 0.6.1 still has no opus decoder, so the
 # transcode codec=mp3/aac rule from PLAN.md finding #14 stands either way.)
 symphonia = { version = "0.5", features = ["all"] }
 clap = { version = "4", features = ["derive", "env"] }

@@ -55,9 +55,21 @@ Every change is marked in the source with a comment beginning `mstream-player pa
   whatever path wrote them (the prefetch included); a refill goes forward from the reader's
   last seek before wrapping to the file's start.
 - `src/lib.rs`: the read path calls `want` before it parks.
+- `StreamDownload::give_up_when` and `source::Nudge` (2026-11-16, the player's decode
+  thread): a read or a seek that is waiting on the download can be told to stop waiting. A
+  stalled download reconnects for ever, so the thread that reads was parked for as long as the
+  server took and could be given nothing else to do — a seek to somewhere already downloaded,
+  say. While the closure handed to `give_up_when` says so, a wait returns at once and the read
+  or seek fails with an error (not of kind `Interrupted`, which callers retry); `Nudge::nudge`
+  makes a wait already under way ask again. The reader is left where it was. Not a fix to
+  upstream behaviour: an addition, and the reason to keep the copy once the range fixes land
+  upstream unless it is offered there too.
 
 ## When to drop it
 
-Once an upstream release carries equivalent fixes. The range tests in `src/engine/http.rs`
-(throttled Range server, nudges, seeks into an island's end) say whether it did: point the
-patch away and run them.
+Once an upstream release carries equivalent fixes, and either `give_up_when` or the engine no
+longer needing it. The range tests in `src/engine/http.rs` (throttled Range server, nudges,
+seeks into an island's end) say whether the fixes landed: point the patch away and run them.
+The engine's stalled-download tests (`a_seek_back_into_what_has_downloaded_plays_with_the_`
+`download_still_held` and its neighbours in `src/engine/mod.rs`) are what `give_up_when` is
+for.

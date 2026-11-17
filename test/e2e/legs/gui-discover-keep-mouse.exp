@@ -10,8 +10,10 @@
 # 30 with the queue panel folded (Tab), `G` opens the room and → its
 # Connected servers tab: the strip's one tile, "Lanterns" from Attic, and
 # the table's one row, "Ember" (row 17). The tile's `[⋯]` hangs its list;
-# its "Keep a copy…" row opens the window — the sizes unanswered (the fake
-# answers none), so its 11 rows stand on rows 6–16: "(•) Album" row 10,
+# its "Keep a copy…" row opens the window — the album's size unanswered
+# (the fake answers none), Every album by there from the open (an album's
+# window, spec §6.2), nothing missing to tick (the user's library holds
+# Lanterns), so its 11 rows stand on rows 6–16: "(•) Album" row 10,
 # "Every album by" row 11, the place row 13 ("d change" at x 85–92), "[ Add
 # album ]" row 15, "Esc close" on the bottom border (row 16, x 83–91); the
 # band clears x 17–96 on those rows. The echo of that click lands on the

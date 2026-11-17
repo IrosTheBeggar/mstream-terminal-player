@@ -369,6 +369,24 @@ impl<P: StorageProvider> StreamDownload<P> {
         self.download_task_cancellation_token.clone()
     }
 
+    /// Makes reads and seeks that are waiting on the download give up, with an error, for as
+    /// long as `give_up` says so, and hands back the [`Nudge`](source::Nudge) that makes one
+    /// already waiting look again.
+    ///
+    /// A read of bytes not yet downloaded waits for them, and a download that has stalled
+    /// reconnects for ever, so without this the reading thread cannot be given anything else
+    /// to do — a seek to somewhere that has downloaded, say. The error is not of kind
+    /// [`Interrupted`](io::ErrorKind::Interrupted), which callers retry. The reader is left
+    /// where it was; what was reading through it may have taken part of something, and should
+    /// seek before it reads on.
+    // mstream-player patch.
+    pub fn give_up_when(
+        &mut self,
+        give_up: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> source::Nudge {
+        self.handle.give_up_when(give_up)
+    }
+
     /// Returns a [`StreamHandle`] that can be used to interact with
     /// the stream remotely.
     pub fn handle(&self) -> StreamHandle {
@@ -578,6 +596,10 @@ impl<P: StorageProvider> Read for StreamDownload<P> {
         }
 
         self.handle.wait_for_position(requested_position);
+        // mstream-player patch: see `give_up_when`.
+        if self.handle.gives_up() {
+            return Err(gave_up());
+        }
         self.check_for_failure()?;
         debug!(
             current_position = stream_position,
@@ -615,6 +637,10 @@ impl<P: StorageProvider> Seek for StreamDownload<P> {
         }
 
         self.handle.seek(absolute_seek_position);
+        // mstream-player patch: see `give_up_when`.
+        if self.handle.gives_up() {
+            return Err(gave_up());
+        }
         self.check_for_failure()?;
         debug!("reached seek position");
 
@@ -622,6 +648,13 @@ impl<P: StorageProvider> Seek for StreamDownload<P> {
             .seek(SeekFrom::Start(absolute_seek_position))
             .inspect_err(|p| debug!(position = format!("{p:?}"), "returning seek position"))
     }
+}
+
+// mstream-player patch: what a read or a seek told to stop waiting fails with. Not
+// `Interrupted`: that kind is retried, by `read_exact` and by symphonia's stream alike, and
+// the retry would wait again.
+fn gave_up() -> io::Error {
+    io::Error::other("gave up waiting for the download")
 }
 
 pub(crate) trait WrapIoResult {

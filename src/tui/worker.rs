@@ -19,9 +19,10 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, ArtistAlbumRow, CancelAnswer, CollectionDestination, CollectionDestinationView, DirListing,
-    DiscoveryPluginsResponse, Genre, GenreList, GenreSource, JobLookup, JobScope, JobStartAnswer, JobStarted, JourneyStop, MoodFilter, MoodSong, Ping, PluginJobList,
-    PluginLink, PlaylistSummary, SearchResults, SimilarArtist, TasteRequest, TasteResponse, Track,
+    Album, AlbumCredit, ArtistAlbumRow, CancelAnswer, CollectionDestination, CollectionDestinationView, DirListing,
+    DiscoveryPluginsResponse, Genre, GenreList, GenreSource, JobLanding, JobLookup, JobScope, JobStartAnswer, JobStarted,
+    JourneyStop, MoodFilter, MoodSong, Ping, PluginJobList, PluginLink, PlaylistSummary, SearchResults, SimilarArtist,
+    TasteRequest, TasteResponse, Track, various_artists,
 };
 use crate::api::{ApiError, Client, PluginFailure};
 use crate::discovery::DiscoveredServer;
@@ -240,55 +241,80 @@ pub enum ApiCmd {
         reach: Option<crate::tui::app::Reach>,
         play: bool,
     },
-    // The Discover room's plug-ins — Keep a copy, the Copies modal, Open
-    // elsewhere (discovery-page clauses 100–149). Every one asks the
-    // session's OWN server (the room is hidden in a peer session, and a
-    // copy lands on the user's server), each stamped with the session
-    // generation: a reply from a server the session left fills nothing.
+    // The plug-ins — Keep a copy, the Copies modal, Open elsewhere
+    // (discovery-page clauses 100–149; keep-a-copy spec §6.1). Every one
+    // asks the user's OWN server — a copy lands there, and a connected
+    // server's plug-ins are not the user's — through `reach`: `None` rides
+    // the session while the session IS that server; its own reach (the
+    // parent's, `App::reach`) while one of its connected servers is
+    // browsed, so a switch while one is out never misroutes it. Each is
+    // stamped with its own server's Keep generation (`KeepState::epoch`):
+    // a reply lands in that server's state, whichever is browsed now.
     /// The gate's two reads: the plug-in listing, then — only when the copy
     /// plug-in is listed and jobs are allowed — the collection destination
     /// (clause 101).
-    KeepGate { generation: u64 },
+    KeepGate { generation: u64, reach: Option<crate::tui::app::Reach> },
     /// The jobs a set of connected-server rows already have, for their
-    /// marks: each row's raw taste JSON, unchanged, chunked at 100 by the
+    /// marks: each row's recommendation, unchanged, chunked at 100 by the
     /// client (clause 111). `seq` comes back: the last lookup wins.
-    JobsLookup { seq: u64, generation: u64, recs: Vec<serde_json::Value> },
+    JobsLookup { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach>, recs: Vec<serde_json::Value> },
     /// The caller's jobs — the poll and the Copies modal (clause 112).
-    Jobs { seq: u64, generation: u64 },
-    /// Start a copy of `rec`, sent unchanged, with `scope` (clause 103)
-    /// and the place LANDS IN showed (clause 145: `None` sends none,
-    /// `Some(None)` null). `ticket` comes back on the reply, so the Keep
-    /// modal knows its own.
+    Jobs { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach> },
+    /// Start a copy of `rec`, sent unchanged, with `scope` (clause 103),
+    /// a folder copy's `landing`, and the place LANDS IN showed (clause
+    /// 145: `None` sends none, `Some(None)` null). `ticket` comes back on
+    /// the reply, so the Keep modal knows its own.
     JobStart {
         ticket: u64,
         generation: u64,
+        reach: Option<crate::tui::app::Reach>,
         plugin: String,
         rec: Box<serde_json::Value>,
         scope: JobScope,
         destination: Option<Option<CollectionDestination>>,
+        landing: Option<JobLanding>,
     },
     /// The destination read again — each Keep a copy modal that opens
     /// asks (clause 105); `seq` comes back: the last read wins.
-    DestinationRead { seq: u64, generation: u64 },
+    DestinationRead { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach> },
     /// Save where this account's copies land — the picker's Save (clause
     /// 144): `None` goes back to the library default.
-    DestinationSave { seq: u64, generation: u64, destination: Option<CollectionDestination> },
+    DestinationSave { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach>, destination: Option<CollectionDestination> },
     /// The folders in `path` (`/{library}/{folder}`), for the picker's
-    /// completion (clause 143): the session's own server's listing.
-    DestinationFolders { seq: u64, generation: u64, path: String },
+    /// completion (clause 143): the user's own server's listing.
+    DestinationFolders { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach>, path: String },
     /// Cancel job `id` (a 409 means it had already finished, clause 133).
-    JobCancel { generation: u64, id: i64 },
+    JobCancel { generation: u64, reach: Option<crate::tui::app::Reach>, id: i64 },
     /// Drop the caller's finished jobs — the Copies modal's Clear finished.
-    JobsClear { generation: u64 },
+    JobsClear { generation: u64, reach: Option<crate::tui::app::Reach> },
     /// Open elsewhere: the `links` plug-in `plugin`'s links for `rec`,
     /// asked only when the list opens (clause 140).
-    PluginLinks { seq: u64, generation: u64, plugin: String, rec: Box<serde_json::Value> },
-    /// The Keep modal's sizes (clause 106): the album's songs and the
-    /// artist's albums on the connected server — through `reach`, its peer
-    /// reach — and the artist's albums in the user's own library, through
-    /// the session. Every read optional: a missing answer leaves its size
-    /// unknown.
-    KeepFacts { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach>, ask: Box<KeepFactsAsk> },
+    PluginLinks { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach>, plugin: String, rec: Box<serde_json::Value> },
+    /// The Keep modal's sizes (clause 106): the album's songs, the
+    /// artist's albums and a folder's files on the connected server —
+    /// through `reach`, its peer reach — and the artist's albums in the
+    /// user's own library, through `own` (`None`: the session, while it is
+    /// that library's server). Every read optional: a missing answer
+    /// leaves its size unknown.
+    KeepFacts {
+        seq: u64,
+        generation: u64,
+        reach: Option<crate::tui::app::Reach>,
+        own: Option<crate::tui::app::Reach>,
+        ask: Box<KeepFactsAsk>,
+    },
+    /// "By your layout"'s tags for a folder's songs — at most 100, read
+    /// once (keep-a-copy spec §6.5.3): the connected server's metadata
+    /// batch through `reach`, its peer reach.
+    KeepFolderTags { seq: u64, generation: u64, reach: Option<crate::tui::app::Reach>, filepaths: Vec<String> },
+    /// The album page's credit, step 3 (keep-a-copy spec §4.1.3): the
+    /// browsed server's albums by `artist` — the session's own read, so it
+    /// rides the session; `generation` the session's.
+    AlbumCredit { seq: u64, generation: u64, artist: String },
+    /// A user's own server's ping while one of its connected servers is
+    /// browsed (keep-a-copy spec §3.2, gap 9): the flags Keep a copy is
+    /// gated on there, from the server under `server`, through `reach`.
+    OwnPing { server: String, reach: crate::tui::app::Reach },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
@@ -352,6 +378,21 @@ impl ApiCmd {
             | ApiCmd::PlaylistNames { reach }
             // A connected server's album asks THAT server, through the proxy.
             | ApiCmd::TasteAlbum { reach, .. } => reach.as_ref(),
+            // The plug-in routes are the user's own server's (clause 100):
+            // its reach while one of its connected servers is browsed.
+            ApiCmd::KeepGate { reach, .. }
+            | ApiCmd::JobsLookup { reach, .. }
+            | ApiCmd::Jobs { reach, .. }
+            | ApiCmd::JobStart { reach, .. }
+            | ApiCmd::DestinationRead { reach, .. }
+            | ApiCmd::DestinationSave { reach, .. }
+            | ApiCmd::DestinationFolders { reach, .. }
+            | ApiCmd::JobCancel { reach, .. }
+            | ApiCmd::JobsClear { reach, .. }
+            | ApiCmd::PluginLinks { reach, .. }
+            // A folder's tags are the connected server's.
+            | ApiCmd::KeepFolderTags { reach, .. } => reach.as_ref(),
+            ApiCmd::OwnPing { reach, .. } => Some(reach),
             // The DJ's turns go to ITS server (auto-dj contract, clause 19).
             ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => request.reach.as_ref(),
             // A play goes to its row's server, a peer's to the parent.
@@ -376,17 +417,8 @@ impl ApiCmd {
             | ApiCmd::DiscoveryProbe
             | ApiCmd::Discover { .. }
             | ApiCmd::Taste { .. }
-            // The plug-in routes are the user's own server's (clause 100).
-            | ApiCmd::KeepGate { .. }
-            | ApiCmd::JobsLookup { .. }
-            | ApiCmd::Jobs { .. }
-            | ApiCmd::JobStart { .. }
-            | ApiCmd::DestinationRead { .. }
-            | ApiCmd::DestinationSave { .. }
-            | ApiCmd::DestinationFolders { .. }
-            | ApiCmd::JobCancel { .. }
-            | ApiCmd::JobsClear { .. }
-            | ApiCmd::PluginLinks { .. }
+            // The album page's credit asks the browsed server: the session.
+            | ApiCmd::AlbumCredit { .. }
             | ApiCmd::SavePlaylist { .. }
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
@@ -539,6 +571,17 @@ pub struct KeepFactsAsk {
     pub artist: Option<String>,
     pub album_artist: Option<String>,
     pub year: Option<i32>,
+    /// With no album artist: the album's songs by its name and year alone,
+    /// never narrowed by the track artist — a browse song's window finds
+    /// its album's credit among them (keep-a-copy spec §4.1.3 step 2).
+    pub whole: bool,
+    /// The artist's albums on the connected server are already in hand
+    /// (an artist's wall's own listing, keep-a-copy spec §6.1): not asked
+    /// again.
+    pub listed: bool,
+    /// A folder on the connected server (its path there, its library
+    /// first): its recursive listing, asked once (keep-a-copy spec §6.5.4).
+    pub folder: Option<String>,
 }
 
 /// The Keep modal's sizes; `None` where a read was not asked or did not
@@ -552,6 +595,29 @@ pub struct KeepFacts {
     pub peer_albums: Option<Vec<ArtistAlbumRow>>,
     /// The artist's albums in the user's own library.
     pub local_albums: Option<Vec<ArtistAlbumRow>>,
+    /// A folder's recursive listing on the connected server, as it named
+    /// its files.
+    pub folder_files: Option<Vec<String>>,
+}
+
+impl KeepFacts {
+    /// `newer` folded over what is known: each read it answered replaces
+    /// its own, one it did not ask (or that failed) keeps what was known —
+    /// an artist's wall's listing, handed in at open.
+    pub fn merge(&mut self, newer: KeepFacts) {
+        if newer.album_songs.is_some() {
+            self.album_songs = newer.album_songs;
+        }
+        if newer.peer_albums.is_some() {
+            self.peer_albums = newer.peer_albums;
+        }
+        if newer.local_albums.is_some() {
+            self.local_albums = newer.local_albums;
+        }
+        if newer.folder_files.is_some() {
+            self.folder_files = newer.folder_files;
+        }
+    }
 }
 
 /// One song of the album's listing, with the tags a copy files it under
@@ -572,6 +638,11 @@ pub struct KeepSong {
     /// "Hip-Hop-Rap" — so a song that lists two or more is unknown (the
     /// webapp's `songGenre`).
     pub genre: Option<String>,
+    /// Its album, and the album's own credit (`album-artist`) — what an
+    /// album's credit is found from (the album page's step 2) and what a
+    /// folder copy by the layout files each song under.
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
 }
 
 impl KeepSong {
@@ -587,6 +658,8 @@ impl KeepSong {
                 [one] => Some(one.clone()),
                 _ => None,
             },
+            album: named(&md.album),
+            album_artist: named(&md.album_artist),
         }
     }
 }
@@ -606,7 +679,13 @@ pub enum LibraryNode {
     Artist(String),
     /// Every album, or those a mood filter keeps — as [`Self::Artists`].
     Albums(MoodFilter),
-    Album { name: String, artist: Option<String> },
+    /// An album page: its name, the track artist a door asks it by (its
+    /// songs' `artist` — none from the walls), and what its opener knew of
+    /// it (keep-a-copy spec §4.1.3): its credit — the album page's resolver
+    /// stores its answer here, so Back and Keep a copy reuse it — its year
+    /// and whether it is a compilation. Its songs are asked by the credit
+    /// and the year where known, so two albums of one name never merge.
+    Album { name: String, artist: Option<String>, album_artist: AlbumCredit, year: Option<i32>, compilation: bool },
     /// The Genres list of one kind (mStream #716) — part of the view's
     /// identity, so a list asked for before the switch moved is dropped
     /// when it lands.
@@ -631,6 +710,25 @@ pub enum LibraryNode {
     /// every machine the Library tab already had.
     Playlists,
     Playlist(String),
+}
+
+impl LibraryNode {
+    /// An album page asked by its name (and a track artist) alone — a door
+    /// that knows nothing else of it: its credit found on the page.
+    pub fn album(name: impl Into<String>, artist: Option<String>) -> LibraryNode {
+        LibraryNode::Album { name: name.into(), artist, album_artist: AlbumCredit::Unknown, year: None, compilation: false }
+    }
+
+    /// A wall's card's page (`/db/albums`, `/db/artists-albums`): its name
+    /// and every fact the listing gave — its credit, null where its rows
+    /// disagree, its year, its compilation flag. `None` for the singles
+    /// bucket, which has no album page of its own.
+    pub fn album_of(card: &Album) -> Option<LibraryNode> {
+        let name = card.name.clone().filter(|n| !n.trim().is_empty())?;
+        let album_artist = card.credit();
+        let compilation = card.compilation || various_artists(album_artist.known());
+        Some(LibraryNode::Album { name, artist: card.artist.clone(), album_artist, year: card.year.filter(|y| *y > 0), compilation })
+    }
 }
 
 #[derive(Debug)]
@@ -826,6 +924,17 @@ pub enum Event {
     JobsCleared { generation: u64, answer: Result<u64, PluginFailure> },
     PluginLinks { seq: u64, generation: u64, answer: Result<Vec<PluginLink>, PluginFailure> },
     KeepFacts { seq: u64, generation: u64, facts: Box<KeepFacts> },
+    /// A folder's songs' tags for "By your layout" ([`ApiCmd::KeepFolderTags`]):
+    /// `None` when the connected server did not answer.
+    KeepFolderTags { seq: u64, generation: u64, tracks: Option<Vec<Track>> },
+    /// The album page's credit, step 3 ([`ApiCmd::AlbumCredit`]): the
+    /// connected server's albums by the first song's artist, `None` when it
+    /// did not answer. `generation` is the session's: the page is.
+    AlbumCredit { seq: u64, generation: u64, rows: Option<Vec<ArtistAlbumRow>> },
+    /// A user's own server's ping, asked while one of its connected servers
+    /// is browsed ([`ApiCmd::OwnPing`]): its flags are what Keep a copy is
+    /// gated on there. `None` when it did not answer.
+    OwnPing { server: String, ping: Option<Box<crate::api::types::Ping>> },
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
@@ -909,7 +1018,37 @@ pub(crate) const AUDIO_THREAD: &str = "mstream-audio";
 pub fn panics_are_caught(thread: Option<&str>) -> bool {
     thread == Some(AUDIO_THREAD)
         || thread == Some(crate::engine::PREPARE_THREAD)
+        || decode_thread(thread)
+        || device_thread(thread)
         || card_thread(thread)
+}
+
+/// A track's decode thread: a panic under the decoder is caught there, the
+/// track ends, and the next one plays — a malformed file costs a track,
+/// not the screen. (In the device callback, where decoding used to
+/// happen, it cost the stream's thread, and on macOS the process.)
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_thread(thread: Option<&str>) -> bool {
+    thread == Some(crate::engine::feed::DECODE_THREAD)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_thread(_thread: Option<&str>) -> bool {
+    false
+}
+
+/// The engine's device thread: every call it makes into the system's audio
+/// service is caught there and read as a failed open — cpal's WASAPI host
+/// panics its way out of an endpoint that vanished between two calls — so
+/// a device unplugged at the wrong moment costs a retry, not the screen.
+#[cfg(not(target_arch = "wasm32"))]
+fn device_thread(thread: Option<&str>) -> bool {
+    thread == Some(crate::engine::output::DEVICE_THREAD)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn device_thread(_thread: Option<&str>) -> bool {
+    false
 }
 
 /// A card transfer's job, fit, eject or sync thread: each catches its own
@@ -1573,7 +1712,8 @@ fn dispatch_read(client: Option<Arc<Client>>, lanes: &Lanes, events: &Sender<Eve
 /// whatever came in behind it — on a thread of its own. Each change's event
 /// goes out before any read issued after it is even asked, so its answers
 /// land on the session the change made: the order the serial loop gave
-/// for free.
+/// for free. The covers a retarget moves onto its new client are asked
+/// after it too.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_changes(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
     let (runner, runner_lanes, runner_events) = (session.clone(), lanes.clone(), events.clone());
@@ -1606,15 +1746,22 @@ fn work_through(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
         let retarget = matches!(cmd, ApiCmd::Retarget { .. });
         let before = client.clone();
         let event = run_change(&mut client, cmd);
+        // The change's own event first, before anything is asked of the
+        // client it made. A retarget's waiting covers move onto that client
+        // just below and are asked there at once, on the lane's threads;
+        // sent after them, the Retargeted could reach the App behind an
+        // answer of theirs. The App reads the two in order: a path coming
+        // up forgives every cover that failed before it
+        // (`App::path_came_up`), so one that had just failed on the new
+        // path itself was forgiven with the rest and asked again at once.
+        let gone = event.is_some_and(|event| events.send(event).is_err());
         let mut slot = lock_session(session);
         if replaced(before.as_ref(), client.as_ref()) {
             lock_lanes(lanes).session_moved(client.clone(), retarget, events);
         }
         slot.client = client;
         drop(slot);
-        if let Some(event) = event
-            && events.send(event).is_err()
-        {
+        if gone {
             return;
         }
     }
@@ -1863,10 +2010,13 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
     }
     // The Keep modal's facts ask the connected server through its reach
     // and the user's own library through the session (clause 106).
-    if let ApiCmd::KeepFacts { seq, generation, reach, ask } = cmd {
+    // The user's own library through `own` — the session while it is that
+    // server (keep-a-copy spec §6.1, gap 11).
+    if let ApiCmd::KeepFacts { seq, generation, reach, own, ask } = cmd {
         let peer = reach.as_ref().and_then(client_for);
-        let facts = match client {
-            Some(session) => crate::api::wait(async { Ok(keep_facts(peer.as_deref(), session, &ask).await) })
+        let own = own.as_ref().and_then(client_for);
+        let facts = match own.as_deref().or(client) {
+            Some(local) => crate::api::wait(async { Ok(keep_facts(peer.as_deref(), local, &ask).await) })
                 .unwrap_or_default(),
             None => KeepFacts::default(),
         };
@@ -1942,25 +2092,40 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             crate::api::wait(taste_album(c, TasteAlbumAsk { name, artist, album_artist, peer, play }, generation))
         }
         // The plug-ins answer through the shapers both workers share.
-        ApiCmd::KeepGate { generation } => crate::api::wait(keep_gate(c, generation)),
-        ApiCmd::JobsLookup { seq, generation, recs } => crate::api::wait(jobs_lookup(c, seq, generation, &recs)),
-        ApiCmd::Jobs { seq, generation } => crate::api::wait(jobs(c, seq, generation)),
-        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination } => {
-            let ask = JobStartAsk { plugin: &plugin, rec: &rec, scope, destination: destination.as_ref().map(Option::as_ref) };
+        ApiCmd::KeepGate { generation, .. } => crate::api::wait(keep_gate(c, generation)),
+        ApiCmd::JobsLookup { seq, generation, recs, .. } => crate::api::wait(jobs_lookup(c, seq, generation, &recs)),
+        ApiCmd::Jobs { seq, generation, .. } => crate::api::wait(jobs(c, seq, generation)),
+        ApiCmd::JobStart { ticket, generation, plugin, rec, scope, destination, landing, .. } => {
+            let ask = JobStartAsk {
+                plugin: &plugin,
+                rec: &rec,
+                scope,
+                destination: destination.as_ref().map(Option::as_ref),
+                landing: landing.as_ref(),
+            };
             crate::api::wait(job_start(c, ticket, generation, ask))
         }
-        ApiCmd::DestinationRead { seq, generation } => crate::api::wait(destination_read(c, seq, generation)),
-        ApiCmd::DestinationSave { seq, generation, destination } => {
+        ApiCmd::DestinationRead { seq, generation, .. } => crate::api::wait(destination_read(c, seq, generation)),
+        ApiCmd::DestinationSave { seq, generation, destination, .. } => {
             crate::api::wait(destination_save(c, seq, generation, destination.as_ref()))
         }
-        ApiCmd::DestinationFolders { seq, generation, path } => {
+        ApiCmd::DestinationFolders { seq, generation, path, .. } => {
             crate::api::wait(destination_folders(c, seq, generation, path))
         }
-        ApiCmd::JobCancel { generation, id } => crate::api::wait(job_cancel(c, generation, id)),
-        ApiCmd::JobsClear { generation } => crate::api::wait(jobs_clear(c, generation)),
-        ApiCmd::PluginLinks { seq, generation, plugin, rec } => {
+        ApiCmd::JobCancel { generation, id, .. } => crate::api::wait(job_cancel(c, generation, id)),
+        ApiCmd::JobsClear { generation, .. } => crate::api::wait(jobs_clear(c, generation)),
+        ApiCmd::PluginLinks { seq, generation, plugin, rec, .. } => {
             crate::api::wait(plugin_links(c, seq, generation, &plugin, &rec))
         }
+        // None of these fail as an error: a read that did not answer is
+        // `None`, and the App reads that.
+        ApiCmd::KeepFolderTags { seq, generation, filepaths, .. } => {
+            Ok(Event::KeepFolderTags { seq, generation, tracks: crate::api::wait(c.metadata_batch_tracks_async(&filepaths)).ok() })
+        }
+        ApiCmd::AlbumCredit { seq, generation, artist } => {
+            Ok(Event::AlbumCredit { seq, generation, rows: crate::api::wait(c.artist_album_rows_async(&artist)).ok() })
+        }
+        ApiCmd::OwnPing { server, .. } => Ok(Event::OwnPing { server, ping: c.ping().ok().map(Box::new) }),
         // A failed ask is `None`: nothing about the saved peers changes.
         ApiCmd::FederationPeers { parent } => {
             Ok(Event::FederationPeers { parent, peers: c.federation_peers().ok() })
@@ -2362,8 +2527,10 @@ pub(crate) async fn load_library(
             LibraryData::Albums(client.artist_albums_async(artist).await?)
         }
         LibraryNode::Albums(moods) => LibraryData::Albums(client.albums_async(*moods).await?),
-        LibraryNode::Album { name, artist } => {
-            LibraryData::Tracks(client.album_songs_async(name, artist.as_deref()).await?)
+        // By every selector its opener knew: the same body as the name
+        // alone where it knew nothing else.
+        LibraryNode::Album { name, artist, album_artist, year, .. } => {
+            LibraryData::Tracks(client.album_songs_by_async(name, artist.as_deref(), album_artist.known(), *year).await?)
         }
         LibraryNode::Genres(source) => LibraryData::Genres(load_genres(client, *source).await?),
         LibraryNode::Genre(genre, source) => {
@@ -2908,7 +3075,7 @@ pub(crate) async fn taste_album(client: &Client, ask: TasteAlbumAsk, generation:
         (Some(_), Some(credit)) => client.album_songs_by_async(&name, None, Some(credit), None).await,
         _ => {
             let asked = if peer.is_some() { artist.clone() } else { None };
-            let node = LibraryNode::Album { name: name.clone(), artist: asked };
+            let node = LibraryNode::album(name.clone(), asked);
             match load_library(client, &node).await {
                 Ok(LibraryData::Tracks(tracks)) => Ok(tracks),
                 Ok(_) => Err(ApiError::Config("not an album listing".into())),
@@ -2974,12 +3141,14 @@ pub(crate) struct JobStartAsk<'a> {
     pub rec: &'a serde_json::Value,
     pub scope: JobScope,
     pub destination: Option<Option<&'a CollectionDestination>>,
+    /// A folder copy's landing (none: the mirror).
+    pub landing: Option<&'a JobLanding>,
 }
 
 /// A start; the server's 409 `destination_changed` is the room's failure
 /// to word (clause 146), the place in force now with it.
 pub(crate) async fn job_start(client: &Client, ticket: u64, generation: u64, ask: JobStartAsk<'_>) -> Result<Event, ApiError> {
-    let answer = plugin_result(client.plugin_job_start_async(ask.plugin, ask.rec, Some(ask.scope), ask.destination).await)?;
+    let answer = plugin_result(client.plugin_job_start_async(ask.plugin, ask.rec, Some(ask.scope), ask.destination, ask.landing).await)?;
     let answer = answer.and_then(|started| match started {
         JobStartAnswer::Started(started) => Ok(started),
         JobStartAnswer::DestinationChanged(now) => Err(PluginFailure::DestinationChanged(now)),
@@ -3033,8 +3202,9 @@ pub(crate) async fn plugin_links(
 
 /// The Keep modal's sizes (clause 106), each read optional: the album's
 /// songs on the connected server asked with the copy's own selectors (a
-/// compilation by its album artist, else by its track artist and year),
-/// the artist's albums there, and the artist's albums in the user's own
+/// compilation by its album artist, else by its track artist and year; a
+/// browse song whose album's credit is not known by its name and year
+/// alone), the artist's albums there, and the artist's albums in the user's own
 /// library. `peer` is `None` where the connected server cannot be reached
 /// from here (the browser build): its sizes stay unknown.
 pub(crate) async fn keep_facts(peer: Option<&Client>, local: &Client, ask: &KeepFactsAsk) -> KeepFacts {
@@ -3044,15 +3214,21 @@ pub(crate) async fn keep_facts(peer: Option<&Client>, local: &Client, ask: &Keep
     if let (Some(peer), Some(album)) = (peer, album) {
         let songs = match ask.album_artist.as_deref() {
             Some(credit) => peer.album_songs_by_async(album, None, Some(credit), ask.year).await,
+            None if ask.whole => peer.album_songs_by_async(album, None, None, ask.year).await,
             None => peer.album_songs_by_async(album, artist, None, ask.year).await,
         };
         facts.album_songs = songs.ok().map(|tracks| tracks.iter().map(KeepSong::of).collect());
     }
     if let Some(artist) = artist {
-        if let Some(peer) = peer {
+        if let Some(peer) = peer.filter(|_| !ask.listed) {
             facts.peer_albums = peer.artist_album_rows_async(artist).await.ok();
         }
         facts.local_albums = local.artist_album_rows_async(artist).await.ok();
+    }
+    // A folder's files, once (keep-a-copy spec §6.5.4): never on a page
+    // view, only with its window.
+    if let (Some(peer), Some(folder)) = (peer, ask.folder.as_deref()) {
+        facts.folder_files = peer.file_explorer_recursive_async(folder).await.ok();
     }
     facts
 }
@@ -3265,7 +3441,7 @@ mod tests {
             ]);
             let c = client(port);
             let shown = CollectionDestination { vpath: "copies".into(), ..CollectionDestination::default() };
-            let ask = JobStartAsk { plugin: "federation-copy", rec: &serde_json::json!({ "title": "x" }), scope: JobScope::Song, destination: Some(Some(&shown)) };
+            let ask = JobStartAsk { plugin: "federation-copy", rec: &serde_json::json!({ "title": "x" }), scope: JobScope::Song, destination: Some(Some(&shown)), landing: None };
             match crate::api::wait(job_start(&c, 3, 4, ask)).unwrap() {
                 Event::JobStarted { ticket: 3, generation: 4, answer: Err(PluginFailure::DestinationChanged(Some(Some(now)))) } => assert_eq!(now.vpath, "music"),
                 other => panic!("{other:?}"),
@@ -3317,6 +3493,7 @@ mod tests {
                 artist: Some("Peer Kim".into()),
                 album_artist: Some("Various Artists".into()),
                 year: Some(2020),
+                ..Default::default()
             };
             let facts = crate::api::wait(async { Ok::<_, ApiError>(keep_facts(Some(&client(peer_port)), &client(own_port), &ask).await) }).unwrap();
             // Each song's own tags, as a copy files it: the ARTIST tag as
@@ -3329,6 +3506,7 @@ mod tests {
                 artist: artist.map(str::to_string),
                 year,
                 genre: genre.map(str::to_string),
+                ..Default::default()
             };
             assert_eq!(
                 facts.album_songs,
@@ -3350,6 +3528,14 @@ mod tests {
             let (own_port, _) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!({ "albums": [{ "name": "One" }] }))]);
             let facts = crate::api::wait(async { Ok::<_, ApiError>(keep_facts(None, &client(own_port), &ask).await) }).unwrap();
             assert_eq!((facts.album_songs, facts.peer_albums.is_none(), facts.local_albums.map(|a| a.len())), (None, true, Some(1)));
+            // A browse song whose album's credit is not known: its album's
+            // songs by name and year alone, never narrowed by its artist
+            // (keep-a-copy spec §4.1.3, rule 1).
+            let (peer_port, peer_seen) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!([])), json_reply("200 OK", serde_json::json!({ "albums": [] }))]);
+            let (own_port, _) = canned_server_bodies(vec![json_reply("200 OK", serde_json::json!({ "albums": [] }))]);
+            let whole = KeepFactsAsk { album: Some("Split Series".into()), artist: Some("Boukmanflow".into()), year: Some(2022), whole: true, ..Default::default() };
+            crate::api::wait(async { Ok::<_, ApiError>(keep_facts(Some(&client(peer_port)), &client(own_port), &whole).await) }).unwrap();
+            assert_eq!(seen_json(&peer_seen).1, serde_json::json!({ "album": "Split Series", "year": 2022 }));
         }
 
         #[test]
@@ -3366,37 +3552,56 @@ mod tests {
         }
 
         #[test]
-        fn every_plugin_command_asks_the_session_and_the_facts_build_their_own() {
-            let reach = crate::tui::app::Reach {
+        fn every_plugin_command_asks_its_own_server_and_the_facts_build_their_own() {
+            let parent = crate::tui::app::Reach {
                 base: "http://parent:3000".into(),
-                token: None,
+                token: Some("tok".into()),
                 self_signed: false,
-                peer: Some(3),
+                peer: None,
                 local_token: None,
-                compressed_art: true,
+                compressed_art: false,
             };
-            for cmd in [
-                ApiCmd::KeepGate { generation: 1 },
-                ApiCmd::JobsLookup { seq: 1, generation: 1, recs: vec![] },
-                ApiCmd::Jobs { seq: 1, generation: 1 },
-                ApiCmd::JobStart {
-                    ticket: 1,
-                    generation: 1,
-                    plugin: "federation-copy".into(),
-                    rec: Box::new(serde_json::json!({})),
-                    scope: JobScope::Album,
-                    destination: None,
-                },
-                ApiCmd::DestinationRead { seq: 1, generation: 1 },
-                ApiCmd::DestinationSave { seq: 1, generation: 1, destination: None },
-                ApiCmd::DestinationFolders { seq: 1, generation: 1, path: "/copies".into() },
-                ApiCmd::JobCancel { generation: 1, id: 2 },
-                ApiCmd::JobsClear { generation: 1 },
-                ApiCmd::PluginLinks { seq: 1, generation: 1, plugin: "links".into(), rec: Box::new(serde_json::json!({})) },
-                ApiCmd::KeepFacts { seq: 1, generation: 1, reach: Some(reach), ask: Box::new(KeepFactsAsk::default()) },
-            ] {
+            let peer = crate::tui::app::Reach { peer: Some(3), compressed_art: true, ..parent.clone() };
+            let commands = |reach: Option<crate::tui::app::Reach>| {
+                vec![
+                    ApiCmd::KeepGate { generation: 1, reach: reach.clone() },
+                    ApiCmd::JobsLookup { seq: 1, generation: 1, reach: reach.clone(), recs: vec![] },
+                    ApiCmd::Jobs { seq: 1, generation: 1, reach: reach.clone() },
+                    ApiCmd::JobStart {
+                        ticket: 1,
+                        generation: 1,
+                        reach: reach.clone(),
+                        plugin: "federation-copy".into(),
+                        rec: Box::new(serde_json::json!({})),
+                        scope: JobScope::Album,
+                        destination: None,
+                        landing: None,
+                    },
+                    ApiCmd::DestinationRead { seq: 1, generation: 1, reach: reach.clone() },
+                    ApiCmd::DestinationSave { seq: 1, generation: 1, reach: reach.clone(), destination: None },
+                    ApiCmd::DestinationFolders { seq: 1, generation: 1, reach: reach.clone(), path: "/copies".into() },
+                    ApiCmd::JobCancel { generation: 1, reach: reach.clone(), id: 2 },
+                    ApiCmd::JobsClear { generation: 1, reach: reach.clone() },
+                    ApiCmd::PluginLinks { seq: 1, generation: 1, reach: reach.clone(), plugin: "links".into(), rec: Box::new(serde_json::json!({})) },
+                ]
+            };
+            // The session while it is the user's own server; that server's
+            // reach while one of its connected servers is browsed.
+            for cmd in commands(None) {
                 assert_eq!(cmd.reach(), None, "{cmd:?}");
             }
+            for cmd in commands(Some(parent.clone())) {
+                assert_eq!(cmd.reach(), Some(&parent), "{cmd:?}");
+            }
+            // The facts build both of their clients themselves.
+            let facts = ApiCmd::KeepFacts { seq: 1, generation: 1, reach: Some(peer.clone()), own: Some(parent.clone()), ask: Box::new(KeepFactsAsk::default()) };
+            assert_eq!(facts.reach(), None);
+            // A folder's tags are the connected server's; the album page's
+            // credit is the browsed server's own read; the own server's ping
+            // asks that server.
+            assert_eq!(ApiCmd::KeepFolderTags { seq: 1, generation: 1, reach: Some(peer.clone()), filepaths: vec![] }.reach(), Some(&peer));
+            assert_eq!(ApiCmd::AlbumCredit { seq: 1, generation: 1, artist: "Boukmanflow".into() }.reach(), None);
+            assert_eq!(ApiCmd::OwnPing { server: "http://parent:3000".into(), reach: parent.clone() }.reach(), Some(&parent));
         }
     }
 
@@ -3968,6 +4173,12 @@ mod tests {
         // would tear the terminal down for a panic already handled — a
         // malformed file must cost a blend, not the screen (audit #32).
         assert!(panics_are_caught(Some(crate::engine::PREPARE_THREAD)));
+        // The device thread catches around every call into the audio
+        // backend: a panic under an open is a failed open.
+        assert!(panics_are_caught(Some(crate::engine::output::DEVICE_THREAD)));
+        // A decode thread catches around the decoder: a panic there ends
+        // the track it was decoding.
+        assert!(panics_are_caught(Some(crate::engine::feed::DECODE_THREAD)));
         assert!(!panics_are_caught(Some("mstream-api")), "the api thread is not caught");
         // A card's job, fit, eject and sync threads catch theirs and end
         // with why: the hook leaves the screen alone there too.
@@ -4655,20 +4866,32 @@ mod tests {
         }
     }
 
-    /// A server whose covers each hang `hold` before a 404, counting the
-    /// asks it was sent; its ping answers at once.
-    fn hanging_art(hold: Duration) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    /// A server whose covers each hang until the flag it hands back is
+    /// raised, then 404, counting the asks it was sent; its ping answers at
+    /// once. Held by the test, not for a length of time: covers that let go
+    /// by themselves after a second and a half did so in the middle of
+    /// whatever a slow machine had not got to yet.
+    fn held_art() -> (String, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicBool>) {
+        use std::sync::atomic::Ordering::SeqCst;
         let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = asked.clone();
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (counter, released) = (asked.clone(), release.clone());
         let base = test_server(move |path| match path {
             "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
             p if p.starts_with("/album-art/") => {
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                (hold, "404 Not Found", "{}")
+                counter.fetch_add(1, SeqCst);
+                // Held on the request's own thread — and not for ever: a
+                // test that failed before raising the flag leaves these to
+                // run out by themselves.
+                let until = std::time::Instant::now() + Duration::from_secs(10);
+                while !released.load(SeqCst) && std::time::Instant::now() < until {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                (Duration::ZERO, "404 Not Found", "{}")
             }
             _ => (Duration::ZERO, "404 Not Found", "{}"),
         });
-        (base, asked)
+        (base, asked, release)
     }
 
     /// The next event that is not the tunnel sampler's.
@@ -4700,7 +4923,7 @@ mod tests {
         // the leftovers kept all six runners for twenty seconds an ask, each
         // still aimed at the server the user had left, and the new server's
         // covers waited behind them.
-        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let (old, asked_old, release) = held_art();
         let new = test_server(|path| match path {
             "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
             _ => (Duration::ZERO, "404 Not Found", "{}"),
@@ -4714,15 +4937,16 @@ mod tests {
 
         tx.send(connect_to(&new)).unwrap();
         assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
-        let asked = std::time::Instant::now();
+        // Answered while the old server still holds its six: it did not
+        // wait for them, since nothing lets them go until this has landed.
         tx.send(small_cover("new.jpeg")).unwrap();
         match next_answer(&events, Duration::from_secs(5)) {
             Event::AlbumArt { file, .. } => assert_eq!(file, "new.jpeg", "the new server's cover first"),
             other => panic!("unexpected {other:?}"),
         }
-        assert!(asked.elapsed() < Duration::from_millis(1000), "it did not wait: {:?}", asked.elapsed());
 
         // The six on the wire land; the fourteen that waited are never sent.
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
         for _ in 0..ART_LANE_WIDTH {
             assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
         }
@@ -4737,7 +4961,7 @@ mod tests {
         // The same server by another way: its claims stand in the App, so
         // what waited on the old path is asked on the new one, at once,
         // rather than behind the old path's six on the wire.
-        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let (old, asked_old, release) = held_art();
         let new = test_server(|path| match path {
             "/api/" => (Duration::ZERO, "200 OK", "{}"),
             _ => (Duration::ZERO, "404 Not Found", "{}"),
@@ -4749,7 +4973,6 @@ mod tests {
         assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
         twenty_covers_on(&tx, &asked_old);
 
-        let moved = std::time::Instant::now();
         tx.send(ApiCmd::Retarget {
             identity: old.clone(),
             server: new,
@@ -4759,14 +4982,22 @@ mod tests {
             local_token: None,
         })
         .unwrap();
-        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Retargeted { .. }));
+        // The move is told before any cover it moved answers. The App
+        // forgives what failed before a path came up, and a cover that
+        // fails on the new path is not one of those.
+        match next_answer(&events, Duration::from_secs(5)) {
+            Event::Retargeted { .. } => {}
+            other => panic!("the move was not the first thing told: {other:?}"),
+        }
+        // The fourteen that waited are answered while the old path still
+        // holds its six: behind those, none of them would answer at all.
         for _ in 0..20 - ART_LANE_WIDTH {
             match next_answer(&events, Duration::from_secs(5)) {
                 Event::AlbumArt { settled: true, .. } => {}
                 other => panic!("unexpected {other:?}"),
             }
         }
-        assert!(moved.elapsed() < Duration::from_millis(1000), "the new path answered them: {:?}", moved.elapsed());
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
         for _ in 0..ART_LANE_WIDTH {
             assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
         }

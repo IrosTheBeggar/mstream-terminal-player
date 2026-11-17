@@ -179,7 +179,11 @@ parent changes a peer's label only.
     Forget (once missing). **No Edit, no Remove while listed** — a peer is
     the parent admin's data. Row activation is Info.
 26. **A peer is read-only.** Its home leads with an inert note — "Read-only
-    server" / "Playlists and ratings stay on your own server". Absent on a
+    server" / "Playlists and ratings stay on your own server" (the
+    terminal GUI says it with one word, "read-only", on the Files crumb
+    and the Artists, Genres and Recent headings — the explanation cut on
+    2026-10-27, the first thing to give way on a short line; the log).
+    Absent on a
     peer: Playlists (tile and add-to-playlist), Rated, ratings and lyrics
     badges, sharing ("Tracks on a shared server can't be shared from here —
     they live in someone else's library."), transcoding, similar-tracks
@@ -357,7 +361,7 @@ already exists (`gui.srv.*`).
 | Forget / Hide from the picker / Show in the picker | federatedForget / federatedHide / federatedShow | — |
 | Show in server picker — Hidden peers keep playing what you queued from them. | federationShowInPicker / federationShowInPickerNote | — |
 | Unnamed server | federationUnnamedServer | — |
-| Read-only server / Playlists and ratings stay on your own server | browserFederatedReadOnly / browserFederatedReadOnlyNote | — |
+| Read-only server / Playlists and ratings stay on your own server | browserFederatedReadOnly / browserFederatedReadOnlyNote | gui.srv.read_only "read-only" (the note's first half alone, since 2026-10-27) |
 | Tracks on a shared server can't be shared from here — they live in someone else's library. | federatedShareUnavailable | — |
 | Network / Federation (home group headers) | browserSectionNetwork / browserFederation | — |
 | Welcome To mStream / Click here to add server | browserWelcomeTitle / browserWelcomeSubtitle | (the no-session screen) |
@@ -413,7 +417,7 @@ Idiom mapping, per the kit's conventions (docs/ui-kit.md):
 | Manage Servers screen + ⋮ row menu | The Manage Servers room — exists; verbs are keys (Enter switch · e edit · d default · p pair · x remove) and hover verbs; peers add h hide/show and, once missing, x Forget |
 | Remove dialog | The kit warning modal — exists ("REMOVE SERVER · Forget %{server}?" with the pairing-code note); no checkbox |
 | Peer row (`└` branch glyph) | The same glyph — the record's `kPeerBranch` is a box-drawing character; hidden peers dim |
-| Read-only note row | A note row at the top of the peer's home listing (the browser top bar's note line is per-action, so a row is the honest place) |
+| Read-only note row | The word "read-only" after the Files crumb and on the Artists, Genres and Recent headings (` · read-only`), giving way first where the line is short (discovery-page clause 155) |
 | Snackbars / toasts | The note line above the bar |
 | Swipe verbs on queue rows | Hover verbs + keys (x remove · i info) |
 | Drag-to-reorder grip | Keys (design in the canvas: a modifier + ↑↓) and a drag on the row's grip cell |
@@ -646,3 +650,14 @@ additions to drawn idioms. Revisit if discussion disagrees.
   launch; here a restore with the DJ armed keeps its last 100 played rows
   and remembers the rest by path, so the no-repeat rule holds without the
   rows.
+- **2026-10-27 — "read-only" alone** (clause 26; the user's rule that
+  every word on screen names a choice, a place, a state or an action
+  needed right there): the terminal's note was "read-only — playlists and
+  ratings stay on your own server" after the Files crumb and on three
+  headings, the explanation pushing the folder's name and the count off
+  the line; it is the word alone in every locale (the header label "{peer}
+  via {parent}" and the missing Playlists room already say whose server
+  this is), and it gives way first (docs/ux-contracts/discovery-page.md,
+  clause 155). On a connected server the same lines now carry Keep a
+  copy's ways in (discovery-page clauses 150–172): the copies land on the
+  parent — your own server — never on the peer.
