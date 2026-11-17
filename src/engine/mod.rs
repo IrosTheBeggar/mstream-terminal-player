@@ -13,6 +13,7 @@
 
 mod bus;
 pub(crate) mod fade;
+pub(crate) mod feed;
 pub(crate) mod http;
 mod mpeg;
 pub(crate) mod output;
@@ -182,18 +183,18 @@ pub struct QueueSnapshot {
 
 // ── Player state ────────────────────────────────────────────────────────────
 
-/// A decoded source ready to attach to a fresh sink. Two concrete decoder
-/// types (local file vs HTTP reader) — kept as an enum so both open paths
-/// share the sink-swap tail without generic-bound gymnastics.
+/// A decoder just built, over a local file or an HTTP reader — and for the
+/// second, how its download is reached from outside it ([`feed::Download`]).
 enum Opened {
     Local(Decoder<BufReader<File>>),
-    Http(Decoder<http::HttpReader>),
+    Http(Decoder<http::HttpReader>, feed::Download),
 }
 
-/// One source opened, probed and spooling: what [`open_entry`] returns,
-/// whether called inline by start_current or from a prepare thread.
+/// One source opened, probed and spooling, its decode thread already a
+/// second ahead ([`feed`]): what [`open_entry`] returns, whether called
+/// inline by start_current or from a prepare thread.
 struct Prepared {
-    opened: Opened,
+    source: feed::Fed,
     path: String,
     duration: f64,
 }
@@ -355,6 +356,19 @@ fn await_open(
 }
 
 fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
+    let (opened, duration) = open_decoder(entry)?;
+    // From here the decoder is its own thread's: nothing that plays this
+    // source ever reads the file or the network itself.
+    let source = match opened {
+        Opened::Local(decoder) => feed::Fed::spawn(decoder, None),
+        Opened::Http(decoder, download) => feed::Fed::spawn(decoder, Some(download)),
+    }?;
+    Ok(Prepared { source, path: entry.path.clone(), duration })
+}
+
+/// The open itself: the file or the stream, probed, with a decoder on it
+/// and the length it claims.
+fn open_decoder(entry: &QueueEntry) -> Result<(Opened, f64), String> {
     let path = entry.path.clone();
     // Diagnostics here go through `stderrln!`: these fire mid-session
     // from audio-side threads, and in the TUI that stderr lands raw on
@@ -366,6 +380,23 @@ fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
             crate::stderrln!("[engine] open failed for {}: {}", redacted, e);
             e
         })?;
+        // The decode thread reads this stream, and a read of what has not
+        // downloaded waits for it — for as long as the server takes. Two
+        // things reach into that wait. Cancelling the download ends it for
+        // good: when nobody is listening any more, a decode thread in a
+        // stalled read lets go of the stream and its spool file there and
+        // then. And a seek the thread has not taken up makes the read give
+        // up, so a seek to sound that has arrived lands at once — only
+        // where the length is known: without it the stream may not seek at
+        // all, and a read pulled out part-way is put right by seeking.
+        let orders = feed::Orders::new();
+        let cancel = reader.cancellation_token();
+        let nudge: Option<Box<dyn Fn() + Send + Sync>> = content_length.is_some().then(|| {
+            let asked = orders.clone();
+            let nudge = reader.give_up_when(Arc::new(move || asked.unserved()));
+            Box::new(move || nudge.nudge()) as Box<dyn Fn() + Send + Sync>
+        });
+        let download = feed::Download { orders, nudge, cancel: Box::new(move || cancel.cancel()) };
         let mut builder = Decoder::builder().with_seekable(true);
         if let Some(len) = content_length {
             // A constant-bitrate MP3 seeks by byte offset: one Range request
@@ -395,7 +426,7 @@ fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
             .duration_hint
             .or_else(|| decoder.total_duration().map(|d| d.as_secs_f64()))
             .unwrap_or(0.0);
-        (Opened::Http(decoder), duration)
+        (Opened::Http(decoder, download), duration)
     } else {
         let file = File::open(&path).map_err(|e| {
             crate::stderrln!("[engine] open failed for {}: {}", path, e);
@@ -422,7 +453,7 @@ fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
             .unwrap_or(0.0);
         (Opened::Local(decoder), duration)
     };
-    Ok(Prepared { opened, path, duration })
+    Ok((opened, duration))
 }
 
 // ── Crossfade machinery ─────────────────────────────────────────────────────
@@ -628,9 +659,15 @@ fn append_gapless(s: &mut State) {
     else {
         return;
     };
-    let (fade, tap_live) = attach(&s.sink, prepared.opened, s.tap.clone(), 1.0);
-    s.appended =
-        Some(Appended { path: prepared.path, duration: prepared.duration, index, fade, tap_live });
+    let (fade, tap_live, feed) = attach(&s.sink, prepared.source, s.tap.clone(), 1.0);
+    s.appended = Some(Appended {
+        path: prepared.path,
+        duration: prepared.duration,
+        index,
+        fade,
+        tap_live,
+        feed,
+    });
 }
 
 /// Open `entry` on a short-lived thread of its own. The open can block for
@@ -661,30 +698,29 @@ fn spawn_prepare(entry: QueueEntry, index: Option<usize>) -> NextTrack {
     }
 }
 
-/// Wrap `opened` in the chain every source gets — the tap copy first, so
+/// Wrap `source` in the chain every source gets — the tap copy first, so
 /// the ring sees the track at full amplitude rather than the blend (the
 /// same reasoning as listening under volume: draw the track, not the
-/// knob), then the fade — and append it to `sink`. Returns the source's
-/// controls for whoever will own them.
+/// knob), then the fade — and append it to `sink`. Both sit on the
+/// callback's side of the decoded blocks, so they act on what is heard now
+/// and not on what was decoded a second ago. Returns the source's controls
+/// for whoever will own them, and the feed its position is read from.
 fn attach(
     sink: &Player,
-    opened: Opened,
+    source: feed::Fed,
     tap: Option<Arc<tap::AudioTap>>,
     initial_gain: f32,
-) -> (Arc<fade::FadeHandle>, Arc<AtomicBool>) {
+) -> (Arc<fade::FadeHandle>, Arc<AtomicBool>, Arc<feed::Feed>) {
     let fade = fade::FadeHandle::new(initial_gain);
     let live = Arc::new(AtomicBool::new(true));
-    match (opened, tap) {
-        (Opened::Local(d), Some(tap)) => {
-            sink.append(fade::Faded::new(tap::Tapped::new(d, tap, live.clone()), fade.clone()))
+    let feed = source.feed();
+    match tap {
+        Some(tap) => {
+            sink.append(fade::Faded::new(tap::Tapped::new(source, tap, live.clone()), fade.clone()))
         }
-        (Opened::Local(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
-        (Opened::Http(d), Some(tap)) => {
-            sink.append(fade::Faded::new(tap::Tapped::new(d, tap, live.clone()), fade.clone()))
-        }
-        (Opened::Http(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
+        None => sink.append(fade::Faded::new(source, fade.clone())),
     }
-    (fade, live)
+    (fade, live, feed)
 }
 
 /// A next track taken over by a play — see [`State::take_ahead`].
@@ -722,13 +758,15 @@ struct Appended {
     index: Option<usize>,
     fade: Arc<fade::FadeHandle>,
     tap_live: Arc<AtomicBool>,
+    feed: Arc<feed::Feed>,
 }
 
 struct State {
-    /// Arc'd so a blocking call on the sink — a seek waiting for the device
-    /// callback to reach data that has not downloaded — can be made on a
-    /// clone with the state lock already released. Held across the wait,
-    /// the lock froze every other control with it (audit #48).
+    /// Arc'd so a call that waits on the sink — a seek, which waits for the
+    /// device callback to take the order — can be made on a clone with the
+    /// state lock already released. Held across the wait, the lock froze
+    /// every other control with it (audit #48), and that wait was once as
+    /// long as a download took.
     sink: Arc<Player>,
     /// The playing source's gain ramp, settled at 1.0 outside a blend.
     /// Every source is wrapped whether or not crossfade is on: one code
@@ -737,6 +775,11 @@ struct State {
     /// The playing source's tap switch, flipped off when the source is
     /// retired into `outgoing` — two sources must never share the ring.
     tap_live: Arc<AtomicBool>,
+    /// The playing source as its decode thread and the device see it: where
+    /// the track stands, and whether the device is being played silence for
+    /// want of decoded sound. The position is read from here and not from
+    /// rodio's sink, whose count takes that silence for the track.
+    feed: Arc<feed::Feed>,
     /// Where a copy of the audio goes, when someone is drawing it. Serve mode
     /// attaches none and pays nothing.
     tap: Option<Arc<tap::AudioTap>>,
@@ -844,7 +887,7 @@ impl State {
         self.orphaned_tail = false;
         let sink = bus.connect();
         sink.set_volume(self.volume);
-        self.attach_fresh(&sink, prepared.opened, if blending_skip { 0.0 } else { 1.0 });
+        self.attach_fresh(&sink, prepared.source, if blending_skip { 0.0 } else { 1.0 });
         if blending_skip {
             self.fade.ramp_to(1.0, SKIP_BLEND);
         }
@@ -856,10 +899,19 @@ impl State {
     }
 
     /// [`attach`], and the fresh controls become the current ones.
-    fn attach_fresh(&mut self, sink: &Player, opened: Opened, initial_gain: f32) {
-        let (fade, live) = attach(sink, opened, self.tap.clone(), initial_gain);
+    fn attach_fresh(&mut self, sink: &Player, source: feed::Fed, initial_gain: f32) {
+        let (fade, live, feed) = attach(sink, source, self.tap.clone(), initial_gain);
         self.fade = fade;
         self.tap_live = live;
+        self.feed = feed;
+    }
+
+    /// Where the sounding track stands, in seconds: the sound the device
+    /// has been handed, so it stands still while a download is stalled and
+    /// the device is played silence ([`feed::Feed::position`]). Nothing
+    /// sounding stands at zero.
+    fn position(&self) -> f64 {
+        if self.stopped { 0.0 } else { self.feed.position() }
     }
 
     /// Retire the playing sink with a breath instead of a cut: its fade is
@@ -933,6 +985,7 @@ impl State {
             self.tap_live.store(false, Ordering::Relaxed);
             self.fade = appended.fade;
             self.tap_live = appended.tap_live;
+            self.feed = appended.feed;
         } else {
             appended.fade.snap(0.0);
             appended.tap_live.store(false, Ordering::Relaxed);
@@ -991,6 +1044,7 @@ impl State {
         self.tap_live.store(false, Ordering::Relaxed);
         self.fade = next.fade;
         self.tap_live = next.tap_live;
+        self.feed = next.feed;
         self.current_file = next.path;
         self.duration = next.duration;
         self.advance_failures = 0;
@@ -1139,7 +1193,7 @@ impl State {
         {
             return None;
         }
-        Some(self.duration - self.sink.get_pos().as_secs_f64())
+        Some(self.duration - self.position())
     }
 
     /// [`State::until_end`] for a driver's pace ([`next_tick`]): None once
@@ -1147,8 +1201,9 @@ impl State {
     /// due time is noted at the first look inside the last `base` of the
     /// track, and forgotten when the track leaves that window. END_GRACE on
     /// the position covers a track that runs long; this covers one whose
-    /// position stopped short of the end — a callback parked on a stalled
-    /// download, a device lost in an outage with nothing to reopen — which
+    /// position stopped short of the end — a download that stalled before
+    /// the track's last second, a device lost in an outage with nothing to
+    /// reopen — which
     /// would otherwise hold the driver at END_POLL for as long as it stays
     /// stopped (review of audit #76).
     fn until_end_paced(&mut self, base: Duration, now: Instant) -> Option<f64> {
@@ -1289,6 +1344,13 @@ const CALLBACK_GAP: Duration = Duration::from_secs(1);
 /// which of the two a silence was given.
 #[cfg(test)]
 const CALLBACK_GAP: Duration = Duration::from_millis(700);
+
+/// How long a seek waits to hear what the decoder made of it, so that a
+/// refusal is this seek's answer and not a line in the recorder. A decoder
+/// working from a file or from sound already downloaded answers in a few
+/// milliseconds; one that has not answered by now is waiting on the
+/// network, and the seek does not wait with it.
+const SEEK_ANSWER: Duration = Duration::from_millis(150);
 
 /// How long a stream opened in place of one that had stopped asking must
 /// have been the output, still asking, before the listener is told the
@@ -1439,8 +1501,10 @@ impl OutputWatch {
 
     /// Whether the stream has stopped asking for buffers: awake, outside
     /// any pull, and silent for [`OutputWatch::stall_after`] — on two looks
-    /// ([`STALL_CONFIRM`]). A pull in flight is never quiet, however long
-    /// it runs: that is a download stalling, and the stream is fine.
+    /// ([`STALL_CONFIRM`]). A pull in flight is never quiet: the stream is
+    /// asking, whatever is keeping its answer. (A stalled download once
+    /// could, for as long as it lasted; the decoding is off the callback
+    /// now, and a stalled track is silence the stream goes on asking for.)
     fn gone_quiet(&mut self, now: Instant) -> bool {
         let pulse = self.out.pulse();
         let unwatched = now.saturating_duration_since(self.looked_at);
@@ -1569,6 +1633,7 @@ impl Engine {
             sink: Arc::new(sink),
             fade: fade::FadeHandle::new(1.0),
             tap_live: Arc::new(AtomicBool::new(true)),
+            feed: feed::Feed::idle(),
             tap: None,
             current_file: String::new(),
             duration: 0.0,
@@ -2208,13 +2273,14 @@ impl Engine {
         if !self.callback_answers() {
             return Err(EngineError::NoDevice("no output device".to_string()));
         }
-        // Take a handle and let the state go before asking. try_seek blocks
-        // on rodio's feedback channel until the device callback performs
-        // the seek, and past the downloaded range that callback is waiting
-        // on the network — possibly forever, since the download loop never
-        // gives a dead server up. The wait is this caller's to make; the
-        // lock was making it everyone's (audit #48).
-        let (sink, fade) = {
+        // Take a handle and let the state go before asking. try_seek waits
+        // on rodio's feedback channel until the device callback has taken
+        // the order — a callback period, now that the callback only passes
+        // the order to the source's decode thread ([`feed`]). It used to
+        // perform the seek itself, and past the downloaded range it waited
+        // on the network with this thread behind it (audit #48 took the
+        // lock out of that wait; the wait itself is gone now).
+        let (sink, fade, feed) = {
             let mut s = self.state.lock().unwrap();
             // rodio's seek order is sink-wide, and under gapless a sink can
             // briefly hold two tracks. A boundary that has already crossed
@@ -2250,7 +2316,7 @@ impl Engine {
             if let Some(ceiling) = seek_ceiling(s.duration, s.crossfade, s.gapless) {
                 let follows = s.pending_next.is_some()
                     || next_candidate(&s.q, !(s.crossfade > 0.0)).is_some();
-                let current = s.sink.get_pos().as_secs_f64();
+                let current = s.position();
                 let asked = target.as_secs_f64();
                 if follows && asked > current && asked > ceiling {
                     target = Duration::from_secs_f64(ceiling.max(current));
@@ -2258,17 +2324,36 @@ impl Engine {
                         target.as_secs_f64());
                 }
             }
-            (s.sink.clone(), s.fade.clone())
+            (s.sink.clone(), s.fade.clone(), s.feed.clone())
         };
         // The dip (C4): down before the jump, up after it. The down-ramp
         // has a device callback or two to land while try_seek waits on the
-        // seek being performed; the up-ramp then rises from the new spot.
+        // order being taken; the up-ramp then rises from the new spot, and
+        // the source itself rises from silence when its sound arrives.
         fade.ramp_to(0.0, SEEK_DIP_DOWN);
-        let sought = sink.try_seek(target).map_err(|e| EngineError::Seek(e.to_string()));
+        let orders = feed.orders();
+        let mut sought = sink.try_seek(target).map_err(|e| EngineError::Seek(e.to_string()));
+        // Whether the decoder can do it is its own thread's to find out. A
+        // quick answer — a source that cannot seek, a place it does not
+        // have — is back in time to be this call's, as it always was. A
+        // decoder that is itself in a read has not looked yet: the order
+        // stands, the position says where it aims, and the sound comes
+        // when that read returns.
+        if sought.is_ok() && feed.orders() != orders {
+            // A decoder waiting on its download is told there is an order:
+            // from this thread, since it takes the waiting reader's lock.
+            feed.nudge();
+            match feed.answer_within(SEEK_ANSWER) {
+                Some(Err(refused)) => sought = Err(EngineError::Seek(refused)),
+                Some(Ok(())) => {}
+                None => etrace!("seek to {:.2}: the source has not answered yet",
+                    target.as_secs_f64()),
+            }
+        }
         etrace!("seek to {:.2}: {} (pos {:.2})", target.as_secs_f64(),
-            if sought.is_ok() { "ok" } else { "FAILED" }, sink.get_pos().as_secs_f64());
-        // try_seek can block for as long as the network makes it, and a
-        // stop or skip can retire this sink in the meantime — its fade then
+            if sought.is_ok() { "ok" } else { "FAILED" }, feed.position());
+        // A stop or skip can retire this sink while the seek is still being
+        // answered — its fade then
         // belongs to a drainer ramping to silence, and the up-ramp would
         // resurrect a track the engine reports as gone, at full volume,
         // until the deadline clicked it off (C4 review). The ptr_eq alone
@@ -2359,7 +2444,7 @@ impl Engine {
         Status {
             playing: !is_empty && !is_paused && !s.stopped,
             paused: is_paused,
-            position: s.sink.get_pos().as_secs_f64(),
+            position: s.position(),
             duration: s.duration,
             volume: s.volume,
             file: s.current_file.clone(),
@@ -2368,6 +2453,16 @@ impl Engine {
             shuffle: s.q.shuffle,
             loop_mode: s.q.loop_mode.as_str().to_string(),
         }
+    }
+
+    /// Whether the sounding track is silent for want of decoded sound: its
+    /// download has stalled, or a seek has not landed yet. The track is
+    /// still the track and still playing; the device is being handed
+    /// silence, and the position stands where the sound stopped.
+    pub fn buffering(&self) -> bool {
+        let s = self.state.lock().unwrap();
+        // A paused sink pulls nothing, so its feed's last word is stale.
+        !s.stopped && !s.sink.empty() && !s.sink.is_paused() && s.feed.is_starved()
     }
 
     pub fn next_manual(&self) -> Result<(), EngineError> {
@@ -2425,9 +2520,13 @@ impl Engine {
                 s.snap_out_of_blend();
                 let sink = s.sink.clone();
                 let fade = s.fade.clone();
+                let feed = s.feed.clone();
                 drop(s);
                 fade.ramp_to(0.0, SEEK_DIP_DOWN);
                 let _ = sink.try_seek(Duration::ZERO);
+                // The start of the track has downloaded; a decoder waiting
+                // on a later part of it is told to come back for this.
+                feed.nudge();
                 // Same resurrection guard as Engine::seek, all three
                 // clauses: only the still-current handle gets the up-ramp.
                 let s = self.state.lock().unwrap();
@@ -2771,7 +2870,7 @@ impl Engine {
         if blending && fade <= 0.0 {
             return;
         }
-        let remaining = s.duration - s.sink.get_pos().as_secs_f64();
+        let remaining = s.duration - s.position();
 
         // A transient failure earns another try on a clock, not never: the
         // one-way latch inside the window meant a single starved open late
@@ -2829,7 +2928,7 @@ impl Engine {
         else {
             return;
         };
-        let remaining = (s.duration - s.sink.get_pos().as_secs_f64()).max(0.0);
+        let remaining = (s.duration - s.position()).max(0.0);
         let fade_secs = blend_window(s.crossfade, s.duration, remaining, prepared.duration);
         let fade_dur = Duration::from_secs_f64(fade_secs);
 
@@ -2844,7 +2943,7 @@ impl Engine {
 
         let sink = self.bus.connect();
         sink.set_volume(s.volume);
-        s.attach_fresh(&sink, prepared.opened, 0.0);
+        s.attach_fresh(&sink, prepared.source, 0.0);
         s.fade.ramp_to(1.0, fade_dur);
         s.sink = Arc::new(sink);
         s.orphaned_tail = false;
@@ -3035,7 +3134,7 @@ mod tests {
             if start == 0 { (300_000, HELD_BACK) } else { (usize::MAX, Duration::ZERO) }
         });
         let entry = QueueEntry { path: url, duration_hint: None };
-        let Opened::Http(mut decoder) = open_entry(&entry).unwrap().opened else {
+        let Ok((Opened::Http(mut decoder, _), _)) = open_decoder(&entry) else {
             panic!("an http source opens as one")
         };
         let total = decoder.total_duration().expect("the Info frame's count");
@@ -3297,17 +3396,30 @@ mod tests {
     /// connection, the download watchdog's range reconnects included, so
     /// the stall lasts exactly as long as the test wants it to.
     fn held_wav_server(seconds: usize, sent_first: usize) -> (String, Arc<AtomicBool>) {
+        let (url, release, _) = watched_held_wav_server(seconds, sent_first);
+        (url, release)
+    }
+
+    /// [`held_wav_server`], and how many connections are open to it: a
+    /// download nobody wants any more is one that has hung up.
+    fn watched_held_wav_server(
+        seconds: usize,
+        sent_first: usize,
+    ) -> (String, Arc<AtomicBool>, Arc<AtomicUsize>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let release = Arc::new(AtomicBool::new(false));
         let released = release.clone();
+        let open = Arc::new(AtomicUsize::new(0));
+        let counted = open.clone();
         std::thread::spawn(move || {
             let body = Arc::new(wav_bytes(seconds));
             for stream in listener.incoming().flatten() {
-                let (body, released) = (body.clone(), released.clone());
+                let (body, released, open) = (body.clone(), released.clone(), counted.clone());
                 std::thread::spawn(move || {
                     let mut stream = stream;
+                    open.fetch_add(1, Ordering::AcqRel);
                     let mut head = [0u8; 2048];
                     let read = stream.read(&mut head).unwrap_or(0);
                     let request = String::from_utf8_lossy(&head[..read]).to_ascii_lowercase();
@@ -3334,14 +3446,21 @@ mod tests {
                     let _ = stream.write_all(sent.as_bytes());
                     let _ = stream.write_all(&body[start..held]);
                     let _ = stream.flush();
-                    while !released.load(Ordering::Acquire) {
-                        std::thread::sleep(Duration::from_millis(20));
+                    // Held: nothing more is sent, and a read of nothing is
+                    // the other end hanging up.
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+                    let mut hung_up = false;
+                    while !released.load(Ordering::Acquire) && !hung_up {
+                        hung_up = matches!(stream.read(&mut [0u8; 16]), Ok(0));
                     }
-                    let _ = stream.write_all(&body[held..]);
+                    if !hung_up {
+                        let _ = stream.write_all(&body[held..]);
+                    }
+                    open.fetch_sub(1, Ordering::AcqRel);
                 });
             }
         });
-        (format!("http://{addr}/held.wav"), release)
+        (format!("http://{addr}/held.wav"), release, open)
     }
 
     /// `cargo test a_blocked_seek -- --ignored --nocapture` (local, no server)
@@ -6342,6 +6461,211 @@ mod tests {
         assert!(started.elapsed() < LAUNCH_PATIENCE, "and it did not take the launch's whole patience");
     }
 
+    // ── A download that stalls ───────────────────────────────────────────
+    //
+    // The device callback used to decode, and decoding reads the network:
+    // with a download stalled the callback sat in that read, every other
+    // track sat behind the callback, and a seek sat behind both. These run
+    // on a stage against a server that sends the first three seconds of a
+    // track and holds the rest for as long as the test says.
+
+    /// Tick until the position has stood still for most of a second — the
+    /// download has run dry — and say where it stands.
+    fn play_until_it_stalls(engine: &Engine) -> f64 {
+        let begun = Instant::now();
+        let (mut last, mut still) = (-1.0, 0);
+        while still < 8 {
+            engine.advance_tick();
+            std::thread::sleep(Duration::from_millis(100));
+            let position = engine.status().position;
+            still = if (position - last).abs() < 0.001 { still + 1 } else { 0 };
+            last = position;
+            assert!(begun.elapsed() < Duration::from_secs(20), "the download never ran dry");
+        }
+        last
+    }
+
+    #[test]
+    fn a_track_whose_download_has_stalled_does_not_silence_the_next_one() {
+        // The server stops sending three seconds into a track. Whatever is
+        // played next — here a file wholly on disk — used to be installed,
+        // reported as playing, and stand at 0:00 in silence until the first
+        // track's download moved again: the callback was parked in its read.
+        let (url, _held) = held_wav_server(30, 500_000);
+        let (engine, _stage) = staged("Speakers");
+        engine.play_source(url, Some(30.0)).unwrap();
+        assert!(!engine.buffering(), "sound to play is not a wait for it");
+        let stood = play_until_it_stalls(&engine);
+        assert!(stood > 1.0 && stood < 4.0, "it ran dry at {stood:.2}");
+        assert!(engine.buffering(), "silent for want of sound, and it says so");
+
+        let local = staged_track("after-a-stall");
+        engine.play_source(local.clone(), None).unwrap();
+        let started = Instant::now();
+        tick_for(&engine, Duration::from_millis(1500));
+        let playing = engine.status();
+        let took = started.elapsed().as_secs_f64();
+        assert_eq!(playing.file, local);
+        assert!(playing.playing);
+        assert!(
+            playing.position > took * 0.6 && playing.position < took * 1.15,
+            "{:.2}s of the next track in {took:.2}s, with the first one's download held",
+            playing.position
+        );
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    #[test]
+    fn a_seek_into_a_stalled_download_frees_the_thread_and_lands_when_the_data_does() {
+        // rodio performs a seek inside the device callback and try_seek
+        // waits for it. With the callback parked in a stalled read the seek
+        // waited as long as the download did — on the thread that ticks and
+        // runs every command — whether it aimed at sound that had arrived
+        // or not.
+        let (url, held) = held_wav_server(30, 500_000);
+        let (engine, _stage) = staged("Speakers");
+        engine.play_source(url, Some(30.0)).unwrap();
+        play_until_it_stalls(&engine);
+
+        let seeker = engine.clone();
+        let started = Instant::now();
+        within(Duration::from_secs(3), move || seeker.seek(20.0)).expect("the seek is taken");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(1), "the seek held its thread {took:?}");
+
+        // It says where it is going, and stays there for as long as there
+        // is nothing to play: silence is not the track moving.
+        let aimed = engine.status();
+        assert!(aimed.playing);
+        assert!((aimed.position - 20.0).abs() < 0.1, "at {:.2}", aimed.position);
+        tick_for(&engine, Duration::from_millis(600));
+        assert!((engine.status().position - 20.0).abs() < 0.1, "it moved with nothing to play");
+        assert!(engine.buffering(), "and the engine knows it is waiting for sound");
+
+        // The rest of the track arrives, and it plays from there.
+        held.store(true, Ordering::Release);
+        tick_until(&engine, |engine, _| engine.status().position > 20.3);
+        assert!(!engine.buffering());
+        let from = engine.status().position;
+        tick_for(&engine, Duration::from_millis(600));
+        assert!(engine.status().position > from + 0.3, "and it plays on");
+        engine.stop();
+    }
+
+    #[test]
+    fn a_stop_during_a_stalled_download_is_a_stop_and_the_next_play_sounds() {
+        let (url, _held) = held_wav_server(30, 500_000);
+        let (engine, _stage) = staged("Speakers");
+        engine.play_source(url, Some(30.0)).unwrap();
+        play_until_it_stalls(&engine);
+
+        engine.stop();
+        tick_for(&engine, Duration::from_millis(300));
+        let stopped = engine.status();
+        assert!(!stopped.playing && stopped.file.is_empty());
+        assert_eq!(stopped.position, 0.0, "nothing sounding stands at nothing");
+        // The stream sleeps when it is due. It used to be kept running for
+        // as long as the stalled read held the callback.
+        tick_for(&engine, STOP_FADE + IDLE_STOPPED + Duration::from_millis(400));
+        assert!(!engine.output_awake(), "the stream sleeps with the download still held");
+
+        let local = staged_track("after-a-stop");
+        engine.play_source(local.clone(), None).unwrap();
+        tick_for(&engine, Duration::from_millis(800));
+        let playing = engine.status();
+        assert!(playing.playing && playing.position > 0.4, "it stood at {:.2}", playing.position);
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    #[test]
+    fn a_seek_back_into_what_has_downloaded_plays_with_the_download_still_held() {
+        // The decode thread is in a read of the part that has not come, and
+        // only the server can end that read. A seek back into the part that
+        // has used to wait behind it: silence until the server answered.
+        // The read is told to give up, the decoder seeks, and what is in
+        // the spool plays.
+        let (url, _held) = held_wav_server(30, 500_000);
+        let (engine, _stage) = staged("Speakers");
+        engine.play_source(url, Some(30.0)).unwrap();
+        let stood = play_until_it_stalls(&engine);
+
+        let seeker = engine.clone();
+        within(Duration::from_secs(3), move || seeker.seek(1.0)).expect("the seek is taken");
+        tick_until(&engine, |engine, _| engine.status().position > 1.5);
+        let playing = engine.status();
+        assert!(playing.position < stood, "{:.2} is not back in the track", playing.position);
+        assert!(!engine.buffering());
+
+        // It runs dry where it did before — to within the packet the
+        // decoder was part-way through, which is cut differently from here
+        // — and waits there as it did.
+        let again = play_until_it_stalls(&engine);
+        assert!((again - stood).abs() < 0.15, "dry at {stood:.2}, then at {again:.2}");
+        assert!(engine.buffering());
+        engine.stop();
+    }
+
+    #[test]
+    fn a_seek_waiting_on_the_download_gives_way_to_the_seek_after_it() {
+        // A seek into sound that has not come waits for it, on the decode
+        // thread, and the next seek used to queue behind that wait. This is
+        // an MP3 through symphonia: the first seek's Range request is never
+        // answered, and the second, back into the first 300 KB, plays.
+        use http::tests::range_server;
+        let held = Duration::from_secs(60);
+        let (url, _asked) = range_server(silent_mp3(b"Info", 2000), move |start| {
+            if start == 0 { (300_000, held) } else { (0, held) }
+        });
+        let (engine, _stage) = staged("Speakers");
+        engine.play_source(url, None).unwrap();
+        tick_for(&engine, Duration::from_millis(400));
+        assert!(engine.status().position > 0.1);
+
+        let seeker = engine.clone();
+        within(Duration::from_secs(3), move || seeker.seek(40.0)).expect("the seek is taken");
+        tick_for(&engine, Duration::from_millis(400));
+        assert!(engine.buffering(), "none of that part has come");
+        assert!((engine.status().position - 40.0).abs() < 0.1);
+
+        let seeker = engine.clone();
+        within(Duration::from_secs(3), move || seeker.seek(5.0)).expect("the seek is taken");
+        tick_until(&engine, |engine, _| {
+            let at = engine.status().position;
+            at > 5.4 && at < 10.0
+        });
+        assert!(!engine.buffering());
+        engine.stop();
+    }
+
+    #[test]
+    fn a_stalled_download_is_let_go_when_its_track_is() {
+        // The decode thread of a track whose download has stalled is in a
+        // read that only the server can end, and the download reconnects
+        // for ever. Stopped, the track used to keep both — a thread, a
+        // connection and a spool file for as long as the server stayed
+        // away, one set for every track tried against it. The download is
+        // cancelled when nobody is listening, which is what ends that read.
+        let (url, _held, open) = watched_held_wav_server(30, 500_000);
+        let (engine, _stage) = staged("Speakers");
+        engine.play_source(url, Some(30.0)).unwrap();
+        play_until_it_stalls(&engine);
+        assert!(open.load(Ordering::Acquire) >= 1, "the download is still asking");
+
+        engine.stop();
+        let until = Instant::now() + Duration::from_secs(8);
+        while open.load(Ordering::Acquire) > 0 {
+            assert!(Instant::now() < until, "the download outlived its track");
+            engine.advance_tick();
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        // And it does not come back: the watchdog that reconnects a silent
+        // download went with it.
+        tick_for(&engine, Duration::from_millis(1500));
+        assert_eq!(open.load(Ordering::Acquire), 0, "the download came back");
+    }
+
     /// A State with no device behind it: the sink is a rodio Player that
     /// nothing pulls, which is all the bookkeeping predicates need.
     fn bare_state() -> State {
@@ -6349,6 +6673,7 @@ mod tests {
             sink: Arc::new(Player::new().0),
             fade: fade::FadeHandle::new(1.0),
             tap_live: Arc::new(AtomicBool::new(true)),
+            feed: feed::Feed::idle(),
             tap: None,
             current_file: String::new(),
             duration: 0.0,
@@ -6640,17 +6965,18 @@ mod tests {
         let _ = std::fs::remove_file(&tiny);
     }
 
-    /// `cargo test a_pull_stuck -- --ignored --nocapture`
+    /// `cargo test a_download_stuck -- --ignored --nocapture`
     #[test]
     #[ignore = "needs an audio device"]
-    fn a_pull_stuck_on_the_network_keeps_the_device_and_not_the_controls() {
-        // A download that stalls mid-track parks the device callback in the
-        // decoder's read (audit #48's shape), and suspending the stream
-        // waits for the callback in flight. The sleep, tried under such a
-        // pull once a stop's threshold passed, held the tick — serve's
-        // loop, the TUI's audio thread, every control behind them — until
-        // the network answered (review of audit #75). The stream stays up
-        // instead, and sleeps once the pull comes back.
+    fn a_download_stuck_on_the_network_keeps_neither_the_device_nor_the_controls() {
+        // A download that stalled mid-track used to park the device
+        // callback in the decoder's read (audit #48's shape), and suspending
+        // the stream waits for the callback in flight: the sleep, tried
+        // under such a pull once a stop's threshold passed, held the tick
+        // until the network answered (review of audit #75). So the stream
+        // was left running for as long as the pull was stuck. The read is a
+        // decode thread's now; the callback is never in it, and the stream
+        // sleeps when it is due whatever the download is doing.
         //
         // The open wants about half a megabyte before it answers: three
         // seconds of this WAV, then the hold.
@@ -6659,8 +6985,8 @@ mod tests {
         engine.set_volume(0.0);
         engine.play_source(url, Some(30.0)).unwrap();
 
-        // What arrived plays out and the position stops: the callback is
-        // waiting on the network.
+        // What arrived plays out and the position stops: there is no more
+        // sound decoded, and the device is played silence.
         let started = Instant::now();
         let mut last = -1.0;
         loop {
@@ -6673,10 +6999,11 @@ mod tests {
             last = at;
         }
 
-        // Stopped under the stuck pull, then ticked past everything a stop
-        // leaves to settle — its breath waits out the outgoing slack, the
-        // callback being in no state to play it — and the stopped
-        // threshold: the ticks come back, and so does status.
+        assert!(engine.buffering());
+
+        // Stopped with the download still held, then ticked past everything
+        // a stop leaves to settle and the stopped threshold: the ticks come
+        // back, so does status, and the stream is asleep on time.
         engine.stop();
         let span = STOP_FADE + OUTGOING_SLACK + IDLE_STOPPED + Duration::from_millis(400);
         let ticker = engine.clone();
@@ -6686,17 +7013,7 @@ mod tests {
         });
         let asker = engine.clone();
         assert!(!within(Duration::from_millis(500), move || asker.status()).playing);
-        assert!(engine.output_awake(), "a stream mid-pull is left running");
-
-        // The rest arrives, the pull returns, the stopped track leaves the
-        // mixer: now the stream sleeps.
+        assert!(!engine.output_awake(), "the stream sleeps with the download still held");
         release.store(true, Ordering::Release);
-        let ticker = engine.clone();
-        within(Duration::from_secs(8), move || {
-            while ticker.output_awake() {
-                ticker.advance_tick();
-                std::thread::sleep(Duration::from_millis(40));
-            }
-        });
     }
 }

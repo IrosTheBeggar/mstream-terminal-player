@@ -171,8 +171,11 @@ pub fn run(args: PlayArgs) -> i32 {
         let st = engine.status();
         max_position = max_position.max(st.position);
 
+        // Playing, with nothing decoded to play: the download has stalled,
+        // or a seek has not landed yet.
+        let waiting = if engine.buffering() { "  (waiting for sound)" } else { "" };
         println!(
-            "t={:5.1}s  pos={:6.2}s / {:6.2}s  playing={} vol={:.2}",
+            "t={:5.1}s  pos={:6.2}s / {:6.2}s  playing={} vol={:.2}{waiting}",
             elapsed, st.position, st.duration, st.playing, st.volume
         );
 

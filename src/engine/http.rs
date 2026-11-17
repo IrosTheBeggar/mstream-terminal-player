@@ -114,10 +114,13 @@ pub(crate) fn clean_spool_dir(dir: &Path) -> usize {
 // recoverable blip into a dead track. A total timeout is simply wrong for
 // streaming: a ten-minute track takes ten minutes to download. What stays
 // unbounded here is a stream that goes silent *after* the headers —
-// reconnection retries forever by design. The one place that patience must
-// not reach is the audio thread's own open: `START_TIMEOUT` in the engine
-// puts the deadline on that whole attempt, probe included, rather than a
-// clock on reads here that would race the watchdog.
+// reconnection retries forever by design. That patience must not reach the
+// audio thread's own open: `START_TIMEOUT` in the engine puts the deadline
+// on that whole attempt, probe included, rather than a clock on reads here
+// that would race the watchdog. Nor does it reach the sound: once a source
+// is open its reads are a decode thread's (`engine::feed`), which a seek
+// can pull out of a wait (`give_up_when`) and which the download's
+// cancellation ends when nobody is listening.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(not(test))]

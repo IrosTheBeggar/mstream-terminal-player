@@ -10,8 +10,11 @@ use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{Future, Stream, StreamExt, TryStream};
+// mstream-player patch: `Nudge` is the one name of `handle`'s that callers hold.
+pub use handle::Nudge;
 use handle::{
-    DownloadStatus, Downloaded, NotifyRead, PositionReached, RequestedPosition, SourceHandle,
+    DownloadStatus, Downloaded, GiveUp, NotifyRead, PositionReached, RequestedPosition,
+    SourceHandle,
 };
 use tokio::sync::watch;
 use tokio::task::yield_now;
@@ -631,6 +634,7 @@ where
             seek_tx: self.seek_tx.clone(),
             want_tx: self.want_tx.clone(),
             content_length: self.content_length,
+            give_up: GiveUp::default(),
         }
     }
 }
