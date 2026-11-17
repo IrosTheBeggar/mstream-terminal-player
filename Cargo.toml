@@ -67,11 +67,6 @@ rust-i18n = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fastrand = "2"
-# The Add-torrent room's release-name parser: a ladder of the record's
-# own patterns (scene grammar, "Artist - Album (1999)", dot names). Already
-# in the tree through tracing-subscriber's env-filter; shared because the
-# parser is pure string work.
-regex = "1"
 # Display width for the GUI's cell budgets: a CJK label is two cells a
 # character, and ratatui measures the same way.
 unicode-width = "0.2"
@@ -259,6 +254,11 @@ mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tun
 # never the terminal. env-filter so RUST_LOG chooses what third-party crates
 # (iroh's relay and holepunch narration above all) get to say.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The Add-torrent room's release-name parser: a ladder of the record's
+# own patterns (scene grammar, "Artist - Album (1999)", dot names). Already
+# in the tree through tracing-subscriber's env-filter, just above. Native
+# only, like its users (gui/ and replay.rs): on wasm32 cargo flags it unused.
+regex = "1"
 # The player's own voice in the same stream as its dependencies': the
 # engine's flight-recorder lines are emitted as tracing events too, so the
 # in-memory ring holds the story of a session at the default level rather

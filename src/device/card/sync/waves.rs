@@ -336,7 +336,7 @@ impl Asking<'_> {
 
     /// A "no ffmpeg" 503's Retry-After is still one to wait out this run.
     fn waits_for_ffmpeg(&self) -> bool {
-        self.ffmpeg_waits.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
+        self.ffmpeg_waits.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
     }
 
     /// An answer taken: enough "no ffmpeg" ones with no bars yet end the
