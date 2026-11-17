@@ -307,6 +307,22 @@ pub fn pick_build_folder(title: &str) -> Pick {
     }
 }
 
+/// The first file the portal's answer names, as a path.
+#[cfg(target_os = "linux")]
+fn first_path(files: &ashpd::desktop::file_chooser::SelectedFiles) -> Option<PathBuf> {
+    files.uris().first().and_then(|uri| file_path(uri.as_str()))
+}
+
+/// A portal URI as the path it names. ashpd hands the URIs back as the
+/// portal wrote them (its own string type since 0.14, no longer a parsed
+/// `Url`); url turns a `file:` one into a path, undoing the percent-encoding,
+/// and anything else — another scheme, a file on another host — is no path.
+#[cfg(target_os = "linux")]
+fn file_path(uri: &str) -> Option<PathBuf> {
+    let url = url::Url::parse(uri).ok().filter(|url| url.scheme() == "file")?;
+    url.to_file_path().ok()
+}
+
 #[cfg(target_os = "linux")]
 pub fn pick_folder() -> Pick {
     use ashpd::desktop::file_chooser::SelectedFiles;
@@ -315,7 +331,7 @@ pub fn pick_folder() -> Pick {
         SelectedFiles::open_file().title(DIALOG_TITLE).directory(true).send().await?.response()
     };
     match crate::runtime::block_on(request) {
-        Ok(Ok(files)) => match files.uris().first().and_then(|uri| uri.to_file_path().ok()) {
+        Ok(Ok(files)) => match first_path(&files) {
             Some(path) => Pick::Folder(path),
             // The portal answered with nothing usable (a non-file URI);
             // treat it like a decline rather than an error.
@@ -347,7 +363,7 @@ pub fn pick_torrent(title: &str, start: Option<&Path>) -> Pick {
         open.send().await?.response()
     };
     match crate::runtime::block_on(request) {
-        Ok(Ok(files)) => match files.uris().first().and_then(|uri| uri.to_file_path().ok()) {
+        Ok(Ok(files)) => match first_path(&files) {
             Some(path) => Pick::File(path),
             None => Pick::Cancelled,
         },
@@ -377,7 +393,7 @@ pub fn pick_firmware(title: &str, start: Option<&Path>) -> Pick {
         open.send().await?.response()
     };
     match crate::runtime::block_on(request) {
-        Ok(Ok(files)) => match files.uris().first().and_then(|uri| uri.to_file_path().ok()) {
+        Ok(Ok(files)) => match first_path(&files) {
             Some(path) => Pick::File(path),
             None => Pick::Cancelled,
         },
@@ -400,7 +416,7 @@ pub fn pick_build_folder(title: &str) -> Pick {
         SelectedFiles::open_file().title(title.as_str()).directory(true).send().await?.response()
     };
     match crate::runtime::block_on(request) {
-        Ok(Ok(files)) => match files.uris().first().and_then(|uri| uri.to_file_path().ok()) {
+        Ok(Ok(files)) => match first_path(&files) {
             Some(path) => Pick::Folder(path),
             None => Pick::Cancelled,
         },
@@ -455,6 +471,37 @@ mod tests {
         assert!(file.contains("default location (POSIX file \"/Users/me/core2\")"), "{file}");
         let folder = folder_script("Choose a \"build\" folder");
         assert_eq!(folder, "POSIX path of (choose folder with prompt \"Choose a \\\"build\\\" folder\")");
+    }
+
+    /// What the portal answers, taken the way ashpd 0.14 hands it over (a
+    /// string, no longer a parsed `Url`), becomes the path it names: the
+    /// percent-encoding undone, a `file:` URI with no authority taken too
+    /// (ashpd lets those through since 0.14), and no path at all for a URI
+    /// that names no local file. The portal itself needs a desktop session,
+    /// so nothing here opens one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_portal_uri_becomes_the_path_it_names() {
+        let path = |uri: &str| {
+            let uri = ashpd::Uri::parse(uri).expect("a URI ashpd takes");
+            file_path(uri.as_str()).map(|path| path.to_string_lossy().into_owned())
+        };
+        for (uri, named) in [
+            ("file:///home/me/Music%20Library", "/home/me/Music Library"),
+            ("file:///home/me/%E9%9F%B3%E6%A5%BD/a.torrent", "/home/me/音楽/a.torrent"),
+            ("file:/home/me/core2/firmware.bin", "/home/me/core2/firmware.bin"),
+            ("file://localhost/home/me/core2", "/home/me/core2"),
+        ] {
+            assert_eq!(path(uri).as_deref(), Some(named), "{uri}");
+        }
+        // A file on another host, and URIs that are no file URI at all.
+        for uri in [
+            "file://elsewhere/home/me/a.torrent",
+            "https://localhost/a.torrent",
+            "sftp://nas/music",
+        ] {
+            assert_eq!(path(uri), None, "{uri}");
+        }
     }
 
     /// A published HWND is handed out as the Win32 window handle rfd's
