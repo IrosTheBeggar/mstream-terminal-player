@@ -145,15 +145,22 @@ pub fn compatible_keys(raw: Option<&str>) -> Vec<String> {
 
 // ── Settings ────────────────────────────────────────────────────────────────
 
-/// What the sonic pool measures distance from (auto-dj contract, clause 23).
+/// The seed lists' mode — what the sonic pool measures distance from
+/// (auto-dj contract, clauses 23 and 64). The TUI's Anchor row calls them
+/// "Follow the vibe" and "Stay on seed"; the GUI's Seeds sheet, Drift and
+/// Stay close. Same labels on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SonicAnchor {
-    /// "Follow the vibe": the last few DJ picks, most recent last, so the
-    /// session's sound may slowly evolve.
+    /// Drift: More like rotates — DJ picks join it as they start and a
+    /// lane's first pick brings the song then current, the oldest unpinned
+    /// leave — so the session's sound may slowly evolve.
     #[default]
     Rolling,
-    /// "Stay on seed": one pin, set on the lane's first pick and reused for
-    /// the whole session.
+    /// Stay close: both lists frozen, every row drawn pinned; a lane with
+    /// nothing to stay close to holds to its first song, past eight rows if
+    /// it must, up to sixteen (decision 42); in the GUI every row it shows
+    /// outlives new queues, Stop and Start and restarts — the TUI keeps its
+    /// pins alone (clause 66, decision 41).
     Locked,
 }
 
@@ -294,6 +301,13 @@ pub struct Settings {
     /// Which genre links the list matches: the files' tags, the discovery
     /// model's, or both (the default, and all an older server knows).
     pub genre_source: GenreSource,
+    /// Learn from skips (clause 23): a quick skip of a DJ pick joins Less
+    /// like. Off by default.
+    pub learn_from_skips: bool,
+    /// The Seeds sheet's "Clear pins when the queue is cleared" (clause 66):
+    /// at a new queue — a clear, or a play that replaces the queue (clause
+    /// 12).
+    pub clear_pins_on_queue_clear: bool,
 }
 
 /// The bounds the room's controls move within, and the server's own caps.
@@ -322,7 +336,8 @@ pub const KEYWORDS_MAX: usize = 50;
 pub const GENRES_MAX: usize = 200;
 pub const RATING_MAX: u32 = 10;
 pub const ARTIST_COOLDOWN_MAX: u32 = 20;
-/// How many DJ picks the rolling anchor remembers (clause 23).
+/// More like's unpinned rows at most, as pins leave room (clause 23) — the
+/// five DJ picks the rolling anchor remembered before the seed lists.
 pub const HISTORY_LEN: usize = 5;
 
 impl Default for Settings {
@@ -448,6 +463,8 @@ impl Settings {
             genre_mode: GenreMode::from_label(&prefs.genre_mode),
             genres: prefs.genres.clone(),
             genre_source: genre_source_from(prefs.genre_source.as_deref()),
+            learn_from_skips: prefs.learn_from_skips,
+            clear_pins_on_queue_clear: prefs.clear_pins_on_queue_clear,
         }
     }
 
@@ -481,9 +498,12 @@ impl Settings {
             genres: self.genres.clone(),
             // Both is the default and writes no key.
             genre_source: (self.genre_source != GenreSource::Both).then(|| self.genre_source.as_str().to_string()),
-            // Only the room's own settings are here; whatever a newer
-            // player wrote alongside them is held by the loaded prefs and
-            // put back by `PlayerPrefs::adopt`. The legacy keys stay gone.
+            learn_from_skips: self.learn_from_skips,
+            clear_pins_on_queue_clear: self.clear_pins_on_queue_clear,
+            // Only the room's own settings are here — the seed rows are the
+            // App's to fill (`App::prefs`); whatever a newer player wrote
+            // alongside them is held by the loaded prefs and put back by
+            // `PlayerPrefs::adopt`. The legacy keys stay gone.
             ..Default::default()
         }
     }
@@ -514,7 +534,9 @@ impl Settings {
 
 // ── Composition ─────────────────────────────────────────────────────────────
 
-use crate::api::types::{BpmWindow, GenreSource, MoodFilter, MoodLevel, MoodScale, RandomSongRequest, Track};
+use crate::api::types::{
+    BpmWindow, GenreSource, LESS_LIKE_MAX, MoodFilter, MoodLevel, MoodScale, RandomSongRequest, Track,
+};
 
 /// The rules of the DJ's library, resolved from its server entry with the
 /// session-wide settings behind it (clause 51), and what the server is.
@@ -581,9 +603,18 @@ pub struct Ask {
     pub playing_key: Option<String>,
     /// The lane's Camelot anchor, as a code, once locked.
     pub camelot_anchor: Option<String>,
-    /// The sonic seeds the App's anchor rule resolved (clause 23); empty
-    /// means no pool is asked for.
+    /// The positives the App's seed lists resolved (clause 23): More like's
+    /// rows on the DJ's server, or the playing track; empty means no pool
+    /// is asked for.
     pub sonic_seeds: Vec<String>,
+    /// Less like's wire paths for this pick (clause 23); empty sends no
+    /// `lessLike`. The App fills it only for a server that takes them.
+    pub less_like: Vec<String>,
+    /// The songs this lane's picks pass over (auto-dj clause 26, decision
+    /// 39): the blended songs the user quick-skipped, in wire form. Never
+    /// sent — the worker keeps them out of an answer as it keeps a keyword
+    /// hit out. Empty on the opener.
+    pub pass_over: Vec<String>,
     /// The round-trip cursor (clause 24).
     pub ignore_list: Vec<u32>,
     /// Recently-played artists, newest first, for the cooldown.
@@ -672,7 +703,12 @@ impl Ask {
         // The pool (clause 23): both keys or neither.
         let threshold = self.sonic_asked().then(|| clamp_similarity(s.sonic_min_similarity));
         let seeds: &[String] = if self.sonic_asked() { &self.sonic_seeds } else { &[] };
-        r.with_sonic_pool(seeds, threshold)
+        let mut r = r.with_sonic_pool(seeds, threshold);
+        // Less like's negatives (clause 23), apart from the pool: a pick
+        // whose positives were dropped still steers away from the skips —
+        // with no `minSimilarity`, which the pool's rule already keeps out.
+        r.less_like = self.less_like.iter().take(LESS_LIKE_MAX).cloned().collect();
+        r
     }
 
     /// Whether this ask carries a sonic pool at all: seeds, on a server
@@ -708,6 +744,13 @@ impl Ask {
             .map(|k| k.trim().to_lowercase())
             .filter(|k| !k.is_empty())
             .any(|k| haystack.contains(&k))
+    }
+
+    /// Whether an answer's song is one this lane passes over (clause 26,
+    /// decision 39): its path in either form, with a leading '/' or none.
+    pub fn passes_over(&self, track: &Track) -> bool {
+        let path = track.filepath.trim_start_matches('/');
+        !path.is_empty() && self.pass_over.iter().any(|over| over.trim_start_matches('/') == path)
     }
 }
 
@@ -925,6 +968,8 @@ mod tests {
             playing_key: Some("Am".into()),
             camelot_anchor: None,
             sonic_seeds: Vec::new(),
+            less_like: Vec::new(),
+            pass_over: Vec::new(),
             ignore_list: vec![4, 5],
             recent_artists: vec!["Alpha".into(), "Beta".into(), "Gamma".into()],
             opener: false,
@@ -1025,6 +1070,32 @@ mod tests {
         assert_eq!(json(&a)["minSimilarity"], 0.8);
         a.settings.sonic_min_similarity = 0.12;
         assert_eq!(json(&a)["minSimilarity"], 0.3);
+    }
+
+    #[test]
+    fn less_likes_negatives_ride_apart_from_the_pool_and_never_the_opener() {
+        let mut a = ask(Settings::default());
+        assert!(json(&a).get("lessLike").is_none(), "none: no key");
+        a.less_like = vec!["lib/skip.mp3".into()];
+        a.sonic_seeds = vec!["lib/a.mp3".into()];
+        let body = json(&a);
+        assert_eq!(body["lessLike"], serde_json::json!(["lib/skip.mp3"]));
+        assert_eq!(body["similarTo"], serde_json::json!(["lib/a.mp3"]));
+
+        // The pool let go of, the negatives still go — with no threshold,
+        // which the server answers with a 400 when no seed is sent.
+        let body = json(&a.without_sonic());
+        assert_eq!(body["lessLike"], serde_json::json!(["lib/skip.mp3"]));
+        assert!(body.get("similarTo").is_none() && body.get("minSimilarity").is_none(), "{body}");
+
+        // Eight at most: more is a 400.
+        a.less_like = (0..12).map(|i| format!("lib/{i}.mp3")).collect();
+        let sent = json(&a)["lessLike"].as_array().unwrap().len();
+        assert_eq!(sent, crate::api::types::LESS_LIKE_MAX);
+
+        // The opener: the library filters and nothing else (clause 3).
+        a.opener = true;
+        assert!(json(&a).get("lessLike").is_none());
     }
 
     #[test]
@@ -1172,6 +1243,26 @@ mod tests {
     }
 
     #[test]
+    fn a_song_the_lane_passes_over_is_known_by_its_path_in_either_form() {
+        let track = |path: &str| Track { filepath: path.into(), metadata: TrackMetadata::default() };
+        let mut a = ask(Settings::default());
+        a.pass_over = vec!["demo/skipped.mp3".into()];
+        assert!(a.passes_over(&track("demo/skipped.mp3")));
+        assert!(a.passes_over(&track("/demo/skipped.mp3")), "a leading slash is the same song");
+        a.pass_over = vec!["/demo/skipped.mp3".into()];
+        assert!(a.passes_over(&track("demo/skipped.mp3")) && a.passes_over(&track("/demo/skipped.mp3")));
+        assert!(!a.passes_over(&track("demo/other.mp3")));
+        assert!(!a.passes_over(&track("")), "no path");
+        assert!(!a.passes_over(&track("/")), "no path either");
+        a.pass_over.clear();
+        assert!(!a.passes_over(&track("demo/skipped.mp3")), "no mark");
+        // Never sent: the worker's filter is the only reader.
+        a.pass_over = vec!["demo/skipped.mp3".into()];
+        let body = json(&a).to_string();
+        assert!(!body.contains("skipped"), "{body}");
+    }
+
+    #[test]
     fn settings_survive_a_round_trip_and_the_old_panel_migrates() {
         let mut s = Settings::default();
         s.songs_per_fetch = 7;
@@ -1184,8 +1275,12 @@ mod tests {
         s.max_seconds = 600;
         s.keyword_filter = true;
         s.keywords = vec!["live".into()];
+        s.learn_from_skips = true;
+        s.clear_pins_on_queue_clear = true;
         let back = Settings::from_prefs(&s.to_prefs(), "");
         assert_eq!(back, s);
+        let fresh = Settings::default();
+        assert!(!fresh.learn_from_skips && !fresh.clear_pins_on_queue_clear, "both off by default");
         assert!(s.to_prefs().tempo_tolerance.is_none(), "the legacy keys are never written");
 
         // The three-mode panel's file: a tempo percent and a key matching

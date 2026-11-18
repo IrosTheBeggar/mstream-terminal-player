@@ -625,7 +625,16 @@ pub(crate) fn glyphs_for(prefs: &config::DisplayPrefs) -> ui::Glyphs {
 /// and a second copy of this drifted once already — it kept its own `App`
 /// construction and silently stopped restoring tunnel sessions.
 pub(crate) fn app_from(start: Startup) -> App {
+    app_for(start, false)
+}
+
+/// [`app_from`] for a shell that says whether it shows the Seeds sheet: the
+/// GUI does, and the lists the file kept load by its rules — every row Stay
+/// close kept — so the flag is set before the prefs are read (auto-dj
+/// decision 41). The TUI, the web build and the replay harness show none.
+pub(crate) fn app_for(start: Startup, seeds_sheet: bool) -> App {
     let mut app = App::new(start.server, start.token, start.username)
+        .with_seeds_sheet(seeds_sheet)
         .with_prefs(&start.prefs)
         .with_keys(&start.keys)
         .with_tunnel(start.tunnel_code);
@@ -635,6 +644,8 @@ pub(crate) fn app_from(start: Startup) -> App {
     }
     app.session.peer = start.peer;
     app.servers = start.servers;
+    // The seed rows of a server the app no longer has go, pinned or not (auto-dj clause 66).
+    app.seeds_drop_unknown();
     app.bundled_server = start.bundled;
     // After the servers, which decide which rows can come back at all.
     if let Some(snapshot) = start.queue {
@@ -648,6 +659,32 @@ pub(crate) fn app_from(start: Startup) -> App {
         app.path = path;
     }
     app
+}
+
+/// A Startup on `http://host:3000` with nothing remembered but `prefs` —
+/// what the startup tests load (rows of a server the app no longer has are
+/// dropped at load, so theirs are on that one).
+#[cfg(test)]
+pub(crate) fn test_startup(prefs: config::PlayerPrefs) -> Startup {
+    Startup {
+        stats: None,
+        peer: None,
+        server_id: None,
+        server: Some("http://host:3000".into()),
+        token: None,
+        username: None,
+        last_path: None,
+        prefs,
+        tunnel_code: None,
+        self_signed: false,
+        keys: Default::default(),
+        theme: config::ThemePrefs::default(),
+        display: config::DisplayPrefs::default(),
+        mouse: config::MousePrefs::default(),
+        servers: Vec::new(),
+        bundled: None,
+        queue: None,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1695,6 +1732,32 @@ mod tests {
         config::delete_stats_file().unwrap();
         ten_seconds(&mut saver, &app);
         assert!(config::load_stats_file().unwrap().is_none(), "and once it lands, left be");
+    }
+
+    #[test]
+    fn a_shell_with_the_seeds_sheet_loads_what_stay_close_kept_and_one_without_the_pins() {
+        // The file desktop Stay close saved (auto-dj decision 41): a pin and
+        // an unpinned row it showed.
+        let row = |path: &str, pinned: bool| config::SeedPrefs {
+            server: "http://host:3000".into(),
+            path: path.into(),
+            pinned,
+            ..Default::default()
+        };
+        let mut prefs = config::PlayerPrefs::default();
+        prefs.dj.sonic_anchor = "locked".into();
+        prefs.dj.more_like_pins = vec![row("p", true), row("b", false)];
+        let paths = |app: &App| app.seeds.more_like.iter().map(|s| s.key.path.clone()).collect::<Vec<_>>();
+
+        let sheet = app_for(test_startup(prefs.clone()), true);
+        assert!(sheet.dj_shows_seeds, "set before the prefs were read");
+        assert!(sheet.seeds.frozen());
+        assert_eq!(paths(&sheet), ["p", "b"], "every row Stay close kept");
+
+        let tui = app_from(test_startup(prefs));
+        assert!(!tui.dj_shows_seeds);
+        assert!(tui.seeds.frozen(), "still Stay close");
+        assert_eq!(paths(&tui), ["p"], "the TUI lets go of what desktop Stay close kept");
     }
 
     #[test]

@@ -21,7 +21,7 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::types::GenreSource;
-use crate::dj::{self, GenreMode, SonicAnchor};
+use crate::dj::{self, GenreMode};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, dim, scroll_list, width, wrap_whole};
 use crate::tui::app::{DjEdit, DjRow};
@@ -32,9 +32,9 @@ use super::{PickServer, Tone};
 /// The sheets' cells across, and the cells their rows take: inside the
 /// border, a pad cell each side.
 const SHEET_W: u16 = 66;
-const TEXT_W: u16 = SHEET_W - 4;
+pub(super) const TEXT_W: u16 = SHEET_W - 4;
 /// The second and third columns of a row of choices, from the first.
-const COL2: u16 = 26;
+pub(super) const COL2: u16 = 26;
 const COL3: u16 = 46;
 /// The Genres list's rows.
 const GENRE_ROWS: u16 = 11;
@@ -68,8 +68,7 @@ pub(crate) enum Stop {
     Switch,
     /// A bar: ← → step it, a click on a cell sets it.
     Bar,
-    /// The first row of choices: the anchor (Drift · Stay close), the way
-    /// a genre list cuts (Only · Skip).
+    /// The first row of choices: the way a genre list cuts (Only · Skip).
     Radio(u8),
     /// The kind of genre the list matches (Generated · Tags · Mixed).
     Kind(u8),
@@ -102,11 +101,12 @@ enum Draft {
         libraries: Vec<String>,
         off: Vec<String>,
     },
+    /// The switch and the bar (auto-dj clause 43): Drift · Stay close is
+    /// the Seeds sheet's now (clause 64).
     Sonic {
         on: bool,
         /// Hundredths of cosine: 30–80.
         floor: u32,
-        anchor: SonicAnchor,
     },
     Genres {
         mode: GenreMode,
@@ -149,9 +149,7 @@ impl Draft {
     fn same(&self, other: &Draft) -> bool {
         match (self, other) {
             (Draft::PlayFrom { chosen: a, off: b, .. }, Draft::PlayFrom { chosen: x, off: y, .. }) => a == x && b == y,
-            (Draft::Sonic { on: a, floor: b, anchor: c }, Draft::Sonic { on: x, floor: y, anchor: z }) => {
-                (a, b, c) == (x, y, z)
-            }
+            (Draft::Sonic { on: a, floor: b }, Draft::Sonic { on: x, floor: y }) => (a, b) == (x, y),
             (
                 Draft::Genres { mode: a, source: b, chosen: c, .. },
                 Draft::Genres { mode: x, source: y, chosen: z, .. },
@@ -209,14 +207,9 @@ pub(crate) fn open(gui: &mut Gui, sheet: Sheet, key: bool) {
     let app = &gui.app;
     let s = &app.dj;
     let (draft, hand) = match sheet {
-        Sheet::Sonic => (
-            Draft::Sonic {
-                on: s.sonic,
-                floor: (s.sonic_min_similarity * 100.0).round() as u32,
-                anchor: s.sonic_anchor,
-            },
-            Stop::Switch,
-        ),
+        Sheet::Sonic => {
+            (Draft::Sonic { on: s.sonic, floor: (s.sonic_min_similarity * 100.0).round() as u32 }, Stop::Switch)
+        }
         Sheet::Batch => (Draft::Batch { songs: s.songs_per_fetch }, Stop::Bar),
         Sheet::Tempo => (Draft::Tempo { on: s.bpm, tolerance: s.bpm_tolerance }, Stop::Switch),
         Sheet::Cooldown => (Draft::Cooldown { artists: s.artist_cooldown }, Stop::Bar),
@@ -300,7 +293,11 @@ fn done(gui: &mut Gui) {
             super::edit(gui, DjEdit::Keywords(words));
         }
         _ if unchanged => {}
-        Draft::Sonic { on, floor, anchor } => super::edit(gui, DjEdit::Sonic { on, floor, anchor }),
+        // The mode rides along as it stands: it is the Seeds sheet's.
+        Draft::Sonic { on, floor } => {
+            let anchor = gui.app.dj.sonic_anchor;
+            super::edit(gui, DjEdit::Sonic { on, floor, anchor });
+        }
         Draft::Batch { songs } => super::edit(gui, DjEdit::Set(DjRow::SongsPerFetch, songs)),
         Draft::Tempo { on, tolerance } => super::edit(gui, DjEdit::Tempo { on, tolerance }),
         Draft::Cooldown { artists } => super::edit(gui, DjEdit::Set(DjRow::Cooldown, artists)),
@@ -344,7 +341,7 @@ fn done(gui: &mut Gui) {
 
 // ── Words ───────────────────────────────────────────────────────────────────
 
-fn done_word() -> String {
+pub(super) fn done_word() -> String {
     format!("[ {} ]", t!("gui.moods.done"))
 }
 
@@ -412,7 +409,7 @@ fn clear_shown(draft: &Draft) -> bool {
 // ── Geometry ────────────────────────────────────────────────────────────────
 
 /// A bar's cells, the value its first cell sets, and what a cell is worth.
-struct BarSpec {
+pub(super) struct BarSpec {
     cells: u16,
     lo: u32,
     hi: u32,
@@ -452,21 +449,24 @@ fn bar_of(draft: &Draft) -> Option<BarSpec> {
             value: *artists,
             words: super::cooldown_value(*artists).0,
         },
-        // Two points a cell across the band, thirty to eighty.
-        Draft::Sonic { floor, .. } => BarSpec {
-            cells: 25,
-            lo: 30,
-            hi: 80,
-            first: 32,
-            per: 2,
-            value: *floor,
-            words: t!("gui.dj.percent", pct = *floor).to_string(),
-        },
+        Draft::Sonic { floor, .. } => sonic_bar(*floor),
         _ => return None,
     })
 }
 
+/// Sonic similarity's match bar, in the sheet and in quick config: two
+/// points a cell across the band, thirty to eighty.
+pub(super) fn sonic_bar(floor: u32) -> BarSpec {
+    BarSpec { cells: 25, lo: 30, hi: 80, first: 32, per: 2, value: floor, words: t!("gui.dj.percent", pct = floor).to_string() }
+}
+
 impl BarSpec {
+    /// The value a step of `delta` from this one lands on, held inside the
+    /// bar's range.
+    pub(super) fn stepped(&self, delta: i32) -> u32 {
+        (self.value as i32 + delta).clamp(self.lo as i32, self.hi as i32) as u32
+    }
+
     fn filled(&self) -> u16 {
         if self.value < self.first.saturating_sub(self.per / 2) {
             return 0;
@@ -598,7 +598,6 @@ fn stop_rows(open: &Open, gui: &Gui) -> Vec<Vec<Stop>> {
             rows.push(vec![Stop::Switch]);
             if *on {
                 rows.push(vec![Stop::Bar]);
-                rows.push(vec![Stop::Radio(0), Stop::Radio(1)]);
             }
         }
         Draft::Genres { .. } => {
@@ -658,7 +657,7 @@ fn settle(open: &mut Open, gui: &Gui) {
         Stop::Clear => Stop::Done,
         Stop::Chip(i) if i > 0 && locate(&rows, Stop::Chip(i - 1)).is_some() => Stop::Chip(i - 1),
         Stop::Chip(_) => Stop::Field(0),
-        Stop::Bar | Stop::Radio(_) => Stop::Switch,
+        Stop::Bar => Stop::Switch,
         Stop::Check(_) if locate(&rows, Stop::Field(1)).is_some() => Stop::Field(1),
         _ => rows.first().and_then(|row| row.first()).copied().unwrap_or(Stop::Done),
     };
@@ -671,8 +670,7 @@ fn body_rows(open: &Open, gui: &Gui, area: Rect) -> u16 {
     let tail = if help > 0 { 1 + help + 2 } else { 2 };
     match &open.draft {
         Draft::Batch { .. } | Draft::Cooldown { .. } | Draft::Rating { .. } => 1 + tail,
-        Draft::Tempo { .. } => 3 + tail,
-        Draft::Sonic { .. } => 5 + tail,
+        Draft::Tempo { .. } | Draft::Sonic { .. } => 3 + tail,
         Draft::Length { .. } => 4 + tail,
         // The line's card is three rows; the words stand right under it.
         Draft::SkipWords { words, .. } => 3 + chip_rows(words).len() as u16 + tail,
@@ -715,9 +713,10 @@ pub(crate) fn border_title_value(frame: &mut Frame, rect: Rect, title: &str, val
 
 /// What a choice wears: the glyph in its state's colour whatever lights
 /// the word; the word ACCENT BOLD under the keyboard's hand, BRIGHT BOLD
-/// under the pointer, BOLD while chosen, DIM while it rests.
+/// under the pointer, BOLD while chosen, DIM while it rests. A click on it
+/// sends `act` (the Seeds sheet's choices are its own acts).
 #[allow(clippy::too_many_arguments)]
-fn draw_choice(
+pub(super) fn draw_choice(
     frame: &mut Frame,
     gui: &mut Gui,
     x: u16,
@@ -728,7 +727,7 @@ fn draw_choice(
     word: &str,
     hand: bool,
     live: bool,
-    act: SheetAct,
+    act: Act,
 ) {
     let rect = Rect { x, y, width: 4 + width(word) as u16, height: 1 };
     let hover = live && gui.ui.hovers(rect);
@@ -743,18 +742,39 @@ fn draw_choice(
     };
     put(frame, x + 4, y, word, word_style);
     if live {
-        gui.ui.click(rect, Act::DjSheet(act));
+        gui.ui.click(rect, act);
     }
 }
 
-fn radio_glyphs() -> (&'static str, &'static str) {
+pub(super) fn radio_glyphs() -> (&'static str, &'static str) {
     if legacy_conhost() { ("(*)", "( )") } else { ("(•)", "( )") }
 }
 
-/// A bar in the volume widget's grammar: `-`, its cells, `+`, the value in
-/// words. A click on an end steps, on a cell sets; at rest it is DIM whole
-/// and takes no click.
-fn draw_bar(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, spec: &BarSpec, hand: bool, live: bool) {
+/// A sheet's bar: its ends step it, its cells set it.
+fn sheet_bar(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, spec: &BarSpec, hand: bool, live: bool) {
+    let step = |delta: i32| Act::DjSheet(SheetAct::Step(Stop::Bar, delta));
+    let set = |value: u32| Act::DjSheet(SheetAct::Set(value));
+    draw_bar(frame, gui, x, y, spec, hand, live, step, set, true);
+}
+
+/// A bar in the volume widget's grammar: `-`, its cells, `+`, and — where
+/// `words` — the value in words. A click on an end sends `step(∓1)`, on a
+/// cell `set` of the value it means; at rest it is DIM whole and takes no
+/// click. The sheets' and quick config's (whose value stands on the row
+/// above, so it has no words).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_bar(
+    frame: &mut Frame,
+    gui: &mut Gui,
+    x: u16,
+    y: u16,
+    spec: &BarSpec,
+    hand: bool,
+    live: bool,
+    step: impl Fn(i32) -> Act,
+    set: impl Fn(u32) -> Act,
+    words: bool,
+) {
     let (full, empty) = if legacy_conhost() { ("■", "·") } else { ("▰", "▱") };
     let end_style = |gui: &Gui, rect: Rect| if live && gui.ui.hovers(rect) { bright_bold() } else { dim() };
     let minus = Rect { x, y, width: 1, height: 1 };
@@ -771,20 +791,22 @@ fn draw_bar(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, spec: &BarSpec, ha
         put(frame, cells.x + k, y, if on { full } else { empty }, style);
         if live {
             let value = spec.first + u32::from(k) * spec.per;
-            gui.ui.click(Rect { x: cells.x + k, y, width: 1, height: 1 }, Act::DjSheet(SheetAct::Set(value)));
+            gui.ui.click(Rect { x: cells.x + k, y, width: 1, height: 1 }, set(value));
         }
     }
     let plus = Rect { x: cells.right() + 1, y, width: 1, height: 1 };
     put(frame, plus.x, y, "+", end_style(gui, plus));
-    let words_style = match (live, hand) {
-        (false, _) => dim(),
-        (true, true) => accent().add_modifier(Modifier::BOLD),
-        (true, false) => Style::default(),
-    };
-    put(frame, plus.x + 4, y, &spec.words, words_style);
+    if words {
+        let words_style = match (live, hand) {
+            (false, _) => dim(),
+            (true, true) => accent().add_modifier(Modifier::BOLD),
+            (true, false) => Style::default(),
+        };
+        put(frame, plus.x + 4, y, &spec.words, words_style);
+    }
     if live {
-        gui.ui.click(minus, Act::DjSheet(SheetAct::Step(Stop::Bar, -1)));
-        gui.ui.click(plus, Act::DjSheet(SheetAct::Step(Stop::Bar, 1)));
+        gui.ui.click(minus, step(-1));
+        gui.ui.click(plus, step(1));
     }
 }
 
@@ -861,27 +883,17 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     match &open.draft {
         Draft::Batch { .. } | Draft::Cooldown { .. } => {
             let spec = bar_of(&open.draft).expect("a bar");
-            draw_bar(frame, gui, x0, y, &spec, hand(Stop::Bar), true);
+            sheet_bar(frame, gui, x0, y, &spec, hand(Stop::Bar), true);
             y += 1;
         }
         Draft::Tempo { on, .. } | Draft::Sonic { on, .. } => {
             let on = *on;
             let word = t!("gui.dj.switch_on").to_string();
-            draw_choice(frame, gui, x0, y, checks, on, ok, &word, hand(Stop::Switch), true, SheetAct::Press(Stop::Switch));
+            let act = Act::DjSheet(SheetAct::Press(Stop::Switch));
+            draw_choice(frame, gui, x0, y, checks, on, ok, &word, hand(Stop::Switch), true, act);
             let spec = bar_of(&open.draft).expect("a bar");
-            draw_bar(frame, gui, x0, y + 2, &spec, hand(Stop::Bar), on);
+            sheet_bar(frame, gui, x0, y + 2, &spec, hand(Stop::Bar), on);
             y += 3;
-            if let Draft::Sonic { anchor, .. } = &open.draft {
-                let radios = radio_glyphs();
-                let words = [t!("gui.dj.drift").to_string(), t!("gui.dj.stay_close").to_string()];
-                let x2 = x0 + COL2.max(4 + width(&words[0]) as u16 + 3);
-                for (i, (kind, word)) in [SonicAnchor::Rolling, SonicAnchor::Locked].into_iter().zip(&words).enumerate() {
-                    let stop = Stop::Radio(i as u8);
-                    let x = if i == 0 { x0 } else { x2 };
-                    draw_choice(frame, gui, x, y + 1, radios, *anchor == kind, accent(), word, hand(stop), on, SheetAct::Press(stop));
-                }
-                y += 2;
-            }
         }
         Draft::Rating { rating } => {
             draw_stars(frame, gui, x0, y, *rating, hand(Stop::Stars));
@@ -895,7 +907,8 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             let word = t!("gui.dj.include_unknown").to_string();
             let stop = Stop::Check(0);
             let live = bound_real(&open.draft);
-            draw_choice(frame, gui, x0, y + 3, checks, *unknown, ok, &word, hand(stop), live, SheetAct::Press(stop));
+            let act = Act::DjSheet(SheetAct::Press(stop));
+            draw_choice(frame, gui, x0, y + 3, checks, *unknown, ok, &word, hand(stop), live, act);
             y += 4;
         }
         Draft::SkipWords { words, input } => {
@@ -1057,7 +1070,8 @@ fn draw_genres(frame: &mut Frame, gui: &mut Gui, rect: Rect, open: &Open) -> Opt
     for (i, (kind, word)) in modes.iter().enumerate() {
         let stop = Stop::Radio(i as u8);
         let x = if i == 0 { x0 } else { x0 + COL2 };
-        draw_choice(frame, gui, x, y, radios, mode == kind, accent(), word, hand(stop), true, SheetAct::Press(stop));
+        let act = Act::DjSheet(SheetAct::Press(stop));
+        draw_choice(frame, gui, x, y, radios, mode == kind, accent(), word, hand(stop), true, act);
     }
     y += 1;
     let kinds = kinds_offered(gui);
@@ -1066,7 +1080,8 @@ fn draw_genres(frame: &mut Frame, gui: &mut Gui, rect: Rect, open: &Open) -> Opt
             let stop = Stop::Kind(i as u8);
             let x = x0 + [0, COL2, COL3][i];
             let word = kind_word(*kind);
-            draw_choice(frame, gui, x, y, radios, source == kind, accent(), &word, hand(stop), true, SheetAct::Press(stop));
+            let act = Act::DjSheet(SheetAct::Press(stop));
+            draw_choice(frame, gui, x, y, radios, source == kind, accent(), &word, hand(stop), true, act);
         }
         y += 1;
     }
@@ -1186,7 +1201,8 @@ fn draw_play_from(frame: &mut Frame, gui: &mut Gui, rect: Rect, open: &Open) {
                 let stop = Stop::Server(i);
                 let word = if server.peer { format!("{branch} {}", server.label) } else { server.label.clone() };
                 let word = super::super::bar::clip(&word, room).into_owned();
-                draw_choice(frame, gui, x0, y, radios, i == *chosen, accent(), &word, hand(stop), true, SheetAct::Press(stop));
+                let act = Act::DjSheet(SheetAct::Press(stop));
+                draw_choice(frame, gui, x0, y, radios, i == *chosen, accent(), &word, hand(stop), true, act);
             }
             PlayLine::Name => {
                 let name =
@@ -1198,7 +1214,8 @@ fn draw_play_from(frame: &mut Frame, gui: &mut Gui, rect: Rect, open: &Open) {
                 let stop = Stop::Check(i);
                 let word = super::super::bar::clip(library, room).into_owned();
                 let on = !off.contains(library);
-                draw_choice(frame, gui, x0, y, checks, on, ok, &word, hand(stop), true, SheetAct::Press(stop));
+                let act = Act::DjSheet(SheetAct::Press(stop));
+                draw_choice(frame, gui, x0, y, checks, on, ok, &word, hand(stop), true, act);
             }
         }
     }
@@ -1325,9 +1342,6 @@ fn press(gui: &mut Gui, open: &mut Open, stop: Stop) -> bool {
     match (&mut open.draft, stop) {
         (_, Stop::Done) => return true,
         (Draft::Sonic { on, .. } | Draft::Tempo { on, .. }, Stop::Switch) => *on = !*on,
-        (Draft::Sonic { anchor, .. }, Stop::Radio(i)) => {
-            *anchor = if i == 0 { SonicAnchor::Rolling } else { SonicAnchor::Locked };
-        }
         (Draft::Genres { mode, .. }, Stop::Radio(i)) => {
             *mode = if i == 0 { GenreMode::Whitelist } else { GenreMode::Blacklist };
         }
@@ -1384,24 +1398,27 @@ fn press(gui: &mut Gui, open: &mut Open, stop: Stop) -> bool {
 
 /// Where a walking key takes the hand: ↑ ↓ the row above or below, the
 /// place in the row kept where it can be; ← → the stop beside; Tab and
-/// Shift-Tab the next or previous stop in reading order, wrapping.
-fn walk(rows: &[Vec<Stop>], hand: Stop, key: KeyCode) -> Stop {
-    let Some((r, c)) = locate(rows, hand) else {
-        return rows.first().and_then(|row| row.first()).copied().unwrap_or(Stop::Done);
+/// Shift-Tab the next or previous stop in reading order, wrapping. A hand
+/// on no stop goes to the first. Every row holds a stop. The sheets' grid
+/// and the Seeds sheet's, whose stops are keyed by a seed.
+pub(super) fn walk<T: Clone + PartialEq>(rows: &[Vec<T>], hand: &T, key: KeyCode) -> T {
+    let found = rows.iter().enumerate().find_map(|(r, row)| row.iter().position(|s| s == hand).map(|c| (r, c)));
+    let Some((r, c)) = found else {
+        return rows.first().and_then(|row| row.first()).cloned().unwrap_or_else(|| hand.clone());
     };
-    let land = |row: &Vec<Stop>| row[c.min(row.len() - 1)];
+    let land = |row: &Vec<T>| row[c.min(row.len() - 1)].clone();
     match key {
         KeyCode::Up if r > 0 => land(&rows[r - 1]),
         KeyCode::Down if r + 1 < rows.len() => land(&rows[r + 1]),
-        KeyCode::Left if c > 0 => rows[r][c - 1],
-        KeyCode::Right if c + 1 < rows[r].len() => rows[r][c + 1],
+        KeyCode::Left if c > 0 => rows[r][c - 1].clone(),
+        KeyCode::Right if c + 1 < rows[r].len() => rows[r][c + 1].clone(),
         KeyCode::Tab | KeyCode::BackTab => {
-            let order: Vec<Stop> = rows.iter().flatten().copied().collect();
+            let order: Vec<&T> = rows.iter().flatten().collect();
             let at = order.iter().position(|s| *s == hand).unwrap_or(0);
             let n = order.len();
-            if key == KeyCode::Tab { order[(at + 1) % n] } else { order[(at + n - 1) % n] }
+            if key == KeyCode::Tab { order[(at + 1) % n].clone() } else { order[(at + n - 1) % n].clone() }
         }
-        _ => hand,
+        _ => hand.clone(),
     }
 }
 
@@ -1438,8 +1455,8 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
                 let last = count.saturating_sub(1);
                 let at = (*row).min(last);
                 match code {
-                    KeyCode::Up if at == 0 => open.hand = walk(&rows, Stop::List, KeyCode::Up),
-                    KeyCode::Down if at >= last => open.hand = walk(&rows, Stop::List, KeyCode::Down),
+                    KeyCode::Up if at == 0 => open.hand = walk(&rows, &Stop::List, KeyCode::Up),
+                    KeyCode::Down if at >= last => open.hand = walk(&rows, &Stop::List, KeyCode::Down),
                     KeyCode::Up => *row = at - 1,
                     KeyCode::Down => *row = at + 1,
                     KeyCode::PageUp => *row = at.saturating_sub(page),
@@ -1488,7 +1505,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         (KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab, _) => {
             // A stowed hand is only shown by the first walking key.
             if open.shown {
-                open.hand = walk(&rows, open.hand, code);
+                open.hand = walk(&rows, &open.hand, code);
             }
             open.shown = true;
             // Play from's lines may stand behind its window: the hand's

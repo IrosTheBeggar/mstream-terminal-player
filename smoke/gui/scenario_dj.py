@@ -1,15 +1,18 @@
 import os, shutil
-# Auto DJ on the rig (auto-dj contract, clauses 40–58; the room rebuilt
-# 2026-11-10): the room from the nav — one row a setting, the server's
-# reasons standing where a value would — Start on an empty queue through
-# the First song question and Recently played, a batch landing with its
+# Auto DJ on the rig (auto-dj contract, clauses 40–59; the room rebuilt
+# 2026-11-10, its FILTERS and MATCH 2026-11-17): the room from the nav —
+# one row a setting, the server's reasons standing where a value would —
+# Start on an empty queue through the First song question and Recently
+# played, a batch landing with its
 # badges, Preview's sheet, the Batch, Length, Genres and Skip words sheets
 # each ending in the row's value, First song's list, quick config over the
 # bar, Play from moving the DJ to the proxied peer (Rig A via B) with the
 # next turn picked from there, Stop, and the bar's button starting the DJ
 # on Play from's home. The rig's servers have no discovery data and no mood
 # scores, so those two rows are greyed and the picks stay random (∞, never
-# ≈).
+# ≈) — and Sonic similarity's sub-rows, Learn from skips and Seeds, rest DIM
+# under it, so the Seeds sheet (clauses 64–66) is not reached here; the
+# tests pin it.
 R = os.environ.get("MSTREAM_RIG_DIR", os.path.expanduser("~/mstream-rig"))
 BIN = os.environ.get("MSTREAM_PLAYER_BIN", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "target", "debug", "mstream-player"))
 
@@ -103,7 +106,7 @@ def run(Gui):
     # The seed config's 20:00 was the end of the bar it was set on: with no
     # ceiling of its own in the file it is no maximum, and the switch is off.
     row_reads(g, "Length", "Any ▸")
-    for header in ("MUST MATCH", "PREFER", "Preview picks ▸"):
+    for header in ("FILTERS", "MATCH", "Learn from skips", "Preview picks ▸"):
         room_wait(g, header, 5)
     g.dump("the room, off")
 

@@ -1036,6 +1036,15 @@ mod tests {
         dj.app.capture = Some(Capture::DjSeed);
         press(&mut dj, KeyCode::Char('K'));
         assert_eq!(dj.app.capture, None);
+
+        // And an Add song pick for a seed list: let go where it stands, no
+        // Seeds sheet back over the tab (auto-dj clause 65).
+        let mut seeds = gui();
+        seeds.app.capture = Some(Capture::Seeds(crate::tui::app::SeedList::MoreLike));
+        press(&mut seeds, KeyCode::Char('K'));
+        assert_eq!(seeds.screen, Screen::Device);
+        assert_eq!(seeds.app.capture, None, "the pick is let go");
+        assert!(!super::super::dj::modal_open(&seeds), "and no sheet comes back");
     }
 
     #[test]

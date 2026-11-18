@@ -2532,7 +2532,7 @@ fn dump(dir: &Path, terminal: &WindowTerminal, face: &mut dyn Face) -> Result<()
     let window_rows: Vec<&str> = window_text.lines().collect();
 
     let size = terminal.backend().size().map_err(|e| e.to_string())?;
-    let test_rows = face_rows(face, size.width, size.height)?;
+    let test_rows = face_rows(face, size.width, size.height);
 
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(format!("window-text-{lang}.txt")), &window_text)
@@ -2547,11 +2547,12 @@ fn dump(dir: &Path, terminal: &WindowTerminal, face: &mut dyn Face) -> Result<()
 }
 
 /// A face drawn into a `TestBackend` of `width`×`height` cells, as the
-/// rows a screen shows: the dump's side that no window draws.
-fn face_rows(face: &mut dyn Face, width: u16, height: u16) -> Result<Vec<String>, String> {
-    let mut test = Terminal::new(TestBackend::new(width, height)).map_err(|e| e.to_string())?;
-    test.draw(|frame| face.render_test(frame)).map_err(|e| e.to_string())?;
-    Ok(shown_rows(test.backend().buffer()))
+/// rows a screen shows: the dump's side that no window draws. A
+/// `TestBackend` cannot fail (its error is `Infallible`), so neither can this.
+fn face_rows(face: &mut dyn Face, width: u16, height: u16) -> Vec<String> {
+    let Ok(mut test) = Terminal::new(TestBackend::new(width, height));
+    let Ok(_) = test.draw(|frame| face.render_test(frame));
+    shown_rows(test.backend().buffer())
 }
 
 /// A buffer's rows as a screen shows them: the cell after a wide glyph is

@@ -107,10 +107,12 @@ url = "http://127.0.0.1:3041"
 - `stats` — play reporting (play-reporting contract): one row queued and
   played past thirty seconds, then skipped; the `[stats]` log line says the
   play was posted, and Last played and Most played list the track.
-- `dj` — Auto DJ on the rig (auto-dj contract, clauses 40–58; the room
-  rebuilt 2026-11-10): the nav's `Auto DJ` row under TOOLS, the room off — one
-  row a setting, `Discovery off` and `No mood data` standing where those two
-  values would (the rig has neither), and a greyed row taking no click;
+- `dj` — Auto DJ on the rig (auto-dj contract, clauses 40–59; the room
+  rebuilt 2026-11-10, its FILTERS and MATCH 2026-11-17): the nav's `Auto DJ`
+  row under TOOLS, the room off — one row a setting, `Discovery off` and `No
+  mood data` standing where those two values would (the rig has neither, so
+  Sonic similarity's sub-rows rest DIM and the Seeds sheet is not reached),
+  and a greyed row taking no click;
   Start on an empty queue asks for a First song, Recently played's list
   hangs from its row with B's own history, and a song of it opens the
   session — the DJ armed, a batch of four badged rows after it (5 tracks);

@@ -223,11 +223,12 @@ pub(crate) enum Act {
     /// clause 33): the opener and the strip's words, the modal's stops and
     /// its `[ Done ]`, the strip's `[X]`.
     Mood(moods::MoodAct),
-    /// The Auto DJ room (auto-dj contract, clauses 40–58): its one primary
-    /// — Start through the toggle (the opening question included), Stop
-    /// wherever the DJ is armed — a row pressed by the pointer or by the
-    /// keyboard (its sheet, its list or its switch), Preview, First song's
-    /// list, a sheet's controls, and quick config over the bar.
+    /// The Auto DJ room (auto-dj contract, clauses 40–59, 64): its one
+    /// primary — Start through the toggle (the opening question included),
+    /// Stop wherever the DJ is armed — a row pressed by the pointer or by
+    /// the keyboard (its sheet, its list or its switch), Preview, First
+    /// song's list, a sheet's controls, quick config over the bar, and the
+    /// Seeds sheet's controls and its row menu.
     DjStartStop,
     DjRow(dj::Row),
     DjRowKey(dj::Row),
@@ -236,6 +237,7 @@ pub(crate) enum Act {
     DjFirstClose,
     DjSheet(dj::SheetAct),
     DjQuick(dj::QuickAct),
+    DjSeeds(dj::SeedsAct),
     // ── Sonic path (see gui::sonic) ─────────────────────────────────────
     /// A setup card's body or a results chip: open the pick-methods menu.
     SonMenu(crate::tui::app::SonicSide),
@@ -631,6 +633,12 @@ pub(crate) struct Gui {
     /// When a setting last changed, while the change is not yet on disk:
     /// the file is written once the changes rest (see [`PREFS_REST`]).
     prefs_unsaved: Option<Instant>,
+    /// What `[player.dj]` keeps of the seed lists, as last seen (auto-dj
+    /// decision 38): when it moves — whoever moved it, the engine's Stay
+    /// close admission, a chosen first song, a new queue's ticked box, or a
+    /// song's tags landing on a kept row included (decision 44) — the
+    /// settings are saved soon.
+    seeds_kept: u64,
 }
 
 /// How long settings rest before they are written: a held ← on the blend
@@ -651,6 +659,9 @@ impl Gui {
         // Play from is this shell's (the room's sheet, quick config): Start
         // goes to its home.
         app.dj_shows_play_from = true;
+        // So is the Seeds sheet: the owner's answers for its lists hold here
+        // (auto-dj decision 41).
+        app.dj_shows_seeds = true;
         let mut ui = Surface::new();
         ui.key_hints = config.gui.key_hints;
         // The Discover room's memories of its own (discovery-page clauses
@@ -660,6 +671,7 @@ impl Gui {
             app.taste.tab = tab;
         }
         app.taste.window = config.gui.discover_window.and_then(crate::tui::app::taste::taste_window);
+        let seeds_kept = app.seeds.kept_hash(app.dj_shows_seeds);
         Gui {
             app,
             pending: Vec::new(),
@@ -705,6 +717,7 @@ impl Gui {
             last_qsel: None,
             hot: false,
             prefs_unsaved: None,
+            seeds_kept,
         }
     }
 
@@ -759,6 +772,9 @@ impl Gui {
                     self.app.tab = Tab::SonicPath;
                 }
                 Some(crate::tui::app::Capture::TasteSeed) => discover::returned(self),
+                // Add song's pick: back to the Seeds sheet over the Auto DJ
+                // room (auto-dj clause 65).
+                Some(crate::tui::app::Capture::Seeds(list)) => dj::seeds_returned(self, list),
                 _ => {}
             }
         }
@@ -806,8 +822,15 @@ impl Gui {
         self.prefs_unsaved = Some(Instant::now());
     }
 
-    /// Once a pass: the settings written once they have rested.
+    /// Once a pass: what the seed lists keep, moved by whoever moved it, is
+    /// a change to write (auto-dj decision 38); the settings are written
+    /// once they have rested.
     fn save_rested(&mut self) {
+        let kept = self.app.seeds.kept_hash(self.app.dj_shows_seeds);
+        if kept != self.seeds_kept {
+            self.seeds_kept = kept;
+            self.save_soon();
+        }
         if self.prefs_unsaved.is_some_and(|since| since.elapsed() >= PREFS_REST) {
             self.save_now();
         }
@@ -938,7 +961,23 @@ impl Gui {
                 // the room that asked (sonic-path contract, clause 12).
                 let sonic = matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
                 let taste = self.app.capture == Some(crate::tui::app::Capture::TasteSeed);
+                let seeds = match self.app.capture {
+                    Some(crate::tui::app::Capture::Seeds(list)) => Some(list),
+                    _ => None,
+                };
                 self.forward(Action::Cancel);
+                // Add song's pick (auto-dj clause 65) is let go outright: a
+                // filter or a Search query being typed takes the first
+                // Cancel and the pick still stands, so it goes once more —
+                // and home to the Seeds sheet only once it is gone.
+                if let Some(list) = seeds {
+                    if self.app.capture.is_some() {
+                        self.forward(Action::Cancel);
+                    }
+                    if self.app.capture.is_none() {
+                        dj::seeds_returned(self, list);
+                    }
+                }
                 if sonic {
                     // Home to the Library by the screens' own door, so the
                     // screen the [X] was pressed on goes with it: the MP3
@@ -1098,8 +1137,18 @@ impl Gui {
                 }
                 // The Auto DJ room opens with its cursor stowed and, with
                 // the DJ off, asks the session's server what it offers so
-                // the rows fit it (auto-dj contract, clause 50).
+                // the rows fit it (auto-dj contract, clause 50). Re-entering
+                // it lets an Add song pick left standing go, and opens the
+                // room without the sheet (clause 65, the sonic room's clause
+                // 13): a Search query edit may take the first Cancel.
                 if i == DJ_NAV {
+                    for _ in 0..2 {
+                        if !matches!(self.app.capture, Some(crate::tui::app::Capture::Seeds(_))) {
+                            break;
+                        }
+                        self.forward(Action::Cancel);
+                    }
+                    self.dj.seeds_back = None;
                     dj::open_room(self);
                 }
                 // The Add rooms likewise: the torrent room stowed, asking
@@ -1207,7 +1256,19 @@ impl Gui {
             Act::Next => self.forward(Action::NextTrack),
             Act::Shuffle => self.forward(Action::ToggleShuffle),
             Act::Repeat => self.forward(Action::ToggleRepeat),
-            Act::AutoDj => self.forward(Action::ToggleAutoDj),
+            // The bar's word and `A` stop as the room's own Stop does: off,
+            // the rows describe Play from's server again, so it is asked
+            // (auto-dj clause 50) — what the DJ's server said went with the
+            // DJ, and the rows that wait on an answer would rest until the
+            // room was entered again.
+            Act::AutoDj => {
+                let was = self.app.dj_armed();
+                self.forward(Action::ToggleAutoDj);
+                if was && !self.app.dj_armed() {
+                    let effects = self.app.dj_room_opened();
+                    self.pend(effects);
+                }
+            }
             Act::VolDown => self.set_volume(self.app.volume - 0.05),
             Act::VolUp => self.set_volume(self.app.volume + 0.05),
             Act::VolSet(i) => self.set_volume((i as f32 + 1.0) / 10.0),
@@ -3068,6 +3129,18 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         discover::returned(gui);
         return false;
     }
+    // Auto DJ's seed pick goes home to the Seeds sheet (auto-dj clause 65)
+    // — once it is gone: a Cancel a Search query edit took only ended that
+    // edit, and the pick still stands (one Esc, one layer).
+    if key.code == KeyCode::Esc
+        && let Some(crate::tui::app::Capture::Seeds(list)) = gui.app.capture
+    {
+        gui.forward(Action::Cancel);
+        if gui.app.capture.is_none() {
+            dj::seeds_returned(gui, list);
+        }
+        return false;
+    }
     if gui.active == ALBUMS_NAV
         && gui.app.connected
         && let Some(quit) = albums::handle_key(gui, key)
@@ -3420,6 +3493,7 @@ where
             gui.reopen_room();
             stats::reopen(gui);
             admin::reopen(gui);
+            dj::reopen(gui);
         }
     }
     ctx.dirty |= servers::poll(gui);
@@ -4271,6 +4345,14 @@ pub fn run(
     }
 }
 
+/// The desktop's App, from a resolved Startup: this shell shows the Seeds
+/// sheet, so the lists the file kept load by its rules — every row Stay
+/// close kept (auto-dj decision 41). `Gui::new` says so again; it cannot
+/// repair a load already made.
+fn desktop_app(start: tui::Startup) -> App {
+    tui::app_for(start, true)
+}
+
 /// The player's startup that owes nothing to a terminal, shared by the
 /// terminal and the window: the config, the workers, the App and its
 /// first effects, and the Gui around them.
@@ -4297,7 +4379,7 @@ fn start(
     // loop answers its requests each tick.
     let control = control.map(control::spawn);
 
-    let mut app = tui::app_from(start);
+    let mut app = desktop_app(start);
     app.tap = Some(tap);
     let pending = app.start();
 
@@ -4507,6 +4589,72 @@ mod tests {
         assert!(!config::load().unwrap().gui.key_hints);
         assert!(gui.prefs_unsaved.is_none());
         let _ = &scratch;
+    }
+
+    /// The engine moves what `[player.dj]` keeps of the seed lists by itself
+    /// — Stay close's one song, a chosen first song, a new queue's ticked box
+    /// — and the settings are saved soon whoever moved it (auto-dj decision
+    /// 38). A Drift pick, which the file does not keep, writes nothing. Each
+    /// look here comes at once after its change, so nothing rests long
+    /// enough to be written (and this GUI writes no file at all).
+    #[test]
+    fn what_the_seed_lists_keep_is_saved_soon_however_it_moved() {
+        use crate::tui::app::{SeedFrom, SeedKey, SeedList};
+        let mut gui = browsing_gui();
+        assert!(gui.app.dj_shows_seeds, "the GUI shows the Seeds sheet (decision 41)");
+        let here = gui.app.origin();
+        let key = |path: &str| SeedKey::new(&here, path);
+        let song = |path: &str| track(path, path, 200.0);
+        let now = crate::clock::Instant::now();
+        gui.prefs_unsaved = None;
+        gui.app.seeds.push_pick(key("a"), song("a"), SeedFrom::Pick, now);
+        gui.save_rested();
+        assert!(gui.prefs_unsaved.is_none(), "a Drift pick is not kept");
+        gui.app.seeds.add_manual(SeedList::MoreLike, key("p"), song("p"), now);
+        gui.save_rested();
+        assert!(gui.prefs_unsaved.is_some(), "a pin is");
+        gui.prefs_unsaved = None;
+        gui.save_rested();
+        assert!(gui.prefs_unsaved.is_none(), "unmoved, nothing to write");
+
+        // Stay close: the engine's own admission.
+        gui.app.set_seed_mode(crate::dj::SonicAnchor::Locked);
+        gui.save_rested();
+        gui.prefs_unsaved = None;
+        assert!(gui.app.seeds.admit_anchor(key("x"), song("x"), now));
+        gui.save_rested();
+        assert!(gui.prefs_unsaved.is_some(), "Stay close's one song");
+        gui.prefs_unsaved = None;
+
+        // The ticked box at a play that replaces the queue: every row goes.
+        gui.app.dj.clear_pins_on_queue_clear = true;
+        gui.app.replace_queue(vec![song("q")]);
+        gui.act(Act::BarPlay);
+        assert!(gui.app.seeds.more_like.is_empty() && gui.app.seeds.less_like.is_empty());
+        assert!(gui.prefs_unsaved.is_none(), "the play itself asks no save");
+        gui.save_rested();
+        assert!(gui.prefs_unsaved.is_some(), "the box's new queue");
+    }
+
+    /// The desktop's own startup loads the lists by this shell's rules:
+    /// every row Stay close kept (auto-dj decision 41) — the flag set
+    /// before the file is read, which `Gui::new` could not repair.
+    #[test]
+    fn the_desktop_start_loads_what_stay_close_kept() {
+        let row = |path: &str, pinned: bool| crate::config::SeedPrefs {
+            server: "http://host:3000".into(),
+            path: path.into(),
+            pinned,
+            ..Default::default()
+        };
+        let mut prefs = crate::config::PlayerPrefs::default();
+        prefs.dj.sonic_anchor = "locked".into();
+        prefs.dj.more_like_pins = vec![row("p", true), row("b", false)];
+        let app = desktop_app(tui::test_startup(prefs));
+        assert!(app.dj_shows_seeds);
+        assert!(app.seeds.frozen());
+        let paths: Vec<&str> = app.seeds.more_like.iter().map(|s| s.key.path.as_str()).collect();
+        assert_eq!(paths, ["p", "b"]);
     }
 
     fn track(filepath: &str, title: &str, duration: f64) -> Track {

@@ -513,8 +513,11 @@ fn remove_server(gui: &mut Gui, index: usize) {
             config.servers.retain(|e| !config::same_server(&e.url, &url));
         });
         if saved {
+            // Its seed rows go too, pinned ones included — written soon
+            // (auto-dj clause 66).
             let effects = gui.app.drop_peer_items(&peer.parent, peer.id);
             gui.pend(effects);
+            gui.save_soon();
             gui.app.servers.retain(|s| !config::same_server(&s.id, &url));
             gui.note = Some((t!("gui.srv.removed", server = peer.name).to_string(), false));
         }
@@ -547,9 +550,12 @@ fn remove_server(gui: &mut Gui, index: usize) {
             let shown = crate::quickconnect::display_server(&url);
             gui.note = Some((t!("gui.srv.removed", server = shown).to_string(), false));
         }
-        // Its queued tracks go with it, silently (contract clause 35).
+        // Its queued tracks go with it, silently (contract clause 35), and
+        // its seed rows, pinned ones included — written soon (auto-dj
+        // clause 66).
         let effects = gui.app.drop_server_items(&url);
         gui.pend(effects);
+        gui.save_soon();
         gui.app.servers.retain(|s| !config::same_server(&s.id, &url));
         gui.servers.versions.remove(&url);
         if gui.servers.switching.as_deref().is_some_and(|s| config::same_server(s, &url)) {

@@ -67,11 +67,6 @@ rust-i18n = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fastrand = "2"
-# The Add-torrent room's release-name parser: a ladder of the record's
-# own patterns (scene grammar, "Artist - Album (1999)", dot names). Already
-# in the tree through tracing-subscriber's env-filter; shared because the
-# parser is pure string work.
-regex = "1"
 # Display width for the GUI's cell budgets: a CJK label is two cells a
 # character, and ratatui measures the same way.
 unicode-width = "0.2"
@@ -164,15 +159,16 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # off since icy_sixel 0.5.1 (before that, quantette brought rayon whatever
 # this line said).
 #
-# Pinned exactly, on purpose. 11.1.0 (2026-09-16) changed `Kitty::new`'s
-# arguments in a minor release, so anything that resolves afresh — `cargo
-# update`, or a `cargo install --git` without --locked — stopped compiling
-# tui::graphics, which builds kitty's placeholders through it. 11.1 also
-# writes those placeholders one per cell, where tui::graphics rides the
-# transmission on (and its tests count) the row's first cell, and it changes
-# what the picker falls back to when a terminal does not answer its query.
-# Moving to it is a port of the cover path, not a version bump.
-ratatui-image = { version = "=11.0.6", default-features = false, features = ["crossterm"] }
+# Held to 11.1's patch releases (`~`), on purpose: upstream breaks its API
+# in minor releases (11.1.0 gave `Kitty::new` a fifth argument), and
+# tui::graphics builds kitty's placeholders through it, so the next minor is
+# a port to check rather than a bump to take. Since 11.1 those placeholders
+# are one per cell, each forced to width 1 for ratatui's diff, and
+# tui::graphics rides its own transmission on the picture's first cell; a
+# query nothing answered falls back on environment hints, which the probe
+# declines (`answered`). 12.0, in release candidates since 2026-09-17, keeps
+# that layout and adds a shared-memory transmit and a reworked picker.
+ratatui-image = { version = "~11.1", default-features = false, features = ["crossterm"] }
 # zlib for kitty covers sent over ssh (tui::graphics, `deflate_kitty`).
 # Already in the tree as png's deflate backend, with these features; named
 # here for one call each way.
@@ -259,6 +255,11 @@ mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tun
 # never the terminal. env-filter so RUST_LOG chooses what third-party crates
 # (iroh's relay and holepunch narration above all) get to say.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The Add-torrent room's release-name parser: a ladder of the record's
+# own patterns (scene grammar, "Artist - Album (1999)", dot names). Already
+# in the tree through tracing-subscriber's env-filter, just above. Native
+# only, like its users (gui/ and replay.rs): on wasm32 cargo flags it unused.
+regex = "1"
 # The player's own voice in the same stream as its dependencies': the
 # engine's flight-recorder lines are emitted as tracing events too, so the
 # in-memory ring holds the story of a session at the default level rather

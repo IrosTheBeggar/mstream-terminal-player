@@ -284,7 +284,9 @@ impl App {
     /// The saved server `old` was re-addressed as `new` (the servers room's
     /// edit; multi-server clause 1): every reference the App holds follows
     /// — the queued rows' origins and the plays owed under them, the
-    /// session's own identity or its peer's parent, the DJ's server.
+    /// session's own identity or its peer's parent, the DJ's server and
+    /// Play from's home, Auto DJ's seed rows (auto-dj clause 66) and the
+    /// lane's marks of them (decision 39).
     pub(crate) fn rename_server(&mut self, old: &str, new: &str) {
         let rename = |id: &mut String| {
             if let Some(renamed) = crate::config::renamed_identity(id, old, new) {
@@ -318,6 +320,28 @@ impl App {
         }
         if let Some(target) = self.dj_target.as_mut() {
             rename(target);
+        }
+        // Left out before, `prefs()` wrote the old home back over the
+        // file's own fix (`config::follow_rename`).
+        if let Some(home) = self.dj_home.as_mut() {
+            rename(home);
+        }
+        self.seeds.rename_server(old, new);
+        let rekey = |key: &super::SeedKey| match crate::config::renamed_identity(&key.server, old, new) {
+            Some(server) => super::SeedKey { server: server.trim_end_matches('/').to_string(), ..key.clone() },
+            None => key.clone(),
+        };
+        self.lane.picked = self.lane.picked.iter().map(rekey).collect();
+        self.lane.last_started = self.lane.last_started.as_ref().map(rekey);
+        // The blend's marks follow too (decision 39): a quick skip of the
+        // renamed row is still the blend's, and the pass-over still names it.
+        self.lane.blended = self.lane.blended.as_ref().map(rekey);
+        let passed: Vec<super::SeedKey> = self.lane.passed_over.iter().map(rekey).collect();
+        self.lane.passed_over.clear();
+        for key in passed {
+            if !self.lane.passed_over.contains(&key) {
+                self.lane.passed_over.push(key);
+            }
         }
     }
 

@@ -250,9 +250,7 @@ mod native {
                 return Graphics { adaptive: true, ..Graphics::disabled() };
             }
 
-            let mut picker = Picker::from_query_stdio()
-                .ok()
-                .filter(|picker| picker.protocol_type() != ProtocolType::Halfblocks);
+            let mut picker = Picker::from_query_stdio().ok().filter(answered);
 
             // iTerm2 answers both the kitty query and DA1's sixel bit, and
             // the query trusts capability answers over environment hints —
@@ -929,7 +927,9 @@ mod native {
         let pixels = resize.resize(&source, font, cells, None);
         let transmit = kitty_transmit(&pixels, id, tmux, deflate);
         let stand_in = image::DynamicImage::new_rgb8(1, 1);
-        let placeholders = Protocol::Kitty(Kitty::new(stand_in, cells, id, tmux).ok()?);
+        // Uncompressed: the stand-in's transmission is spent on the scratch
+        // cell below and never reaches the terminal.
+        let placeholders = Protocol::Kitty(Kitty::new(stand_in, cells, id, tmux, false).ok()?);
         let scratch = Rect::new(0, 0, 1, 1);
         Image::new(&placeholders).allow_clipping(true).render(scratch, &mut Buffer::empty(scratch));
         Some((placeholders, transmit))
@@ -941,7 +941,8 @@ mod native {
     /// the placeholders to draw — upstream's `transmit_virtual`, framed the
     /// same way for tmux, and ours to drop once sent.
     ///
-    /// Upstream always sends RGBA, uncompressed: 5.3 bytes on the wire a
+    /// Upstream always sends RGBA, and uncompressed unless its probe was
+    /// told to ask about o=z (11.1): 5.3 bytes on the wire a
     /// pixel, a quarter of them an alpha byte that is constant for a cover
     /// (performance audit #93). An opaque picture goes as RGB (f=24) here —
     /// the pixels being sent decide, not the source's format: a fit that
@@ -1073,11 +1074,12 @@ mod native {
     /// pty moves that page in tens of milliseconds, less than deflating it
     /// would take out of the frame's encode budget (~0.5 ms a wall cover,
     /// ~12 ms a 640 px one — the audit's measurements, #93). And only to
-    /// kitty and Ghostty, which inflate: the capability query asks about
-    /// f=24, never o=z, and with q=2 a terminal that could not inflate
-    /// would show nothing and say nothing. Both name themselves in TERM,
-    /// which ssh carries; under tmux TERM is tmux's own, and the pixels go
-    /// plain.
+    /// kitty and Ghostty, which inflate: the probe does not ask about o=z
+    /// (ratatui-image 11.1 can be told to, `kitty_compression`, and its
+    /// answer would replace these two names: a change of its own), and
+    /// with q=2 a terminal that could not inflate would show nothing and
+    /// say nothing. Both name themselves in TERM, which ssh carries; under
+    /// tmux TERM is tmux's own, and the pixels go plain.
     fn deflate_kitty(env: impl Fn(&str) -> Option<String>) -> bool {
         let remote = env("SSH_CONNECTION").is_some() || env("SSH_TTY").is_some();
         let inflates =
@@ -1106,6 +1108,22 @@ mod native {
     /// learn to draw.
     fn skip_query_for_apple_terminal(env: impl Fn(&str) -> Option<String>) -> bool {
         env("TERM_PROGRAM").is_some_and(|v| v == "Apple_Terminal")
+    }
+
+    /// Whether the query found a pixel protocol the terminal answered for.
+    ///
+    /// Halfblocks is the mosaic's job. And since ratatui-image 11.0.7 a
+    /// query nothing answered no longer comes back as halfblocks: given a
+    /// font size from the window-size ioctl, upstream picks iTerm2 from the
+    /// environment alone (TERM_PROGRAM or LC_TERMINAL naming a terminal that
+    /// speaks it, or tmux's outer-terminal hints). Those variables outlive
+    /// the terminal that set them (ssh carries LC_TERMINAL on purpose, a
+    /// multiplexer inherits TERM_PROGRAM), which is why `demote_for_iterm2`
+    /// will not trust them alone either. That fallback is the one picker
+    /// with no capabilities, as every answer the query reads is one; here
+    /// it still means what it did before: no answer, the mosaic.
+    fn answered(picker: &Picker) -> bool {
+        picker.protocol_type() != ProtocolType::Halfblocks && !picker.capabilities().is_empty()
     }
 
     /// Whether a multiplexer — tmux, zellij, or screen — sits between us
@@ -1711,7 +1729,7 @@ mod native {
                 // upstream's own draws once its transmission is spent.
                 let cells = ours.size();
                 let pixels = resize.resize(&source, picker.font_size(), cells, None);
-                let upstream = Protocol::Kitty(Kitty::new(pixels, cells, 42, false).unwrap());
+                let upstream = Protocol::Kitty(Kitty::new(pixels, cells, 42, false, false).unwrap());
                 let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
                 frame_of(&mut terminal, &upstream);
                 let mut again = Terminal::new(TestBackend::new(40, 12)).unwrap();
@@ -1949,12 +1967,11 @@ mod native {
             // A 64px cover in a 400x200px area: Fit would have kept it at
             // its own 7x4 cells anchored where `centre` placed the 20x10
             // box the arithmetic promised — small art hanging in the box's
-            // slack. Scale meets the promise. Kitty writes each row's
-            // placeholders into the row's first cell as one string, so the
-            // evidence is the char count and where the rows start: 20
-            // placeholder chars per row, 10 rows, first cell at column 10
-            // — the centred box exactly. Any of enlargement, centring or
-            // the fit regressing moves at least one of the three.
+            // slack. Scale meets the promise. Kitty's placeholders are one
+            // per cell (ratatui-image 11.1), so the evidence is which cells
+            // hold one: every cell of a 20x10 box from column 10, the
+            // centred box exactly, and nothing outside it. Any of
+            // enlargement, centring or the fit regressing moves an edge.
             let art = a_cover(64);
             let mut graphics = Graphics::forced(ProtocolType::Kitty);
             let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
@@ -1963,22 +1980,23 @@ mod native {
             assert!(drew, "a small cover still draws");
 
             let buffer = terminal.backend().buffer();
-            let mut chars = 0;
+            let (mut cells, mut chars) = (0, 0);
             let (mut xs, mut ys) = ((u16::MAX, 0u16), (u16::MAX, 0u16));
             for y in 0..10 {
                 for x in 0..40 {
                     let here =
                         buffer[(x, y)].symbol().matches('\u{10EEEE}').count();
                     if here > 0 {
+                        cells += 1;
                         chars += here;
                         xs = (xs.0.min(x), xs.1.max(x));
                         ys = (ys.0.min(y), ys.1.max(y));
                     }
                 }
             }
-            assert_eq!(chars, 20 * 10, "every cell of the fitted box is covered");
-            assert_eq!(xs.0, 10, "the box starts at the centred column");
-            assert_eq!(ys, (0, 9), "and spans the rows the fit promised");
+            assert_eq!((cells, chars), (20 * 10, 20 * 10), "one placeholder a cell, every cell");
+            assert_eq!(xs, (10, 29), "across the centred columns");
+            assert_eq!(ys, (0, 9), "and down the rows the fit promised");
         }
 
         /// Wide and short, so a small box fits it at zero rows.
@@ -2170,6 +2188,20 @@ mod native {
                     bytes(&png),
                     bytes(&jpeg)
                 );
+            }
+        }
+
+        #[test]
+        fn a_picker_built_on_no_answer_is_declined_whatever_it_guessed() {
+            // The no-answer fallback's shape: a font size, a protocol from
+            // the environment, and no capabilities, as no answer was read.
+            // (A picker with answers takes a terminal to build: the pty
+            // smoke covers that side.)
+            #[allow(deprecated)]
+            let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
+            for protocol in [ProtocolType::Iterm2, ProtocolType::Kitty, ProtocolType::Sixel] {
+                picker.set_protocol_type(protocol);
+                assert!(!answered(&picker), "{protocol:?}");
             }
         }
 

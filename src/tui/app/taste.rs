@@ -747,8 +747,8 @@ impl App {
                 match verb {
                     TasteVerb::PlayFrom => {
                         let songs = self.taste_songs();
-                        self.replace_queue(songs);
-                        self.play_index(index)
+                        let items = self.queued_all(songs);
+                        self.play_replacing(items, index)
                     }
                     TasteVerb::Now => self.queue_track_next(&origin, track, true),
                     TasteVerb::Next => self.queue_track_next(&origin, track, false),
@@ -760,10 +760,7 @@ impl App {
                 let Some(at) = self.taste_peer_position(group, row) else { return Vec::new() };
                 let Some(item) = rows.get(at).cloned() else { return Vec::new() };
                 match verb {
-                    TasteVerb::PlayFrom => {
-                        self.queue.replace(rows);
-                        self.play_index(at)
-                    }
+                    TasteVerb::PlayFrom => self.play_replacing(rows, at),
                     TasteVerb::Now => self.queue_track_next(&item.origin, item.track, true),
                     TasteVerb::Next => self.queue_track_next(&item.origin, item.track, false),
                     TasteVerb::Queue => self.queue_track_end(&item.origin, item.track),
@@ -783,8 +780,7 @@ impl App {
         if shuffle {
             fastrand::shuffle(&mut items);
         }
-        self.queue.replace(items);
-        self.play_index(0)
+        self.play_replacing(items, 0)
     }
 
     /// The verbs line's queue all (clause 64, browser-top-bar clause 11):
@@ -913,8 +909,7 @@ impl App {
             return Vec::new();
         }
         if play {
-            self.queue.replace(items);
-            return self.play_index(0);
+            return self.play_replacing(items, 0);
         }
         self.taste_append(items)
     }
