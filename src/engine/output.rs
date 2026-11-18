@@ -872,15 +872,19 @@ fn meaning(kind: cpal::ErrorKind, wasapi: bool) -> Meaning {
         Kind::DeviceNotAvailable => Meaning::Over,
         // "Must be rebuilt", and on WASAPI that is how cpal announces that
         // the system default moved under a stream opened on it: its thread
-        // runs on, and the stream sounds wherever Windows has it — cpal
+        // runs on, and the stream sounds wherever Windows has it. cpal
         // opens the default through Windows' own default-device interface,
-        // and says the stream stays on the endpoint it started on. The move
-        // is the default watch's to make, with the old stream sounding until
-        // the new one has opened; pulling the tripwire would close it first,
+        // and Windows takes a stream opened there to the new default itself.
+        // cpal's comments say the stream is never rebound; a Realtek
+        // headphone jack said otherwise on 2026-11-18, the music on from the
+        // speakers a third of a second after the jack came out while the
+        // open of a new stream was being refused. The default watch opens
+        // one of the new device's own all the same, with the old stream
+        // sounding until it has; pulling the tripwire would close it first,
         // and a default that is slow to open — a Bluetooth link coming up —
-        // would be silence where the speakers were. A WASAPI stream that
-        // says this and has in fact ended stops asking, which is the pulse's
-        // to notice.
+        // would be silence where the music was. A WASAPI stream that says
+        // this and has in fact ended stops asking, which is the pulse's to
+        // notice.
         Kind::StreamInvalidated if wasapi => Meaning::PlaysOn,
         // Elsewhere it has stopped: CoreAudio pauses a stream whose device
         // changed its sample rate before saying so.

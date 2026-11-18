@@ -1257,11 +1257,13 @@ fn next_tick(settled: bool, until_end: Option<f64>, base: Duration) -> Duration 
 
 /// How often the system default output is compared with the one the
 /// stream opened on. Plugging in headphones (or a Bluetooth speaker
-/// connecting) moves the default without touching the running stream —
-/// the OS leaves it playing on the old endpoint — so the only way to
-/// hear about it is to ask. Also how long the drivers wait between ticks
-/// while the engine is [settled](Engine::settled): the watch is then the
-/// only thing the tick has to do, and it keeps its pace.
+/// connecting) moves the default, and not every host says so: the watch
+/// asks. Where the running stream sounds meanwhile is the host's doing —
+/// Windows takes one opened on its default to the new default by itself
+/// (`output::meaning`) — and the watch opens one of the new device's own
+/// all the same. Also how long the drivers wait between ticks while the
+/// engine is [settled](Engine::settled): the watch is then the only thing
+/// the tick has to do, and it keeps its pace.
 pub(crate) const DEVICE_POLL: Duration = Duration::from_secs(1);
 
 /// How long a failed open rests before the next try: the outage where
@@ -3337,6 +3339,12 @@ mod tests {
     }
 
     /// A playable WAV: 44.1k stereo 16-bit of quiet tone, `seconds` long.
+    ///
+    /// A server makes its body before its thread starts, and once: a bound
+    /// listener takes a connection at once, and thirty seconds of these
+    /// samples are some 550 ms of work in an unoptimised build — more than
+    /// the test build's open waits for an answer, and twice that with the
+    /// suite's other servers making theirs beside it.
     fn wav_bytes(seconds: usize) -> Vec<u8> {
         let rate = 44_100usize;
         let frames = rate * seconds;
@@ -3368,9 +3376,10 @@ mod tests {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        let body = Arc::new(wav_bytes(seconds));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let body = wav_bytes(seconds);
+                let body = body.clone();
                 std::thread::spawn(move || {
                     let mut stream = stream;
                     let mut head = [0u8; 2048];
@@ -3413,8 +3422,8 @@ mod tests {
         let released = release.clone();
         let open = Arc::new(AtomicUsize::new(0));
         let counted = open.clone();
+        let body = Arc::new(wav_bytes(seconds));
         std::thread::spawn(move || {
-            let body = Arc::new(wav_bytes(seconds));
             for stream in listener.incoming().flatten() {
                 let (body, released, open) = (body.clone(), released.clone(), counted.clone());
                 std::thread::spawn(move || {
@@ -3732,10 +3741,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = hits.clone();
+        let body = Arc::new(wav_bytes(seconds));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 counter.fetch_add(1, Ordering::SeqCst);
-                let body = wav_bytes(seconds);
+                let body = body.clone();
                 std::thread::spawn(move || {
                     let mut stream = stream;
                     let mut head = [0u8; 2048];
@@ -3762,10 +3772,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = hits.clone();
+        let body = Arc::new(wav_bytes(seconds));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                let body = wav_bytes(seconds);
+                let body = body.clone();
                 std::thread::spawn(move || {
                     let mut stream = stream;
                     let mut head = [0u8; 2048];
