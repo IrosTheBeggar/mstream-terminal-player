@@ -3337,6 +3337,12 @@ mod tests {
     }
 
     /// A playable WAV: 44.1k stereo 16-bit of quiet tone, `seconds` long.
+    ///
+    /// A server makes its body before its thread starts, and once: a bound
+    /// listener takes a connection at once, and thirty seconds of these
+    /// samples are some 550 ms of work in an unoptimised build — more than
+    /// the test build's open waits for an answer, and twice that with the
+    /// suite's other servers making theirs beside it.
     fn wav_bytes(seconds: usize) -> Vec<u8> {
         let rate = 44_100usize;
         let frames = rate * seconds;
@@ -3368,9 +3374,10 @@ mod tests {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        let body = Arc::new(wav_bytes(seconds));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let body = wav_bytes(seconds);
+                let body = body.clone();
                 std::thread::spawn(move || {
                     let mut stream = stream;
                     let mut head = [0u8; 2048];
@@ -3413,8 +3420,8 @@ mod tests {
         let released = release.clone();
         let open = Arc::new(AtomicUsize::new(0));
         let counted = open.clone();
+        let body = Arc::new(wav_bytes(seconds));
         std::thread::spawn(move || {
-            let body = Arc::new(wav_bytes(seconds));
             for stream in listener.incoming().flatten() {
                 let (body, released, open) = (body.clone(), released.clone(), counted.clone());
                 std::thread::spawn(move || {
@@ -3732,10 +3739,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = hits.clone();
+        let body = Arc::new(wav_bytes(seconds));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 counter.fetch_add(1, Ordering::SeqCst);
-                let body = wav_bytes(seconds);
+                let body = body.clone();
                 std::thread::spawn(move || {
                     let mut stream = stream;
                     let mut head = [0u8; 2048];
@@ -3762,10 +3770,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = hits.clone();
+        let body = Arc::new(wav_bytes(seconds));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                let body = wav_bytes(seconds);
+                let body = body.clone();
                 std::thread::spawn(move || {
                     let mut stream = stream;
                     let mut head = [0u8; 2048];
