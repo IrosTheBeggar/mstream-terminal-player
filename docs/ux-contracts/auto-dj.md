@@ -1883,6 +1883,23 @@ where this player differs, the build settled it so:
     already accepts. The GUI's fingerprint of what the file keeps reads
     the tags, so a pin's, and those of a row Stay close keeps, are written
     soon (decision 38); the TUI writes them on the way out.
+45. **A remote clear or play gets past an open picker** (clauses 10, 12,
+    66; the owner's go-ahead, 2026-11-18, PR #85). The control face's
+    `/queue/clear` and `/play` clear through `App::clear_queue`, which
+    empties the queue without handing the clear to an open mode, then
+    settles as every action does; the `C` key's arm and the direct clear
+    share `empty_the_queue`. The `C` key still goes through the mode, which
+    takes it. So a remote clear is a real clear whatever is open — the
+    DJ's opening question, the room's Genres sheet, Now Playing's sources
+    picker, genre list or skip-word field — and a remote play replaces the
+    queue: a new queue for the seeds (decision 27), whose pins go with
+    Clear pins when the queue is cleared ticked (clause 66). The open mode
+    stays as it was: the remote changed the queue, it did not answer the
+    mode. A sheet saves its draft however it closes, a closed field would
+    drop what was typed, and the opening question's answers already cope
+    with a queue that filled while it was up. The remote's other commands
+    (`/pause`, `/resume`, `/next`, `/previous`, `/loop`) still go through
+    an open mode — a session of their own.
 
 ## Deviations log
 
@@ -2332,7 +2349,8 @@ where this player differs, the build settled it so:
     bare row takes its title, artist and album when its tags land, and a
     pin, or a row the GUI's Stay close keeps, writes them soon, decision
     44. The first stays open: older than this work, it goes to a session
-    of its own.)*
+    of its own.)* *(2026-11-18, PR #85: the first is closed too — a remote
+    clear or play gets past an open picker, decision 45.)*
   - **A full More like and Stay close's one song**, found in review. A
     move of the DJ in Stay close now keeps every row where it kept the
     pins alone, so eight rows of the old server — pins and frozen picks —
@@ -2425,7 +2443,7 @@ where this player differs, the build settled it so:
     work, for a session of its own; and a pick already out that lands
     while the queue's last row waits for its tunnel still starts over that
     row, the landing's play-now test reading the idle status (clause 14) —
-    older too.
+    older too. *(2026-11-18: the first is closed by PR #85, decision 45.)*
   - **History.** The second answers' items "Where the lane meets a new
     queue", "Two gaps at the remote" and "A full More like and Stay close's
     one song", and the entry "The TUI drives the same mode", describe the

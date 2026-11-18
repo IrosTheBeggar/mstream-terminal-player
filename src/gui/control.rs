@@ -410,8 +410,9 @@ mod tests {
     /// The remote's clear, then its play, while one of the App's modes is
     /// up — `up` says whether it still is. The clear empties the queue and
     /// stops; the play makes the queue its one track and starts that, not
-    /// the old first row; and the mode stays as it was, drawn as before:
-    /// the remote moved the queue under it, it did not answer it.
+    /// the old first row; and the mode stays up after each, and through a
+    /// redraw over the new queue: the remote moved the queue under it, it
+    /// did not answer it.
     fn clear_and_play_past(g: &mut Gui, up: impl Fn(&Gui) -> bool) {
         assert!(up(g), "the mode is up to begin with");
         execute(g, Command::QueueAddMany(vec!["Music/a.mp3".into(), "Music/b.mp3".into()]));

@@ -2653,10 +2653,26 @@ a LATER secondary screen (party view), Columns retired.
   corrected. 2 App tests new, 2 extended with the new cases, 2 of round
   2's updated to the settle; each new half failed on the code before; both
   suites green (3214 terminal, 3333 desktop) and the desktop build OK. Not
-  seen in the window or on the rig. Open: the remote picker gap (older; a
-  session of its own), a pick already out landing over a last row that
-  waits for its tunnel (older), and the readings the round's deviations
-  entry names.
+  seen in the window or on the rig. Open: the remote picker gap (older;
+  closed by #85, the next entry), a pick already out landing over a last
+  row that waits for its tunnel (older), and the readings the round's
+  deviations entry names.
+- **The remote's clear and play get past an open picker ✅ 2026-11-18**
+  (#85) — the gap rounds 2 and 3 left open. The control face's
+  `/queue/clear` and `/play` clear through `App::clear_queue`, which
+  empties the queue without handing the clear to an open mode, then
+  settles as `handle_action` does; the `C` key's arm and the direct clear
+  share `empty_the_queue`, which carries the seeds' new queue. A remote
+  clear is now a real clear, and a new queue for the seeds, whatever
+  picker is up; the picker stays up (auto-dj contract, decision 45).
+  Tests: 4 GUI (one mode each, opened by its real path, then cleared and
+  played through the control face) and 1 App (the `C` key still waits
+  for every mode the direct clear gets past); each failed on the old
+  code. Rebased onto main with #89 and #86: the seeds' clear moved into
+  `empty_the_queue`, and the remote still saves soon after `clear(gui)`.
+  Both suites green (3238 terminal, 3358 desktop). Open: the remote's
+  other commands (`/pause`, `/resume`, `/next`, `/previous`, `/loop`)
+  still go through an open mode — a session of their own.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
