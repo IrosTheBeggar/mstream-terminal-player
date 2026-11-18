@@ -1652,3 +1652,133 @@ fn the_wordmark_is_not_painted_over_a_wizard_modal() {
     let figlet = r" _ __ ___ / ___|| |_ _ __ ___  __ _ _ __ ___";
     assert!(after.text.contains(figlet), "no figlet in the band:\n{}", after.text);
 }
+
+/// The GUI in the window: a `GuiFace` handed the window's Board as `run`
+/// hands it, drawn at the window's 100×30 by its `render_test` (the GUI's
+/// `render`) through the backend's post processor. `frames` frames, each
+/// once `step` (handed the frame's number) has changed the Gui, each with
+/// the rects the board painted in it and how many pictures it was handed
+/// that stand under an overlay.
+fn gui_in_the_window(
+    gui: crate::gui::Gui,
+    frames: usize,
+    mut step: impl FnMut(&mut crate::gui::Gui, usize),
+) -> Result<Vec<(Frame, Vec<Rect>, usize)>, String> {
+    use std::sync::Arc;
+
+    use super::covers::{Board, CoverPost};
+    use super::face::Face;
+
+    let (cols, rows) = (100u32, 30u32);
+    let board = Arc::new(Board::default());
+    let ctx = crate::gui::tests::quiet_ctx(&gui);
+    let mut face = crate::gui::GuiFace { gui, ctx };
+    let watching = board.clone();
+    face.host_pictures(board.clone(), Box::new(move |rect| watching.overlay(rect)));
+
+    let wide = 4096;
+    let builder = Builder::<CoverPost>::from_font_and_user_data(hack()?, board.clone())
+        .with_font_size_px(PX)
+        .with_width_and_height(Dimensions {
+            width: NonZeroU32::new(wide).unwrap(),
+            height: NonZeroU32::new(rows * PX).unwrap(),
+        })
+        .with_bg_color(Color::Rgb(GROUND[0], GROUND[1], GROUND[2]))
+        .with_fg_color(Color::White);
+    let mut backend = block_on(builder.build_headless())?
+        .map_err(|e| format!("no headless wgpu backend: {e}"))?;
+    let reported = backend.window_size().map_err(|e| e.to_string())?;
+    let cell_w = wide / u32::from(reported.columns_rows.width);
+    backend.resize(cols * cell_w, rows * PX);
+
+    let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+    let mut drawn = Vec::new();
+    for at in 0..frames {
+        step(&mut face.gui, at);
+        board.begin_frame();
+        terminal.draw(|frame| face.render_test(frame)).map_err(|e| e.to_string())?;
+        let (placed, under) = board.placed_rects();
+        let text = terminal.backend().get_text();
+        let pixels = terminal.backend().read_pixels().ok_or("the frame could not be read back")?;
+        let frame = Frame { pixels, width: cols * cell_w, cell_w, cell_h: PX, text };
+        drawn.push((frame, placed, under));
+    }
+    Ok(drawn)
+}
+
+/// Now Playing's cover under the Auto-DJ tab's pickers, the genre list and
+/// the sources picker. The pickers are the TUI's overlay, drawn into the
+/// grid, and the cover a picture the board paints over the grid after it:
+/// the box was never registered as an overlay, so the cover was painted
+/// over the list's rows — their tick boxes and names — frame after frame.
+/// Before a picker opens the board paints the cover; on the frame one
+/// opens the cover stands under it, from the next it is the mosaic beside
+/// it, and on both the rows' cells hold their glyphs and none of the
+/// picture.
+#[test]
+fn the_now_playing_cover_is_not_painted_over_its_pickers() {
+    use ratatui::layout::Position;
+
+    use crate::api::types::Genre;
+    use crate::gui::now::tests::{COVER, open, play_with_a_cover, session};
+    use crate::gui::{Act, Gui, Screen};
+    use crate::tui::app::DjRow;
+    use crate::tui::worker::Event;
+
+    let _gpu = one_at_a_time();
+    let cover_px = |frame: &Frame, rect: Rect| {
+        let cells = rect.positions().flat_map(|at| frame.cell(at.x.into(), at.y.into()));
+        cells.filter(|px| *px == COVER).count()
+    };
+    let pickers = [(DjRow::Genres, ["Ambient", "Techno"]), (DjRow::Sources, ["Music", "Pods"])];
+    for (row, names) in pickers {
+        let mut gui = session();
+        play_with_a_cover(&mut gui);
+        let step = |gui: &mut Gui, at: usize| match at {
+            0 => {
+                gui.act(Act::Screen(Screen::NowPlaying));
+            }
+            1 => {
+                open(gui, row);
+                if row == DjRow::Genres {
+                    let genre = |name: &str| Genre { name: name.into(), track_count: Some(1) };
+                    let effects = gui.app.apply_event(Event::Genres(Vec::from(names.map(genre))));
+                    gui.pend(effects);
+                }
+            }
+            _ => {}
+        };
+        let Some(frames) = frame_or_skip(gui_in_the_window(gui, 3, step)) else { return };
+        let [before, opened, after] = &frames[..] else { panic!("three frames") };
+        let [cover] = before.1[..] else { panic!("{row:?}: the cover alone: {:?}", before.1) };
+        assert_eq!(before.2, 0, "{row:?}: nothing over the cover yet");
+        assert!(cover_px(&before.0, cover) > 0, "{row:?}: the board paints the cover");
+
+        // The rows, by their names: from the tick box to the name's end.
+        for (frame, when) in [(&opened.0, "the frame it opens"), (&after.0, "the frame after")] {
+            let mut over_the_cover = 0;
+            for name in names {
+                let needle = format!("] {name}");
+                let found = frame.text.lines().enumerate().find(|(_, line)| line.contains(&needle));
+                let Some((y, line)) = found else {
+                    panic!("{row:?}, {when}: no {name} row:\n{}", frame.text);
+                };
+                let start = line.find(&needle).unwrap() - 2;
+                let x0 = crate::kit::width(&line[..start]) as u16;
+                for (i, glyph) in line[start..start + 2 + needle.len()].chars().enumerate() {
+                    let at = Position { x: x0 + i as u16, y: y as u16 };
+                    over_the_cover += usize::from(cover.contains(at));
+                    let (cx, cy) = (u32::from(at.x), u32::from(at.y));
+                    let painted = frame.cell(cx, cy).contains(&COVER);
+                    assert!(!painted, "{row:?}, {when}: the cover over {name}'s row at {at:?}");
+                    let drawn = glyph == ' ' || frame.inked(cx, cy);
+                    assert!(drawn, "{row:?}, {when}: no {glyph:?} in {name}'s row at {at:?}");
+                }
+            }
+            assert!(over_the_cover > 0, "{row:?}, {when}: the cover lies under the rows");
+        }
+        assert_eq!((opened.1.len(), opened.2), (0, 1), "{row:?}: the cover stands under the box");
+        assert_eq!((after.1.len(), after.2), (0, 0), "{row:?}: the mosaic from the next frame");
+        assert!(cover_px(&after.0, cover) > 0, "{row:?}: the mosaic beside the box");
+    }
+}

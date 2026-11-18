@@ -747,6 +747,7 @@ impl Gui {
     /// can see (now-playing contract, the states).
     fn sync_screen(&mut self) {
         if self.screen == Screen::NowPlaying && !self.app.fullscreen {
+            now::leave(self);
             self.screen = Screen::Library;
             self.active = match self.app.tab {
                 Tab::SonicPath => SONIC_NAV,
@@ -998,8 +999,12 @@ impl Gui {
                 self.screen = screen;
                 // The App's full-screen flag follows the screen, so its keys
                 // mean here what they mean in the TUI's view (now-playing
-                // contract, the states).
+                // contract, the states) — and the view's own modes go down
+                // with it.
                 self.app.fullscreen = screen == Screen::NowPlaying;
+                if was == Screen::NowPlaying && screen != Screen::NowPlaying {
+                    now::leave(self);
+                }
                 if screen != Screen::Library {
                     self.cursor = None;
                     self.servers.drop_open = false;
@@ -1038,6 +1043,9 @@ impl Gui {
                 // again when its own row (or `G`) is pressed while it is up.
                 let was = (self.screen == Screen::Library).then_some(self.active);
                 // A nav row is the Library's: it brings that screen back.
+                if self.screen == Screen::NowPlaying {
+                    now::leave(self);
+                }
                 self.screen = Screen::Library;
                 self.app.fullscreen = false;
                 stats::close(self);
@@ -3628,8 +3636,15 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                 return Flow::Continue;
             }
             // The App keeps the pointer too: the Now Playing band
-            // lights under it, the TUI's way.
-            gui.app.note_pointer(at);
+            // lights under it, the TUI's way. Not through a guard (a
+            // modal's frame, a lent picker's box): a click there goes no
+            // further, and the band's light promises a seek. Last frame's
+            // registry, the one the pointer is over.
+            if matches!(gui.ui.hit(at), Some(Act::Guard)) {
+                gui.app.pointer = None;
+            } else {
+                gui.app.note_pointer(at);
+            }
             // A grip on the Admin log's lines, or a held arrow or dragged
             // thumb of its bar, lets go before anything reads it once the
             // log is gone, and a press while a grip stands means its
