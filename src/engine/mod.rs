@@ -1257,11 +1257,13 @@ fn next_tick(settled: bool, until_end: Option<f64>, base: Duration) -> Duration 
 
 /// How often the system default output is compared with the one the
 /// stream opened on. Plugging in headphones (or a Bluetooth speaker
-/// connecting) moves the default without touching the running stream —
-/// the OS leaves it playing on the old endpoint — so the only way to
-/// hear about it is to ask. Also how long the drivers wait between ticks
-/// while the engine is [settled](Engine::settled): the watch is then the
-/// only thing the tick has to do, and it keeps its pace.
+/// connecting) moves the default, and not every host says so: the watch
+/// asks. Where the running stream sounds meanwhile is the host's doing —
+/// Windows takes one opened on its default to the new default by itself
+/// (`output::meaning`) — and the watch opens one of the new device's own
+/// all the same. Also how long the drivers wait between ticks while the
+/// engine is [settled](Engine::settled): the watch is then the only thing
+/// the tick has to do, and it keeps its pace.
 pub(crate) const DEVICE_POLL: Duration = Duration::from_secs(1);
 
 /// How long a failed open rests before the next try: the outage where
