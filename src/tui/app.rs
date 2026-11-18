@@ -2972,7 +2972,15 @@ impl App {
     // ── Actions ─────────────────────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Vec<Effect> {
-        let mut effects = self.act(action);
+        let effects = self.act(action);
+        self.settle(effects)
+    }
+
+    /// What every action's and every event's batch is followed by: the
+    /// engine's next track, the shape fetched ahead of it and the
+    /// full-screen Discover panel brought in line with what the batch
+    /// left, and its waits noted.
+    fn settle(&mut self, mut effects: Vec<Effect>) -> Vec<Effect> {
         effects.extend(self.refresh_prepared());
         // Rides the same funnel as the announcement it reads, so a queue
         // edit that changes what comes next also changes which shape is
@@ -2981,6 +2989,45 @@ impl App {
         effects.extend(self.refresh_now_discover());
         self.note_pending(&effects);
         effects
+    }
+
+    /// The queue emptied and playback stopped, whatever input mode is up:
+    /// the control face's `/queue/clear`, and its `/play` before the one
+    /// track goes in (gui/control.rs). A mode owns the keys a user presses,
+    /// not what a remote does to the queue — handed the clear, the DJ's
+    /// opening question, its genre and sources pickers and its skip-word
+    /// field each dropped it, so a remote clear cleared nothing and a
+    /// remote play queued its track behind the old rows and started the
+    /// first of them. The mode stays up, as it does under any queue change
+    /// it did not make. The `C` key still comes through `handle_action`,
+    /// so a mode that has the keyboard still takes it.
+    pub(crate) fn clear_queue(&mut self) -> Vec<Effect> {
+        let effects = self.empty_the_queue();
+        self.settle(effects)
+    }
+
+    /// The clear itself, for the `C` key's arm (its funnel settles it) and
+    /// [`App::clear_queue`].
+    fn empty_the_queue(&mut self) -> Vec<Effect> {
+        // The checkbox counts a clear that really emptied a queue
+        // (auto-dj contract, clause 66).
+        let had_rows = !self.queue.items.is_empty();
+        self.queue.clear();
+        self.now_playing = None;
+        self.stall = None;
+        self.tunnel_wait = None;
+        // A cleared queue is somewhere new: the DJ's lane starts over
+        // (auto-dj contract, clauses 10 and 12), the DJ staying armed
+        // — and the seed lists start over as at any new queue (clause
+        // 12): with Clear pins when the queue is cleared ticked, the
+        // pins go, every row in the GUI's Stay close (clause 66,
+        // decision 41). A pool the
+        // lane let go is asked for again by the new lane's own epoch
+        // (decision 43). The last note was about rows that are gone.
+        self.new_lane();
+        self.seeds_new_queue(had_rows);
+        self.message = None;
+        vec![Effect::Audio(AudioCmd::Stop)]
     }
 
     fn act(&mut self, action: Action) -> Vec<Effect> {
@@ -3197,27 +3244,7 @@ impl App {
                 self.dj_remove_last_keyword()
             }
             Action::RemoveFromQueue => self.remove_from_queue(),
-            Action::ClearQueue => {
-                // The checkbox counts a clear that really emptied a queue
-                // (auto-dj contract, clause 66).
-                let had_rows = !self.queue.items.is_empty();
-                self.queue.clear();
-                self.now_playing = None;
-                self.stall = None;
-                self.tunnel_wait = None;
-                // A cleared queue is somewhere new: the DJ's lane starts over
-                // (auto-dj contract, clauses 10 and 12), the DJ staying armed
-                // — and the seed lists start over as at any new queue (clause
-                // 12): with Clear pins when the queue is cleared ticked, the
-                // pins go, every row in the GUI's Stay close (clause 66,
-                // decision 41). A pool the
-                // lane let go is asked for again by the new lane's own epoch
-                // (decision 43). The last note was about rows that are gone.
-                self.new_lane();
-                self.seeds_new_queue(had_rows);
-                self.message = None;
-                vec![Effect::Audio(AudioCmd::Stop)]
-            }
+            Action::ClearQueue => self.empty_the_queue(),
             Action::ToggleRepeat => {
                 self.queue.repeat = self.queue.repeat.next();
                 self.info(format!("repeat: {}", self.queue.repeat.label()));
@@ -6252,12 +6279,8 @@ impl App {
         if matches!(event, Event::Error(_) | Event::Unauthorized) {
             self.clear_pending();
         }
-        let mut effects = self.consume(event);
-        effects.extend(self.refresh_prepared());
-        effects.extend(self.prefetch_waveform());
-        effects.extend(self.refresh_now_discover());
-        self.note_pending(&effects);
-        effects
+        let effects = self.consume(event);
+        self.settle(effects)
     }
 
     fn consume(&mut self, event: Event) -> Vec<Effect> {

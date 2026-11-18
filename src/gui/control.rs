@@ -180,7 +180,7 @@ fn execute(gui: &mut Gui, cmd: Command) -> Answer {
         // queue is cleared may have let the seed lists' pins go (auto-dj
         // clause 66).
         Command::Play(file) => {
-            gui.forward(Action::ClearQueue);
+            clear(gui);
             gui.save_soon();
             enqueue(gui, file);
             let effects = gui.app.play_index(0);
@@ -214,7 +214,7 @@ fn execute(gui: &mut Gui, cmd: Command) -> Answer {
             Answer::ok()
         }
         Command::QueueClear => {
-            gui.forward(Action::ClearQueue);
+            clear(gui);
             gui.save_soon();
             Answer::ok()
         }
@@ -274,6 +274,17 @@ fn execute(gui: &mut Gui, cmd: Command) -> Answer {
             Answer::json(serde_json::json!({ "ok": true, "loop_mode": loop_mode(gui.app.queue.repeat) }))
         }
     }
+}
+
+/// Empty the queue and stop — /queue/clear, and /play's first step — by
+/// the App's direct clear rather than its `C` key: a key goes to whatever
+/// input mode is up (the DJ's opening question, its genre and sources
+/// pickers, its skip-word field), and each of them dropped this one. The
+/// mode stays up; the clear was the remote's, not the user's answer.
+/// See [`crate::tui::app::App::clear_queue`].
+fn clear(gui: &mut Gui) {
+    let effects = gui.app.clear_queue();
+    gui.pend(effects);
 }
 
 /// Stop playback and keep the queue — the jukebox's /stop, as opposed to
@@ -340,13 +351,140 @@ fn loop_mode(repeat: Repeat) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::super::dj::Row;
+    use super::super::{Act, DJ_NAV, Screen};
     use super::*;
     use crate::config::Config;
-    use crate::tui::app::App;
-    use crate::tui::worker::ApiCmd;
+    use crate::tui::app::{App, DjRow, NowTab};
+    use crate::tui::worker::{ApiCmd, DjServerInfo, Event};
+
+    const HOST: &str = "http://localhost:3000";
 
     fn gui() -> Gui {
-        Gui::new(Config::default(), false, App::new(Some("http://localhost:3000".into()), None, None))
+        Gui::new(Config::default(), false, App::new(Some(HOST.into()), None, None))
+    }
+
+    /// A connected session: a server for the DJ to be switched on for.
+    fn session() -> Gui {
+        let mut g = gui();
+        g.app.connected = true;
+        g.app.session.server = HOST.into();
+        g.app.session.server_id = HOST.into();
+        g
+    }
+
+    /// The DJ's server answers its probe, with two libraries: the Auto-DJ
+    /// tab gets its Sources row.
+    fn probed(g: &mut Gui) {
+        let info = DjServerInfo {
+            version: Some("6.33.1".into()),
+            discovery: true,
+            discovery_ready: Some(true),
+            libraries: vec!["Music".into(), "Pods".into()],
+            mood_filters: true,
+            auto_dj: Some(1),
+        };
+        let effects = g.app.apply_event(Event::DjProbed { identity: HOST.into(), info: Some(info) });
+        g.pend(effects);
+    }
+
+    fn key(g: &mut Gui, code: KeyCode) {
+        super::super::handle_key(g, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// The Now Playing screen on its Auto-DJ tab, the tab's cursor on `row`.
+    fn on_the_dj_tab(g: &mut Gui, row: DjRow) {
+        g.act(Act::Screen(Screen::NowPlaying));
+        for _ in 0..8 {
+            if g.app.now_tab() == NowTab::AutoDj {
+                break;
+            }
+            key(g, KeyCode::Tab);
+        }
+        assert_eq!(g.app.now_tab(), NowTab::AutoDj);
+        g.app.dj_panel.row = g.app.dj_panel.rows.iter().position(|r| *r == row).expect("the row is on the tab");
+    }
+
+    /// The remote's clear, then its play, while one of the App's modes is
+    /// up — `up` says whether it still is. The clear empties the queue and
+    /// stops; the play makes the queue its one track and starts that, not
+    /// the old first row; and the mode stays up after each, and through a
+    /// redraw over the new queue: the remote moved the queue under it, it
+    /// did not answer it.
+    fn clear_and_play_past(g: &mut Gui, up: impl Fn(&Gui) -> bool) {
+        assert!(up(g), "the mode is up to begin with");
+        execute(g, Command::QueueAddMany(vec!["Music/a.mp3".into(), "Music/b.mp3".into()]));
+        execute(g, Command::QueuePlayIndex(1));
+        assert!(g.app.now_playing.is_some(), "something is on");
+
+        g.pending.clear();
+        assert_eq!(execute(g, Command::QueueClear).code, 200);
+        assert!(queue_of(g).queue.is_empty(), "the clear cleared: {:?}", queue_of(g).queue);
+        assert!(g.app.now_playing.is_none() && g.app.queue.current.is_none(), "nothing is on");
+        assert!(g.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Stop))), "{:?}", g.pending);
+        assert!(up(g), "the mode is still up after the clear");
+
+        execute(g, Command::QueueAddMany(vec!["Music/a.mp3".into(), "Music/b.mp3".into()]));
+        g.pending.clear();
+        assert_eq!(execute(g, Command::Play("Music/c.mp3".into())).code, 200);
+        assert_eq!(queue_of(g).queue, ["Music/c.mp3"], "the play replaced the queue");
+        assert_eq!(g.app.queue.current, Some(0), "and its row is the one playing");
+        let started: Vec<&str> = g
+            .pending
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Audio(AudioCmd::Play { url, .. }) => Some(url.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(started.as_slice(), [url] if url.contains("c.mp3")), "{started:?}");
+        assert!(up(g), "the mode is still up after the play");
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| super::super::render(frame, g)).unwrap();
+        assert!(up(g), "and drawing it over the new queue keeps it");
+    }
+
+    #[test]
+    fn the_remote_clears_and_plays_past_the_djs_opening_question() {
+        // Switching the DJ on over an empty queue asks how to begin, and
+        // the question has the keyboard. It stays unanswered.
+        let mut g = session();
+        g.act(Act::AutoDj);
+        clear_and_play_past(&mut g, |g| g.app.dj_chooser.is_some());
+        assert!(!g.app.dj_armed(), "the remote answered nothing: the DJ is still off");
+    }
+
+    #[test]
+    fn the_remote_clears_and_plays_past_the_rooms_genres_sheet() {
+        // The room's Genres sheet keeps the App's genre picker up beneath
+        // it, and the two stay up together.
+        let mut g = session();
+        g.act(Act::Nav(DJ_NAV));
+        probed(&mut g);
+        g.act(Act::DjRowKey(Row::Genres));
+        clear_and_play_past(&mut g, |g| g.dj.sheet.is_some() && g.app.dj_panel.genres.is_some());
+    }
+
+    #[test]
+    fn the_remote_clears_and_plays_past_the_now_playing_sources_picker() {
+        let mut g = session();
+        probed(&mut g);
+        on_the_dj_tab(&mut g, DjRow::Sources);
+        key(&mut g, KeyCode::Enter);
+        clear_and_play_past(&mut g, |g| g.app.dj_panel.sources.is_some() && g.screen == Screen::NowPlaying);
+    }
+
+    #[test]
+    fn the_remote_clears_and_plays_past_the_now_playing_skip_word_field() {
+        // What was typed stays in the field.
+        let mut g = session();
+        on_the_dj_tab(&mut g, DjRow::Keywords);
+        key(&mut g, KeyCode::Enter);
+        key(&mut g, KeyCode::Char('l'));
+        key(&mut g, KeyCode::Char('o'));
+        clear_and_play_past(&mut g, |g| g.app.dj_keyword.as_deref() == Some("lo") && g.screen == Screen::NowPlaying);
     }
 
     fn body(answer: &Answer) -> &serde_json::Value {

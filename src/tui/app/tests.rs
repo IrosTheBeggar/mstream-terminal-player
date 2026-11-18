@@ -6406,6 +6406,42 @@ fn editing_the_queue_reannounces_what_now_follows() {
 }
 
 #[test]
+fn the_direct_clear_gets_past_every_mode_the_c_key_waits_for() {
+    // The control face's clear (gui/control.rs) is no key. The DJ's
+    // opening question, its genre and sources pickers and its skip-word
+    // field each have the keyboard, and each dropped `ClearQueue` — which
+    // stays so for the key. The direct clear empties the queue under the
+    // mode, leaves the mode up, and runs what the action funnel runs after
+    // a clear: here, the blend's announced next row taken back.
+    let modes: [(&str, fn(&mut App), fn(&App) -> bool); 4] = [
+        ("the opening question", |app| app.dj_chooser = Some(Default::default()), |app| app.dj_chooser.is_some()),
+        ("the genre picker", |app| app.dj_panel.genres = Some(GenrePicker::default()), |app| app.dj_panel.genres.is_some()),
+        ("the sources picker", |app| app.dj_panel.sources = Some(GenrePicker::default()), |app| app.dj_panel.sources.is_some()),
+        ("the skip-word field", |app| app.dj_keyword = Some("lo".into()), |app| app.dj_keyword.as_deref() == Some("lo")),
+    ];
+    for (mode, open, up) in modes {
+        let mut app = connected_app();
+        let (_, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3"]);
+        assert!(announced.contains("b.mp3"), "{announced}");
+        open(&mut app);
+
+        let keyed = app.handle_action(Action::ClearQueue);
+        assert_eq!(app.queue.items.len(), 2, "{mode} takes the key: {keyed:?}");
+        assert!(app.now_playing.is_some(), "{mode}: a C typed at it stops nothing");
+
+        let effects = app.clear_queue();
+        assert!(app.queue.items.is_empty(), "{mode}: the direct clear empties the queue");
+        assert!(app.now_playing.is_none() && app.queue.current.is_none(), "{mode}: nothing is on");
+        assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Stop))), "{mode}: {effects:?}");
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
+            "{mode}: the engine forgets the old next row: {effects:?}"
+        );
+        assert!(up(&app), "{mode} is still up");
+    }
+}
+
+#[test]
 fn a_handover_moves_the_cursor_without_starting_anything() {
     let mut app = connected_app();
     let (url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
