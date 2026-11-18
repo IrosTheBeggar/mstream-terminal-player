@@ -3636,8 +3636,15 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
                 return Flow::Continue;
             }
             // The App keeps the pointer too: the Now Playing band
-            // lights under it, the TUI's way.
-            gui.app.note_pointer(at);
+            // lights under it, the TUI's way. Not through a guard (a
+            // modal's frame, a lent picker's box): a click there goes no
+            // further, and the band's light promises a seek. Last frame's
+            // registry, the one the pointer is over.
+            if matches!(gui.ui.hit(at), Some(Act::Guard)) {
+                gui.app.pointer = None;
+            } else {
+                gui.app.note_pointer(at);
+            }
             // A grip on the Admin log's lines, or a held arrow or dragged
             // thumb of its bar, lets go before anything reads it once the
             // log is gone, and a press while a grip stands means its

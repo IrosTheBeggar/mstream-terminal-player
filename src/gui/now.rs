@@ -98,9 +98,17 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     // The Auto-DJ tab's pickers are the TUI's own overlay, lent from the
     // view this screen reuses: its Sources row's and its Genres row's —
     // the TUI's genre list, not the room's Genres sheet, which is a kit
-    // modal like the chooser.
-    if gui.app.dj_panel.sources.is_some() || gui.app.dj_panel.genres.is_some() {
-        crate::tui::ui::render_dj_picker(frame, view, &gui.app);
+    // modal like the chooser. The picker's box stands over the screen as
+    // the GUI's own pop-ups do: an overlay, so the cover under it stands
+    // down (clause 7) — the desktop window painted the picture over its
+    // rows — and a click of either button in it goes no further, the
+    // cover's right click (its sheet) included.
+    if (gui.app.dj_panel.sources.is_some() || gui.app.dj_panel.genres.is_some())
+        && let Some(rect) = crate::tui::ui::render_dj_picker(frame, view, &gui.app)
+    {
+        gui.ui.overlay(rect);
+        gui.ui.click(rect, Act::Guard);
+        gui.ui.context(rect, Act::Guard);
     }
 
     // The screen's note, where the TUI's key hints would be (clause 9): the
@@ -113,14 +121,20 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     }
 }
 
-/// The screen goes down — a tab, a nav row, the App leaving its view on
-/// its own — and the App's modes it serves go with it, as their Esc takes
+/// The screen goes down — a top-bar tab; the playing track's sheet's Keep
+/// a copy…, which brings the Library back for its window (the cover's
+/// right click opens the sheet with a mode up, wherever no picker's box
+/// stands over the cover); or the App leaving its view on its own (a sonic
+/// path's Random song, `Event::SonicRandom`, landing after a mode was
+/// opened) — and the App's modes it serves go with it, as their Esc takes
 /// them: the keyword field (a word typed and not yet added is dropped) and
 /// the Auto-DJ tab's pickers (a switch already flipped stays). The TUI's
 /// view keeps every key while one is up, its way out included; here the
-/// pointer can take the screen down from under one, and the mode stayed
-/// up unseen, every later action falling into it — the Library's queue
-/// Clear among them. The room's Genres sheet keeps its own picker.
+/// screen can go down from under one, and the mode stayed up unseen, every
+/// later action falling into it — the Library's queue Clear among them.
+/// `Act::Nav` calls this too, as a safeguard: no nav row is drawn here,
+/// and a mode takes the keys, `D` among them. The room's Genres sheet
+/// keeps its own picker.
 pub(crate) fn leave(gui: &mut Gui) {
     gui.app.dj_keyword = None;
     gui.app.dj_panel.sources = None;
@@ -204,15 +218,19 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::layout::{Position, Rect};
 
     use super::super::{Act, FILES_NAV, Gui, Screen, handle_key, render};
     use crate::api::types::{Genre, Track};
     use crate::config::Config;
     use crate::tui::app::{Action, App, DjRow, KnownServer, NowTab};
+    use crate::tui::art::Art;
     use crate::tui::worker::{DjServerInfo, Event};
 
     const HOST: &str = "http://host:3000";
@@ -220,7 +238,7 @@ mod tests {
     /// A connected session, its server saved and its probe answered with two
     /// libraries: the Auto-DJ tab has its Genres, Keywords and Sources rows,
     /// and a library switched off has an entry to be written to.
-    fn session() -> Gui {
+    pub(crate) fn session() -> Gui {
         let mut gui = Gui::new(Config::default(), false, App::new(Some(HOST.into()), None, None));
         gui.app.connected = true;
         gui.app.session.server = HOST.into();
@@ -241,6 +259,7 @@ mod tests {
             discovery_ready: Some(true),
             libraries: vec!["Music".into(), "Pods".into()],
             mood_filters: true,
+            auto_dj: Some(1),
         };
         let effects = gui.app.apply_event(Event::DjProbed { identity: HOST.into(), info: Some(info) });
         gui.pend(effects);
@@ -251,19 +270,57 @@ mod tests {
         handle_key(gui, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
-    fn screen_text(gui: &mut Gui) -> String {
+    /// One frame at 100×30, row by row, a cell's symbol each.
+    fn screen_cells(gui: &mut Gui) -> Vec<Vec<String>> {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| render(frame, gui)).unwrap();
         let buffer = terminal.backend().buffer();
         let area = *buffer.area();
         (0..area.height)
-            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    fn screen_text(gui: &mut Gui) -> String {
+        screen_cells(gui).iter().map(|row| row.concat()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// The box a picker drew, found on the frame by its own lines — the top
+    /// border wearing `title` after its corner, the corner across from it,
+    /// the bottom corners under them — not by what the screen registered.
+    fn drawn_box(cells: &[Vec<String>], title: &str) -> Option<Rect> {
+        let title: Vec<String> = title.chars().map(String::from).collect();
+        let (y0, at) = cells.iter().enumerate().find_map(|(y, row)| {
+            row.windows(title.len()).position(|run| run == title.as_slice()).map(|at| (y, at))
+        })?;
+        let top = &cells[y0];
+        let x0 = at.checked_sub(1).filter(|&x| top[x] == "┌")?;
+        let x1 = x0 + top[x0..].iter().position(|cell| cell == "┐")?;
+        let y1 = y0 + cells[y0..].iter().position(|row| row[x0] == "└")?;
+        if cells[y1][x1] != "┘" {
+            return None;
+        }
+        Some(Rect::new(x0 as u16, y0 as u16, (x1 + 1 - x0) as u16, (y1 + 1 - y0) as u16))
+    }
+
+    /// Every cell's left click and right click, as the last frame drew them.
+    fn hit_maps(gui: &Gui) -> Vec<(Position, Option<Act>, Option<Act>)> {
+        (0..30)
+            .flat_map(|y| (0..100).map(move |x| Position { x, y }))
+            .map(|at| (at, gui.ui.hit(at), gui.ui.hit_context(at)))
+            .collect()
+    }
+
+    /// A mouse event through the GUI's own loop, the routing the player
+    /// runs: the page owners first, then the surface.
+    fn mouse(gui: &mut Gui, kind: MouseEventKind, at: Position) {
+        let event = MouseEvent { kind, column: at.x, row: at.y, modifiers: KeyModifiers::NONE };
+        let mut ctx = super::super::tests::quiet_ctx(gui);
+        super::super::input(gui, &mut ctx, ratatui::crossterm::event::Event::Mouse(event));
     }
 
     /// Now Playing on its Auto-DJ tab, Enter on `row`: the mode that row opens.
-    fn open(gui: &mut Gui, row: DjRow) {
+    pub(crate) fn open(gui: &mut Gui, row: DjRow) {
         gui.act(Act::Screen(Screen::NowPlaying));
         for _ in 0..8 {
             if gui.app.now_tab() == NowTab::AutoDj {
@@ -276,6 +333,17 @@ mod tests {
         key(gui, KeyCode::Enter);
     }
 
+    /// The cover's one colour, which nothing else on the screen wears.
+    pub(crate) const COVER: [u8; 3] = [255, 0, 255];
+
+    /// A track playing, its cover a solid [`COVER`] in the art cache.
+    pub(crate) fn play_with_a_cover(gui: &mut Gui) {
+        let mut playing = Track { filepath: "Music/a.mp3".into(), metadata: Default::default() };
+        playing.metadata.album_art = Some("cover.jpeg".into());
+        gui.app.now_playing = Some(playing);
+        gui.app.art.insert("cover.jpeg".into(), Art::from_rgb(4, 4, COVER.repeat(16)));
+    }
+
     /// Whether one of the App's modes this screen serves is up.
     fn a_mode_is_up(gui: &Gui) -> bool {
         gui.app.dj_keyword.is_some() || gui.app.dj_panel.sources.is_some() || gui.app.dj_panel.genres.is_some()
@@ -284,10 +352,11 @@ mod tests {
     #[test]
     fn the_views_modes_go_down_with_the_screen_whichever_way_it_is_left() {
         // The TUI's view keeps every key while a mode is up, its way out
-        // included; here the pointer takes the screen down from under one —
-        // the top bar's tabs, a nav row — and the mode stayed up unseen,
-        // taking every action after it: the Library's queue Clear did
-        // nothing.
+        // included; here the pointer takes the screen down from under one
+        // by the top bar's tabs or the playing track's sheet's Keep a copy…
+        // (`Act::Screen` both; `Act::Nav` is a safeguard: no nav row is
+        // drawn here), and the mode stayed up unseen, taking every action
+        // after it: the Library's queue Clear did nothing.
         let ways = [Act::Screen(Screen::Library), Act::Screen(Screen::Stats), Act::Nav(FILES_NAV)];
         for row in [DjRow::Keywords, DjRow::Sources, DjRow::Genres] {
             for way in ways.clone() {
@@ -362,5 +431,116 @@ mod tests {
         gui.forward(Action::Up);
         assert_eq!(gui.screen, Screen::Library);
         assert!(gui.app.dj_keyword.is_none());
+    }
+
+    /// Now Playing with the genre list up, long enough (24 genres, 22 rows
+    /// shown) that its box reaches down over the band, and a track with a
+    /// cover playing at 0:50 of 3:20: one frame drawn, and the box found on
+    /// it.
+    fn a_long_list_up() -> (Gui, Rect) {
+        let mut gui = session();
+        play_with_a_cover(&mut gui);
+        gui.app.status.duration = 200.0;
+        gui.app.status.position = 50.0;
+        open(&mut gui, DjRow::Genres);
+        let genre = |i: u32| Genre { name: format!("Genre {i:02}"), track_count: Some(1) };
+        let effects = gui.app.apply_event(Event::Genres((0..24).map(genre).collect()));
+        gui.pend(effects);
+        let cells = screen_cells(&mut gui);
+        let Some(boxed) = drawn_box(&cells, " Genres · ") else {
+            let text = cells.iter().map(|row| row.concat()).collect::<Vec<_>>().join("\n");
+            panic!("no box for the list:\n{text}");
+        };
+        (gui, boxed)
+    }
+
+    #[test]
+    fn a_pickers_box_stands_over_the_screen_and_keeps_the_clicks_on_it() {
+        // The pickers are the TUI's overlay, lent: the box stands over the
+        // screen as the GUI's own pop-ups do, so the cover under it draws as
+        // the mosaic from the next frame (clause 7) — the desktop window
+        // painted the picture over the rows — and a click of either button
+        // on the box goes no further: not to the transport or the band
+        // beneath, nor to the cover's right click, which opened the playing
+        // track's sheet over the list. The box is the one drawn, border and
+        // all; off it every click is the screen's own (the top bar's tabs
+        // among them), and with the list down so are the box's cells.
+        let (mut gui, boxed) = a_long_list_up();
+        let up = hit_maps(&gui);
+        screen_text(&mut gui);
+        let cover = gui.now.cover.expect("the screen draws its cover");
+        assert!(gui.ui.covered_last_frame(cover), "the cover stands down under the list");
+        // The overlay is the box drawn, to its border: each corner stands
+        // under it, and the cell beyond each edge does not.
+        let (x0, y0, x1, y1) = (boxed.x, boxed.y, boxed.right() - 1, boxed.bottom() - 1);
+        let covered = |gui: &Gui, x, y| gui.ui.covered_last_frame(Rect::new(x, y, 1, 1));
+        for (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+            assert!(covered(&gui, x, y), "the box's corner ({x}, {y}) is the overlay's");
+        }
+        for (x, y) in [(x0 - 1, y0), (x1 + 1, y1), (x1, y0 - 1), (x0, y1 + 1)] {
+            assert!(!covered(&gui, x, y), "({x}, {y}), beyond the box, is no overlay's");
+        }
+        // A right click where the box stands over the cover.
+        let over = boxed.positions().find(|at| cover.contains(*at));
+        let over = over.expect("the box stands over the cover");
+        mouse(&mut gui, MouseEventKind::Down(MouseButton::Right), over);
+        assert!(gui.actions.sheet.is_none(), "a right click on the box opens no sheet beneath it");
+        assert!(gui.app.dj_panel.genres.is_some(), "and the list stays up");
+
+        key(&mut gui, KeyCode::Esc);
+        screen_text(&mut gui);
+        let down = hit_maps(&gui);
+        let guard = Some(Act::Guard);
+        let guarded = down.iter().filter(|(_, click, menu)| *click == guard || *menu == guard);
+        assert_eq!(guarded.count(), 0, "no box with the list down");
+        let (mut beneath, mut cover_menu) = (0, 0);
+        for ((at, click, menu), (_, click_down, menu_down)) in up.iter().zip(&down) {
+            if boxed.contains(*at) {
+                assert_eq!((click, menu), (&guard, &guard), "a click on the box at {at:?}");
+                beneath += usize::from(click_down.is_some());
+                cover_menu += usize::from(*menu_down == Some(Act::NowMore));
+            } else {
+                assert_eq!((click, menu), (click_down, menu_down), "off the box, at {at:?}");
+            }
+        }
+        assert!(beneath > 0, "the box stood over the screen's own controls");
+        assert!(cover_menu > 0, "and over the cover's right click");
+        screen_text(&mut gui);
+        assert!(!gui.ui.covered_last_frame(cover), "and the cover is the picture again");
+        mouse(&mut gui, MouseEventKind::Down(MouseButton::Right), over);
+        assert!(gui.actions.sheet.is_some(), "the cover's right click is its own again");
+    }
+
+    #[test]
+    fn the_band_stays_dark_under_a_pickers_box() {
+        // The band lights under the pointer and marks where a click would
+        // seek (clause 4). A click on a picker's box goes no further, so the
+        // pointer resting on it is no one's: where a long list's box reaches
+        // down over the band, as it does the mirrored band's wave row, the
+        // scrubber beneath stayed lit, its caret promising a seek the box
+        // takes. Off the box the band lights as ever.
+        let (mut gui, boxed) = a_long_list_up();
+        let band = gui.now.band;
+        let scrubber = usize::from(band.bottom() - 1);
+        let caret = crate::tui::ui::glyphs().caret;
+        let lit = |gui: &mut Gui| screen_cells(gui)[scrubber].iter().any(|cell| cell == caret);
+
+        let off = Position { x: boxed.x + 5, y: band.bottom() - 1 };
+        mouse(&mut gui, MouseEventKind::Moved, off);
+        assert_eq!(gui.app.pointer, Some(off), "off the box, on the scrubber");
+        assert!(lit(&mut gui), "the scrubber lights under the pointer");
+
+        // The box's last row, on the band's wave row.
+        let on_band = Position { x: boxed.x + 5, y: boxed.bottom() - 1 };
+        if band.contains(on_band) {
+            mouse(&mut gui, MouseEventKind::Moved, on_band);
+            assert!(!lit(&mut gui), "the scrubber stays dark under the box: no seek there");
+        } else {
+            // The legacy band is one row, under the rule the box ends on.
+            assert!(!crate::tui::ui::glyphs().mirrored, "the box ends over a mirrored band");
+        }
+        // Anywhere on the box, the pointer is no one's.
+        mouse(&mut gui, MouseEventKind::Moved, Position { x: boxed.x + 5, y: boxed.y + 1 });
+        assert_eq!(gui.app.pointer, None, "the pointer on the box is no one's");
     }
 }

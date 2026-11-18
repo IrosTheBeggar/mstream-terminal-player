@@ -2969,7 +2969,10 @@ fn render_dj_overlays(frame: &mut Frame, area: Rect, app: &App) {
 /// Whether a picker row is switched on, however the picker decides that.
 type Chosen<'a> = Box<dyn Fn(&str) -> bool + 'a>;
 
-pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
+/// The list to toggle through — the genres, or the DJ server's libraries —
+/// centred over `area`. Returns the box it drew, for a shell that lends it
+/// (the GUI's Now Playing screen) to register over what it covers.
+pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) -> Option<Rect> {
     let sources_off = app.dj_sources_off();
     let (picker, title, empty, chosen): (&crate::tui::app::GenrePicker, String, &str, Chosen<'_>) =
         if let Some(picker) = app.dj_panel.sources.as_ref() {
@@ -2987,7 +2990,7 @@ pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
         let genres = library.genres;
         (picker, title, "  no genres tagged", Box::new(move |name: &str| genres.iter().any(|g| g == name)))
     } else {
-        return;
+        return None;
     };
 
     let mut lines: Vec<Line> = Vec::new();
@@ -3034,6 +3037,7 @@ pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
     frame.render_widget(Paragraph::new(lines), inner);
+    Some(box_area)
 }
 
 /// "Start Auto DJ with what?" — the two answers and the remember box.

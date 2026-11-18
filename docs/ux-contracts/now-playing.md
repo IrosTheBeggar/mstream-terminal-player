@@ -20,8 +20,9 @@ pointer needs to drive the view: the transport under the cover.
 1. **`0`** from any room; **`0`** or **Esc** back to the Library. The top
    bar has no tab for this screen (hidden 2026-09-27); its **Library** tab
    is the way back, and no tab wears the slab while the screen is up.
-2. A nav row's click leaves for that room. **The digits mean the view's
-   tabs while it is up** (clause 8): the rooms are one `0` away.
+2. The screen draws no nav column: the rooms are one `0` away, and `D`
+   goes straight to the Auto DJ room. **The digits mean the view's tabs
+   while it is up** (clause 8).
 
 ## States & flows
 
@@ -68,10 +69,12 @@ pointer needs to drive the view: the transport under the cover.
 4. **The band seeks on click and lights under the pointer**, as the TUI's
    does: the TUI's own `seek_target` maps the column to the track, and a
    click past the bar, or on a track of unknown length, seeks nowhere.
+   Where a box stands over the band (an Auto-DJ picker's, a modal's
+   frame) a click goes no further, and the band does not light under it.
 5. **The tabs click** — each tab of the strip, or the `‹ ›` arrows when the
    strip does not fit.
-6. **A right click on the cover**, or `m`, is the playing track's sheet
-   (the track-actions contract).
+6. **A right click on the cover** (where no picker's box stands over
+   it), or `m`, is the playing track's sheet (the track-actions contract).
 7. **A cover an overlay touched last frame draws as the mosaic** for that
    frame — the GUI's rule for every cover, since a picture's cells are
    skipped by the terminal writer.
@@ -126,7 +129,7 @@ names the tab, `gui.tips.now` the keys on the footer (ten locales).
 | `render_now_playing`: `Clear`, the title row, then the parts | `render_now_view` over `now_regions(view)` — the title row is the top bar's, and nothing is cleared (the GUI paints its ground) |
 | The cover under the facts | The same path, four rows shorter for the transport (`NowExtras.reserve`), as the mosaic when an overlay stood over it last frame (`NowExtras.mosaic`) |
 | The keys row: hints left, modes right | The modes right (`NowExtras.no_hints`); the note at the left; the GUI footer names the keys |
-| Mouse: a click on the band seeks (`on_mouse`) | `Act::NowSeek(column)` per band column → `seek_target` + `App::seek_to`; `Act::NowTab(i)` / `Act::NowTabStep(±1)` on the strip; `Act::NowMore` on the cover's right click; `App::note_pointer` on every mouse event so the band lights |
+| Mouse: a click on the band seeks (`on_mouse`) | `Act::NowSeek(column)` per band column → `seek_target` + `App::seek_to`; `Act::NowTab(i)` / `Act::NowTabStep(±1)` on the strip; `Act::NowMore` on the cover's right click; `App::note_pointer` on every mouse event off a guard (a picker's box, a modal's frame) so the band lights |
 | No transport (keys only) | `bar::tall_compact` × 3 under the cover: `Act::Prev`, `Act::PlayPause`, `Act::Next` |
 | `fullscreen` toggled by `0`/Esc | Set by the screen: up on `Act::Screen(NowPlaying)`, down on `Act::Screen(Library)` and every `Act::Nav` |
 
@@ -181,15 +184,28 @@ names the tab, `gui.tips.now` the keys on the footer (ten locales).
   are `gui.tips.now` (it names no tab) and the TUI keymap's key-4 line,
   which names the TUI browser's own Discover tab — a different thing that
   keeps its name.
-- **2026-11-17 — The view's modes go down with the screen.** The pointer
-  can take the screen down from under one of the App's modes — a top-bar
-  tab, a nav row, the App leaving its view on its own — and the mode
-  stayed up unseen, every later action falling into it (the Library's
-  queue Clear did nothing). They now close as their Esc closes them
-  (`now::leave`: `Act::Screen` off this screen, `Act::Nav`,
-  `sync_screen`). With it, the Auto-DJ tab's Genres row: it opens the
-  TUI's genre list, not the room's Genres sheet, and the 2026-09-26 fix
-  served only the keyword field and the sources picker — the list was
-  neither drawn nor served, so Space ticked genres nobody could see and
-  Esc left the screen with the list still up. It is lent as the sources
-  picker is now: drawn over the view, the list keys its own.
+- **2026-11-17 — The view's modes go down with the screen.** The screen
+  can go down from under one of the App's modes — a top-bar tab; the
+  playing track's sheet's Keep a copy…, which brings the Library back
+  for its window (the cover's right click opens the sheet with a mode
+  up, wherever no picker's box stands over the cover); or the App
+  leaving its view on its own (a sonic path's Random song, sonic-path
+  clause 2, landing after the mode was opened) — and the mode stayed up
+  unseen, every later action falling into it (the Library's queue Clear
+  did nothing). They now close as their Esc closes them (`now::leave`:
+  `Act::Screen` off this screen, `sync_screen`, and `Act::Nav` as a
+  safeguard — no nav row is drawn here, and a mode takes the keys, `D`
+  among them; entry point 2 no longer names one). With it, the Auto-DJ
+  tab's Genres row: it opens the TUI's genre list, not the room's Genres
+  sheet, and the 2026-09-26 fix served only the keyword field and the
+  sources picker — the list was neither drawn nor served, so Space
+  ticked genres nobody could see and Esc left the screen with the list
+  still up. It is lent as the sources picker is now: drawn over the
+  view, the list keys its own. And either picker's box stands over the
+  screen as the GUI's own pop-ups do. The desktop window's cover board
+  (`covers::Board`) paints its pictures after the cells, and it painted
+  the playing track's cover over either picker's rows; the box is an
+  overlay now, and the cover stands down under it (clause 7). A click of
+  either button on the box goes no further — a right click there opened
+  the playing track's sheet over the list — and the band does not light
+  under it (clause 4).
