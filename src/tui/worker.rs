@@ -482,6 +482,10 @@ pub struct DjServerInfo {
     /// The server has mood scores to filter by (`moodFilters`): Smart
     /// filters can be kept to there.
     pub mood_filters: bool,
+    /// `features.autoDj` as a probe reported it (1: random-songs takes
+    /// `lessLike`, auto-dj clause 23); `None` while no probe has answered —
+    /// the session's provisional answer knows nothing of it.
+    pub auto_dj: Option<u32>,
 }
 
 impl DjServerInfo {
@@ -2714,6 +2718,11 @@ struct DjLearner {
     /// By server, then by lane: a preview's lane and the running lane's
     /// never read or write each other's.
     suppressed: std::collections::HashMap<String, std::collections::HashMap<u64, std::collections::HashSet<String>>>,
+    /// Seed paths a lane found gone or not analysed (clause 31, decision 29),
+    /// by server, then by lane as `suppressed` is: left out of `similarTo`
+    /// while the rest of the pool still goes. A pinned seed whose file went
+    /// would otherwise cost every lane its sonic, silently.
+    dead: std::collections::HashMap<String, std::collections::HashMap<u64, std::collections::HashSet<String>>>,
 }
 
 fn learner() -> std::sync::MutexGuard<'static, DjLearner> {
@@ -2728,6 +2737,20 @@ impl DjLearner {
         let Some(map) = body.as_object_mut() else { return dropped };
         let rejected = self.rejected.get(identity);
         let suppressed = self.suppressed.get(identity).and_then(|lanes| lanes.get(&epoch));
+        // The lane's dead seeds leave the pool; the pool goes whole or not
+        // at all, so with none left both of its keys go.
+        if let Some(dead) = self.dead.get(identity).and_then(|lanes| lanes.get(&epoch))
+            && let Some(serde_json::Value::Array(seeds)) = map.get_mut("similarTo")
+        {
+            seeds.retain(|seed| !seed.as_str().is_some_and(|path| dead.contains(path)));
+            if seeds.is_empty() {
+                for key in SONIC_KEYS {
+                    if map.remove(key).is_some() {
+                        dropped.push(key.to_string());
+                    }
+                }
+            }
+        }
         map.retain(|key, _| {
             let gone = rejected.is_some_and(|r| r.contains(key))
                 || suppressed.is_some_and(|s| s.contains(key));
@@ -2758,8 +2781,18 @@ impl DjLearner {
         }
     }
 
+    /// Seeds a lane found gone or not analysed: never sent again in that
+    /// lane, the rest of its pool still asked for. Lanes kept as
+    /// `suppress` keeps them.
+    fn mark_dead(&mut self, identity: &str, epoch: u64, paths: &[String]) {
+        let lanes = self.dead.entry(identity.to_string()).or_default();
+        lanes.retain(|lane, _| *lane & PREVIEW_LANE != 0 || *lane == epoch || epoch & PREVIEW_LANE != 0);
+        lanes.entry(epoch).or_default().extend(paths.iter().cloned());
+    }
+
     /// A lane takes back what it let go of: its sonic settings changed, so
-    /// the pool gets another go with them.
+    /// the pool gets another go with them. A dead seed stays dead: it
+    /// would only fail again.
     fn unsuppress(&mut self, identity: &str, epoch: u64) {
         if let Some(lanes) = self.suppressed.get_mut(identity) {
             lanes.remove(&epoch);
@@ -2779,6 +2812,35 @@ impl DjLearner {
 /// `retrySonic`.
 pub(crate) fn dj_retry_sonic(identity: &str, epoch: u64) {
     learner().unsuppress(identity, epoch);
+}
+
+/// The seeds a running lane found gone or not analysed (clause 31): what
+/// the App reads as rows Stay close cannot stay close to (decision 42) —
+/// that lane's alone, never a Preview's (`preview_lane`). Empty for a
+/// lane that found none.
+pub(crate) fn dj_dead_seeds(identity: &str, epoch: u64) -> std::collections::HashSet<String> {
+    learner().dead.get(identity).and_then(|lanes| lanes.get(&epoch)).cloned().unwrap_or_default()
+}
+
+/// The App's tests' stand-in for a degrade (clause 30): the lane's pool
+/// let go of, as `autodj_pick` lets it go.
+#[cfg(test)]
+pub(crate) fn dj_suppress_pool(identity: &str, epoch: u64) {
+    learner().suppress(identity, epoch, &SONIC_KEYS);
+}
+
+/// Whether a lane's pool is let go of, for the App's tests.
+#[cfg(test)]
+pub(crate) fn dj_pool_suppressed(identity: &str, epoch: u64) -> bool {
+    learner().all_suppressed(identity, epoch, &SONIC_KEYS)
+}
+
+/// The App's tests' stand-in for a refusal found (clause 31): the seeds a
+/// lane's server refused, as `autodj_pick` marks them.
+#[cfg(test)]
+pub(crate) fn dj_mark_dead(identity: &str, epoch: u64, paths: &[&str]) {
+    let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+    learner().mark_dead(identity, epoch, &paths);
 }
 
 /// The key a Joi rejection names — `"<key>" is not allowed`, its quotes
@@ -2850,12 +2912,58 @@ fn classify(err: &ApiError, sonic_asked: bool) -> Refusal {
     }
 }
 
+/// Whether a refusal says a seed has no vector yet.
+fn names_unscanned(err: &ApiError) -> bool {
+    match err {
+        ApiError::Forbidden(message) | ApiError::NotFound(message) | ApiError::Server { message, .. } => {
+            message.to_lowercase().contains("analyzed")
+        }
+        _ => false,
+    }
+}
+
+/// The seeds a refused pool is to be blamed on (clause 31, decision 29): the
+/// one seed a 404 or an "analyzed" body came back for — the path form
+/// refuses seed by seed, so a lone one is the culprit; of several, each
+/// one the server refuses on its own — gone (a 404) or not analysed —
+/// asked once apiece. Empty when none is found to blame, and the pool is
+/// then let go of as before.
+async fn dead_seeds(client: &Client, sent: &serde_json::Value, err: &ApiError) -> Vec<String> {
+    let seeds: Vec<String> = sent
+        .get("similarTo")
+        .and_then(serde_json::Value::as_array)
+        .map(|seeds| seeds.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let gone = matches!(err, ApiError::NotFound(_));
+    match seeds.len() {
+        0 => Vec::new(),
+        1 => if gone || names_unscanned(err) { seeds } else { Vec::new() },
+        _ if gone || names_unscanned(err) => {
+            let mut dead = Vec::new();
+            for seed in seeds {
+                let alone = serde_json::json!({"similarTo": [seed], "minSimilarity": dj::SONIC_MIN_SIMILARITY});
+                match client.random_songs_raw_async(alone).await {
+                    Err(ApiError::NotFound(_)) => dead.push(seed),
+                    Err(err) if names_unscanned(&err) => dead.push(seed),
+                    _ => {}
+                }
+            }
+            dead
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// One Auto DJ turn against the DJ's server: the ask, less whatever the
 /// server is known not to take; a schema rejection learned and retried; a
-/// failing pool let go of for the lane and the same pick taken without it;
-/// the keyword filter over the answer, re-asked with the fresh cursor when
-/// it blocked everything, five times, then the last answer whole (clauses
-/// 25, 26, 30). Never an error: the App reads the failure and speaks.
+/// seed that is gone or not analysed found and left out of the lane's pool
+/// (clause 31); a failing pool let go of for the lane and the same pick
+/// taken without it;
+/// the keyword filter and the lane's pass-over over the answer, re-asked
+/// with the fresh cursor when they kept everything out, five times, then
+/// the last answer whole but for a song the lane passes over, while
+/// anything else is left (clauses 25, 26, 30; decision 39). Never an
+/// error: the App reads the failure and speaks.
 pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked {
     let identity = request.identity.as_str();
     let epoch = request.epoch;
@@ -2867,6 +2975,8 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
     let mut note: Option<DjNote> = None;
     // The last answer blocked in full, and whether its body carried the pool.
     let mut last: Option<(crate::api::types::RandomSongsResponse, bool)> = None;
+    // A refused pool's seeds are looked into once a pick (clause 31).
+    let mut probed = false;
     let mut attempts = 0;
     while attempts < 5 {
         attempts += 1;
@@ -2900,22 +3010,54 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
         match answer {
             Ok(response) => {
                 let sonic = sent_with_pool(&sent);
+                // What the negatives did, one line an answer (clause 63).
+                if let Some(echo) = &response.less_like {
+                    let like = echo.avoided.iter().filter(|like| **like).count();
+                    let threshold = echo.threshold.map_or_else(|| "—".to_string(), |t| format!("{t:.2}"));
+                    dj_log(format!(
+                        "[dj] {name}: lessLike used {}, ignored {}, threshold {threshold}, avoided {like} of {} (like a skip)",
+                        echo.used,
+                        echo.ignored,
+                        echo.avoided.len()
+                    ));
+                }
                 if response.songs.is_empty() {
                     return Picked { failure: Some(DjFailure::NoMatch), ..Picked { songs: Vec::new(), ignore_list: response.ignore_list, sonic, note, pool: response.sonic, failure: None } };
                 }
-                let accepted: Vec<Track> =
-                    response.songs.iter().filter(|t| !ask.keyword_blocked(t)).cloned().collect();
+                let accepted: Vec<Track> = response
+                    .songs
+                    .iter()
+                    .filter(|t| !ask.keyword_blocked(t) && !ask.passes_over(t))
+                    .cloned()
+                    .collect();
                 if !accepted.is_empty() {
                     return Picked { songs: accepted, ignore_list: response.ignore_list, sonic, note, pool: response.sonic, failure: None };
                 }
-                // Blocked in full: the fresh cursor means the next answer
+                // Kept out in full: the fresh cursor means the next answer
                 // is different candidates.
-                dj_log(format!("[dj] {name}: every song of the answer was a keyword hit — asking again"));
+                dj_log(format!(
+                    "[dj] {name}: every song of the answer was kept out — a keyword hit, or a song this lane passes over — asking again"
+                ));
                 ask.ignore_list = response.ignore_list.clone();
                 last = Some((response, sonic));
             }
             Err(err) => match classify(&err, ask.sonic_asked()) {
                 Refusal::Degrade(say) => {
+                    // One seed that is gone or not analysed fails the whole
+                    // pool: find it and leave it out — every one of them,
+                    // when all are — rather than let the lane's sonic go
+                    // with it (decision 29). The next body is built without.
+                    if !probed {
+                        probed = true;
+                        let dead = dead_seeds(client, &sent, &err).await;
+                        if !dead.is_empty() {
+                            for path in &dead {
+                                dj_log(format!("[dj] {name}: {path} is gone or not analysed — left out of this lane's pool"));
+                            }
+                            learner().mark_dead(identity, epoch, &dead);
+                            continue;
+                        }
+                    }
                     dj_log(format!("[dj] {name}: the pool cannot be honoured ({err}) — playing without it this lane"));
                     learner().suppress(identity, epoch, &SONIC_KEYS);
                     if let Some(say) = say {
@@ -2939,16 +3081,21 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
         }
     }
     // Every try was blocked in full: the last answer whole, rather than a
-    // queue stalled forever by an over-eager filter (clause 26).
+    // queue stalled forever by an over-eager filter (clause 26) — whole but
+    // for a song the lane passes over, while anything else is left
+    // (decision 39).
     match last {
-        Some((response, sonic)) => Picked {
-            songs: response.songs,
-            ignore_list: response.ignore_list,
-            sonic,
-            note,
-            pool: response.sonic,
-            failure: None,
-        },
+        Some((response, sonic)) => {
+            let rest: Vec<Track> = response.songs.iter().filter(|t| !ask.passes_over(t)).cloned().collect();
+            Picked {
+                songs: if rest.is_empty() { response.songs } else { rest },
+                ignore_list: response.ignore_list,
+                sonic,
+                note,
+                pool: response.sonic,
+                failure: None,
+            }
+        }
         None => Picked::failed(ask.ignore_list, DjFailure::NoMatch),
     }
 }
@@ -3015,13 +3162,17 @@ pub(crate) async fn dj_probe(client: &Client) -> Option<DjServerInfo> {
             discovery_ready: info.features.discovery_ready,
             libraries: info.user.vpaths,
             mood_filters: info.features.mood_filters,
+            auto_dj: Some(info.features.auto_dj),
         }),
+        // A server that answers only the flat ping predates `lessLike`
+        // (mStream #1108 came long after the layered `/api/`).
         Err(_) => client.ping_async().await.ok().map(|ping| DjServerInfo {
             version: None,
             discovery: ping.discovery,
             discovery_ready: None,
             libraries: ping.vpaths,
             mood_filters: ping.mood_filters,
+            auto_dj: Some(0),
         }),
     }
 }
@@ -4382,6 +4533,287 @@ mod tests {
         assert!(dj_genres_event(GenreSource::Tag, Err(ApiError::Unauthorized)).is_err());
         let failed = dj_genres_event(GenreSource::Tag, Err(ApiError::Network("down".into()))).expect("said in the sheet");
         assert!(matches!(failed, Event::GenresFailed(_)));
+    }
+
+    #[test]
+    fn a_dead_seed_leaves_the_pool_and_the_last_one_takes_the_threshold_with_it() {
+        let mut learned = DjLearner::default();
+        let body = |seeds: &[&str]| serde_json::json!({"limit": 4, "similarTo": seeds, "minSimilarity": 0.55});
+        learned.mark_dead("http://s", 7, &["gone".to_string()]);
+        let mut pool = body(&["gone", "here"]);
+        assert!(learned.filter("http://s", 7, &mut pool).is_empty(), "the pool still goes");
+        assert_eq!(pool["similarTo"], serde_json::json!(["here"]));
+        assert_eq!(pool["minSimilarity"], 0.55);
+        let mut alone = body(&["gone"]);
+        let mut dropped = learned.filter("http://s", 7, &mut alone);
+        dropped.sort();
+        assert_eq!(dropped, ["minSimilarity", "similarTo"], "whole or not at all");
+        assert_eq!(alone, serde_json::json!({"limit": 4}));
+        // Per lane, and the preview's lane apart.
+        let mut next_lane = body(&["gone"]);
+        assert!(learned.filter("http://s", 8, &mut next_lane).is_empty());
+        let mut preview = body(&["gone"]);
+        assert!(learned.filter("http://s", preview_lane(7), &mut preview).is_empty());
+        learned.mark_dead("http://s", preview_lane(7), &["other".to_string()]);
+        let mut lane = body(&["gone"]);
+        learned.filter("http://s", 7, &mut lane);
+        assert!(lane.get("similarTo").is_none(), "the preview's mark leaves the lane's standing");
+
+        // Every seed found dead lets nothing go lane-wide: a later pick's
+        // new positives still go, threshold and all (decision 29).
+        assert!(!learned.all_suppressed("http://s", 7, &SONIC_KEYS));
+        let mut later = body(&["fresh"]);
+        assert!(learned.filter("http://s", 7, &mut later).is_empty());
+        assert_eq!(later["similarTo"], serde_json::json!(["fresh"]));
+        assert_eq!(later["minSimilarity"], 0.55);
+        // A retry of the pool keeps what is known dead.
+        learned.unsuppress("http://s", 7);
+        let mut again = body(&["gone", "fresh"]);
+        learned.filter("http://s", 7, &mut again);
+        assert_eq!(again["similarTo"], serde_json::json!(["fresh"]));
+        // A new running lane supersedes the old one's marks.
+        learned.mark_dead("http://s", 8, &["x".to_string()]);
+        let mut old = body(&["gone"]);
+        assert!(learned.filter("http://s", 7, &mut old).is_empty(), "lane 7's marks went with it");
+    }
+
+    /// `test_server`, but answered by the request's body: random-songs
+    /// with a pool refuses a seed whose path says it is gone or unscanned,
+    /// as mStream does (a 404 for the first; a 400 naming "analyzed").
+    fn seed_server(bodies: Arc<std::sync::Mutex<Vec<serde_json::Value>>>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let bodies = bodies.clone();
+                thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let head_end = loop {
+                        if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break at + 4;
+                        }
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&request[..head_end]).to_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|n| n.trim().parse().ok())
+                        .unwrap_or(0);
+                    while request.len() < head_end + length {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&request[head_end..head_end + length]).unwrap_or_default();
+                    bodies.lock().unwrap().push(body.clone());
+                    let seeds: Vec<String> = body["similarTo"]
+                        .as_array()
+                        .map(|s| s.iter().filter_map(|p| p.as_str().map(str::to_string)).collect())
+                        .unwrap_or_default();
+                    let (status, answer) = if seeds.iter().any(|p| p.contains("gone")) {
+                        ("404 Not Found", r#"{"error":"Track not found"}"#.to_string())
+                    } else if seeds.iter().any(|p| p.contains("raw")) {
+                        ("400 Bad Request", r#"{"error":"Sonic seed track has not been analyzed yet"}"#.to_string())
+                    } else {
+                        let sonic = if seeds.is_empty() { "" } else { r#","sonic":{"similarity":0.7,"poolSize":9}"# };
+                        ("200 OK", format!(r#"{{"songs":[{{"filepath":"demo/new.mp3"}}],"ignoreList":[1]{sonic}}}"#))
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes());
+                });
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn a_pick_finds_its_dead_seeds_and_keeps_the_rest_of_the_pool() {
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = seed_server(bodies.clone());
+        let client = Client::new(&base).unwrap();
+        let ask = |seeds: &[&str]| dj::Ask {
+            settings: dj::Settings::default(),
+            library: Default::default(),
+            playing_bpm: None,
+            playing_key: None,
+            camelot_anchor: None,
+            sonic_seeds: seeds.iter().map(|s| s.to_string()).collect(),
+            less_like: vec!["demo/skip.mp3".into()],
+            pass_over: Vec::new(),
+            ignore_list: Vec::new(),
+            recent_artists: Vec::new(),
+            opener: false,
+            server_version: None,
+            mood_scores: false,
+        };
+        let request = |seeds: &[&str]| DjRequest { identity: base.clone(), reach: None, epoch: 5, ask: ask(seeds) };
+        let pick = |request: &DjRequest| crate::runtime::block_on(autodj_pick(&client, request)).expect("the runtime");
+
+        // Several seeds, one gone and one unscanned: each asked about alone,
+        // both left out, the pool kept for the one that is fine.
+        let picked = pick(&request(&["demo/ok.mp3", "demo/gone.mp3", "demo/raw.mp3"]));
+        assert!(picked.failure.is_none() && picked.note.is_none(), "{picked:?}");
+        assert!(picked.sonic, "the pool went, without its dead seeds");
+        let sent: Vec<serde_json::Value> = std::mem::take(&mut *bodies.lock().unwrap());
+        let probes: Vec<&serde_json::Value> = sent.iter().filter(|b| b.get("limit").is_none()).collect();
+        assert_eq!(probes.len(), 3, "one probe a seed: {sent:?}");
+        let last = sent.last().unwrap();
+        assert_eq!(last["similarTo"], serde_json::json!(["demo/ok.mp3"]));
+        assert_eq!(last["minSimilarity"], 0.55);
+        assert_eq!(last["lessLike"], serde_json::json!(["demo/skip.mp3"]));
+        assert!(!learner().all_suppressed(&base, 5, &SONIC_KEYS), "the lane keeps its sonic");
+
+        // The one seed gone: no probe, and the pick goes without the pool
+        // this once — the next one's new seed still rides (decision 29).
+        let picked = pick(&request(&["demo/gone-too.mp3"]));
+        assert!(picked.failure.is_none() && picked.note.is_none() && !picked.sonic, "{picked:?}");
+        let sent: Vec<serde_json::Value> = std::mem::take(&mut *bodies.lock().unwrap());
+        assert_eq!(sent.len(), 2, "the refusal, then the pick without the pool: {sent:?}");
+        assert!(sent[1].get("similarTo").is_none() && sent[1].get("minSimilarity").is_none());
+        assert_eq!(sent[1]["lessLike"], serde_json::json!(["demo/skip.mp3"]), "the negatives still go");
+        let picked = pick(&request(&["demo/gone-too.mp3", "demo/next.mp3"]));
+        assert!(picked.sonic, "a later pick's live seed keeps the pool");
+        let sent: Vec<serde_json::Value> = std::mem::take(&mut *bodies.lock().unwrap());
+        assert_eq!(sent.len(), 1, "the dead seed was never sent again: {sent:?}");
+        assert_eq!(sent[0]["similarTo"], serde_json::json!(["demo/next.mp3"]));
+
+        // One unscanned seed sent alone is the one to blame — the path form
+        // refuses seed by seed — so it goes as a gone one does: no probe,
+        // that pick without the pool, and the lane keeps its sonic. A lone
+        // pinned More like row with no vector would otherwise cost every
+        // lane its pool (clause 31, decision 29).
+        let lone = DjRequest { epoch: 6, ..request(&["demo/raw.mp3"]) };
+        let picked = pick(&lone);
+        assert!(picked.failure.is_none() && picked.note.is_none() && !picked.sonic, "{picked:?}");
+        let sent: Vec<serde_json::Value> = std::mem::take(&mut *bodies.lock().unwrap());
+        assert_eq!(sent.len(), 2, "the refusal, then the pick without the pool: {sent:?}");
+        assert!(sent[1].get("similarTo").is_none() && sent[1].get("minSimilarity").is_none());
+        assert_eq!(sent[1]["lessLike"], serde_json::json!(["demo/skip.mp3"]), "the negatives still go");
+        assert!(!learner().all_suppressed(&base, 6, &SONIC_KEYS), "the lane keeps its sonic");
+        let later = DjRequest { epoch: 6, ..request(&["demo/raw.mp3", "demo/next.mp3"]) };
+        let picked = pick(&later);
+        assert!(picked.failure.is_none() && picked.sonic, "a fresh analysed seed keeps the pool: {picked:?}");
+        let sent: Vec<serde_json::Value> = std::mem::take(&mut *bodies.lock().unwrap());
+        assert_eq!(sent.len(), 1, "the unscanned seed was never sent again: {sent:?}");
+        assert_eq!(sent[0]["similarTo"], serde_json::json!(["demo/next.mp3"]));
+        assert_eq!(sent[0]["minSimilarity"], 0.55);
+    }
+
+    /// `seed_server`'s pattern, answered by the count of requests so far
+    /// (from 0): each request read whole, then the body `answer` names.
+    fn counted_server(answer: fn(usize) -> &'static str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = count.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let calls = calls.clone();
+                thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let head_end = loop {
+                        if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break at + 4;
+                        }
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&request[..head_end]).to_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|n| n.trim().parse().ok())
+                        .unwrap_or(0);
+                    while request.len() < head_end + length {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let body = answer(calls.fetch_add(1, Ordering::SeqCst));
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes());
+                });
+            }
+        });
+        (base, count)
+    }
+
+    #[test]
+    fn a_pick_passes_over_the_lanes_skipped_blend_and_its_last_answer_leaves_it_out_while_it_can() {
+        use std::sync::atomic::Ordering;
+        const AGAIN: &str = r#"{"songs":[{"filepath":"demo/skipped.mp3"}],"ignoreList":[1]}"#;
+        const NEW: &str = r#"{"songs":[{"filepath":"demo/new.mp3"}],"ignoreList":[1,2]}"#;
+        const BOTH: &str = r#"{"songs":[{"filepath":"demo/skipped.mp3"},{"filepath":"demo/live.mp3"}],"ignoreList":[1]}"#;
+        let ask = |pass_over: &[&str], keywords: &[&str]| dj::Ask {
+            settings: dj::Settings {
+                keyword_filter: !keywords.is_empty(),
+                keywords: keywords.iter().map(|k| k.to_string()).collect(),
+                ..Default::default()
+            },
+            library: Default::default(),
+            playing_bpm: None,
+            playing_key: None,
+            camelot_anchor: None,
+            sonic_seeds: Vec::new(),
+            less_like: Vec::new(),
+            pass_over: pass_over.iter().map(|p| p.to_string()).collect(),
+            ignore_list: Vec::new(),
+            recent_artists: Vec::new(),
+            opener: false,
+            server_version: None,
+            mood_scores: false,
+        };
+        let pick = |base: &str, ask: dj::Ask| {
+            let client = Client::new(base).unwrap();
+            let request = DjRequest { identity: base.to_string(), reach: None, epoch: 5, ask };
+            crate::runtime::block_on(autodj_pick(&client, &request)).expect("the runtime")
+        };
+        let paths = |picked: &Picked| picked.songs.iter().map(|t| t.filepath.clone()).collect::<Vec<_>>();
+
+        // The skipped blend offered again: passed over — in either path
+        // form — and asked again with the fresh cursor.
+        let (base, calls) = counted_server(|n| if n == 0 { AGAIN } else { NEW });
+        let picked = pick(&base, ask(&["/demo/skipped.mp3"], &[]));
+        assert_eq!(paths(&picked), ["demo/new.mp3"], "passed over, and asked again with the fresh cursor");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(picked.failure.is_none());
+
+        // Every try kept out in full, a keyword hit beside it: the last
+        // answer whole but for the passed-over song, while anything else is
+        // left.
+        let (base, calls) = counted_server(|_| BOTH);
+        let picked = pick(&base, ask(&["demo/skipped.mp3"], &["live"]));
+        assert_eq!(calls.load(Ordering::SeqCst), 5, "five tries");
+        assert_eq!(paths(&picked), ["demo/live.mp3"], "whole but for the passed-over song");
+        assert!(picked.failure.is_none());
+
+        // Nothing else is left: the answer whole, rather than a stall.
+        let (base, _) = counted_server(|_| AGAIN);
+        let picked = pick(&base, ask(&["demo/skipped.mp3"], &[]));
+        assert_eq!(paths(&picked), ["demo/skipped.mp3"], "nothing else is left: the answer whole, rather than a stall");
+        assert!(picked.failure.is_none());
     }
 
     #[test]

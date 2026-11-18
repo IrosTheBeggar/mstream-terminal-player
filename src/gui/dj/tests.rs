@@ -7,15 +7,17 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Position;
 
-use super::super::{Act, DJ_NAV, FILES_NAV, Gui, Screen, render};
-use super::{Item, QuickAct, Row, layout};
+use super::super::{Act, DJ_NAV, FILES_NAV, Gui, List, RowVerb, SEARCH_NAV, Screen, render};
+use super::{Item, Layout, QuickAct, Row, layout};
 use crate::api::types::{
-    Genre, GenreSource, GenreSources, MoodFilter, MoodLevel, MoodScale, SonicReport, Track, TrackMetadata,
+    Genre, GenreSource, GenreSources, MoodFilter, MoodLevel, MoodScale, Ping, SonicReport, Track, TrackMetadata,
 };
 use crate::config::{self, Config};
 use crate::dj::{self, EmptyQueueStart, GenreMode, SonicAnchor};
 use crate::kit::theme::th;
-use crate::tui::app::{App, Capture, DjMark, Effect, KnownServer, Origin, Queued};
+use crate::tui::app::{
+    App, Capture, DjEdit, DjMark, Effect, Entry, KnownServer, Origin, Queued, SeedFrom, SeedKey, SeedList,
+};
 use crate::tui::worker::{ApiCmd, DjNote, DjServerInfo, Event};
 
 const HOST: &str = "http://host:3000";
@@ -84,6 +86,7 @@ fn info(version: &str) -> DjServerInfo {
         discovery_ready: Some(true),
         libraries: vec!["Music".into()],
         mood_filters: true,
+        auto_dj: Some(1),
     }
 }
 
@@ -197,6 +200,34 @@ fn opener_asked(gui: &Gui) -> bool {
     gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AutoDj(request)) if request.ask.opener))
 }
 
+/// A seed of the room's server.
+fn seed_key(path: &str) -> SeedKey {
+    SeedKey::new(&Origin { server: HOST.into(), peer: None }, path)
+}
+
+/// The lists the A boards drew, newest first: More like — SkyWalk
+/// (pinned), Crystalstair, Fayz, Better Days (pinned), Looking Back; Less
+/// like — Circles, Heartbeat (pinned). Built with the model's own moves:
+/// the DJ's picks, the user's adds, a learned skip.
+fn a_board_lists(gui: &mut Gui) {
+    let now = crate::clock::Instant::now();
+    let seeds = &mut gui.app.seeds;
+    let (b, c) = ("Boukmanflow", "Color Out");
+    let pick = |seeds: &mut crate::tui::app::Seeds, path: &str, title: &str, artist: &str| {
+        seeds.push_pick(seed_key(path), song(path, title, artist), SeedFrom::Pick, now);
+    };
+    let add = |seeds: &mut crate::tui::app::Seeds, list: SeedList, path: &str, title: &str, artist: &str| {
+        seeds.add_manual(list, seed_key(path), song(path, title, artist), now);
+    };
+    pick(seeds, "lib/looking-back.mp3", "Looking Back", b);
+    add(seeds, SeedList::MoreLike, "lib/better-days.mp3", "Better Days", b);
+    pick(seeds, "lib/fayz.mp3", "Fayz", "ALM");
+    pick(seeds, "lib/crystalstair.mp3", "Crystalstair", b);
+    add(seeds, SeedList::MoreLike, "lib/skywalk.mp3", "SkyWalk", b);
+    add(seeds, SeedList::LessLike, "lib/heartbeat.mp3", "Heartbeat", c);
+    seeds.quick_skip(&seed_key("lib/circles.mp3"), &song("lib/circles.mp3", "Circles", c), true, now);
+}
+
 #[test]
 #[ignore = "prints the room for a look"]
 fn dump_dj() {
@@ -232,55 +263,125 @@ fn dump_dj() {
     key(&mut gui, KeyCode::Esc);
     gui.act(Act::DjQuick(QuickAct::Toggle));
     println!("{}", draw(&mut gui).join("\n"));
+    key(&mut gui, KeyCode::Esc);
+    // The Seeds sheet as the A boards drew it: Drift, a row's menu, Stay
+    // close.
+    a_board_lists(&mut gui);
+    gui.act(Act::DjRowKey(Row::Seeds));
+    println!("{}", draw(&mut gui).join("\n"));
+    let rows = draw(&mut gui);
+    let (x, y) = find(&rows, "Looking Back").expect("the row");
+    let menu = gui.ui.hit(Position { x: x + 57, y }).expect("its [⋯]");
+    gui.act(menu);
+    println!("{}", draw(&mut gui).join("\n"));
+    key(&mut gui, KeyCode::Esc);
+    super::edit(&mut gui, DjEdit::SeedMode(SonicAnchor::Locked));
+    println!("{}", draw(&mut gui).join("\n"));
+    println!("{}", draw_sized(&mut gui, 100, 24).join("\n"));
 }
 
 // ── The room ────────────────────────────────────────────────────────────────
+
+/// E-AutoDJ, the room's cells 17–63 on rows 2–24 at 100×30 (the DJ armed,
+/// as the board drew it).
+const E_AUTODJ: [&str; 23] = [
+    "Auto DJ                         Preview picks ▸",
+    "╭─────────────────────────────────────────────╮",
+    "│                    Stop                     │",
+    "╰─────────────────────────────────────────────╯",
+    "First song                                Ask ▾",
+    "Batch                                 4 songs ▸",
+    "Artist cooldown                     3 artists ▸",
+    "                                               ",
+    "FILTERS                                        ",
+    "Smart filters                             Any ▸",
+    "Genres                                    Any ▸",
+    "Rating                                    Any ▸",
+    "Length                                    Any ▸",
+    "Skip words                                Off ▸",
+    "                                               ",
+    "MATCH                                          ",
+    "Sonic similarity                          55% ▸",
+    "  Learn from skips                        [ ]  ",
+    "    Skipping a song will prevent similar songs ",
+    "    from being selected                        ",
+    "  Seeds                                       ▸",
+    "Beat matching                             Off ▸",
+    "Harmonic mixing                           [ ]  ",
+];
+
+/// Whether a cell is drawn in the TEXT colour: the terminal's own, or the
+/// theme's where it owns the ground.
+fn is_text(color: ratatui::style::Color) -> bool {
+    color == ratatui::style::Color::Reset || color == th().text
+}
+
+/// The frame drawn at 100×30, with its styles.
+fn buffer(gui: &mut Gui) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| render(frame, gui)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn bold(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> bool {
+    buffer[(x, y)].modifier.contains(ratatui::style::Modifier::BOLD)
+}
 
 #[test]
 fn the_room_is_one_row_a_setting_on_its_twenty_three_rows() {
     let _en = english();
     let mut gui = room_gui();
+    gui.app.queue.items = vec![queued("a.mp3", None)];
+    gui.act(Act::DjStartStop);
+    let rows = draw(&mut gui);
+    // E-AutoDJ: the name and Preview, the button, how the session runs,
+    // FILTERS and MATCH — Learn from skips and Seeds indented under Sonic
+    // similarity, Learn's line under its name — the room's 23 rows whole,
+    // the last on its last. No Harmonic line: the room needs every row.
+    for (i, want) in E_AUTODJ.iter().enumerate() {
+        let y = 2 + i as u16;
+        assert_eq!(room(&rows, y), *want, "row {y}:\n{}", rows.join("\n"));
+    }
+    // Its colours: the sub-rows' names TEXT two cells in, the switch and the
+    // chevron DIM, Learn's line DIM four cells in, the headers DIM.
+    let b = buffer(&mut gui);
+    assert!(is_text(b[(19, 19)].fg) && is_text(b[(19, 22)].fg), "the sub-rows' names");
+    assert_eq!((b[(59, 19)].fg, b[(21, 20)].fg, b[(21, 21)].fg, b[(63, 22)].fg), (th().dim, th().dim, th().dim, th().dim));
+    assert_eq!((b[(17, 10)].fg, b[(17, 17)].fg), (th().dim, th().dim), "FILTERS and MATCH");
+    assert_eq!(b[(59, 18)].fg, th().ok, "55%");
+    // Each row takes its click across its own cells; Learn's line takes none.
+    assert_eq!(gui.ui.hit(Position { x: 17, y: 19 }), Some(Act::DjRow(Row::Learn)));
+    assert_eq!(gui.ui.hit(Position { x: 63, y: 22 }), Some(Act::DjRow(Row::Seeds)));
+    assert_eq!(gui.ui.hit(Position { x: 30, y: 20 }), None, "the line is no control");
+
+    // With Play from: Learn's line, the frame and one blank row — the one
+    // before FILTERS — on the same 23 rows.
     two_libraries(&mut gui);
     let rows = draw(&mut gui);
-    // The canvas's "The room, off": the name and Preview, the button, how
-    // the session runs, what must match, what the DJ prefers — the room's
-    // 23 rows whole, the last on its last.
-    assert!(room(&rows, 2).starts_with("Auto DJ") && room(&rows, 2).ends_with("Preview picks ▸"), "{:?}", room(&rows, 2));
-    assert_eq!(room(&rows, 4), format!("╭{}╮", "─".repeat(45)), "the button, the rows' width");
-    assert_eq!(room(&rows, 5).trim_matches(['│', ' ']), "Start ▸");
     let want = [
-        (8, "Play from", "host:3000 ▸"),
-        (9, "First song", "Ask ▾"),
-        (10, "Batch", "4 songs ▸"),
-        (13, "Sonic similarity", "55% ▸"),
-        (14, "Smart filters", "Any ▸"),
-        (15, "Genres", "Any ▸"),
-        (16, "Rating", "Any ▸"),
-        (17, "Length", "Any ▸"),
-        (20, "Beat matching", "Off ▸"),
-        (21, "Harmonic mixing", "[ ]  "),
-        (23, "Skip words", "Off ▸"),
-        (24, "Artist cooldown", "3 artists ▸"),
+        (6, "Play from", "host:3000 ▸"),
+        (7, "First song", "Ask ▾"),
+        (8, "Batch", "4 songs ▸"),
+        (9, "Artist cooldown", "3 artists ▸"),
+        (12, "Smart filters", "Any ▸"),
+        (16, "Skip words", "Off ▸"),
+        (18, "Sonic similarity", "55% ▸"),
+        (19, "  Learn from skips", "[ ]  "),
+        (22, "  Seeds", "▸"),
+        (23, "Beat matching", "Off ▸"),
+        (24, "Harmonic mixing", "[ ]  "),
     ];
     for (y, label, tail) in want {
         let row = room(&rows, y);
-        assert!(row.starts_with(label) && row.ends_with(tail), "row {y}: {row:?}");
+        assert!(row.starts_with(label) && row.ends_with(tail), "row {y}: {row:?}\n{}", rows.join("\n"));
     }
-    assert_eq!(room(&rows, 12).trim_end(), "MUST MATCH");
-    assert_eq!(room(&rows, 19).trim_end(), "PREFER");
-    assert_eq!(room(&rows, 22).trim_end(), "  Next song in a key that mixes well");
-    for blank in [3, 7, 11, 18] {
-        assert_eq!(room(&rows, blank).trim(), "", "row {blank} is air");
-    }
+    assert_eq!(room(&rows, 3), format!("╭{}╮", "─".repeat(45)), "the frame, no air over it");
+    assert_eq!((room(&rows, 10).trim(), room(&rows, 11).trim_end()), ("", "FILTERS"));
+    assert_eq!(room(&rows, 17).trim_end(), "MATCH", "no air before it");
+    assert_eq!(room(&rows, 20).trim_end(), "    Skipping a song will prevent similar songs");
     // Every value ends two cells before the chevron's, whatever its length.
-    assert_eq!(cells(&rows[9], 59, 64), "Ask ▾");
-    assert_eq!(cells(&rows[24], 53, 64), "3 artists ▸");
-    // One server and one library: Play from has nothing to choose, so it
-    // is not drawn, and the rows under it stand a row higher.
-    probed(&mut gui, info("6.33.1"));
-    let rows = draw(&mut gui);
-    assert!(!rows.join("\n").contains("Play from"));
-    assert!(room(&rows, 8).starts_with("First song") && room(&rows, 23).starts_with("Artist cooldown"));
+    assert_eq!(cells(&rows[7], 59, 64), "Ask ▾");
+    assert_eq!(cells(&rows[9], 53, 64), "3 artists ▸");
 }
 
 /// A wider room: the rows take up to a fifth more than the canvas's 47
@@ -295,10 +396,10 @@ fn the_block_grows_a_fifth_and_then_stands_centred() {
     // and the block fills it — nothing has moved.
     let rows = draw(&mut gui);
     assert_eq!(find(&rows, "Auto DJ  ").map(|(x, _)| x), Some(17));
-    assert_eq!(cells(&rows[4], 17, 64), format!("╭{}╮", "─".repeat(45)));
+    assert_eq!(cells(&rows[3], 17, 64), format!("╭{}╮", "─".repeat(45)));
     // 106 columns: a room of 53 cells, and the block is all of it.
     let rows = draw_sized(&mut gui, 106, 30);
-    assert_eq!(cells(&rows[4], 17, 70), format!("╭{}╮", "─".repeat(51)), "{}", rows.join("\n"));
+    assert_eq!(cells(&rows[3], 17, 70), format!("╭{}╮", "─".repeat(51)), "{}", rows.join("\n"));
     let batch = cells(&rows[row_of(&rows, "Batch") as usize], 17, 70);
     assert!(batch.starts_with("Batch") && batch.ends_with("4 songs ▸"), "{batch:?}");
     // 140 columns: a room of 87 cells. The block stops at 56 — a fifth past
@@ -306,15 +407,18 @@ fn the_block_grows_a_fifth_and_then_stands_centred() {
     let rows = draw_sized(&mut gui, 140, 30);
     let all = rows.join("\n");
     let x = 17 + 15;
-    assert_eq!(cells(&rows[4], x, x + 56), format!("╭{}╮", "─".repeat(54)), "{all}");
-    assert_eq!(cells(&rows[4], 17, x).trim(), "", "nothing at the room's left: {all}");
+    assert_eq!(cells(&rows[3], x, x + 56), format!("╭{}╮", "─".repeat(54)), "{all}");
+    assert_eq!(cells(&rows[3], 17, x).trim(), "", "nothing at the room's left: {all}");
     let title = cells(&rows[2], x, x + 56);
     assert!(title.starts_with("Auto DJ") && title.ends_with("Preview picks ▸"), "{title:?}");
     for (label, tail) in [("Play from", "host:3000 ▸"), ("Sonic similarity", "55% ▸"), ("Artist cooldown", "3 artists ▸")] {
         let row = cells(&rows[row_of(&rows, label) as usize], x, x + 56);
         assert!(row.starts_with(label) && row.ends_with(tail), "{row:?}");
     }
-    assert_eq!(cells(&rows[row_of(&rows, "MUST MATCH") as usize], x, x + 10), "MUST MATCH");
+    assert_eq!(cells(&rows[row_of(&rows, "FILTERS") as usize], x, x + 7), "FILTERS");
+    // The sub-rows keep their indent and their columns in the wider block.
+    let seeds = cells(&rows[row_of(&rows, "  Seeds") as usize], x, x + 56);
+    assert!(seeds.starts_with("  Seeds ") && seeds.ends_with('▸'), "{seeds:?}");
     // A row takes its click across its own cells, and no further.
     let (y, left) = (row_of(&rows, "Batch"), x as u16);
     assert_eq!(gui.ui.hit(Position { x: left, y }), Some(Act::DjRow(Row::Batch)));
@@ -332,7 +436,7 @@ fn the_block_grows_a_fifth_and_then_stands_centred() {
     // twelve cells in.
     gui.queue_open = false;
     let rows = draw(&mut gui);
-    assert_eq!(cells(&rows[4], 29, 85), format!("╭{}╮", "─".repeat(54)), "{}", rows.join("\n"));
+    assert_eq!(cells(&rows[3], 29, 85), format!("╭{}╮", "─".repeat(54)), "{}", rows.join("\n"));
     // And the floor, 100×24 with the queue open, is the canvas's still.
     gui.queue_open = true;
     let rows = draw_sized(&mut gui, 100, 24);
@@ -346,47 +450,98 @@ fn the_floor_keeps_every_row_at_a_hundred_by_twenty_four() {
     let mut gui = room_gui();
     two_libraries(&mut gui);
     let rows = draw_sized(&mut gui, 100, 24);
-    // The canvas's "Minimum": Start folds to the slab on the title row,
-    // the air around the button and Harmonic's line go, and all twelve
-    // settings stand on the room's 17 rows.
+    // The canvas's "Minimum": Start folds to the slab on the title row, the
+    // air and Learn's line go, and all fourteen settings stand on the
+    // room's 17 rows, the headers with them.
     assert_eq!(room(&rows, 2), "Auto DJ              Preview picks ▸   Start ▸ ");
     assert_eq!(hit_text(&gui, &rows, " Start ▸ "), Some(Act::DjStartStop), "the slab is the button");
     let labels = [
-        "Play from", "First song", "Batch", "", "MUST MATCH", "Sonic similarity", "Smart filters", "Genres", "Rating",
-        "Length", "", "PREFER", "Beat matching", "Harmonic mixing", "Skip words", "Artist cooldown",
+        "Play from", "First song", "Batch", "Artist cooldown", "FILTERS", "Smart filters", "Genres", "Rating", "Length",
+        "Skip words", "MATCH", "Sonic similarity", "  Learn from skips", "  Seeds", "Beat matching", "Harmonic mixing",
+    ];
+    for (i, label) in labels.iter().enumerate() {
+        let row = room(&rows, 3 + i as u16);
+        assert!(row.starts_with(label), "row {}: {row:?}\n{}", 3 + i, rows.join("\n"));
+    }
+    assert!(!rows.join("\n").contains("Skipping a song"), "no room for the line");
+    // Without Play from the one row to spare is the blank before FILTERS.
+    probed(&mut gui, info("6.33.1"));
+    let rows = draw_sized(&mut gui, 100, 24);
+    let labels = [
+        "First song", "Batch", "Artist cooldown", "", "FILTERS", "Smart filters", "Genres", "Rating", "Length",
+        "Skip words", "MATCH", "Sonic similarity", "  Learn from skips", "  Seeds", "Beat matching", "Harmonic mixing",
     ];
     for (i, label) in labels.iter().enumerate() {
         let row = room(&rows, 3 + i as u16);
         assert!(if label.is_empty() { row.trim().is_empty() } else { row.starts_with(label) }, "row {}: {row:?}", 3 + i);
     }
-    assert!(!rows.join("\n").contains("mixes well"), "no room for the line");
     // Armed, the slab is Stop.
     gui.app.queue.items = vec![queued("a.mp3", None)];
     gui.act(Act::DjStartStop);
     assert!(room(&draw_sized(&mut gui, 100, 24), 2).ends_with(" Stop "));
 }
 
+/// Where even the rows cannot all stand — the floor with the tips line and
+/// Play from, sixteen rows — the two headers fold first, and their gaps
+/// with them: every setting still stands, Harmonic mixing on the last.
+#[test]
+fn the_headers_fold_where_even_the_rows_cannot_stand() {
+    let _en = english();
+    let mut gui = room_gui();
+    two_libraries(&mut gui);
+    gui.config.gui.key_hints = true;
+    let rows = draw_sized(&mut gui, 100, 24);
+    let all = rows.join("\n");
+    assert!(!all.contains("FILTERS") && !all.contains("MATCH"), "{all}");
+    let labels = [
+        "Play from", "First song", "Batch", "Artist cooldown", "Smart filters", "Genres", "Rating", "Length",
+        "Skip words", "Sonic similarity", "  Learn from skips", "  Seeds", "Beat matching", "Harmonic mixing",
+    ];
+    for (i, label) in labels.iter().enumerate() {
+        let row = room(&rows, 3 + i as u16);
+        assert!(row.starts_with(label), "row {}: {row:?}\n{all}", 3 + i);
+    }
+    assert_eq!(gui.ui.hit(Position { x: 30, y: 16 }), Some(Act::DjRow(Row::Harmonic)), "and it takes its click");
+}
+
 #[test]
 fn the_rows_the_height_affords_come_back_in_one_order() {
-    let l = |rows, play_from| layout(rows, play_from);
-    // With Play from the rows alone take 15.
-    let bare = l(15, true);
-    assert!(!bare.gap_must && !bare.gap_prefer && !bare.tall && !bare.hint, "the rows, nothing else");
-    assert!(l(12, true) == bare, "under the floor nothing more goes");
-    assert!(l(16, true).gap_must && !l(16, true).gap_prefer);
-    let floor = l(17, true);
-    assert!(floor.gap_must && floor.gap_prefer && !floor.tall && !floor.hint, "100×24");
-    assert!(l(18, true).hint && !l(18, true).tall);
-    assert!(l(19, true).hint && !l(19, true).tall);
-    let tight = l(20, true);
-    assert!(tight.tall && !tight.blank_button && !tight.blank_title && !tight.hint, "the frame, no air");
-    assert!(l(21, true).tall && l(21, true).blank_button && !l(21, true).blank_title);
-    assert!(l(22, true).blank_title && !l(22, true).hint);
-    let whole = l(23, true);
-    assert!(whole.tall && whole.blank_title && whole.blank_button && whole.hint && whole.gap_must && whole.gap_prefer);
-    assert!(l(40, true) == whole, "a taller room adds nothing: it never scrolls, and never stretches");
-    // Without Play from every step comes a row sooner.
-    assert!(l(22, false) == whole && l(16, false) == floor);
+    // Plan D28's table — English, so Learn from skips' line is two rows,
+    // and no Play from: the spare rows come back by priority, each whole or
+    // not at all, skipping what does not fit — Learn's line, the frame, the
+    // blank before FILTERS, then before MATCH, a blank under the frame,
+    // then over it.
+    let flags = |l: Layout| [l.learn_lines == 2, l.tall, l.gap_filters, l.gap_match, l.blank_button, l.blank_title];
+    let table: [(u16, [bool; 6]); 10] = [
+        (16, [false, false, false, false, false, false]),
+        (17, [false, false, true, false, false, false]),
+        (18, [true, false, false, false, false, false]),
+        (19, [true, false, true, false, false, false]),
+        (20, [true, false, true, true, false, false]),
+        (21, [true, true, false, false, false, false]),
+        (22, [true, true, true, false, false, false]),
+        (23, [true, true, true, true, false, false]),
+        (24, [true, true, true, true, true, false]),
+        (25, [true, true, true, true, true, true]),
+    ];
+    for (rows, want) in table {
+        let l = layout(rows, false, 2);
+        assert_eq!(flags(l), want, "{rows} rows: {l:?}");
+        assert!(l.headers, "{rows} rows: the headers stand");
+    }
+    assert_eq!(layout(40, false, 2), layout(25, false, 2), "a taller room adds nothing: it never scrolls, and never stretches");
+    // With Play from every step comes a row later: at 100×30 it keeps
+    // Learn's line, the frame and one blank row.
+    assert_eq!(layout(17, true, 2), Layout { headers: true, ..Layout::default() });
+    assert_eq!(flags(layout(23, true, 2)), [true, true, true, false, false, false]);
+    // A one-line Learn — ja, zh, or the reason — comes back sooner.
+    assert_eq!(layout(17, false, 1), Layout { headers: true, learn_lines: 1, ..Layout::default() });
+    assert_eq!(layout(20, false, 1), Layout { headers: true, learn_lines: 1, tall: true, ..Layout::default() });
+    // Where even the rows cannot all stand — 100×24 with the tips line and
+    // Play from — the headers fold first, and their gaps with them.
+    let folded = layout(16, true, 2);
+    assert!(!folded.headers && !folded.gap_filters && !folded.gap_match && !folded.tall, "{folded:?}");
+    assert_eq!(layout(16, true, 1).learn_lines, 1, "the one row to spare is a one-line Learn's");
 }
 
 #[test]
@@ -447,6 +602,7 @@ fn a_setting_the_server_cannot_do_keeps_its_place_and_says_why() {
             discovery_ready: None,
             libraries: vec!["Music".into()],
             mood_filters: false,
+            auto_dj: Some(0),
         },
     );
     let rows = draw(&mut gui);
@@ -460,14 +616,22 @@ fn a_setting_the_server_cannot_do_keeps_its_place_and_says_why() {
     assert!(line("Length").ends_with("Needs server 6.25+"));
     assert!(line("Beat matching").ends_with("Needs server 6.7.1+"));
     assert!(line("Harmonic mixing").ends_with("Needs server 6.7.1+"));
-    // The rows did not move: the same lines as on a server that can.
-    assert_eq!(row_of(&rows, "Artist cooldown"), 23);
+    // The rows did not move: the same lines as on a server that can, E-AutoDJ's.
+    assert_eq!((row_of(&rows, "Artist cooldown"), row_of(&rows, "  Seeds"), row_of(&rows, "Harmonic mixing")), (8, 22, 24));
     // DIM whole, and nothing to press.
     let y = row_of(&rows, "Genres");
     assert_eq!(fg_at(&mut gui, 17, y), th().dim, "the name");
     assert!(gui.ui.hit(Position { x: 17, y }).is_none(), "no click on a row the server can't do");
     gui.act(Act::DjRowKey(Row::Genres));
     assert!(gui.dj.sheet.is_none(), "and no sheet");
+    // Sonic similarity blocked, its sub-rows rest under it, DIM with no
+    // reason of their own — Learn's usual line: the server's word about
+    // negatives counts only once sonic can run (clause 59).
+    assert!(line("  Learn from skips").ends_with("[ ]") && line("  Seeds").ends_with('▸'));
+    assert!(rows[20].contains("Skipping a song will prevent similar songs"), "{}", rows[20]);
+    assert!(!rows.join("\n").contains("Needs a newer server"));
+    assert_eq!((fg_at(&mut gui, 19, 19), fg_at(&mut gui, 19, 22)), (th().dim, th().dim));
+    assert!(gui.ui.hit(Position { x: 19, y: 22 }).is_none());
     // The keyboard walks past them.
     for _ in 0..12 {
         key(&mut gui, KeyCode::Down);
@@ -479,6 +643,7 @@ fn a_setting_the_server_cannot_do_keeps_its_place_and_says_why() {
     }
     assert!(seen.contains(&Some(Item::Row(Row::Rating))) && seen.contains(&Some(Item::Row(Row::SkipWords))));
     assert!(!seen.contains(&Some(Item::Row(Row::Genres))) && !seen.contains(&Some(Item::Row(Row::Sonic))));
+    assert!(!seen.contains(&Some(Item::Row(Row::Learn))) && !seen.contains(&Some(Item::Row(Row::Seeds))));
 
     // The sonic row's other two reasons, and the scan's word once it is
     // under way.
@@ -550,12 +715,12 @@ fn the_button_is_the_status_and_stop_always_stops() {
     gui.app.queue.items = vec![queued("a.mp3", None)];
     let rows = draw(&mut gui);
     assert_eq!(hit_text(&gui, &rows, "Start ▸"), Some(Act::DjStartStop));
-    assert_eq!(fg_at(&mut gui, 17, 4), th().accent, "Start in the accent");
+    assert_eq!(fg_at(&mut gui, 17, 3), th().accent, "Start in the accent");
     gui.act(Act::DjStartStop);
     assert_eq!(gui.app.dj_server.as_deref(), Some(HOST), "started through the toggle");
     let rows = draw(&mut gui);
-    assert_eq!(room(&rows, 5).trim_matches(['│', ' ']), "Stop");
-    assert_eq!(fg_at(&mut gui, 17, 4), th().ok, "Stop lit, never the destructive colour");
+    assert_eq!(room(&rows, 4).trim_matches(['│', ' ']), "Stop");
+    assert_eq!(fg_at(&mut gui, 17, 3), th().ok, "Stop lit, never the destructive colour");
     assert!(rows.join("\n").contains("Auto DJ •"), "and the nav row wears its dot");
     // Browsing another server, Stop still stops.
     gui.app.session.server = ATTIC.into();
@@ -597,15 +762,22 @@ fn the_nav_row_opens_the_room_and_the_keyboard_walks_its_rows() {
     key(&mut gui, KeyCode::Esc);
     assert!(gui.dj.cursor.is_none());
     assert_eq!((gui.screen, gui.active), (Screen::Library, DJ_NAV));
-    // ↑ from rest takes the last row; Space on Harmonic flips the one
-    // switch on the page.
-    key(&mut gui, KeyCode::Up);
-    assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Cooldown)));
-    key(&mut gui, KeyCode::Up);
+    // ↑ from rest takes the last row, Harmonic mixing: Space flips its
+    // switch; up the column, Beat matching, then Sonic similarity's two.
     key(&mut gui, KeyCode::Up);
     assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Harmonic)));
     key(&mut gui, KeyCode::Char(' '));
     assert!(gui.app.dj.harmonic);
+    let mut walked = Vec::new();
+    for _ in 0..4 {
+        key(&mut gui, KeyCode::Up);
+        walked.push(gui.dj.cursor);
+    }
+    let want = [Row::Beat, Row::Seeds, Row::Learn, Row::Sonic].map(|row| Some(Item::Row(row)));
+    assert_eq!(walked, want, "the sub-rows are stops of their own");
+    for _ in 0..4 {
+        key(&mut gui, KeyCode::Down);
+    }
     // And a click on its row does the same, the hand staying where it was.
     let rows = draw(&mut gui);
     click(&mut gui, &rows, "Harmonic mixing");
@@ -837,20 +1009,36 @@ fn a_sheet_edits_a_draft_and_closing_it_any_way_applies_it() {
     gui.act(Act::DjRowKey(Row::Sonic));
     let rows = draw(&mut gui);
     let all = rows.join("\n");
-    // The canvas's "A sheet over the room": 66 cells, the row's name and
-    // its value on the top border, the switch, the bar, the anchor, the
-    // old room's help line inside, and [ Done ] at the foot — no [X].
+    // E-Sonic: the sheet over the room, rows 10 to 19 — 66 cells, the row's
+    // name and its value on the top border, the switch, the bar, the old
+    // room's help line inside, and [ Done ] at the foot — no [X], and no
+    // Drift · Stay close: the mode is the Seeds sheet's now.
     let (x, y) = find(&rows, "╭─ Sonic similarity · 55% ─").expect("the title and the value on the border");
-    assert_eq!(x, 17);
+    assert_eq!((x, y), (17, 10));
     assert_eq!(cells(&rows[y as usize], 17, 83).chars().count(), 66);
     assert_eq!(cells(&rows[y as usize], 82, 83), "╮");
-    assert!(all.contains("[✓] On") && all.contains("(•) Drift") && all.contains("( ) Stay close"), "{all}");
-    assert!(all.contains("Only pick songs that sound like the session"), "{all}");
+    assert_eq!(cells(&rows[11], 19, 25), "[✓] On");
+    assert_eq!(cells(&rows[13], 19, 54), "- ▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ +   55%");
+    assert_eq!(cells(&rows[15], 19, 73).trim_end(), "Only pick songs that sound like the session, using the");
+    assert_eq!(cells(&rows[16], 19, 73).trim_end(), "server's audio analysis.");
+    assert_eq!(cells(&rows[18], 73, 81), "[ Done ]");
+    assert!(cells(&rows[19], 17, 18) == "╰" && rows[20].contains("Skipping a song"), "ten rows, the room under");
+    for blank in [12, 14, 17] {
+        assert_eq!(cells(&rows[blank], 18, 82).trim(), "", "row {blank}");
+    }
+    assert!(!all.contains("Drift") && !all.contains("Stay close"), "{all}");
     assert!(all.contains("[ Done ]") && !all.contains("[X]"));
     assert!(!all.contains("clear"), "nothing here to clear");
     // Two points a cell across the band: 55% lights thirteen of 25.
     let bar = rows.iter().find(|r| r.contains("▰")).expect("the bar");
     assert_eq!((bar.matches('▰').count(), bar.matches('▱').count()), (13, 12), "{bar}");
+    // ↓ from the bar goes to the foot: no stops are left between.
+    key(&mut gui, KeyCode::Down);
+    key(&mut gui, KeyCode::Down);
+    key(&mut gui, KeyCode::Down);
+    assert!(format!("{:?}", gui.dj.sheet.as_ref().unwrap()).contains("hand: Done"));
+    key(&mut gui, KeyCode::Up);
+    key(&mut gui, KeyCode::Up);
     // The room beneath is inert.
     assert_eq!(gui.ui.hit(Position { x: 2, y: 2 }), Some(Act::Guard));
 
@@ -873,8 +1061,8 @@ fn a_sheet_edits_a_draft_and_closing_it_any_way_applies_it() {
     let rows = draw(&mut gui);
     assert!(room(&rows, row_of(&rows, "Sonic similarity")).ends_with("Off ▸"));
 
-    // By the pointer: the switch back on, a cell of the bar, the other
-    // anchor, Done.
+    // By the pointer: the switch back on, a cell of the bar, Done. The mode
+    // rides through as it stands.
     gui.prefs_unsaved = None;
     let rows = draw(&mut gui);
     click(&mut gui, &rows, "Sonic similarity");
@@ -886,13 +1074,13 @@ fn a_sheet_edits_a_draft_and_closing_it_any_way_applies_it() {
     gui.act(act);
     let rows = draw(&mut gui);
     assert!(rows.join("\n").contains("Sonic similarity · 70%"), "the twentieth cell is 70%");
-    click(&mut gui, &rows, "( ) Stay close");
-    let rows = draw(&mut gui);
+    super::edit(&mut gui, DjEdit::SeedMode(SonicAnchor::Locked));
     click(&mut gui, &rows, "[ Done ]");
     assert!(gui.dj.sheet.is_none());
     assert!(gui.app.dj.sonic);
     assert_eq!(gui.app.dj.sonic_min_similarity, 0.7);
-    assert_eq!(gui.app.dj.sonic_anchor, SonicAnchor::Locked);
+    assert_eq!(gui.app.dj.sonic_anchor, SonicAnchor::Locked, "the sheet leaves the mode as it found it");
+    assert!(gui.app.seeds.frozen());
 
     // A sheet closed as it was opened writes nothing.
     gui.prefs_unsaved = None;
@@ -1498,17 +1686,17 @@ fn the_bars_button_splits_and_its_chevron_opens_quick_config() {
     assert!(py > 2);
     assert!(all.contains("PLAY FROM") && all.contains("(•) host:3000") && all.contains("( ) attic:3000"), "{all}");
     assert!(all.contains("[✓] Sonic similarity") && all.contains("55%"), "{all}");
-    assert!(all.contains("(•) Drift") && all.contains("( ) Stay close"), "{all}");
+    assert!(all.contains("▰▰▰▰▰▰▰▰▰▰▰▰▰▱") && all.contains("│     Seeds"), "the match bar and the Seeds row: {all}");
+    assert!(!all.contains("Drift") && !all.contains("Stay close"), "the mode is the Seeds sheet's: {all}");
     assert!(all.contains("Smart filters") && all.contains("All Auto DJ settings ▸"), "{all}");
     assert!(all.contains("│ auto-dj │ ▾ │"), "the chevron points down to it");
     // Every change applies at once: no draft, no Done.
-    click(&mut gui, &rows, "( ) Stay close");
-    assert_eq!(gui.app.dj.sonic_anchor, SonicAnchor::Locked);
     let rows = draw(&mut gui);
     click(&mut gui, &rows, "[✓] Sonic similarity");
     assert!(!gui.app.dj.sonic);
     let rows = draw(&mut gui);
-    assert!(!rows.join("\n").contains("Stay close"), "the anchor goes with its switch");
+    let all = rows.join("\n");
+    assert!(!all.contains("│     - ") && !all.contains("Seeds"), "the bar and Seeds go with its switch: {all}");
     click(&mut gui, &rows, "( ) attic:3000");
     assert_eq!(gui.app.dj_home.as_deref(), Some(ATTIC));
     assert!(gui.dj.quick.is_some(), "it stays up");
@@ -1554,10 +1742,22 @@ fn quick_config_walks_by_the_keyboard_and_rests_what_the_server_cannot_do() {
     assert!(!gui.app.dj.sonic, "the switch, at once");
     key(&mut gui, KeyCode::Char(' '));
     assert!(gui.app.dj.sonic);
+    // ↓ to the match bar: ← → step it a point, at once; ↓ again walks on.
     key(&mut gui, KeyCode::Down);
     key(&mut gui, KeyCode::Right);
+    key(&mut gui, KeyCode::Right);
+    key(&mut gui, KeyCode::Left);
+    assert_eq!(gui.app.dj.sonic_min_similarity, 0.56);
+    assert!(gui.prefs_unsaved.is_some(), "saved once the steps rest");
+    // Seeds, under it: Enter opens the Seeds sheet, its hand up, and quick
+    // config goes.
+    key(&mut gui, KeyCode::Down);
     key(&mut gui, KeyCode::Enter);
-    assert_eq!(gui.app.dj.sonic_anchor, SonicAnchor::Locked);
+    assert!(gui.dj.quick.is_none() && gui.dj.seeds.is_some());
+    assert!(format!("{:?}", gui.dj.seeds).contains("shown: true"), "{:?}", gui.dj.seeds);
+    key(&mut gui, KeyCode::Esc);
+    assert!(gui.dj.seeds.is_none());
+    gui.act(Act::DjQuick(QuickAct::Toggle));
     // An older server: the reasons, and nothing to press on those rows.
     let mut old = info("6.10.0");
     old.discovery = false;
@@ -1576,6 +1776,1067 @@ fn quick_config_walks_by_the_keyboard_and_rests_what_the_server_cannot_do() {
     assert!(gui.dj.quick.is_none());
 }
 
+/// E-Quick: quick config's cells 14–55 on rows 16–24, sonic on.
+const E_QUICK: [&str; 9] = [
+    "╭────────────────────────────────────────╮",
+    "│ [✓] Sonic similarity               55% │",
+    "│     - ▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ +      │",
+    "│     Seeds                            ▸ │",
+    "│                                        │",
+    "│ Smart filters                    Any ▸ │",
+    "│                                        │",
+    "│ All Auto DJ settings ▸                 │",
+    "╰────────────────────────────────────────╯",
+];
+
+#[test]
+fn quick_config_wears_the_match_bar_and_the_way_to_the_seeds() {
+    let _en = english();
+    let mut gui = room_gui();
+    gui.act(Act::DjQuick(QuickAct::Toggle));
+    let rows = draw(&mut gui);
+    // E-Quick: the match bar and Seeds under Sonic similarity, where Drift
+    // · Stay close stood; the popover a row taller, its foot still on row 24.
+    for (i, want) in E_QUICK.iter().enumerate() {
+        let y = 16 + i;
+        assert_eq!(cells(&rows[y], 14, 56), *want, "row {y}:\n{}", rows.join("\n"));
+    }
+    let b = buffer(&mut gui);
+    assert_eq!((b[(20, 18)].fg, b[(48, 18)].fg), (th().dim, th().dim), "the bar's ends");
+    assert_eq!((b[(22, 18)].fg, b[(34, 18)].fg, b[(35, 18)].fg), (th().accent, th().accent, th().dim), "13 lit of 25");
+    assert!(is_text(b[(20, 19)].fg) && b[(53, 19)].fg == th().dim, "Seeds TEXT, its chevron DIM");
+    // The pointer's: a cell sets, the ends step a point — at once, and the
+    // popover stays.
+    assert_eq!(gui.ui.hit(Position { x: 22 + 19, y: 18 }), Some(Act::DjQuick(QuickAct::Set(70))));
+    gui.act(Act::DjQuick(QuickAct::Set(70)));
+    assert_eq!(gui.app.dj.sonic_min_similarity, 0.7);
+    assert!(gui.prefs_unsaved.is_some() && gui.dj.quick.is_some());
+    draw(&mut gui);
+    assert_eq!(gui.ui.hit(Position { x: 20, y: 18 }), Some(Act::DjQuick(QuickAct::Step(-1))));
+    assert_eq!(gui.ui.hit(Position { x: 48, y: 18 }), Some(Act::DjQuick(QuickAct::Step(1))));
+    gui.act(Act::DjQuick(QuickAct::Step(-1)));
+    assert_eq!(gui.app.dj.sonic_min_similarity, 0.69);
+    for _ in 0..40 {
+        gui.act(Act::DjQuick(QuickAct::Step(1)));
+    }
+    assert_eq!(gui.app.dj.sonic_min_similarity, 0.8, "held inside its band");
+    assert!(draw(&mut gui).join("\n").contains("80% │"));
+    // Seeds opens the Seeds sheet — quick config goes, the hand stowed.
+    draw(&mut gui);
+    assert_eq!(gui.ui.hit(Position { x: 20, y: 19 }), Some(Act::DjQuick(QuickAct::Press(super::quick::QStop::Seeds))));
+    assert_eq!(gui.ui.hit(Position { x: 53, y: 19 }), gui.ui.hit(Position { x: 20, y: 19 }), "the row's whole width");
+    gui.act(Act::DjQuick(QuickAct::Press(super::quick::QStop::Seeds)));
+    assert!(gui.dj.quick.is_none() && gui.dj.seeds.is_some());
+    assert!(format!("{:?}", gui.dj.seeds).contains("shown: false"));
+    key(&mut gui, KeyCode::Esc);
+    // Sonic off, or blocked: the bar and Seeds are not drawn. (The bar's
+    // own volume cells are the only ▰ then.)
+    gui.app.dj.sonic = false;
+    gui.act(Act::DjQuick(QuickAct::Toggle));
+    let all = draw(&mut gui).join("\n");
+    assert!(all.contains("[ ] Sonic similarity") && !all.contains("│     - ") && !all.contains("Seeds"), "{all}");
+    gui.app.dj.sonic = true;
+    let mut off = info("6.33.1");
+    off.discovery = false;
+    probed(&mut gui, off);
+    let all = draw(&mut gui).join("\n");
+    assert!(all.contains("Discovery off") && !all.contains("│     - ") && !all.contains("Seeds"), "{all}");
+}
+
+// ── Sonic similarity's sub-rows ─────────────────────────────────────────────
+
+/// E-SonicOff: sonic switched off — or blocked — its two sub-rows rest in
+/// place, DIM whole: no click, no stop, no reason; the switch keeps its
+/// state's glyph.
+#[test]
+fn sonic_off_rests_its_two_sub_rows_in_place() {
+    let _en = english();
+    let mut gui = room_gui();
+    super::edit(&mut gui, DjEdit::LearnSkips(true));
+    super::edit(&mut gui, DjEdit::Sonic { on: false, floor: 55, anchor: SonicAnchor::Rolling });
+    let rows = draw(&mut gui);
+    assert_eq!(room(&rows, 18), "Sonic similarity                          Off ▸");
+    assert_eq!(room(&rows, 19), "  Learn from skips                        [✓]  ");
+    for y in 20..=22u16 {
+        assert_eq!(room(&rows, y), E_AUTODJ[y as usize - 2], "row {y}");
+    }
+    let b = buffer(&mut gui);
+    assert!(is_text(b[(17, 18)].fg) && b[(59, 18)].fg == th().dim, "Sonic's name live, its Off DIM");
+    for (x, y) in [(19, 19), (59, 19), (21, 20), (21, 21), (19, 22), (63, 22)] {
+        assert_eq!(b[(x, y)].fg, th().dim, "({x}, {y}) rests");
+    }
+    for y in 19..=22u16 {
+        assert_eq!(gui.ui.hit(Position { x: 30, y }), None, "row {y} takes no click");
+    }
+    assert_eq!(gui.ui.hit(Position { x: 30, y: 18 }), Some(Act::DjRow(Row::Sonic)), "its sheet is how it comes back on");
+    // No stop: from Harmonic up, the hand passes from Beat to Sonic.
+    key(&mut gui, KeyCode::Up);
+    key(&mut gui, KeyCode::Up);
+    key(&mut gui, KeyCode::Up);
+    assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Sonic)));
+    // Pressed anyway, nothing.
+    gui.act(Act::DjRowKey(Row::Seeds));
+    gui.act(Act::DjRowKey(Row::Learn));
+    assert!(gui.dj.seeds.is_none() && gui.app.dj.learn_from_skips);
+    // Blocked rests them the same way.
+    super::edit(&mut gui, DjEdit::Sonic { on: true, floor: 55, anchor: SonicAnchor::Rolling });
+    let mut off = info("6.33.1");
+    off.discovery = false;
+    probed(&mut gui, off);
+    let rows = draw(&mut gui);
+    assert!(room(&rows, 18).trim_end().ends_with("Discovery off"), "{}", room(&rows, 18));
+    assert_eq!((fg_at(&mut gui, 19, 22), gui.ui.hit(Position { x: 30, y: 22 })), (th().dim, None));
+    // Back on, they answer again.
+    probed(&mut gui, info("6.33.1"));
+    draw(&mut gui);
+    assert_eq!(gui.ui.hit(Position { x: 30, y: 22 }), Some(Act::DjRow(Row::Seeds)));
+}
+
+/// Learn from skips answers only where the server takes negatives, and
+/// says "Needs a newer server" in place of its line only once a probe has
+/// said the server predates them — never while nobody knows (decision
+/// 30, clause 59): in the room, and on the Seeds sheet's LESS LIKE.
+#[test]
+fn learn_from_skips_says_why_only_once_the_server_has_said_so() {
+    let _en = english();
+    let reason = |gui: &mut Gui| draw(gui).join("\n").contains("Needs a newer server");
+    // Nobody knows yet: the DJ off, Play from's server not answering.
+    let mut gui = session_gui();
+    gui.act(Act::Nav(DJ_NAV));
+    assert!(gui.app.dj_info.is_none());
+    let rows = draw(&mut gui);
+    assert_eq!(room(&rows, 19), "  Learn from skips                        [ ]  ");
+    assert_eq!(room(&rows, 20), E_AUTODJ[18], "its usual line");
+    assert!(!reason(&mut gui));
+    assert_eq!((fg_at(&mut gui, 19, 19), gui.ui.hit(Position { x: 30, y: 19 })), (th().dim, None), "at rest");
+    assert_eq!(gui.ui.hit(Position { x: 30, y: 22 }), Some(Act::DjRow(Row::Seeds)), "the seeds answer");
+    gui.act(Act::DjRowKey(Row::Seeds));
+    let rows = draw(&mut gui);
+    assert_eq!(cells(&rows[row_of(&rows, "LESS LIKE") as usize], 19, 81).trim_end(), "LESS LIKE", "no reason");
+    key(&mut gui, KeyCode::Esc);
+    // The provisional info: the DJ armed on the session's own server, its
+    // probe still out.
+    gui.app.queue.items = vec![queued("a.mp3", None)];
+    gui.act(Act::DjStartStop);
+    assert!(gui.app.dj_info.as_ref().is_some_and(|info| info.auto_dj.is_none()));
+    let rows = draw(&mut gui);
+    assert_eq!(room(&rows, 20), E_AUTODJ[18]);
+    assert!(!reason(&mut gui) && gui.ui.hit(Position { x: 30, y: 19 }).is_none());
+    // A probe that says autoDj 0: the reason in place of the line — one
+    // row, so the room gives the row back above — and Learn still rests.
+    probed(&mut gui, DjServerInfo { auto_dj: Some(0), ..info("6.33.1") });
+    let rows = draw(&mut gui);
+    let y = row_of(&rows, "Learn from skips");
+    assert_eq!(room(&rows, y + 1).trim_end(), "    Needs a newer server");
+    assert!(room(&rows, y + 2).starts_with("  Seeds") && !rows.join("\n").contains("Skipping a song"));
+    assert_eq!((fg_at(&mut gui, 21, y + 1), gui.ui.hit(Position { x: 30, y })), (th().dim, None));
+    assert_eq!(room(&rows, 24), E_AUTODJ[22], "the rows still end on the room's last");
+    gui.act(Act::DjRowKey(Row::Seeds));
+    let rows = draw(&mut gui);
+    let head = row_of(&rows, "LESS LIKE") as usize;
+    assert_eq!(cells(&rows[head], 19, 81), format!("LESS LIKE{:>53}", "Needs a newer server"), "on its header, at the row's end");
+    key(&mut gui, KeyCode::Esc);
+    // And a server that takes them: Learn answers, under its usual line.
+    probed(&mut gui, info("6.33.1"));
+    assert!(!reason(&mut gui));
+    assert_eq!(gui.ui.hit(Position { x: 30, y: 19 }), Some(Act::DjRow(Row::Learn)));
+}
+
+#[test]
+fn learn_from_skips_is_a_switch_by_click_and_by_space() {
+    let _en = english();
+    let mut gui = room_gui();
+    assert!(!gui.app.dj.learn_from_skips, "off by default");
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "Learn from skips");
+    assert!(gui.app.dj.learn_from_skips);
+    assert!(gui.prefs_unsaved.is_some(), "saved once the edits rest");
+    let rows = draw(&mut gui);
+    assert!(room(&rows, 19).ends_with("[✓]  "));
+    assert_eq!(fg_at(&mut gui, 59, 19), th().ok);
+    assert!(gui.dj.cursor.is_none(), "a click seats no hand");
+    // By the keyboard: up from Harmonic to it, Space flips it — the
+    // switch's tips while the hand is there.
+    gui.prefs_unsaved = None;
+    for _ in 0..4 {
+        key(&mut gui, KeyCode::Up);
+    }
+    assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Learn)));
+    assert_eq!(super::tips(&gui).as_deref(), Some("Space toggle · ↑ ↓ rows · Esc done"));
+    key(&mut gui, KeyCode::Char(' '));
+    assert!(!gui.app.dj.learn_from_skips && gui.prefs_unsaved.is_some());
+    let b = buffer(&mut gui);
+    assert!((17..64).all(|x| b[(x, 19)].bg == th().accent), "the hand's slab, the row's width");
+}
+
+/// The probes of the room's server among `effects`.
+fn probes_of(effects: &[Effect]) -> usize {
+    effects.iter().filter(|e| matches!(e, Effect::Api(ApiCmd::DjProbe { identity, .. }) if identity == HOST)).count()
+}
+
+/// Stopped by `A` or by the bar's word as by the room's own Stop: off, the
+/// rows describe Play from's server again, and it is asked what it offers —
+/// else Learn from skips and Less like rested until the room was entered
+/// again. While it is asked, the hand on Learn stands on Sonic similarity.
+#[test]
+fn a_stop_by_a_or_the_bars_word_asks_play_froms_server_again() {
+    let _en = english();
+    for how in ["A", "the bar's word"] {
+        let mut gui = room_gui();
+        gui.app.queue.items = vec![queued("a.mp3", None)];
+        gui.act(Act::DjStartStop);
+        probed(&mut gui, info("6.33.1"));
+        // The hand on Learn from skips: up four from rest.
+        for _ in 0..4 {
+            key(&mut gui, KeyCode::Up);
+        }
+        assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Learn)), "{how}");
+        gui.pending.clear();
+        if how == "A" {
+            key(&mut gui, KeyCode::Char('A'));
+        } else {
+            let rows = draw(&mut gui);
+            click(&mut gui, &rows, "auto-dj");
+        }
+        assert!(!gui.app.dj_armed(), "{how} stops");
+        assert_eq!(probes_of(&gui.pending), 1, "{how}: Play from's server is asked: {:?}", gui.pending);
+        draw(&mut gui);
+        assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Sonic)), "{how}: Learn rests while it is asked");
+        // It answers: Learn from skips, and Less like's Add song, answer.
+        probed(&mut gui, info("6.33.1"));
+        let rows = draw(&mut gui);
+        assert_eq!(hit_text(&gui, &rows, "Learn from skips"), Some(Act::DjRow(Row::Learn)), "{how}");
+        gui.act(Act::DjRowKey(Row::Seeds));
+        let rows = draw(&mut gui);
+        let y = row_of(&rows, "LESS LIKE") + 1;
+        let (x, _) = find(&rows, "+ Add song").expect("Add song");
+        assert_eq!(gui.ui.hit(Position { x, y }), Some(add(SeedList::LessLike)), "{how}");
+    }
+}
+
+/// One pass of the loop's frame half with `event` in from the workers, as
+/// a session's answer comes: what it sent the API worker. What the test
+/// left pending before it (the room's opening probe, answered by hand) is
+/// not the pass's.
+fn frame_with(gui: &mut Gui, event: Event) -> Vec<ApiCmd> {
+    struct Quiet;
+    impl super::super::Host for Quiet {
+        fn pointer(&mut self, _hand: bool) {}
+    }
+    gui.pending.clear();
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (audio_tx, _audio_rx) = std::sync::mpsc::channel();
+    let (api_tx, api_rx) = std::sync::mpsc::channel();
+    event_tx.send(event).unwrap();
+    let channels = super::super::Channels { event_rx, audio_tx, api_tx, event_tx, control: None };
+    let mut ctx = super::super::Ctx::new(&gui.app, channels);
+    let mut terminal = Terminal::new(super::super::tests::IoTest(TestBackend::new(100, 30))).unwrap();
+    super::super::frame(&mut terminal, gui, &mut ctx, &mut Quiet).unwrap();
+    api_rx.try_iter().collect()
+}
+
+/// The session reconnects with the DJ off — a switch from the header, a
+/// wake — and the App lets go of what the rows knew: the room up asks Play
+/// from's server again, and so does a layer of the DJ's up over another
+/// room; with neither up, nothing is asked.
+#[test]
+fn a_reconnect_under_the_room_asks_play_froms_server_again() {
+    let _en = english();
+    // A server that lists its peers is asked for them: the pass writes no
+    // config file.
+    let connected = || Event::Connected {
+        server: HOST.into(),
+        id: HOST.into(),
+        username: None,
+        token: None,
+        ping: Box::new(Ping { federation_browse: true, ..Ping::default() }),
+    };
+    let probes = |asked: &[ApiCmd]| {
+        asked.iter().filter(|cmd| matches!(cmd, ApiCmd::DjProbe { identity, .. } if identity == HOST)).count()
+    };
+    let mut gui = room_gui();
+    let asked = frame_with(&mut gui, connected());
+    assert_eq!(probes(&asked), 1, "the room asks again: {asked:?}");
+    probed(&mut gui, info("6.33.1"));
+    let rows = draw(&mut gui);
+    assert_eq!(hit_text(&gui, &rows, "Learn from skips"), Some(Act::DjRow(Row::Learn)));
+    // Quick config's Seeds sheet, up over the Files room.
+    gui.act(Act::Nav(FILES_NAV));
+    gui.act(Act::DjQuick(QuickAct::Toggle));
+    gui.act(Act::DjQuick(QuickAct::Press(super::quick::QStop::Seeds)));
+    assert!(gui.dj.seeds.is_some());
+    let asked = frame_with(&mut gui, connected());
+    assert_eq!(probes(&asked), 1, "the sheet asks again: {asked:?}");
+    key(&mut gui, KeyCode::Esc);
+    assert!(gui.dj.seeds.is_none());
+    let asked = frame_with(&mut gui, connected());
+    assert_eq!(probes(&asked), 0, "nothing of the DJ's up: {asked:?}");
+}
+
+/// A row gone to rest under the keyboard's hand hands it to the nearest row
+/// above that answers — a sub-row to Sonic similarity, its parent — its
+/// slab and its tips with it, and the arrows walk on from there. Before a
+/// draw has settled it, they walk from the hand's place.
+#[test]
+fn a_row_gone_to_rest_under_the_hand_hands_it_to_the_row_above() {
+    let _en = english();
+    let mut gui = room_gui();
+    for _ in 0..3 {
+        key(&mut gui, KeyCode::Up);
+    }
+    assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Seeds)));
+    // Quick config switches sonic off under it.
+    gui.act(Act::DjQuick(QuickAct::Toggle));
+    gui.act(Act::DjQuick(QuickAct::Press(super::quick::QStop::Sonic)));
+    gui.act(Act::DjQuick(QuickAct::Close));
+    assert!(!gui.app.dj.sonic);
+    let rows = draw(&mut gui);
+    assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Sonic)));
+    let y = row_of(&rows, "Sonic similarity");
+    let b = buffer(&mut gui);
+    assert!((17..64).all(|x| b[(x, y)].bg == th().accent), "the hand's slab on Sonic similarity's row");
+    assert_eq!(super::tips(&gui).as_deref(), Some("Enter open · ↑ ↓ rows · Esc done"));
+    key(&mut gui, KeyCode::Down);
+    assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Beat)));
+    key(&mut gui, KeyCode::Up);
+    key(&mut gui, KeyCode::Up);
+    assert_eq!(gui.dj.cursor, Some(Item::Row(Row::SkipWords)));
+    // Sonic off under a hand on Learn from skips, nothing drawn since: ↓
+    // takes Beat matching, ↑ Sonic similarity — the rows either side of it.
+    for (code, want) in [(KeyCode::Down, Row::Beat), (KeyCode::Up, Row::Sonic)] {
+        super::edit(&mut gui, DjEdit::Sonic { on: true, floor: 55, anchor: SonicAnchor::Rolling });
+        gui.dj.cursor = Some(Item::Row(Row::Learn));
+        super::edit(&mut gui, DjEdit::Sonic { on: false, floor: 55, anchor: SonicAnchor::Rolling });
+        key(&mut gui, code);
+        assert_eq!(gui.dj.cursor, Some(Item::Row(want)), "{code:?}");
+    }
+}
+
+#[test]
+fn seeds_opens_its_sheet_by_click_and_by_key() {
+    let _en = english();
+    let mut gui = room_gui();
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "  Seeds");
+    assert!(gui.dj.seeds.is_some() && super::modal_open(&gui));
+    assert!(format!("{:?}", gui.dj.seeds).contains("hand: Mode(0), shown: false"), "{:?}", gui.dj.seeds);
+    let rows = draw(&mut gui);
+    assert!(rows.join("\n").contains("╭─ Seeds ─"));
+    assert_eq!(gui.ui.hit(Position { x: 2, y: 2 }), Some(Act::Guard), "the room beneath is inert");
+    assert_eq!(super::tips(&gui).as_deref(), Some("Tab ↑ ↓ move · Space press · m menu · Enter done"));
+    key(&mut gui, KeyCode::Esc);
+    assert!(gui.dj.seeds.is_none());
+    gui.act(Act::DjRowKey(Row::Seeds));
+    assert!(format!("{:?}", gui.dj.seeds).contains("hand: Mode(0), shown: true"));
+    assert_eq!(gui.dj.cursor, Some(Item::Row(Row::Seeds)), "the room's hand on its row");
+    // In Stay close the hand opens on Stay close.
+    key(&mut gui, KeyCode::Esc);
+    super::edit(&mut gui, DjEdit::SeedMode(SonicAnchor::Locked));
+    gui.act(Act::DjRowKey(Row::Seeds));
+    assert!(format!("{:?}", gui.dj.seeds).contains("hand: Mode(1)"));
+}
+
+// ── The Seeds sheet ─────────────────────────────────────────────────────────
+
+/// A-Drift's sheet, the board's rows 5–24 (x17–82), Looking Back's menu
+/// down.
+const A_DRIFT: [&str; 20] = [
+    "╭─ Seeds ────────────────────────────────────────────────────────╮",
+    "│ (•) Drift                 ( ) Stay close                       │",
+    "│ Songs are rotated out regularly. Pin a song to keep it from    │",
+    "│ being removed.                                                 │",
+    "│                                                                │",
+    "│ MORE LIKE                                                      │",
+    "│ ◉ SkyWalk · Boukmanflow                                    [⋯] │",
+    "│ ◌ Crystalstair · Boukmanflow                               [⋯] │",
+    "│ ◌ Fayz · ALM                                               [⋯] │",
+    "│ ◉ Better Days · Boukmanflow                                [⋯] │",
+    "│ ◌ Looking Back · Boukmanflow                               [⋯] │",
+    "│ + Add song                                ╭──────────────────╮ │",
+    "│                                           │ Less like this   │ │",
+    "│ LESS LIKE                                 │ Remove           │ │",
+    "│ ◌ Circles · Color Out                     ╰──────────────────╯ │",
+    "│ ◉ Heartbeat · Color Out                                    [⋯] │",
+    "│ + Add song                                                     │",
+    "│                                                                │",
+    "│                                                       [ Done ] │",
+    "╰────────────────────────────────────────────────────────────────╯",
+];
+
+/// A-StayClose's sheet, the board's rows 5–24.
+const A_STAY_CLOSE: [&str; 20] = [
+    "╭─ Seeds ────────────────────────────────────────────────────────╮",
+    "│ ( ) Drift                 (•) Stay close                       │",
+    "│ All songs are now pinned. No new songs will be added.          │",
+    "│                                                                │",
+    "│                                                                │",
+    "│ MORE LIKE                                                      │",
+    "│ ◉ SkyWalk · Boukmanflow                                    [⋯] │",
+    "│ ◉ Crystalstair · Boukmanflow                               [⋯] │",
+    "│ ◉ Fayz · ALM                                               [⋯] │",
+    "│ ◉ Better Days · Boukmanflow                                [⋯] │",
+    "│ ◉ Looking Back · Boukmanflow                               [⋯] │",
+    "│ + Add song                                                     │",
+    "│                                                                │",
+    "│ LESS LIKE                                                      │",
+    "│ ◉ Circles · Color Out                                      [⋯] │",
+    "│ ◉ Heartbeat · Color Out                                    [⋯] │",
+    "│ + Add song                                                     │",
+    "│                                                                │",
+    "│                                                       [ Done ] │",
+    "╰────────────────────────────────────────────────────────────────╯",
+];
+
+/// Where an A board's row stands in the build: the sheet is a row
+/// taller for its checkbox (decision 34), so the board's rows 5–22 stand a
+/// row higher, the checkbox takes row 22, and Done and the bottom border
+/// keep 23 and 24.
+fn build_row(board: usize) -> usize {
+    if board <= 22 { board - 1 } else { board }
+}
+
+/// The checkbox's row of the build, unticked.
+fn checkbox_row() -> String {
+    format!("│ {:<62} │", "[ ] Clear pins when the queue is cleared")
+}
+
+/// The sheet's stop on a row: its pin or its `[⋯]`.
+fn pin(list: SeedList, path: &str) -> Act {
+    Act::DjSeeds(super::SeedsAct::Press(super::seeds::SeedStop::Pin(list, seed_key(path))))
+}
+
+fn dots(list: SeedList, path: &str) -> Act {
+    Act::DjSeeds(super::SeedsAct::Press(super::seeds::SeedStop::Menu(list, seed_key(path))))
+}
+
+fn add(list: SeedList) -> Act {
+    Act::DjSeeds(super::SeedsAct::Press(super::seeds::SeedStop::Add(list)))
+}
+
+/// `count` rows of one's own in `list`, pinned: "Song 1" … newest first.
+fn pinned_rows(gui: &mut Gui, list: SeedList, tag: &str, count: usize) {
+    let now = crate::clock::Instant::now();
+    for n in (1..=count).rev() {
+        let path = format!("lib/{tag}{n}.mp3");
+        gui.app.seeds.add_manual(list, seed_key(&path), song(&path, &format!("{tag} {n}"), "Band"), now);
+    }
+}
+
+#[test]
+fn the_seeds_sheet_is_a_drift_cell_for_cell() {
+    let _en = english();
+    let mut gui = room_gui();
+    a_board_lists(&mut gui);
+    gui.act(Act::DjRow(Row::Seeds));
+    draw(&mut gui);
+    // The board shows Looking Back's menu down, opened by its [⋯].
+    assert_eq!(gui.ui.hit(Position { x: 78, y: 14 }), Some(dots(SeedList::MoreLike, "lib/looking-back.mp3")));
+    gui.act(gui.ui.hit(Position { x: 80, y: 14 }).expect("its last cell too"));
+    let rows_open = draw(&mut gui);
+    for (i, want) in A_DRIFT.iter().enumerate() {
+        let y = build_row(5 + i);
+        assert_eq!(cells(&rows_open[y], 17, 83), *want, "board row {} at {y}:\n{}", 5 + i, rows_open.join("\n"));
+    }
+    assert_eq!(cells(&rows_open[22], 17, 83), checkbox_row());
+    // Its colours, the board's.
+    let b = buffer(&mut gui);
+    assert!(is_text(b[(20, 4)].fg) && bold(&b, 20, 4), "the title");
+    assert_eq!((b[(19, 5)].fg, b[(45, 5)].fg), (th().accent, th().dim), "the radios");
+    assert!(bold(&b, 23, 5) && !bold(&b, 49, 5), "Drift chosen");
+    assert_eq!((b[(19, 6)].fg, b[(19, 9)].fg, b[(19, 17)].fg), (th().dim, th().dim, th().dim), "the line, the headers");
+    assert_eq!((b[(19, 10)].fg, b[(19, 11)].fg, b[(19, 19)].fg), (th().ok, th().dim, th().ok), "pinned OK, unpinned DIM");
+    assert!(is_text(b[(21, 10)].fg) && b[(29, 10)].fg == th().dim && b[(78, 10)].fg == th().dim, "the title, the artist, [⋯]");
+    assert!(b[(21, 14)].fg == th().accent && bold(&b, 21, 14) && b[(78, 14)].fg == th().accent, "the menu's row");
+    assert!(is_text(b[(19, 15)].fg), "Add song");
+    assert_eq!((b[(61, 15)].fg, b[(63, 17)].fg), (th().accent, th().danger), "the menu, Remove DANGER at rest");
+    assert!(is_text(b[(63, 16)].fg));
+    assert!(b[(73, 23)].fg == th().accent && bold(&b, 73, 23), "[ Done ]");
+    // The menu's verbs take their clicks; a click off it folds it.
+    assert_eq!(gui.ui.hit(Position { x: 63, y: 16 }), Some(Act::DjSeeds(super::SeedsAct::Verb(0))));
+    assert_eq!(gui.ui.hit(Position { x: 70, y: 17 }), Some(Act::DjSeeds(super::SeedsAct::Verb(1))));
+    assert_eq!(gui.ui.hit(Position { x: 30, y: 20 }), Some(Act::DjSeeds(super::SeedsAct::MenuClose)));
+    gui.act(Act::DjSeeds(super::SeedsAct::MenuClose));
+    // Folded, the sheet is the board's under it: every row's pin and [⋯]
+    // are the row's own stops, Add song and the checkbox theirs.
+    let rows = draw(&mut gui);
+    assert_eq!(cells(&rows[15], 17, 83), format!("│ {:<62} │", "+ Add song"));
+    assert_eq!(rows[4..15], rows_open[4..15], "the rows above the menu as they were");
+    assert_eq!(gui.ui.hit(Position { x: 19, y: 11 }), Some(pin(SeedList::MoreLike, "lib/crystalstair.mp3")));
+    assert_eq!(gui.ui.hit(Position { x: 79, y: 18 }), Some(dots(SeedList::LessLike, "lib/circles.mp3")));
+    assert_eq!(gui.ui.hit(Position { x: 19, y: 15 }), Some(add(SeedList::MoreLike)));
+    assert_eq!(gui.ui.hit(Position { x: 19, y: 20 }), Some(add(SeedList::LessLike)));
+    assert_eq!(gui.ui.hit(Position { x: 30, y: 10 }), Some(Act::Guard), "a title takes no click");
+    // The pointer brightens a pin and a [⋯].
+    gui.ui.pointer = Some(Position { x: 19, y: 11 });
+    let b = buffer(&mut gui);
+    assert!(b[(19, 11)].fg == th().bright && bold(&b, 19, 11));
+    gui.ui.pointer = Some(Position { x: 79, y: 12 });
+    let b = buffer(&mut gui);
+    assert!(b[(78, 12)].fg == th().bright && bold(&b, 80, 12));
+}
+
+#[test]
+fn stay_close_locks_every_pin_and_keeps_the_menus() {
+    let _en = english();
+    let mut gui = room_gui();
+    a_board_lists(&mut gui);
+    gui.act(Act::DjRow(Row::Seeds));
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "( ) Stay close");
+    assert_eq!(gui.app.dj.sonic_anchor, SonicAnchor::Locked, "applied at once");
+    assert!(gui.app.seeds.frozen() && gui.dj.seeds.is_some());
+    let rows = draw(&mut gui);
+    for (i, want) in A_STAY_CLOSE.iter().enumerate() {
+        let y = build_row(5 + i);
+        assert_eq!(cells(&rows[y], 17, 83), *want, "board row {} at {y}:\n{}", 5 + i, rows.join("\n"));
+    }
+    assert_eq!(cells(&rows[22], 17, 83), checkbox_row());
+    // Every pin ◉ DIM and locked; the menus and Add song still answer.
+    let b = buffer(&mut gui);
+    for y in [10, 11, 12, 13, 14, 18, 19] {
+        assert_eq!(b[(19, y)].fg, th().dim, "row {y}'s pin");
+        assert_eq!(gui.ui.hit(Position { x: 19, y }), Some(Act::Guard), "row {y}'s pin is locked");
+    }
+    assert!(b[(45, 5)].fg == th().accent && bold(&b, 49, 5), "Stay close chosen");
+    assert_eq!(gui.ui.hit(Position { x: 78, y: 11 }), Some(dots(SeedList::MoreLike, "lib/crystalstair.mp3")));
+    assert!(is_text(b[(19, 15)].fg) && gui.ui.hit(Position { x: 19, y: 15 }) == Some(add(SeedList::MoreLike)));
+    // A pin pressed anyway changes nothing; the stored pins were never
+    // touched, and Drift gives the user's own back.
+    gui.act(pin(SeedList::MoreLike, "lib/crystalstair.mp3"));
+    assert!(!gui.app.seeds.more_like[1].pinned);
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "( ) Drift");
+    assert!(!gui.app.seeds.frozen());
+    let b = buffer(&mut gui);
+    assert_eq!((b[(19, 10)].fg, b[(19, 11)].fg), (th().ok, th().dim));
+}
+
+#[test]
+fn a_seed_press_applies_at_once_and_done_only_closes() {
+    let _en = english();
+    let mut gui = room_gui();
+    a_board_lists(&mut gui);
+    gui.act(Act::DjRow(Row::Seeds));
+    draw(&mut gui);
+    gui.act(pin(SeedList::MoreLike, "lib/crystalstair.mp3"));
+    assert!(gui.app.seeds.more_like[1].pinned, "pinned at once");
+    assert!(gui.prefs_unsaved.is_some(), "and saved once the edits rest");
+    assert_eq!(fg_at(&mut gui, 19, 11), th().ok);
+    gui.act(pin(SeedList::LessLike, "lib/heartbeat.mp3"));
+    assert!(!gui.app.seeds.less_like[1].pinned, "and let go");
+    // Done writes nothing more: there is no draft.
+    gui.prefs_unsaved = None;
+    let before = gui.app.seeds.clone();
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "[ Done ]");
+    assert!(gui.dj.seeds.is_none() && gui.prefs_unsaved.is_none());
+    assert_eq!(gui.app.seeds, before);
+    // Enter and Esc are Done too.
+    gui.act(Act::DjRowKey(Row::Seeds));
+    key(&mut gui, KeyCode::Enter);
+    assert!(gui.dj.seeds.is_none());
+    gui.act(Act::DjRowKey(Row::Seeds));
+    key(&mut gui, KeyCode::Esc);
+    assert!(gui.dj.seeds.is_none() && gui.prefs_unsaved.is_none());
+}
+
+#[test]
+fn the_checkbox_says_whether_a_cleared_queue_lets_the_pins_go() {
+    let _en = english();
+    let mut gui = room_gui();
+    assert!(!gui.app.dj.clear_pins_on_queue_clear, "off by default");
+    gui.act(Act::DjRow(Row::Seeds));
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "[ ] Clear pins when the queue is cleared");
+    assert!(gui.app.dj.clear_pins_on_queue_clear && gui.prefs_unsaved.is_some());
+    let rows = draw(&mut gui);
+    let (x, y) = find(&rows, "[✓] Clear pins when the queue is cleared").expect("ticked");
+    assert_eq!((x, fg_at(&mut gui, x, y)), (19, th().ok));
+    // By the keyboard: ↑ from Done, Space.
+    for _ in 0..12 {
+        key(&mut gui, KeyCode::Down);
+    }
+    key(&mut gui, KeyCode::Up);
+    key(&mut gui, KeyCode::Char(' '));
+    assert!(!gui.app.dj.clear_pins_on_queue_clear);
+}
+
+#[test]
+fn a_rows_menu_moves_and_removes_and_rests_a_move_with_no_room() {
+    let _en = english();
+    let mut gui = room_gui();
+    a_board_lists(&mut gui);
+    gui.act(Act::DjRow(Row::Seeds));
+    draw(&mut gui);
+    // Less like this: the row goes to the top of Less like, pinned.
+    gui.act(dots(SeedList::MoreLike, "lib/looking-back.mp3"));
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "Less like this");
+    let seeds = &gui.app.seeds;
+    assert_eq!(seeds.less_like[0].key.path, "lib/looking-back.mp3");
+    assert!(seeds.less_like[0].pinned && !seeds.holds(SeedList::MoreLike, &seed_key("lib/looking-back.mp3")));
+    assert!(gui.dj.seeds.is_some() && !draw(&mut gui).join("\n").contains("Less like this"), "the menu folds, the sheet stays");
+    // More like this, from a Less like row; then Remove.
+    gui.act(dots(SeedList::LessLike, "lib/circles.mp3"));
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "More like this");
+    assert_eq!(gui.app.seeds.more_like[0].key.path, "lib/circles.mp3");
+    gui.act(dots(SeedList::MoreLike, "lib/circles.mp3"));
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "Remove");
+    assert!(!gui.app.seeds.holds(SeedList::MoreLike, &seed_key("lib/circles.mp3")));
+    // Less like full of pins: a More like row's Less like this rests — DIM,
+    // no click, and the cursor passes it.
+    pinned_rows(&mut gui, SeedList::LessLike, "Pin", 6);
+    assert!(!gui.app.seeds.can_take(SeedList::LessLike));
+    // (The removal left the hand, stowed, on SkyWalk's [⋯], where Circles
+    // stood: ↓ shows it there.)
+    gui.act(Act::DjSeeds(super::SeedsAct::MenuClose));
+    key(&mut gui, KeyCode::Down);
+    key(&mut gui, KeyCode::Char('m'));
+    let rows = draw(&mut gui);
+    let (vx, vy) = find(&rows, "Less like this").expect("the verb");
+    assert_eq!(fg_at(&mut gui, vx, vy), th().dim);
+    assert_eq!(gui.ui.hit(Position { x: vx, y: vy }), Some(Act::Guard));
+    let b = buffer(&mut gui);
+    assert!(b[(vx, vy + 1)].bg == th().accent, "the cursor shown on Remove, the one verb on offer");
+    key(&mut gui, KeyCode::Up);
+    assert_eq!(buffer(&mut gui)[(vx, vy + 1)].bg, th().accent, "↑ passes the resting verb");
+    gui.act(Act::DjSeeds(super::SeedsAct::Verb(0)));
+    assert_eq!(gui.app.seeds.more_like[0].key.path, "lib/skywalk.mp3", "a resting verb does nothing");
+    key(&mut gui, KeyCode::Enter);
+    assert!(!gui.app.seeds.holds(SeedList::MoreLike, &seed_key("lib/skywalk.mp3")), "Enter, Remove");
+}
+
+/// The server takes no negatives: Less like rests, DIM — its pins and
+/// Add song inert, its menus live — and More like's menus rest Less like
+/// this.
+#[test]
+fn less_like_rests_where_the_server_takes_no_negatives() {
+    let _en = english();
+    let mut gui = room_gui();
+    probed(&mut gui, DjServerInfo { auto_dj: Some(0), ..info("6.33.1") });
+    a_board_lists(&mut gui);
+    gui.act(Act::DjRow(Row::Seeds));
+    let rows = draw(&mut gui);
+    assert_eq!(cells(&rows[17], 17, 83), format!("│ LESS LIKE{:>53} │", "Needs a newer server"));
+    let b = buffer(&mut gui);
+    for y in [18, 19] {
+        assert_eq!((b[(19, y)].fg, b[(21, y)].fg), (th().dim, th().dim), "row {y} DIM");
+        assert_eq!(gui.ui.hit(Position { x: 19, y }), Some(Act::Guard), "row {y}'s pin rests");
+    }
+    assert_eq!(b[(19, 20)].fg, th().dim, "its Add song rests");
+    assert_eq!(gui.ui.hit(Position { x: 19, y: 20 }), Some(Act::Guard));
+    assert_eq!(gui.ui.hit(Position { x: 78, y: 18 }), Some(dots(SeedList::LessLike, "lib/circles.mp3")), "its menu answers");
+    assert_eq!(gui.ui.hit(Position { x: 19, y: 15 }), Some(add(SeedList::MoreLike)), "More like's answers");
+    gui.act(dots(SeedList::LessLike, "lib/circles.mp3"));
+    let rows = draw(&mut gui);
+    let (x, y) = find(&rows, "More like this").expect("the verb");
+    assert!(gui.ui.hit(Position { x, y }).is_some_and(|act| act == Act::DjSeeds(super::SeedsAct::Verb(0))));
+    gui.act(dots(SeedList::MoreLike, "lib/skywalk.mp3"));
+    let rows = draw(&mut gui);
+    let (x, y) = find(&rows, "Less like this").expect("the verb");
+    assert_eq!((fg_at(&mut gui, x, y), gui.ui.hit(Position { x, y })), (th().dim, Some(Act::Guard)));
+}
+
+#[test]
+fn add_song_rests_while_its_list_is_full_or_the_library_is_another_servers() {
+    let _en = english();
+    let mut gui = room_gui();
+    pinned_rows(&mut gui, SeedList::MoreLike, "Pin", 8);
+    gui.act(Act::DjRowKey(Row::Seeds));
+    let rows = draw(&mut gui);
+    let (x, y) = find(&rows, "+ Add song").expect("More like's");
+    assert_eq!((fg_at(&mut gui, x, y), gui.ui.hit(Position { x, y })), (th().dim, Some(Act::Guard)));
+    // No stop either: Tab walks the whole sheet and never lands on it.
+    let mut seen = Vec::new();
+    for _ in 0..40 {
+        key(&mut gui, KeyCode::Tab);
+        seen.push(format!("{:?}", gui.dj.seeds));
+    }
+    assert!(!seen.iter().any(|ui| ui.contains("hand: Add(MoreLike)")) && seen.iter().any(|ui| ui.contains("hand: Add(LessLike)")));
+    // Stay close shows every row pinned: a list of 8 can take none, even
+    // one that was not all pinned.
+    key(&mut gui, KeyCode::Esc);
+    gui.app.seeds.more_like[3].pinned = false;
+    assert!(gui.app.seeds.can_take(SeedList::MoreLike));
+    super::edit(&mut gui, DjEdit::SeedMode(SonicAnchor::Locked));
+    assert!(!gui.app.seeds.can_take(SeedList::MoreLike));
+    // Browsing a server that is not the room's: both rest, with no reason.
+    super::edit(&mut gui, DjEdit::SeedMode(SonicAnchor::Rolling));
+    gui.app.seeds = Default::default();
+    two_servers(&mut gui);
+    gui.app.dj_home = Some(ATTIC.into());
+    assert!(!gui.app.seeds_pickable());
+    gui.act(Act::DjRowKey(Row::Seeds));
+    let rows = draw(&mut gui);
+    for y in [row_of(&rows, "MORE LIKE") + 1, row_of(&rows, "LESS LIKE") + 1] {
+        assert_eq!(cells(&rows[y as usize], 19, 29), "+ Add song");
+        assert_eq!((fg_at(&mut gui, 19, y), gui.ui.hit(Position { x: 19, y })), (th().dim, Some(Act::Guard)));
+    }
+    gui.act(add(SeedList::MoreLike));
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_some(), "a press anyway arms nothing");
+}
+
+#[test]
+fn the_seeds_sheet_lists_stay_closes_ninth_row() {
+    // Eight of another server's rows fill More like; a move of the DJ here
+    // in Stay close takes the song playing as a ninth row (auto-dj
+    // decision 42), and the sheet lists it with the eight — Add song
+    // resting, as with any full list.
+    let _en = english();
+    let mut gui = room_gui();
+    // So the move's provisional answer leaves sonic usable.
+    gui.app.capabilities.discovery = true;
+    let far = "http://far:3000";
+    gui.app.servers = vec![known(HOST, "Home"), known(far, "Far")];
+    let far_origin = Origin { server: far.into(), peer: None };
+    let now = crate::clock::Instant::now();
+    for n in (1..=8).rev() {
+        let path = format!("lib/far{n}.mp3");
+        let row = song(&path, &format!("Far {n}"), "Band");
+        assert!(gui.app.seeds.add_manual(SeedList::MoreLike, SeedKey::new(&far_origin, &path), row, now));
+    }
+    gui.app.dj_server = Some(far.into());
+    super::edit(&mut gui, DjEdit::SeedMode(SonicAnchor::Locked));
+    let two = Queued { origin: Origin { server: HOST.into(), peer: None }, dj: None, track: song("lib/two.mp3", "Two", "Band") };
+    gui.app.queue.items = vec![two];
+    gui.app.queue.current = Some(0);
+    gui.app.status.source = "http://host:3000/media/two".into();
+    let effects = gui.app.dj_move_to(HOST.into());
+    gui.pend(effects);
+    assert_eq!(gui.app.seeds.more_like.len(), 9);
+    assert_eq!(gui.app.seeds.more_like[0].from, SeedFrom::Anchor);
+
+    gui.act(Act::DjRow(Row::Seeds));
+    let rows = draw(&mut gui);
+    let all = rows.join("\n");
+    for n in 1..=8 {
+        assert!(all.contains(&format!("Far {n} · Band")), "Far {n}:\n{all}");
+    }
+    assert!(all.contains("Two · Band"), "the ninth row:\n{all}");
+    let (x, y) = find(&rows, "+ Add song").expect("More like's");
+    assert!(y > row_of(&rows, "Far 1 · Band") && y < row_of(&rows, "LESS LIKE"), "More like's, under its nine rows");
+    assert_eq!((fg_at(&mut gui, x, y), gui.ui.hit(Position { x, y })), (th().dim, Some(Act::Guard)));
+}
+
+#[test]
+fn the_seeds_sheet_walks_by_the_keyboard() {
+    let _en = english();
+    let mut gui = room_gui();
+    a_board_lists(&mut gui);
+    gui.act(Act::DjRowKey(Row::Seeds));
+    let hand = |gui: &Gui| format!("{:?}", gui.dj.seeds);
+    // Tab walks the reading order and wraps: the two modes, each row's pin
+    // and [⋯], the two Add songs, the checkbox and Done — twenty stops.
+    for _ in 0..20 {
+        key(&mut gui, KeyCode::Tab);
+    }
+    assert!(hand(&gui).contains("hand: Mode(0)"), "{}", hand(&gui));
+    key(&mut gui, KeyCode::BackTab);
+    assert!(hand(&gui).contains("hand: Done"));
+    // ↓ from the modes is the first row's pin; → its [⋯]: the hand the
+    // accent slab on the glyph.
+    key(&mut gui, KeyCode::Tab);
+    key(&mut gui, KeyCode::Down);
+    let b = buffer(&mut gui);
+    assert!(b[(19, 10)].bg == th().accent && b[(21, 10)].bg != th().accent, "the pin's cell");
+    key(&mut gui, KeyCode::Right);
+    let b = buffer(&mut gui);
+    assert!((78..81).all(|x| b[(x, 10)].bg == th().accent), "[⋯]'s cells");
+    // Space on [⋯] opens its menu with the cursor up; Esc folds it and the
+    // sheet stays. `m` from the pin opens it too; ← folds.
+    key(&mut gui, KeyCode::Char(' '));
+    let b = buffer(&mut gui);
+    assert!(draw(&mut gui).join("\n").contains("Less like this") && b[(63, 12)].bg == th().accent, "the cursor on its first verb");
+    assert_eq!(super::tips(&gui).as_deref(), Some("↑ ↓ rows · Enter choose · Esc close"));
+    key(&mut gui, KeyCode::Esc);
+    assert!(gui.dj.seeds.is_some() && !draw(&mut gui).join("\n").contains("Less like this"));
+    key(&mut gui, KeyCode::Left);
+    key(&mut gui, KeyCode::Char('m'));
+    assert!(draw(&mut gui).join("\n").contains("Less like this"));
+    key(&mut gui, KeyCode::Left);
+    assert!(!draw(&mut gui).join("\n").contains("Less like this"));
+    // Space on Stay close; PageDown moves nothing here — the lists fit.
+    key(&mut gui, KeyCode::Up);
+    key(&mut gui, KeyCode::Right);
+    key(&mut gui, KeyCode::Char(' '));
+    assert!(gui.app.seeds.frozen());
+    // A click stows the hand: the next walking key only shows it.
+    gui.act(Act::DjSeeds(super::SeedsAct::Press(super::seeds::SeedStop::Mode(0))));
+    assert!(!gui.app.seeds.frozen() && hand(&gui).contains("shown: false"));
+    key(&mut gui, KeyCode::Down);
+    assert!(hand(&gui).contains("hand: Mode(0), shown: true"));
+}
+
+#[test]
+fn eight_and_eight_rows_scroll_the_lists() {
+    let _en = english();
+    let mut gui = room_gui();
+    pinned_rows(&mut gui, SeedList::MoreLike, "More", 8);
+    pinned_rows(&mut gui, SeedList::LessLike, "Less", 8);
+    gui.act(Act::DjRowKey(Row::Seeds));
+    let rows = draw(&mut gui);
+    let all = rows.join("\n");
+    // As tall as the room affords — from row 1, never over the bar — the
+    // mode, the checkbox and Done fixed, the lists scrolling between.
+    let (_, top) = find(&rows, "╭─ Seeds ─").expect("the sheet");
+    assert_eq!(top, 1);
+    assert_eq!(cells(&rows[24], 17, 18), "╰");
+    assert!(all.contains("(•) Drift") && all.contains("[ ] Clear pins") && all.contains("[ Done ]"), "{all}");
+    assert!(all.contains("More 1 · Band") && !all.contains("Less 8 · Band"), "{all}");
+    assert_eq!((cells(&rows[6], 80, 81), cells(&rows[20], 80, 81)), ("▲".into(), "▼".into()), "the scrollbar");
+    assert_eq!(cells(&rows[7], 76, 79), "[⋯]", "[⋯] two cells in, clear of the bar");
+    // A walking key brings the hand's row into view: Less like's last, on
+    // the window's last line (sixteen rows down: neither full list's Add
+    // song is a stop).
+    for _ in 0..16 {
+        key(&mut gui, KeyCode::Down);
+    }
+    let rows = draw(&mut gui);
+    let all = rows.join("\n");
+    assert!(all.contains("Less 8 · Band") && !all.contains("MORE LIKE"), "{all}");
+    let at = row_of(&rows, "Less 8 · Band");
+    assert_eq!(at, 20);
+    // Its menu hangs above it: below, it would pass the sheet's last row.
+    key(&mut gui, KeyCode::Char('m'));
+    let rows = draw(&mut gui);
+    let (mx, my) = find(&rows, "╭──────────────────╮").expect("the menu");
+    assert_eq!((mx, my), (59, at - 4), "its right border on [⋯]'s ], over the row:\n{}", rows.join("\n"));
+    assert!(cells(&rows[at as usize - 1], 59, 79).starts_with('╰'));
+    key(&mut gui, KeyCode::Esc);
+    // The wheel turns the window, wherever the hand is.
+    gui.wheel(Position { x: 50, y: 12 }, -40);
+    let all = draw(&mut gui).join("\n");
+    assert!(all.contains("MORE LIKE") && all.contains("More 1 · Band"), "{all}");
+    gui.wheel(Position { x: 50, y: 12 }, 40);
+    let all = draw(&mut gui).join("\n");
+    assert!(all.contains("Less 8 · Band") && all.contains("+ Add song"), "the window's end: {all}");
+    // PageUp moves the window a page back.
+    key(&mut gui, KeyCode::PageUp);
+    assert!(draw(&mut gui).join("\n").contains("More 1 · Band"));
+}
+
+#[test]
+fn a_row_that_goes_under_the_hand_settles_it() {
+    let _en = english();
+    let mut gui = room_gui();
+    a_board_lists(&mut gui);
+    gui.act(Act::DjRowKey(Row::Seeds));
+    // The hand on Circles' [⋯], its menu down.
+    for _ in 0..7 {
+        key(&mut gui, KeyCode::Down);
+    }
+    key(&mut gui, KeyCode::Right);
+    assert!(format!("{:?}", gui.dj.seeds).contains("circles"), "{:?}", gui.dj.seeds);
+    key(&mut gui, KeyCode::Char(' '));
+    // Its thirty minutes run out: the row goes, the menu with it, and the
+    // hand stands where the row stood — on Heartbeat's [⋯]. (The sheet,
+    // a row shorter, stands a row lower: it follows its rows.)
+    let later = crate::clock::Instant::now() + std::time::Duration::from_secs(31 * 60);
+    assert!(gui.app.seeds.prune(later));
+    let rows = draw(&mut gui);
+    assert!(!rows.join("\n").contains("Circles") && !rows.join("\n").contains("Remove"));
+    let y = row_of(&rows, "Heartbeat");
+    assert_eq!(y, row_of(&rows, "LESS LIKE") + 1);
+    let b = buffer(&mut gui);
+    assert!((78..81).all(|x| b[(x, y)].bg == th().accent), "the hand on the row that took its place");
+}
+
+// ── Add song's library pick ─────────────────────────────────────────────────
+
+/// The room's server's Files listing, to pick from: Night Drive at row 2,
+/// Aurora at row 3.
+fn listing(gui: &mut Gui) {
+    gui.app.files.set(vec![
+        Entry::Parent,
+        Entry::Dir { label: "Ambient".into(), path: "music/Ambient".into() },
+        Entry::Track { label: "Night Drive".into(), track: Box::new(song("music/a.mp3", "Night Drive", "Color Out")) },
+        Entry::Track { label: "Aurora".into(), track: Box::new(song("music/b.mp3", "Aurora", "ALM")) },
+    ]);
+}
+
+/// The Seeds sheet up by the keyboard, and More like's Add song pressed.
+fn armed_by_key(gui: &mut Gui) {
+    gui.act(Act::DjRowKey(Row::Seeds));
+    key(gui, KeyCode::Down);
+    key(gui, KeyCode::Char(' '));
+    assert_eq!(gui.app.capture, Some(Capture::Seeds(SeedList::MoreLike)));
+}
+
+#[test]
+fn add_song_arms_the_library_pick_and_the_song_comes_back_pinned() {
+    let _en = english();
+    let mut gui = room_gui();
+    listing(&mut gui);
+    armed_by_key(&mut gui);
+    // The sheet is gone before the pick is armed: the Files room, under
+    // the pick's banner, the room a row lower.
+    assert!(gui.dj.seeds.is_none());
+    assert_eq!((gui.screen, gui.active), (Screen::Library, FILES_NAV));
+    let rows = draw(&mut gui);
+    assert!(rows[2].contains("Pick a song for More like") && rows[2].contains("[X]"), "{:?}", rows[2]);
+    assert!(!rows[2].contains("Esc cancels"), "the tips line is off: its tail is cut");
+    assert!(rows[3].contains("Files"), "the room a row lower: {:?}", rows[3]);
+    let close_x = rows[2].chars().position(|c| c == '[').unwrap() as u16;
+    assert_eq!(gui.ui.hit(Position { x: close_x, y: 2 }), Some(Act::CaptureCancel));
+    assert_eq!(super::tips(&gui).as_deref(), Some("↑ ↓ rows · Enter picks the song · Esc cancels the pick"));
+    // Aurora: a pinned row of More like, the sheet back over the Auto DJ
+    // room with the hand on that Add song, shown — and saved soon.
+    gui.prefs_unsaved = None;
+    gui.act(Act::PaneRow(List::Files, 3, RowVerb::Open));
+    assert!(gui.app.capture.is_none());
+    assert_eq!((gui.screen, gui.active), (Screen::Library, DJ_NAV));
+    let row = &gui.app.seeds.more_like[0];
+    assert!(row.pinned && row.key == seed_key("music/b.mp3") && row.track.title_or_file() == "Aurora");
+    assert!(gui.prefs_unsaved.is_some());
+    assert!(format!("{:?}", gui.dj.seeds).contains("hand: Add(MoreLike), shown: true"), "{:?}", gui.dj.seeds);
+    let rows = draw(&mut gui);
+    let y = row_of(&rows, "+ Add song");
+    assert!(cells(&rows[y as usize - 1], 19, 40).starts_with("◉ Aurora · ALM"));
+    let b = buffer(&mut gui);
+    assert!(b[(19, y)].fg == th().accent && bold(&b, 19, y), "the hand on it");
+    // By the pointer: the hand comes back stowed, on Less like's Add song.
+    let rows = draw(&mut gui);
+    let (x, y) = find(&rows, "+ Add song").map(|(x, _)| (x, row_of(&rows, "LESS LIKE") + 1)).unwrap();
+    gui.act(gui.ui.hit(Position { x, y }).expect("Less like's Add song"));
+    assert!(gui.dj.seeds.is_none() && gui.app.capture == Some(Capture::Seeds(SeedList::LessLike)));
+    assert!(draw(&mut gui)[2].contains("Pick a song for Less like"));
+    gui.act(Act::PaneRow(List::Files, 2, RowVerb::Open));
+    assert_eq!(gui.app.seeds.less_like[0].key, seed_key("music/a.mp3"));
+    assert!(format!("{:?}", gui.dj.seeds).contains("hand: Add(LessLike), shown: false"));
+}
+
+#[test]
+fn esc_and_the_banners_x_let_the_pick_go_back_to_the_sheet() {
+    let _en = english();
+    let mut gui = room_gui();
+    listing(&mut gui);
+    armed_by_key(&mut gui);
+    key(&mut gui, KeyCode::Esc);
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_some());
+    assert_eq!(gui.active, DJ_NAV);
+    assert!(gui.app.seeds.more_like.is_empty(), "nothing landed");
+    key(&mut gui, KeyCode::Esc);
+    armed_by_key(&mut gui);
+    let rows = draw(&mut gui);
+    click(&mut gui, &rows, "[X]");
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_some() && gui.active == DJ_NAV);
+}
+
+/// Esc takes one layer at a time (decision 33): a filter or a Search query
+/// being typed ends first and the pick stands; the next Esc lets it go.
+/// The banner's `[X]` lets it go outright.
+#[test]
+fn esc_takes_a_typed_filter_first_and_the_pick_next() {
+    let _en = english();
+    let mut gui = room_gui();
+    listing(&mut gui);
+    armed_by_key(&mut gui);
+    gui.act(Act::BarFilter);
+    type_text(&mut gui, "au");
+    assert!(gui.app.filtering);
+    key(&mut gui, KeyCode::Esc);
+    assert!(!gui.app.filtering && gui.app.capture == Some(Capture::Seeds(SeedList::MoreLike)));
+    assert!(gui.dj.seeds.is_none() && gui.active == FILES_NAV, "still picking");
+    key(&mut gui, KeyCode::Esc);
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_some() && gui.active == DJ_NAV);
+    // A Search query being typed, the same.
+    key(&mut gui, KeyCode::Esc);
+    armed_by_key(&mut gui);
+    gui.act(Act::Nav(SEARCH_NAV));
+    assert!(gui.app.editing_query);
+    key(&mut gui, KeyCode::Esc);
+    assert!(!gui.app.editing_query && gui.app.capture.is_some() && gui.dj.seeds.is_none());
+    key(&mut gui, KeyCode::Esc);
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_some() && gui.active == DJ_NAV);
+    // [X] with a filter being typed: one click.
+    key(&mut gui, KeyCode::Esc);
+    armed_by_key(&mut gui);
+    gui.act(Act::BarFilter);
+    type_text(&mut gui, "au");
+    gui.act(Act::CaptureCancel);
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_some() && gui.active == DJ_NAV);
+    // And with a query being typed.
+    key(&mut gui, KeyCode::Esc);
+    armed_by_key(&mut gui);
+    gui.act(Act::Nav(SEARCH_NAV));
+    assert!(gui.app.editing_query);
+    gui.act(Act::CaptureCancel);
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_some() && gui.active == DJ_NAV);
+}
+
+#[test]
+fn a_pick_after_the_rooms_server_changed_is_refused_and_says_so() {
+    let _en = english();
+    let mut gui = room_gui();
+    listing(&mut gui);
+    two_servers(&mut gui);
+    armed_by_key(&mut gui);
+    // Play from moved under the pick (the control face, a removal).
+    gui.app.dj_home = Some(ATTIC.into());
+    gui.act(Act::PaneRow(List::Files, 3, RowVerb::Open));
+    assert!(gui.app.capture.is_none() && gui.app.seeds.more_like.is_empty(), "consumed, and no row");
+    assert!(gui.dj.seeds.is_some() && gui.active == DJ_NAV, "home all the same");
+    assert_eq!(gui.note.as_ref().map(|(text, _)| text.as_str()), Some("Pick a track on attic"));
+}
+
+#[test]
+fn the_rooms_nav_row_lets_a_standing_pick_go_and_opens_no_sheet() {
+    let _en = english();
+    let mut gui = room_gui();
+    listing(&mut gui);
+    armed_by_key(&mut gui);
+    gui.act(Act::Nav(DJ_NAV));
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_none() && gui.active == DJ_NAV);
+    // Also with a Search query edit left open: it takes the first Cancel.
+    armed_by_key(&mut gui);
+    gui.app.editing_query = true;
+    gui.act(Act::Nav(DJ_NAV));
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_none());
+    // Stop leaves a pick standing: the sheet works with the DJ off.
+    gui.app.queue.items = vec![queued("a.mp3", None)];
+    gui.act(Act::DjStartStop);
+    armed_by_key(&mut gui);
+    let effects = gui.app.disarm_dj();
+    gui.pend(effects);
+    assert_eq!(gui.app.capture, Some(Capture::Seeds(SeedList::MoreLike)));
+    // The MP3 Player tab lets it go in place.
+    gui.act(Act::Screen(Screen::Device));
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_none());
+    assert_eq!(gui.screen, Screen::Device);
+}
+
+/// The pick leaves for the Files room, and comes home, by the screens' own
+/// door: the screen left goes whole — the full-screen view's keys from Now
+/// Playing, the Admin tab's room and its log's poll under quick config.
+#[test]
+fn the_pick_goes_and_comes_home_by_the_screens_own_door() {
+    let _en = english();
+    let mut gui = room_gui();
+    listing(&mut gui);
+    armed_by_key(&mut gui);
+    // The banner's [X] on Now Playing.
+    gui.act(Act::Screen(Screen::NowPlaying));
+    assert!(gui.app.fullscreen);
+    let rows = draw(&mut gui);
+    assert_eq!(hit_text(&gui, &rows, "[X]"), Some(Act::CaptureCancel));
+    click(&mut gui, &rows, "[X]");
+    assert!(gui.app.capture.is_none() && gui.dj.seeds.is_some());
+    assert_eq!((gui.screen, gui.active), (Screen::Library, DJ_NAV));
+    assert!(!gui.app.fullscreen, "the full-screen view's keys went with it");
+    key(&mut gui, KeyCode::Esc);
+    // Add song from quick config's Seeds sheet over the Admin tab.
+    gui.act(Act::Screen(Screen::Admin));
+    assert!(gui.admin.log.running() && gui.admin.room.is_some());
+    gui.act(Act::DjQuick(QuickAct::Toggle));
+    gui.act(Act::DjQuick(QuickAct::Press(super::quick::QStop::Seeds)));
+    gui.act(add(SeedList::MoreLike));
+    assert_eq!(gui.app.capture, Some(Capture::Seeds(SeedList::MoreLike)));
+    assert_eq!((gui.screen, gui.active), (Screen::Library, FILES_NAV));
+    assert!(!gui.admin.log.running() && gui.admin.room.is_none(), "the Admin tab let go");
+}
+
 // ── Every language ──────────────────────────────────────────────────────────
 
 const LOCALES: [&str; 10] = ["en", "de", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"];
@@ -1589,14 +2850,60 @@ fn every_locale_draws_the_floor_whole() {
         two_libraries(&mut gui);
         gui.app.dj.bpm = true;
         let rows = draw_sized(&mut gui, 100, 24);
-        // Twelve settings, two headers and the title: no name clipped, and
-        // every value clear of its name.
+        // Fourteen settings, two headers and the title on the room's 17
+        // rows: no name clipped, and every value clear of its name.
         for y in 2..19u16 {
             let row = room(&rows, y);
             assert!(!row.contains('…'), "{locale} row {y} is clipped: {row:?}");
         }
+        let all = squash(&rows.join("\n"));
+        for key in ["gui.dj.learn_skips", "gui.dj.seeds", "gui.dj.sonic", "gui.dj.harmonic", "gui.dj.cooldown"] {
+            assert!(all.contains(&squash(&rust_i18n::t!(key))), "{locale}: {key} is not whole:\n{}", rows.join("\n"));
+        }
         let title = room(&rows, 2);
         assert!(title.trim_end().len() < title.len() || title.ends_with(' '), "{locale}: {title:?}");
+        // At 100×30 Learn from skips' line stands whole under its name, on
+        // the rows the room has for it.
+        probed(&mut gui, info("6.33.1"));
+        let rows = draw(&mut gui);
+        let name = squash(&rust_i18n::t!("gui.dj.learn_skips"));
+        let learn = rows.iter().position(|row| squash(&cells(row, 17, 100)).contains(&name)).expect("Learn's row");
+        let lines = crate::kit::wrap_whole(&rust_i18n::t!("gui.dj.learn_skips_sub"), 43);
+        for (i, line) in lines.iter().enumerate() {
+            assert!(squash(&rows[learn + 1 + i]).contains(&squash(line)), "{locale}: {line:?}\n{}", rows.join("\n"));
+        }
+        assert!(squash(&rows[24]).contains(&squash(&rust_i18n::t!("gui.dj.harmonic"))), "{locale}: the room's last row");
+        // The Seeds sheet: every word whole but the songs' own.
+        a_board_lists(&mut gui);
+        gui.act(Act::DjRowKey(Row::Seeds));
+        let rows = draw(&mut gui);
+        let all = squash(&rows.join("\n"));
+        for key in ["gui.dj.drift", "gui.dj.stay_close", "gui.dj.add_song", "gui.dj.clear_pins", "gui.moods.done"] {
+            assert!(all.contains(&squash(&rust_i18n::t!(key))), "{locale}: {key} is not whole:\n{}", rows.join("\n"));
+        }
+        for line in crate::kit::wrap_whole(&rust_i18n::t!("gui.dj.seeds_drift_sub"), 62) {
+            assert!(all.contains(&squash(&line)), "{locale}: {line:?} is not whole:\n{}", rows.join("\n"));
+        }
+        for key in ["gui.dj.more_like", "gui.dj.less_like"] {
+            assert!(all.contains(&squash(&rust_i18n::t!(key).to_uppercase())), "{locale}: {key}");
+        }
+        // Its row menu's verbs, and the mode's other line.
+        let menu = Act::DjSeeds(super::SeedsAct::Press(super::seeds::SeedStop::Menu(
+            SeedList::MoreLike,
+            seed_key("lib/skywalk.mp3"),
+        )));
+        gui.act(menu);
+        let all = squash(&draw(&mut gui).join("\n"));
+        for key in ["gui.dj.less_like_this", "gui.dj.seed_remove"] {
+            assert!(all.contains(&squash(&rust_i18n::t!(key))), "{locale}: {key}");
+        }
+        key(&mut gui, KeyCode::Esc);
+        super::edit(&mut gui, DjEdit::SeedMode(SonicAnchor::Locked));
+        let all = squash(&draw(&mut gui).join("\n"));
+        for line in crate::kit::wrap_whole(&rust_i18n::t!("gui.dj.seeds_stay_sub"), 62) {
+            assert!(all.contains(&squash(&line)), "{locale}: {line:?}");
+        }
+        key(&mut gui, KeyCode::Esc);
         // The opening question and a sheet's foot fit their 66 cells.
         let mut gui = session_gui();
         gui.act(Act::AutoDj);
@@ -1641,10 +2948,39 @@ fn every_locales_help_and_tips_fit_their_cells() {
             "gui.tips.dj_length",
             "gui.tips.dj_quick",
             "gui.tips.dj_genres",
+            "gui.tips.dj_seeds",
+            "gui.tips.dj_seed_pick",
             "gui.dj.start_keys",
         ] {
             let tip = rust_i18n::t!(key);
             assert!(crate::kit::width(&tip) <= 99, "{locale}: {key} is {} cells", crate::kit::width(&tip));
+        }
+        // The seeds' words in the cells the boards gave them: a
+        // header in the room's 47; Learn from skips before the switch at
+        // 59; its line two rows at 43, and the reason one; the mode's lines
+        // two at the sheet's 62; LESS LIKE and the reason side by side; Add
+        // song and the checkbox's words beside their glyphs; the menu's
+        // verbs in a list the sheet can hang.
+        let w = |key: &str| crate::kit::width(&rust_i18n::t!(key));
+        let lines = |key: &str, at: usize| crate::kit::wrap_whole(&rust_i18n::t!(key), at).len();
+        for key in ["gui.dj.group_filters", "gui.dj.group_match"] {
+            assert!(crate::kit::width(&rust_i18n::t!(key).to_uppercase()) <= 47, "{locale}: {key}");
+        }
+        assert!(2 + w("gui.dj.learn_skips") <= 40, "{locale}: Learn from skips is {} cells", w("gui.dj.learn_skips"));
+        assert!(lines("gui.dj.learn_skips_sub", 43) <= 2, "{locale}: Learn's line");
+        assert!(w("gui.dj.needs_newer_server") <= 43 && w("gui.dj.seeds") <= 43, "{locale}");
+        for key in ["gui.dj.seeds_drift_sub", "gui.dj.seeds_stay_sub"] {
+            assert!(lines(key, 62) <= 2, "{locale}: {key} takes {} lines", lines(key, 62));
+        }
+        let less = crate::kit::width(&rust_i18n::t!("gui.dj.less_like").to_uppercase());
+        assert!(less + 1 + w("gui.dj.needs_newer_server") <= 60, "{locale}: LESS LIKE and its reason");
+        assert!(2 + w("gui.dj.add_song") <= 58 && 4 + w("gui.dj.clear_pins") <= 62, "{locale}");
+        for key in ["gui.dj.more_like_this", "gui.dj.less_like_this", "gui.dj.seed_remove"] {
+            assert!(w(key) + 6 <= 40, "{locale}: {key} is {} cells", w(key));
+        }
+        // The pick's banners keep the " · " their Esc words are cut at.
+        for key in ["gui.dj.seeds_pick_more", "gui.dj.seeds_pick_less"] {
+            assert!(rust_i18n::t!(key).rsplit_once(" · ").is_some(), "{locale}: {key}");
         }
         // A reason never loses its words: the few it has leave the row's
         // name a dozen cells at the least, in the room and in quick config.

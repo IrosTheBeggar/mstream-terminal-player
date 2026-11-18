@@ -236,7 +236,7 @@ pub struct AutoDjPrefs {
     pub sonic: bool,
     /// The raw cosine floor the pool is drawn at, .30–.80.
     pub sonic_min_similarity: f64,
-    /// "rolling" (follow the vibe) or "locked" (stay on seed).
+    /// "rolling" (Drift) or "locked" (Stay close): the seed lists' mode.
     pub sonic_anchor: String,
     /// What switching on with nothing queued does: "ask", "random", "pick".
     pub empty_queue: String,
@@ -299,8 +299,77 @@ pub struct AutoDjPrefs {
     pub key_matching: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sonic_tightness: Option<u32>,
+    /// Learn from skips (auto-dj clause 23): a quick skip of a DJ pick
+    /// joins Less like. Off by default.
+    pub learn_from_skips: bool,
+    /// The Seeds sheet's "Clear pins when the queue is cleared" (clause 66),
+    /// off by default: at a new queue — a clear, or a play that replaces the
+    /// queue (clause 12).
+    pub clear_pins_on_queue_clear: bool,
+    /// The seed rows the file keeps, newest first (clause 66): the user's
+    /// pins — and, saved in Stay close by the GUI, every row the sheet
+    /// shows, each with its pin (More like up to sixteen where Stay close's
+    /// one song came in, decision 42) — read row by row: one that does not
+    /// read is let go, never the file.
+    #[serde(deserialize_with = "seed_rows", skip_serializing_if = "Vec::is_empty")]
+    pub more_like_pins: Vec<SeedPrefs>,
+    #[serde(deserialize_with = "seed_rows", skip_serializing_if = "Vec::is_empty")]
+    pub less_like_pins: Vec<SeedPrefs>,
     #[serde(flatten)]
     pub extra: Keep,
+}
+
+/// One kept Auto DJ seed row as `[player.dj]` keeps it (auto-dj contract,
+/// clause 66): its server (and a peer's row id there), its path in wire
+/// form, what the Seeds sheet shows of it — and, for a row Stay close keeps
+/// that the user did not pin, the flag and an unpinned skip's Drift time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SeedPrefs {
+    pub server: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer: Option<i64>,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    /// The user pinned it. A row Stay close keeps that the user did not pin is
+    /// `false`; absent reads as a pin, as every row of a file from before was.
+    #[serde(skip_serializing_if = "is_true")]
+    pub pinned: bool,
+    /// An unpinned skip's Drift time when Stay close froze it, in ms (clause
+    /// 66, decision 36): its 30 minutes resume from there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift_ms: Option<u64>,
+}
+
+impl Default for SeedPrefs {
+    fn default() -> Self {
+        SeedPrefs {
+            server: String::new(),
+            peer: None,
+            path: String::new(),
+            title: None,
+            artist: None,
+            album: None,
+            // A row is a pin unless it says otherwise — every row of a file
+            // from before the flag was one.
+            pinned: true,
+            drift_ms: None,
+        }
+    }
+}
+
+/// A list of seed rows, read row by row: a row that does not read — or a
+/// value that is no list at all — is let go, never the whole config.
+fn seed_rows<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SeedPrefs>, D::Error> {
+    Ok(match toml::Value::deserialize(d) {
+        Ok(toml::Value::Array(rows)) => rows.into_iter().filter_map(|row| row.try_into().ok()).collect(),
+        _ => Vec::new(),
+    })
 }
 
 impl Default for AutoDjPrefs {
@@ -345,6 +414,10 @@ impl Default for AutoDjPrefs {
             tempo_tolerance: None,
             key_matching: None,
             sonic_tightness: None,
+            learn_from_skips: false,
+            clear_pins_on_queue_clear: false,
+            more_like_pins: Vec::new(),
+            less_like_pins: Vec::new(),
             extra: Keep::new(),
         }
     }
@@ -781,6 +854,13 @@ pub fn follow_rename(config: &mut Config, old: &str, new: &str) {
     {
         *server = renamed;
     }
+    // Auto DJ's seed rows (auto-dj clause 66): a peer's row names its parent.
+    let dj = &mut config.player.dj;
+    for row in dj.more_like_pins.iter_mut().chain(dj.less_like_pins.iter_mut()) {
+        if let Some(renamed) = renamed_identity(&row.server, old, new) {
+            row.server = renamed;
+        }
+    }
 }
 
 /// What to call an entry: a peer's name, a tunnel's short identity, a
@@ -913,6 +993,12 @@ pub fn set_peer_hidden(config: &mut Config, url: &str, hidden: bool) -> bool {
 /// set — an absent key and `false` read back the same.
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// serde's `skip_serializing_if` for a bool whose absent key reads as set —
+/// only `false` is worth writing.
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1587,6 +1673,14 @@ pub fn remove_server(config: &mut Config, credentials: &mut Credentials, url: &s
     }
     credentials.tokens.retain(|entry| !same_server(&entry.server, url));
     credentials.pairings.retain(|entry| !same_server(&entry.server, url));
+    // Auto DJ's seed rows go with it (auto-dj clause 66): a server's own and
+    // its peers' — or, for a peer's identity, that peer's alone.
+    let gone = |row: &SeedPrefs| match peer_identity_parts(url) {
+        Some((id, parent)) => same_server(&row.server, parent) && row.peer == Some(id),
+        None => same_server(&row.server, url),
+    };
+    config.player.dj.more_like_pins.retain(|row| !gone(row));
+    config.player.dj.less_like_pins.retain(|row| !gone(row));
 }
 
 
@@ -1883,6 +1977,169 @@ mod tests {
             Some("secret-token".into()),
             "a trailing slash is the same server"
         );
+    }
+
+    #[test]
+    fn the_seed_pins_round_trip_beside_a_newer_players_keys() {
+        let scratch = Scratch::new("seed-pins");
+        // Arrays of tables in a table that flattens its unknown keys: a
+        // shape the serializer has to order.
+        fs::write(
+            scratch.dir.join(CONFIG_FILE),
+            "version = 1\n\
+             \n\
+             [player.dj]\n\
+             sonic_anchor = \"locked\"\n\
+             learn_from_skips = true\n\
+             energy_curve = \"rise\"\n\
+             \n\
+             [[player.dj.more_like_pins]]\n\
+             server = \"http://host:3000\"\n\
+             path = \"demo/a.mp3\"\n\
+             title = \"A\"\n\
+             artist = \"Alpha\"\n\
+             \n\
+             [[player.dj.more_like_pins]]\n\
+             server = \"http://host:3000\"\n\
+             peer = 4\n\
+             path = \"demo/b.mp3\"\n\
+             album = \"Bee\"\n\
+             \n\
+             [[player.dj.less_like_pins]]\n\
+             server = \"http://host:3000\"\n\
+             path = \"demo/c.mp3\"\n\
+             \n\
+             [[player.dj.less_like_pins]]\n\
+             server = 7\n\
+             path = \"demo/odd.mp3\"\n\
+             \n\
+             [[player.dj.less_like_pins]]\n\
+             server = \"http://host:3000\"\n\
+             path = \"demo/d.mp3\"\n",
+        )
+        .unwrap();
+        let config = load().unwrap();
+        let dj = &config.player.dj;
+        let paths = |rows: &[SeedPrefs]| rows.iter().map(|r| r.path.clone()).collect::<Vec<_>>();
+        assert!(dj.learn_from_skips && !dj.clear_pins_on_queue_clear);
+        assert_eq!(paths(&dj.more_like_pins), ["demo/a.mp3", "demo/b.mp3"], "in order");
+        assert_eq!((dj.more_like_pins[1].peer, dj.more_like_pins[1].album.as_deref()), (Some(4), Some("Bee")));
+        assert_eq!(dj.more_like_pins[0].artist.as_deref(), Some("Alpha"));
+        assert_eq!(paths(&dj.less_like_pins), ["demo/c.mp3", "demo/d.mp3"], "a row that does not read goes, not the file");
+        assert_eq!(dj.extra.get("energy_curve").and_then(toml::Value::as_str), Some("rise"));
+
+        save(&config).unwrap();
+        let raw = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(raw.contains("[[player.dj.more_like_pins]]") && raw.contains("[[player.dj.less_like_pins]]"), "{raw}");
+        let again = load().unwrap();
+        assert_eq!(again.player.dj, config.player.dj, "the file loads back whole:\n{raw}");
+
+        // Nothing pinned writes no list at all.
+        let mut bare = again;
+        bare.player.dj.more_like_pins.clear();
+        bare.player.dj.less_like_pins.clear();
+        save(&bare).unwrap();
+        let raw = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!raw.contains("like_pins"), "{raw}");
+    }
+
+    /// What Stay close keeps (auto-dj clause 66, decision 36): a row the
+    /// user did not pin says so, an unpinned skip carries its Drift time,
+    /// and a row from before the flag is a pin, written as it always was.
+    #[test]
+    fn a_kept_rows_pin_and_clock_go_through_the_file_and_an_old_row_is_a_pin() {
+        let scratch = Scratch::new("seed-rows-kept");
+        fs::write(
+            scratch.dir.join(CONFIG_FILE),
+            "version = 1\n\
+             \n\
+             [player.dj]\n\
+             sonic_anchor = \"locked\"\n\
+             \n\
+             [[player.dj.more_like_pins]]\n\
+             server = \"http://host:3000\"\n\
+             path = \"demo/old.mp3\"\n\
+             \n\
+             [[player.dj.more_like_pins]]\n\
+             server = \"http://host:3000\"\n\
+             path = \"demo/pick.mp3\"\n\
+             pinned = false\n\
+             \n\
+             [[player.dj.less_like_pins]]\n\
+             server = \"http://host:3000\"\n\
+             path = \"demo/skip.mp3\"\n\
+             pinned = false\n\
+             drift_ms = 300000\n\
+             \n\
+             [[player.dj.less_like_pins]]\n\
+             server = \"http://host:3000\"\n\
+             path = \"demo/junk-flag.mp3\"\n\
+             pinned = \"no\"\n\
+             \n\
+             [[player.dj.less_like_pins]]\n\
+             server = \"http://host:3000\"\n\
+             path = \"demo/junk-clock.mp3\"\n\
+             pinned = false\n\
+             drift_ms = -3\n",
+        )
+        .unwrap();
+        let config = load().unwrap();
+        let dj = &config.player.dj;
+        let rows = |rows: &[SeedPrefs]| rows.iter().map(|r| (r.path.clone(), r.pinned, r.drift_ms)).collect::<Vec<_>>();
+        assert_eq!(
+            rows(&dj.more_like_pins),
+            [("demo/old.mp3".to_string(), true, None), ("demo/pick.mp3".to_string(), false, None)],
+            "a row without the flag is a pin"
+        );
+        assert_eq!(
+            rows(&dj.less_like_pins),
+            [("demo/skip.mp3".to_string(), false, Some(300_000))],
+            "a row that does not read goes, not the file"
+        );
+
+        save(&config).unwrap();
+        let raw = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert_eq!(raw.matches("pinned = false").count(), 2, "{raw}");
+        assert_eq!(raw.matches("drift_ms = 300000").count(), 1, "{raw}");
+        assert_eq!(raw.matches("drift_ms").count(), 1, "{raw}");
+        let old = raw.split("[[player.dj.").find(|table| table.contains("demo/old.mp3")).expect("the old row");
+        assert!(!old.contains("pinned"), "a pin is written as before:\n{raw}");
+        let again = load().unwrap();
+        assert_eq!(again.player.dj, config.player.dj, "the file loads back whole:\n{raw}");
+    }
+
+    #[test]
+    fn the_seed_pins_follow_a_rename_and_leave_with_their_server() {
+        let row = |server: &str, peer: Option<i64>, path: &str| SeedPrefs {
+            server: server.into(),
+            peer,
+            path: path.into(),
+            ..Default::default()
+        };
+        let mut config = Config::default();
+        config.player.dj.more_like_pins = vec![
+            row("http://old:3000", None, "a"),
+            row("http://old:3000/", Some(4), "b"),
+            row("http://else:3000", None, "c"),
+        ];
+        config.player.dj.less_like_pins = vec![row("http://old:3000", Some(4), "d")];
+        follow_rename(&mut config, "http://old:3000", "http://new:3000");
+        let servers: Vec<&str> = config.player.dj.more_like_pins.iter().map(|r| r.server.as_str()).collect();
+        assert_eq!(servers, ["http://new:3000", "http://new:3000", "http://else:3000"], "a peer's row names its parent");
+        assert_eq!(config.player.dj.less_like_pins[0].server, "http://new:3000");
+
+        // A peer forgotten by its identity takes its own rows alone…
+        let mut credentials = Credentials::default();
+        remove_server(&mut config, &mut credentials, &peer_identity("http://new:3000", 4));
+        let left: Vec<&str> = config.player.dj.more_like_pins.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(left, ["a", "c"]);
+        assert!(config.player.dj.less_like_pins.is_empty());
+        // …and a server takes its own and its peers'.
+        config.player.dj.less_like_pins = vec![row("http://new:3000", Some(9), "e")];
+        remove_server(&mut config, &mut credentials, "http://new:3000");
+        let left: Vec<&str> = config.player.dj.more_like_pins.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(left, ["c"]);
+        assert!(config.player.dj.less_like_pins.is_empty());
     }
 
     #[test]

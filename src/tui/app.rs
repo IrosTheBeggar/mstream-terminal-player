@@ -1478,6 +1478,11 @@ mod track;
 pub use track::{PlaylistNames, RatingWrite};
 #[allow(unused_imports)] // the browser shell has no room yet
 pub use autodj::{DjEdit, DjGate};
+// Auto DJ's seed lists (auto-dj contract, clauses 23, 64–66): a pure model,
+// held on the App because they outlive the lane.
+pub(crate) mod seeds;
+#[allow(unused_imports)] // the browser shell has no Seeds sheet
+pub use seeds::{Seed, SeedFrom, SeedKey, SeedList, SeedRefusal, Seeds};
 pub(crate) mod entries;
 mod nav;
 mod session;
@@ -1514,6 +1519,8 @@ pub enum DjRow {
     SongsPerFetch,
     Sonic,
     Strictness,
+    /// The seeds' mode, Drift or Stay close — the GUI's Seeds sheet sets the
+    /// same one (auto-dj clause 64).
     Anchor,
     EmptyQueue,
     Bpm,
@@ -1675,6 +1682,9 @@ pub enum Capture {
     /// contract, clauses 14 and 21) — its own, never `Discover`, which is
     /// the TUI's.
     TasteSeed,
+    /// A song for one of Auto DJ's seed lists, from the Seeds sheet's Add
+    /// song (auto-dj contract, clause 65).
+    Seeds(SeedList),
 }
 
 impl Capture {
@@ -1685,6 +1695,7 @@ impl Capture {
             Capture::Discover => "SEED",
             Capture::DjSeed => "OPENER",
             Capture::TasteSeed => "SEED",
+            Capture::Seeds(_) => "SEED",
         }
     }
 }
@@ -2069,9 +2080,11 @@ pub struct App {
     rating_seq: u64,
     /// The latest rating write per track (its `rating_seq`), and the
     /// `rating_seq` a details fetch went out under: a block that answers
-    /// after a newer write cannot put the older rating back (clause 10).
+    /// after a newer write cannot put the older rating back (clause 10) —
+    /// with the server it asked, whose song's seed rows its tags then fill
+    /// (auto-dj decision 44).
     rated_at: HashMap<String, u64>,
-    info_asked: HashMap<String, u64>,
+    info_asked: HashMap<String, (u64, Origin)>,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
@@ -2124,6 +2137,13 @@ pub struct App {
     pub dj_info: Option<DjServerInfo>,
     /// The session lane (clause 10).
     pub(crate) lane: autodj::DjLane,
+    /// Auto DJ's seed lists (clauses 23, 64–66): they outlive the lane, and
+    /// what they keep outlives the run — the pins, and every row while Stay
+    /// close holds them in a shell that shows them (decision 41).
+    pub seeds: Seeds,
+    /// The last Add song pick the lists refused, for the GUI to word once
+    /// (clause 65).
+    pub seeds_refused: Option<SeedRefusal>,
     /// The empty-queue chooser, when open (clause 2).
     pub dj_chooser: Option<autodj::DjChooser>,
     /// The Auto-DJ tab's keyword entry (clause 49): the word being typed,
@@ -2140,6 +2160,17 @@ pub struct App {
     /// row — the TUI's tab — arms the server it stands on, as it always
     /// has, and that one becomes the home.
     pub dj_shows_play_from: bool,
+    /// Whether this shell shows the Seeds sheet (the GUI's room and quick
+    /// config). Only there do the owner's answers for the sheet's lists hold
+    /// (auto-dj decision 41): Stay close keeps every row it shows through new
+    /// queues, Stop and Start and restarts, the file with it, and a first song
+    /// chosen in Stay close joins More like pinned. A shell with no sheet —
+    /// the TUI's tab, the web build — keeps the old rules: a pin nobody can
+    /// see or remove is never made, Stay close starts over with each new
+    /// queue, and the file keeps the pins alone. The pins carry over between
+    /// the two. Read by the prefs' load, so a shell sets it first
+    /// ([`App::with_seeds_sheet`]).
+    pub dj_shows_seeds: bool,
     /// The songs last played on a server, for Recently played: whose they
     /// are, and the list once it has answered (`None` while it is out).
     pub dj_recent: Option<(String, Option<Vec<Track>>)>,
@@ -2438,11 +2469,14 @@ impl App {
             dj_server: None,
             dj_info: None,
             lane: Default::default(),
+            seeds: Seeds::default(),
+            seeds_refused: None,
             dj_chooser: None,
             dj_keyword: None,
             dj_target: None,
             dj_home: None,
             dj_shows_play_from: false,
+            dj_shows_seeds: false,
             dj_recent: None,
             dj_migrate: false,
             dj: dj::Settings::default(),
@@ -2548,6 +2582,13 @@ impl App {
         self
     }
 
+    /// Whether this shell shows the Seeds sheet ([`App::dj_shows_seeds`]) —
+    /// before [`App::with_prefs`], whose load keeps by that shell's rules.
+    pub fn with_seeds_sheet(mut self, shown: bool) -> Self {
+        self.dj_shows_seeds = shown;
+        self
+    }
+
     /// Start from remembered preferences.
     pub fn with_prefs(mut self, prefs: &crate::config::PlayerPrefs) -> Self {
         self.volume = prefs.volume.clamp(0.0, 1.0);
@@ -2568,11 +2609,27 @@ impl App {
         self.pause_fade = prefs.pause_fade;
         self.resume_queue = prefs.resume_queue;
         self.dj = dj::Settings::from_prefs(&prefs.dj, &prefs.autodj);
+        // What the file kept (auto-dj clause 66): the pins — and, where this
+        // shell shows the Seeds sheet, every row, frozen as it stood, when
+        // the file says Stay close (decision 41): the lists and the mode
+        // agree from the first frame.
+        self.seeds = Seeds::from_prefs(
+            &prefs.dj.more_like_pins,
+            &prefs.dj.less_like_pins,
+            self.dj.sonic_anchor == dj::SonicAnchor::Locked,
+            self.dj_shows_seeds,
+            crate::clock::Instant::now(),
+        );
         self
     }
 
     /// The preferences worth remembering for next time.
     pub fn prefs(&self) -> crate::config::PlayerPrefs {
+        // The room's settings, and what the seed lists keep (clause 66): the
+        // pins, and in Stay close every row where this shell shows them
+        // (decision 41).
+        let mut dj = self.dj.to_prefs();
+        (dj.more_like_pins, dj.less_like_pins) = self.seeds.to_prefs(self.dj_shows_seeds);
         crate::config::PlayerPrefs {
             // Rounded because this lands in a file people are meant to read;
             // 0.74999994 is noise from repeated nudges.
@@ -2586,7 +2643,7 @@ impl App {
             blend_skips: self.blend_skips,
             pause_fade: self.pause_fade,
             resume_queue: self.resume_queue,
-            dj: self.dj.to_prefs(),
+            dj,
             // Settings from a newer player belong to the file, not to this
             // app's state; `PlayerPrefs::adopt` is what carries them across.
             ..Default::default()
@@ -3002,6 +3059,8 @@ impl App {
                         // The room is the GUI's; it goes back there itself
                         // (discovery-page clause 14).
                         Capture::TasteSeed => Vec::new(),
+                        // So is the Seeds sheet (auto-dj clause 65).
+                        Capture::Seeds(_) => Vec::new(),
                     };
                 }
                 // The guaranteed way out of the settings value rows, where
@@ -3099,7 +3158,8 @@ impl App {
             Action::MoveQueueDown => self.move_queue_row(1),
 
             Action::PlayPause => self.play_pause(),
-            Action::NextTrack => self.skip(true),
+            // Auto DJ reads a quick skip off it first (auto-dj clause 23).
+            Action::NextTrack => self.next_track(),
             Action::PrevTrack => self.skip_previous(),
             Action::SeekForward => self.seek_by(SEEK_STEP),
             Action::SeekBackward => self.seek_by(-SEEK_STEP),
@@ -3138,14 +3198,23 @@ impl App {
             }
             Action::RemoveFromQueue => self.remove_from_queue(),
             Action::ClearQueue => {
+                // The checkbox counts a clear that really emptied a queue
+                // (auto-dj contract, clause 66).
+                let had_rows = !self.queue.items.is_empty();
                 self.queue.clear();
                 self.now_playing = None;
                 self.stall = None;
                 self.tunnel_wait = None;
                 // A cleared queue is somewhere new: the DJ's lane starts over
-                // (auto-dj contract, the flows), the DJ staying armed. The
-                // last note was about rows that are gone.
-                self.lane.reset();
+                // (auto-dj contract, clauses 10 and 12), the DJ staying armed
+                // — and the seed lists start over as at any new queue (clause
+                // 12): with Clear pins when the queue is cleared ticked, the
+                // pins go, every row in the GUI's Stay close (clause 66,
+                // decision 41). A pool the
+                // lane let go is asked for again by the new lane's own epoch
+                // (decision 43). The last note was about rows that are gone.
+                self.new_lane();
+                self.seeds_new_queue(had_rows);
                 self.message = None;
                 vec![Effect::Audio(AudioCmd::Stop)]
             }
@@ -3524,8 +3593,8 @@ impl App {
                 if tracks.is_empty() {
                     return Vec::new();
                 }
-                self.replace_queue(tracks);
-                self.play_index(offset)
+                let items = self.queued_all(tracks);
+                self.play_replacing(items, offset)
             }
         }
     }
@@ -4431,10 +4500,28 @@ impl App {
         tracks.into_iter().map(|track| Queued { dj: None, origin: origin.clone(), track }).collect()
     }
 
-    /// Replace the queue with these tracks, stamped as the session's.
+    /// Replace the queue with these tracks, stamped as the session's — the
+    /// tests' setup. A play that replaces the queue goes through
+    /// `play_replacing`, a new queue for the seeds (auto-dj clause 12).
+    #[cfg(test)]
     pub(crate) fn replace_queue(&mut self, tracks: Vec<Track>) {
         let tracks = self.queued_all(tracks);
         self.queue.replace(tracks);
+    }
+
+    /// A play that replaces the queue — Play, Shuffle, Play from here, a
+    /// sonic path's, Discover's (auto-dj decision 27): the rows, then a new
+    /// queue for the seeds (clause 12), then the row at `index` starts. No
+    /// new lane: a pick already out still lands — after the new rows, so the
+    /// new queue's start is settled on the row that started before that
+    /// late pick can become it (clause 15).
+    fn play_replacing(&mut self, items: Vec<Queued>, index: usize) -> Vec<Effect> {
+        let had_rows = !self.queue.items.is_empty();
+        self.queue.replace(items);
+        self.seeds_new_queue(had_rows);
+        let effects = self.play_index(index);
+        self.seeds_settle_lane_start();
+        effects
     }
 
     /// Stamp a track with an origin it already has — a queue row's, the
@@ -4719,8 +4806,10 @@ impl App {
     /// playback lands on the next survivor — playing when something was —
     /// and a queue that belonged wholly to the server ends as a Clear would.
     pub(crate) fn drop_server_items(&mut self, server: &str) -> Vec<Effect> {
-        // Its DJ goes with it (auto-dj contract, clause 10).
+        // Its DJ goes with it (auto-dj contract, clause 10), and its seed
+        // rows and its peers', pinned or not (clause 66).
         let mut effects = self.dj_server_removed(server);
+        self.seeds.drop_where(|key| crate::config::same_server(&key.server, server));
         let sweep = queue_without(&self.queue.items, server, self.queue.current);
         effects.extend(self.apply_sweep(sweep));
         effects
@@ -4730,6 +4819,7 @@ impl App {
     /// 23), by the same rule as a removed server.
     pub(crate) fn drop_peer_items(&mut self, parent: &str, id: i64) -> Vec<Effect> {
         let mut effects = self.dj_server_removed(&crate::config::peer_identity(parent, id));
+        self.seeds.drop_where(|key| crate::config::same_server(&key.server, parent) && key.peer == Some(id));
         let sweep = queue_without_by(
             &self.queue.items,
             |origin| crate::config::same_server(&origin.server, parent) && origin.peer == Some(id),
@@ -4754,6 +4844,16 @@ impl App {
             self.queue.clear();
             self.now_playing = None;
             self.failures = 0;
+            // A removal that empties the queue is a new Auto DJ lane (auto-dj
+            // contract, clauses 10–11), whichever server the DJ is on: a
+            // pick out or owed is dropped rather than fill the emptied
+            // queue, and the DJ's unpinned More like rows go (every row
+            // stays in the GUI's Stay close, decision 41). The box is a
+            // user's new queue's — a
+            // clear or a play that replaces the queue — never a removal's
+            // (decision 27). A removal of the DJ's own server has started
+            // one already; another only moves the epoch on.
+            self.new_lane();
             let mut effects = vec![Effect::Audio(AudioCmd::Stop)];
             effects.extend(self.refresh_prepared());
             return effects;
@@ -5128,6 +5228,9 @@ impl App {
         // The Discover room's copies, polled while one is live and shown
         // (discovery-page clause 112).
         effects.extend(self.keep_tick(now));
+        // A Less like row past its life goes between frames, so the Seeds
+        // sheet never shows one (auto-dj clause 23).
+        self.seeds.prune(now);
         effects
     }
 
@@ -5472,8 +5575,9 @@ impl App {
     /// The browser bar's Play and Shuffle (contract: browser-top-bar,
     /// clauses 10 and 12): replace the queue with the pane's playable rows
     /// — the FILTERED view when a filter is on, what you see is what plays
-    /// — and start from the top. `shuffle` reorders once, the record's own
-    /// semantic; the shuffle MODE is not touched.
+    /// — and start from the top, a new queue for the seeds (auto-dj clause
+    /// 12). `shuffle` reorders once, the record's own semantic; the shuffle
+    /// MODE is not touched.
     pub(crate) fn play_listing(&mut self, shuffle: bool) -> Vec<Effect> {
         let (mut tracks, _) = self.pane().tracks_with_offset();
         if tracks.is_empty() {
@@ -5483,8 +5587,7 @@ impl App {
             fastrand::shuffle(&mut tracks);
         }
         let tracks = self.queued_all(tracks);
-        self.queue.replace(tracks);
-        self.play_index(0)
+        self.play_replacing(tracks, 0)
     }
 
     /// The browser bar's Queue all (clause 11): append the pane's playable
@@ -5566,6 +5669,9 @@ impl App {
         effects.push(Effect::Audio(AudioCmd::Play { url, duration_hint: hint }));
         effects.extend(self.fetch_art());
         effects.extend(self.fetch_waveform(&filepath, &item.origin));
+        // A DJ pick joins More like as it starts, before the top-up builds
+        // the next turn from the lists (auto-dj clause 15).
+        self.seeds_note_start(index);
         effects.extend(self.maybe_autodj());
         effects
     }
@@ -6063,7 +6169,15 @@ impl App {
                 return self.play_index(index);
             }
         }
-        match self.queue.next_index(manual) {
+        let next = self.queue.next_index(manual);
+        self.skip_to(next)
+    }
+
+    /// Play the row a skip landed on — or, past the queue's end, stop. The
+    /// row is the caller's: under shuffle `next_index` rolls the dice, so a
+    /// caller that has already looked at the next row plays that one.
+    fn skip_to(&mut self, next: Option<usize>) -> Vec<Effect> {
+        match next {
             Some(index) => self.play_index(index),
             None => {
                 self.now_playing = None;
@@ -6200,8 +6314,17 @@ impl App {
             }
             Event::TrackEnded { source } => {
                 // The end of a track we are no longer on. Advancing on it
-                // would skip past the one the user chose instead.
-                if !self.is_current_source(&source) {
+                // would skip past the one the user chose instead. Nor the
+                // end of one whose queue is gone: a clear, or a removal that
+                // emptied it, sent its Stop, and until the Stop's status
+                // lands the status still names the thrown-away track —
+                // taken for the queue's end, it asked the new lane's first
+                // pick for the emptied queue, and the pick played there
+                // (auto-dj decision 40). Nor while a row waits for its
+                // tunnel: the play that parked it sent a Stop and no Play,
+                // so the status still names the track left behind, and its
+                // end skipped the row the user chose.
+                if !self.is_current_source(&source) || self.queue.items.is_empty() || self.tunnel_wait.is_some() {
                     return Vec::new();
                 }
                 // The engine ran out of it: a completed play, whichever
@@ -6214,8 +6337,15 @@ impl App {
                 // the same rule TrackEnded lives by — and one that raced a
                 // play the user just asked for is superseded: `starting`
                 // covers the gap where status still names the old track
-                // while the user's own pick is opening.
-                if !self.is_current_source(&from) || self.starting.is_some() {
+                // while the user's own pick is opening — and one out of a
+                // track whose queue a clear or a removal emptied, or while
+                // a row waits for its tunnel, its play sending no Play
+                // (decision 40).
+                if !self.is_current_source(&from)
+                    || self.starting.is_some()
+                    || self.queue.items.is_empty()
+                    || self.tunnel_wait.is_some()
+                {
                     return Vec::new();
                 }
                 // The engine crossfaded into the announced track by itself.
@@ -6247,6 +6377,7 @@ impl App {
                         self.failures = 0;
                         let mut effects: Vec<Effect> = Vec::new();
                         effects.extend(self.fetch_art());
+                        self.seeds_note_start(index);
                         effects.extend(self.maybe_autodj());
                         effects
                     }

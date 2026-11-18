@@ -176,8 +176,12 @@ fn execute(gui: &mut Gui, cmd: Command) -> Answer {
         Command::Queue => Answer::json(serde_json::to_value(queue_of(gui)).unwrap_or_default()),
 
         // The jukebox's play: the queue becomes this one track, playing.
+        // A clear like any other — saved soon, as Clear pins when the
+        // queue is cleared may have let the seed lists' pins go (auto-dj
+        // clause 66).
         Command::Play(file) => {
             gui.forward(Action::ClearQueue);
+            gui.save_soon();
             enqueue(gui, file);
             let effects = gui.app.play_index(0);
             gui.pend(effects);
@@ -211,6 +215,7 @@ fn execute(gui: &mut Gui, cmd: Command) -> Answer {
         }
         Command::QueueClear => {
             gui.forward(Action::ClearQueue);
+            gui.save_soon();
             Answer::ok()
         }
 
@@ -442,6 +447,87 @@ mod tests {
         assert_eq!(g.app.queue.current, None);
         assert_eq!(queue_of(&g).queue, ["x"], "the queue survives a stop");
         assert!(g.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Stop))));
+    }
+
+    /// The owner's "fill the seed rows" (auto-dj decision 44): a song
+    /// started from the remote joins More like bare, under its file name,
+    /// and the tags its block brings fill that row — and a pin, or Stay
+    /// close's one song, saves them soon.
+    #[test]
+    fn a_remote_songs_tags_reach_its_seed_row_and_the_pin_that_saves_them() {
+        use crate::tui::app::{DjEdit, SeedFrom, SeedKey, SeedList};
+        use crate::tui::worker::Event;
+        let block = |path: &str| Event::TrackInfo {
+            filepath: path.into(),
+            track: Some(Box::new(Track {
+                filepath: path.into(),
+                metadata: TrackMetadata {
+                    title: Some("Sea".into()),
+                    artist: Some("Band".into()),
+                    album: Some("LP".into()),
+                    ..Default::default()
+                },
+            })),
+        };
+        let tags = |track: &Track| {
+            let m = &track.metadata;
+            (m.title.clone(), m.artist.clone(), m.album.clone())
+        };
+        let sea = (Some("Sea".to_string()), Some("Band".to_string()), Some("LP".to_string()));
+        let armed = || {
+            let mut g = gui();
+            g.app.connected = true;
+            execute(&mut g, Command::QueueAdd("Music/a.mp3".into()));
+            g.forward(Action::ToggleAutoDj);
+            assert!(g.app.dj_armed(), "armed on the session's server");
+            // Something plays.
+            g.app.status.source = "http://localhost:3000/media/a".into();
+            g
+        };
+
+        // Drift: the play composes the new queue's first pick inside the
+        // command, and the song joins More like bare.
+        let mut g = armed();
+        execute(&mut g, Command::Play("Music/c.mp3".into()));
+        let key = SeedKey::new(&g.app.origin(), "Music/c.mp3");
+        let row = g.app.seeds.more_like[0].clone();
+        assert_eq!((row.key.clone(), row.from), (key.clone(), SeedFrom::Opener));
+        assert_eq!(row.track.metadata.title, None, "joined bare");
+        g.app.dj_edit(DjEdit::SeedPin { list: SeedList::MoreLike, key: key.clone(), pinned: true });
+        g.save_rested();
+        g.prefs_unsaved = None;
+        g.app.apply_event(block("Music/c.mp3"));
+        assert_eq!(tags(&g.app.seeds.more_like[0].track), sea, "the seed row has its tags");
+        g.save_rested();
+        assert!(g.prefs_unsaved.is_some(), "the pin's tags moved what the file keeps");
+        let kept = &g.app.prefs().dj.more_like_pins[0];
+        assert_eq!((kept.title.clone(), kept.artist.clone(), kept.album.clone()), sea);
+
+        // Stay close: the song is the lane's one song, and the file keeps it
+        // with its tags.
+        let mut g = armed();
+        g.app.dj_info = Some(crate::tui::worker::DjServerInfo {
+            version: Some("6.34.0".into()),
+            discovery: true,
+            discovery_ready: Some(true),
+            libraries: vec![],
+            mood_filters: false,
+            auto_dj: Some(1),
+        });
+        g.app.dj_edit(DjEdit::SeedMode(crate::dj::SonicAnchor::Locked));
+        execute(&mut g, Command::Play("Music/c.mp3".into()));
+        let row = g.app.seeds.more_like[0].clone();
+        assert_eq!((row.key.path.as_str(), row.from, row.pinned), ("Music/c.mp3", SeedFrom::Anchor, false));
+        assert_eq!(row.track.metadata.title, None, "joined bare");
+        g.save_rested();
+        g.prefs_unsaved = None;
+        g.app.apply_event(block("Music/c.mp3"));
+        assert_eq!(tags(&g.app.seeds.more_like[0].track), sea);
+        g.save_rested();
+        assert!(g.prefs_unsaved.is_some(), "saved soon");
+        let kept = &g.app.prefs().dj.more_like_pins[0];
+        assert_eq!((kept.path.as_str(), kept.pinned), ("Music/c.mp3", false));
+        assert_eq!((kept.title.clone(), kept.artist.clone(), kept.album.clone()), sea);
     }
 
     #[test]

@@ -223,6 +223,10 @@ pub fn dj(args: DjArgs) -> i32 {
                 } else {
                     Vec::new()
                 },
+                // A one-shot command has no skips to steer away from.
+                less_like: Vec::new(),
+                // A one-shot command has no lane to pass a song over in.
+                pass_over: Vec::new(),
                 ignore_list: Vec::new(),
                 recent_artists: Vec::new(),
                 opener: false,

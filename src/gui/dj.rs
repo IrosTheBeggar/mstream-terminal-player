@@ -1,19 +1,23 @@
 //! Auto DJ in the GUI shell (docs/ux-contracts/auto-dj.md): the room, a
 //! Library nav room under TOOLS — one row per setting, each opening one
-//! sheet (clauses 40–58, re-laid 2026-11-10 from the record's rebuilt
-//! screen) — the opening question as a kit modal (clause 2), the
-//! opening-song banner (clause 4), the empty queue's openers (clause 16),
-//! and quick config over the bar. The bar's `auto-dj` toggle and `A` ride
-//! the shared App's toggle (entry point 1); every edit here goes through the
-//! App's [`DjEdit`], so both shells change one model.
+//! sheet (clauses 40–59, re-laid 2026-11-10 from the record's rebuilt
+//! screen, and 2026-11-17 into how the session runs, FILTERS and MATCH,
+//! with Sonic similarity's two sub-rows indented under it) — the opening
+//! question as a kit modal (clause 2), the opening-song banner (clause 4),
+//! the empty queue's openers (clause 16), quick config over the bar, and
+//! the Seeds sheet with its library pick (clauses 64–66). The bar's
+//! `auto-dj` toggle and `A` ride the shared App's toggle (entry point 1);
+//! every edit here goes through the App's [`DjEdit`], so both shells change
+//! one model.
 //!
 //! The room never scrolls. Start / Stop is the status; a row is a name, its
 //! value at one right edge — DIM for Any, Off and how the session runs, OK
 //! while it shapes the picks, GOLD with `!` when a running session had to
 //! drop it — and `▸` (a sheet) or `▾` (a list, where a pick applies at
 //! once). A setting the server can't do keeps its place, DIM, with its
-//! reason where the value would be. The sheets are [`sheets`]; the bar's
-//! split button opens [`quick`].
+//! reason where the value would be; a sub-row whose parent is off rests in
+//! place, DIM, with no reason. The sheets are [`sheets`] and [`seeds`]; the
+//! bar's split button opens [`quick`].
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -28,15 +32,17 @@ use crate::config;
 use crate::dj::{self, EmptyQueueStart, GenreMode};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, cursor_ring, dim, width, wrap_whole};
-use crate::tui::app::{Action, Capture, DjEdit, DjGate};
+use crate::tui::app::{Action, Capture, DjEdit, DjGate, SeedList};
 use crate::tui::worker::DjNote;
 
 use super::{Act, DJ_NAV, Gui, Screen, accent, bright_bold, put, sel, text_button};
 
 mod quick;
+mod seeds;
 mod sheets;
 
 pub(crate) use quick::QuickAct;
+pub(crate) use seeds::{SeedsAct, returned as seeds_returned};
 pub(crate) use sheets::{Sheet, SheetAct, border_title_value};
 
 /// The rows' cells across: a name, its value ending two cells before the
@@ -73,8 +79,13 @@ pub(crate) struct DjUi {
     /// played last — once each time the queue runs out.
     recent_asked: bool,
     /// The open sheet's list window: Genres' genres, Play from's servers
-    /// and folders.
+    /// and folders, the Seeds sheet's lists.
     pub list: ListView,
+    /// The Seeds sheet, when it is up (clause 64).
+    pub seeds: Option<seeds::SeedsUi>,
+    /// Add song's pick is armed: whether the sheet's hand was shown when
+    /// it was pressed, for the sheet that comes back (clause 65).
+    pub seeds_back: Option<bool>,
 }
 
 impl DjUi {
@@ -83,13 +94,18 @@ impl DjUi {
     }
 }
 
-/// A row of the room, in its order.
+/// A row of the room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Row {
     PlayFrom,
     FirstSong,
     Batch,
     Sonic,
+    /// Learn from skips: a switch indented under Sonic similarity, its
+    /// line under it (clause 59).
+    Learn,
+    /// The way to the Seeds sheet, indented under Sonic similarity.
+    Seeds,
     Smart,
     Genres,
     Rating,
@@ -100,11 +116,16 @@ pub(crate) enum Row {
     Cooldown,
 }
 
-/// How the session runs; then what every pick must match; then what the DJ
-/// leans towards and gives up when it must.
-const SESSION: [Row; 3] = [Row::PlayFrom, Row::FirstSong, Row::Batch];
-const MUST: [Row; 5] = [Row::Sonic, Row::Smart, Row::Genres, Row::Rating, Row::Length];
-const PREFER: [Row; 4] = [Row::Beat, Row::Harmonic, Row::SkipWords, Row::Cooldown];
+/// How the session runs; what every pick is filtered by; what it is
+/// matched to (E-AutoDJ, the record's FILTERS and MATCH).
+const SESSION: [Row; 4] = [Row::PlayFrom, Row::FirstSong, Row::Batch, Row::Cooldown];
+const FILTERS: [Row; 5] = [Row::Smart, Row::Genres, Row::Rating, Row::Length, Row::SkipWords];
+const MATCH: [Row; 5] = [Row::Sonic, Row::Learn, Row::Seeds, Row::Beat, Row::Harmonic];
+
+/// Whether a row stands indented under its parent: Sonic similarity's two.
+fn sub_row(row: Row) -> bool {
+    matches!(row, Row::Learn | Row::Seeds)
+}
 
 /// A control the keyboard's hand can rest on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +163,7 @@ enum Kind {
     Sheet,
     /// `▾`: its list, where a pick applies at once.
     List,
-    /// The one switch on the page.
+    /// A switch: Harmonic mixing, Learn from skips.
     Switch(bool),
     /// Nothing: the server can't do it, and the value is the reason.
     Gated,
@@ -156,6 +177,10 @@ struct RowView {
     kind: Kind,
     /// The reason in a sentence, where the kit's tooltip has one to give.
     tip: Option<String>,
+    /// At rest in its place, DIM whole: no click, no stop, no reason — a
+    /// sub-row while sonic similarity is off or blocked (E-SonicOff), and
+    /// Learn from skips where the server takes no negatives.
+    inert: bool,
 }
 
 // ── Servers ─────────────────────────────────────────────────────────────────
@@ -366,6 +391,8 @@ fn row_label(row: Row) -> String {
         Row::FirstSong => t!("gui.dj.first_song"),
         Row::Batch => t!("gui.dj.batch"),
         Row::Sonic => t!("gui.dj.sonic"),
+        Row::Learn => t!("gui.dj.learn_skips"),
+        Row::Seeds => t!("gui.dj.seeds"),
         Row::Smart => t!("gui.dj.smart"),
         Row::Genres => t!("gui.dj.genres"),
         Row::Rating => t!("gui.dj.rating_row"),
@@ -378,20 +405,47 @@ fn row_label(row: Row) -> String {
     .to_string()
 }
 
+/// Whether Sonic similarity's sub-rows answer: it is on, and the server can
+/// do it (clause 59).
+fn sub_live(gui: &Gui) -> bool {
+    gui.app.dj.sonic && gui.app.dj_sonic_gate().is_none()
+}
+
+/// Learn from skips' line (clause 59): "Needs a newer server", one line,
+/// once the server has said it takes no negatives; else its subtext,
+/// wrapped under the name — at most three lines. While nobody knows yet,
+/// the switch rests under its usual line.
+fn learn_lines(gui: &Gui, w: u16) -> Vec<String> {
+    let room = w.saturating_sub(4) as usize;
+    if sub_live(gui) && gui.app.dj_lacks_negatives() {
+        return vec![super::bar::clip(&t!("gui.dj.needs_newer_server"), room).into_owned()];
+    }
+    wrap_whole(&t!("gui.dj.learn_skips_sub"), room).into_iter().take(3).collect()
+}
+
 /// A row as it stands: its value in its tone, or the reason the server
 /// can't do it (the version gates, the peer's missing stars, the sonic
-/// row's three reasons — clauses 36, 43, 46, 50).
+/// row's three reasons — clauses 36, 43, 46, 50) — or, a sub-row, at rest
+/// while its parent is (clause 59).
 fn row_view(gui: &Gui, row: Row) -> RowView {
     let app = &gui.app;
     let s = &app.dj;
     let label = row_label(row);
-    let sheet = |(value, tone): (String, Tone)| RowView { label: label.clone(), value, tone, kind: Kind::Sheet, tip: None };
+    let sheet = |(value, tone): (String, Tone)| RowView {
+        label: label.clone(),
+        value,
+        tone,
+        kind: Kind::Sheet,
+        tip: None,
+        inert: false,
+    };
     let gated = |gate: DjGate, tip: Option<String>| RowView {
         label: label.clone(),
         value: gate_words(gate),
         tone: Tone::Neutral,
         kind: Kind::Gated,
         tip,
+        inert: false,
     };
     match row {
         Row::PlayFrom => sheet((target_name(gui), Tone::Neutral)),
@@ -409,6 +463,14 @@ fn row_view(gui: &Gui, row: Row) -> RowView {
                 None => sheet(sonic_value(s.sonic, (s.sonic_min_similarity * 100.0).round() as u32)),
             }
         }
+        // The switch answers only where the server takes negatives
+        // (clause 23); the way to the seeds wherever sonic does.
+        Row::Learn => RowView {
+            kind: Kind::Switch(s.learn_from_skips),
+            inert: !(sub_live(gui) && app.dj_takes_negatives()),
+            ..sheet((String::new(), Tone::Neutral))
+        },
+        Row::Seeds => RowView { inert: !sub_live(gui), ..sheet((String::new(), Tone::Neutral)) },
         Row::Smart => match app.dj_mood_gate() {
             Some(gate) => gated(gate, None),
             None => sheet(moods_value(s.moods)),
@@ -453,50 +515,91 @@ fn row_view(gui: &Gui, row: Row) -> RowView {
 // ── Layout ──────────────────────────────────────────────────────────────────
 
 /// What the room's height affords beyond its rows (the canvas's "The
-/// floor"): the two blank rows between the groups first; then Start / Stop
-/// as the 3-row frame, with the air around it as the rows allow; then
-/// Harmonic's line. Without the frame, Start is the kit's one-row slab on
-/// the title row. Nothing ever scrolls.
+/// floor", clause 54): the spare rows come back by priority, each whole or
+/// not at all, skipping what does not fit — Learn from skips' line; Start /
+/// Stop as the 3-row frame; the blank row before FILTERS, then before
+/// MATCH; a blank under the frame, then over it. Without the frame, Start
+/// is the kit's one-row slab on the title row. Where even the rows cannot
+/// all stand, the two headers fold first, and their gaps with them.
+/// Nothing ever scrolls.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Layout {
     tall: bool,
     blank_title: bool,
     blank_button: bool,
-    hint: bool,
-    gap_must: bool,
-    gap_prefer: bool,
+    gap_filters: bool,
+    gap_match: bool,
+    headers: bool,
+    /// The rows Learn from skips' line takes under it: all of them, or none.
+    learn_lines: u16,
 }
 
-fn layout(rows: u16, play_from: bool) -> Layout {
-    // The title, the session rows, two headers, five and four rows.
-    let base = 14 + u16::from(play_from);
-    let spare = rows.saturating_sub(base);
-    let mut l = Layout { gap_must: spare >= 1, gap_prefer: spare >= 2, ..Layout::default() };
-    match spare.saturating_sub(2) {
-        0 => {}
-        1 | 2 => l.hint = true,
-        3 => l.tall = true,
-        4 => (l.tall, l.blank_button) = (true, true),
-        5 => (l.tall, l.blank_button, l.blank_title) = (true, true, true),
-        _ => (l.tall, l.blank_button, l.blank_title, l.hint) = (true, true, true, true),
+fn layout(rows: u16, play_from: bool, learn_lines: u16) -> Layout {
+    // The title, the session's rows, two headers, five filters and five
+    // matches; folded, the headers' two are given back.
+    let base = 16 + u16::from(play_from);
+    let headers = rows >= base;
+    let mut spare = rows.saturating_sub(if headers { base } else { base - 2 });
+    let mut take = |n: u16| {
+        let fits = n > 0 && n <= spare;
+        if fits {
+            spare -= n;
+        }
+        fits
+    };
+    let mut l = Layout { headers, ..Layout::default() };
+    if take(learn_lines) {
+        l.learn_lines = learn_lines;
     }
+    l.tall = take(3);
+    l.gap_filters = headers && take(1);
+    l.gap_match = headers && take(1);
+    l.blank_button = l.tall && take(1);
+    l.blank_title = l.tall && take(1);
     l
 }
 
+/// Every control of the room in its reading order, drawn or not.
+fn order() -> Vec<Item> {
+    let rows = SESSION.into_iter().chain(FILTERS).chain(MATCH).map(Item::Row);
+    [Item::Preview, Item::Toggle].into_iter().chain(rows).collect()
+}
+
 /// The controls the keyboard walks: the title row's, Start / Stop, and the
-/// rows drawn that the server can do.
+/// rows drawn that answer — not one the server can't do, not one at rest.
 fn items(gui: &Gui) -> Vec<Item> {
     let play_from = shows_play_from(gui);
-    let mut out = vec![Item::Preview, Item::Toggle];
-    for row in SESSION.into_iter().chain(MUST).chain(PREFER) {
-        if row == Row::PlayFrom && !play_from {
-            continue;
-        }
-        if row_view(gui, row).kind != Kind::Gated {
-            out.push(Item::Row(row));
-        }
+    order()
+        .into_iter()
+        .filter(|item| match *item {
+            Item::Row(Row::PlayFrom) if !play_from => false,
+            Item::Row(row) => {
+                let view = row_view(gui, row);
+                view.kind != Kind::Gated && !view.inert
+            }
+            Item::Preview | Item::Toggle => true,
+        })
+        .collect()
+}
+
+/// The first control of `ahead` that answers.
+fn first_live<'a>(mut ahead: impl Iterator<Item = &'a Item>, items: &[Item]) -> Option<Item> {
+    ahead.find(|item| items.contains(item)).copied()
+}
+
+/// Where the keyboard's hand stands: on its control while that answers;
+/// else on the nearest one above that does — a sub-row gone to rest under
+/// it (sonic switched off, a stop that let the server's answer go) hands
+/// it to Sonic similarity, as quick config's does — else below.
+fn settled(gui: &Gui) -> Option<Item> {
+    let at = gui.dj.cursor?;
+    let items = items(gui);
+    if items.contains(&at) {
+        return Some(at);
     }
-    out
+    let order = order();
+    let i = order.iter().position(|item| *item == at).unwrap_or(0);
+    first_live(order[..i].iter().rev(), &items).or_else(|| first_live(order[i + 1..].iter(), &items))
 }
 
 // ── The room ────────────────────────────────────────────────────────────────
@@ -511,12 +614,26 @@ pub(crate) fn open_room(gui: &mut Gui) {
     gui.pend(effects);
 }
 
+/// A session (re)connected (the frame's Connected arm): with the DJ off,
+/// the App let go of what the rows knew — the old server's — so the room,
+/// or a layer of the DJ's up over any room, asks Play from's server now, as
+/// the room does on opening (clause 50); else Learn from skips and Less
+/// like rest until the room is entered again. A DJ that runs probes its
+/// own server.
+pub(crate) fn reopen(gui: &mut Gui) {
+    if gui.active == DJ_NAV || modal_open(gui) {
+        let effects = gui.app.dj_room_opened();
+        gui.pend(effects);
+    }
+}
+
 /// Whether one of the DJ's layers owns the pointer and keyboard: the
-/// opening question, a sheet, First song's list, quick config, or the
-/// empty queue's list.
+/// opening question, a sheet, the Seeds sheet, First song's list, quick
+/// config, or the empty queue's list.
 pub(crate) fn modal_open(gui: &Gui) -> bool {
     gui.app.dj_chooser.is_some()
         || gui.dj.sheet.is_some()
+        || gui.dj.seeds.is_some()
         || gui.dj.first.is_some()
         || gui.dj.quick.is_some()
         || gui.dj.recent.is_some()
@@ -533,18 +650,23 @@ fn down_glyph() -> &'static str {
     if legacy_conhost() { "v" } else { "▾" }
 }
 
-/// The room (clauses 40–53): the name, `Preview picks ▸` at the right;
-/// Start / Stop; then the session's rows, what every pick must match, and
-/// what the DJ prefers. A nav room has no way back — the nav column is
-/// right there.
+/// The room (clauses 40–59, E-AutoDJ): the name, `Preview picks ▸` at the
+/// right; Start / Stop; then how the session runs, FILTERS — what every
+/// pick is filtered by — and MATCH, what it is matched to, Sonic
+/// similarity's two sub-rows under it. A nav room has no way back — the nav
+/// column is right there.
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    // The hand off a row gone to rest under it, so its slab — and the tips
+    // line, drawn after the room — stand on a control that answers.
+    gui.dj.cursor = settled(gui);
     // The block: the room's width up to the rows' most, centred in what
     // is left over.
     let w = content.width.min(ROW_W_MAX);
     let x = content.x + (content.width - w) / 2;
     let (right, bottom) = (x + w, content.bottom());
     let play_from = shows_play_from(gui);
-    let lay = layout(content.height, play_from);
+    let learn = learn_lines(gui, w);
+    let lay = layout(content.height, play_from, learn.len() as u16);
     let mut y = content.y;
     gui.dj.first_anchor = None;
 
@@ -557,10 +679,11 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         draw_button(frame, gui, Rect { x, y, width: w, height: 3 });
         y += 3 + u16::from(lay.blank_button);
     }
+    let header = |key: &str| lay.headers.then(|| t!(key).to_uppercase());
     let groups: [(Option<String>, bool, &[Row]); 3] = [
         (None, false, &SESSION),
-        (Some(t!("gui.dj.must_match").to_uppercase()), lay.gap_must, &MUST),
-        (Some(t!("gui.dj.prefer").to_uppercase()), lay.gap_prefer, &PREFER),
+        (header("gui.dj.group_filters"), lay.gap_filters, &FILTERS),
+        (header("gui.dj.group_match"), lay.gap_match, &MATCH),
     ];
     for (header, gap, rows) in groups {
         y += u16::from(gap);
@@ -584,10 +707,15 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 gui.dj.first_anchor = Some(rect);
             }
             y += 1;
-            if row == Row::Harmonic && lay.hint && y < bottom {
-                let hint = t!("gui.dj.harmonic_hint");
-                put(frame, x + 2, y, &super::bar::clip(&hint, w.saturating_sub(2) as usize), dim());
-                y += 1;
+            // Learn from skips' line, under its name, DIM whatever it says.
+            if row == Row::Learn && lay.learn_lines > 0 {
+                for line in &learn {
+                    if y >= bottom {
+                        return;
+                    }
+                    put(frame, x + 4, y, line, dim());
+                    y += 1;
+                }
             }
         }
     }
@@ -668,28 +796,33 @@ fn draw_slab(frame: &mut Frame, gui: &mut Gui, right: u16, y: u16) -> u16 {
 /// One row: its name, its value in its tone ending two cells before the
 /// chevron, and `▸` or `▾`; the keyboard's hand as the accent slab; the
 /// pointer brightening the name and the chevron. A row the server can't do
-/// is DIM whole, takes no click, and says why where the value would be.
+/// is DIM whole, takes no click, and says why where the value would be; a
+/// row at rest is DIM whole too, takes no click, and says nothing. A
+/// sub-row's name stands two cells in; its value and chevron do not move.
 fn draw_row(frame: &mut Frame, gui: &mut Gui, rect: Rect, row: Row) {
     let view = row_view(gui, row);
     let gated = view.kind == Kind::Gated;
-    let held = !gated && (gui.dj.cursor == Some(Item::Row(row)) || (row == Row::FirstSong && gui.dj.first.is_some()));
-    let hover = !gated && !held && gui.ui.hovers(rect);
+    let rests = gated || view.inert;
+    let held = !rests && (gui.dj.cursor == Some(Item::Row(row)) || (row == Row::FirstSong && gui.dj.first.is_some()));
+    let hover = !rests && !held && gui.ui.hovers(rect);
     if held {
         frame.render_widget(Block::default().style(sel()), rect);
     }
     let value_end = rect.right().saturating_sub(2);
+    let indent: u16 = if sub_row(row) { 2 } else { 0 };
     // A reason never loses its words: where the two do not fit, the name
     // gives way — its row has not moved, so it is still found.
     let reason_w = if gated { width(&view.value) } else { 0 };
-    let label_room = (rect.width as usize).saturating_sub(if gated { reason_w + 4 } else { 4 });
-    let label_w = width(&view.label).min(label_room);
+    let label_room =
+        (rect.width as usize).saturating_sub(if gated { reason_w + 4 } else { 4 } + usize::from(indent));
+    let label_w = width(&view.label).min(label_room) + usize::from(indent);
     match view.kind {
         Kind::Switch(on) => {
             let (check_on, check_off) = super::check_glyphs();
-            let style = match (held, on) {
-                (true, _) => sel(),
-                (false, true) => Style::default().fg(th().ok),
-                (false, false) => dim(),
+            let style = match (held, rests, on) {
+                (true, _, _) => sel(),
+                (false, false, true) => Style::default().fg(th().ok),
+                (false, _, _) => dim(),
             };
             put(frame, value_end.saturating_sub(3), rect.y, if on { check_on } else { check_off }, style);
         }
@@ -697,21 +830,21 @@ fn draw_row(frame: &mut Frame, gui: &mut Gui, rect: Rect, row: Row) {
             let room = (rect.width as usize).saturating_sub(label_w + 2 + 2);
             let words = if view.tone == Tone::Warning { format!("! {}", view.value) } else { view.value.clone() };
             let shown = super::bar::clip(&words, room);
-            let style = if held { sel() } else { view.tone.style() };
+            let style = if held { sel() } else if view.inert { dim() } else { view.tone.style() };
             put(frame, value_end.saturating_sub(width(&shown) as u16), rect.y, &shown, style);
             // A value that did not fit says itself whole on a dwell.
-            if width(&words) > room && !gated {
+            if width(&words) > room && !rests {
                 gui.ui.tip(rect, words);
             }
         }
     }
-    let label_style = match (gated, held, hover) {
+    let label_style = match (rests, held, hover) {
         (true, _, _) => dim(),
         (false, true, _) => sel().add_modifier(Modifier::BOLD),
         (false, false, true) => bright_bold(),
         (false, false, false) => Style::default(),
     };
-    put(frame, rect.x, rect.y, &super::bar::clip(&view.label, label_room), label_style);
+    put(frame, rect.x + indent, rect.y, &super::bar::clip(&view.label, label_room), label_style);
     let chevron = match view.kind {
         Kind::Sheet => Some(super::forward_glyph()),
         Kind::List => Some(down_glyph()),
@@ -725,10 +858,10 @@ fn draw_row(frame: &mut Frame, gui: &mut Gui, rect: Rect, row: Row) {
         };
         put(frame, rect.right().saturating_sub(1), rect.y, chevron, style);
     }
-    if !gated {
+    if !rests {
         gui.ui.click(rect, Act::DjRow(row));
     }
-    if let Some(tip) = view.tip {
+    if let Some(tip) = view.tip.filter(|_| !view.inert) {
         gui.ui.tip(rect, tip);
     }
 }
@@ -736,12 +869,14 @@ fn draw_row(frame: &mut Frame, gui: &mut Gui, rect: Rect, row: Row) {
 // ── Layers ──────────────────────────────────────────────────────────────────
 
 /// The DJ's layers, in the order they stack: First song's list, the empty
-/// queue's list, quick config, the sheet, the opening question.
+/// queue's list, quick config, a sheet, the Seeds sheet, the opening
+/// question.
 pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     draw_first_list(frame, gui, area);
     draw_recent_list(frame, gui, area);
     quick::draw(frame, gui, area);
     sheets::draw(frame, gui, area);
+    seeds::draw(frame, gui, area);
     draw_chooser(frame, gui, area);
 }
 
@@ -793,8 +928,9 @@ fn draw_first_list(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
 }
 
-/// A song as Recently played names it: the title, then the artist DIM.
-fn song_words(track: &crate::api::types::Track) -> (String, Option<String>) {
+/// A song as Recently played and the Seeds sheet name it: the title, then
+/// the artist DIM.
+pub(super) fn song_words(track: &crate::api::types::Track) -> (String, Option<String>) {
     let title = track.title_or_file().to_string();
     let artist = track.metadata.artist.clone().filter(|a| !a.trim().is_empty());
     (title, artist)
@@ -983,6 +1119,9 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if super::moods::dj_open(gui) {
         return super::moods::handle_key(gui, key);
     }
+    if let Some(quit) = seeds::handle_key(gui, key) {
+        return Some(quit);
+    }
     if let Some(quit) = sheets::handle_key(gui, key) {
         return Some(quit);
     }
@@ -1073,17 +1212,28 @@ fn chooser_key(gui: &mut Gui, key: KeyEvent) {
     }
 }
 
-/// Move the keyboard's hand along the controls that exist right now.
+/// Move the keyboard's hand along the controls that answer right now: from
+/// its place in the room — a row's gone to rest under it too, before a
+/// draw has settled it — to the next one that answers that way. At an end
+/// it stays.
 fn move_cursor(gui: &mut Gui, delta: i32) {
     let items = items(gui);
-    let at = gui.dj.cursor.and_then(|c| items.iter().position(|i| *i == c));
-    let next = match at {
-        Some(i) => (i as i32 + delta).clamp(0, items.len() as i32 - 1) as usize,
+    let next = match gui.dj.cursor {
         // From rest: ↓ takes Start / Stop, ↑ the last row.
-        None if delta < 0 => items.len() - 1,
-        None => 1,
+        None if delta < 0 => items.last().copied(),
+        None => items.get(1).copied(),
+        Some(at) => {
+            let order = order();
+            let i = order.iter().position(|item| *item == at).unwrap_or(0);
+            let ahead = if delta < 0 {
+                first_live(order[..i].iter().rev(), &items)
+            } else {
+                first_live(order[i + 1..].iter(), &items)
+            };
+            ahead.or_else(|| settled(gui))
+        }
     };
-    gui.dj.cursor = Some(items[next]);
+    gui.dj.cursor = next;
 }
 
 fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
@@ -1125,10 +1275,12 @@ pub(crate) fn edit(gui: &mut Gui, edit: DjEdit) {
     gui.save_soon();
 }
 
-/// A row pressed: its sheet, its list, or — Harmonic mixing — its switch.
-/// `key` says the keyboard pressed it, so the layer opens with its hand up.
+/// A row pressed: its sheet, its list, or — Harmonic mixing, Learn from
+/// skips — its switch. `key` says the keyboard pressed it, so the layer
+/// opens with its hand up. A row that rests takes no press.
 fn press_row(gui: &mut Gui, row: Row, key: bool) {
-    if row_view(gui, row).kind == Kind::Gated {
+    let view = row_view(gui, row);
+    if view.kind == Kind::Gated || view.inert {
         return;
     }
     // A click seats the hand only where the keyboard already had it up.
@@ -1141,6 +1293,11 @@ fn press_row(gui: &mut Gui, row: Row, key: bool) {
             gui.dj.first = Some(FIRST.iter().position(|c| *c == now).unwrap_or(0));
         }
         Row::Harmonic => edit(gui, DjEdit::Step(crate::tui::app::DjRow::Harmonic, 1)),
+        Row::Learn => {
+            let on = !gui.app.dj.learn_from_skips;
+            edit(gui, DjEdit::LearnSkips(on));
+        }
+        Row::Seeds => seeds::open(gui, key),
         Row::Smart => super::moods::open_for_dj(gui, key),
         Row::PlayFrom => sheets::open(gui, Sheet::PlayFrom, key),
         Row::Batch => sheets::open(gui, Sheet::Batch, key),
@@ -1229,6 +1386,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::DjFirstClose => gui.dj.first = None,
         Act::DjSheet(sheet_act) => sheets::act(gui, sheet_act),
         Act::DjQuick(quick_act) => quick::act(gui, quick_act),
+        Act::DjSeeds(seeds_act) => seeds::act(gui, seeds_act),
         _ => return false,
     }
     true
@@ -1239,7 +1397,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
 /// song of the twenty is the pointer's to reach. True when a layer of the
 /// DJ's is up or the room is — the room itself has nothing to scroll.
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) -> bool {
-    if sheets::wheel(gui, delta) {
+    if seeds::wheel(gui, delta) || sheets::wheel(gui, delta) {
         return true;
     }
     let last = gui.app.dj_recent_songs().len().saturating_sub(1);
@@ -1282,6 +1440,9 @@ pub(crate) fn tips(gui: &Gui) -> Option<String> {
     if gui.app.dj_chooser.is_some() {
         return Some(t!("gui.dj.start_keys").to_string());
     }
+    if let Some(tip) = seeds::tips(gui) {
+        return Some(tip);
+    }
     if let Some(tip) = sheets::tips(gui) {
         return Some(tip);
     }
@@ -1291,8 +1452,10 @@ pub(crate) fn tips(gui: &Gui) -> Option<String> {
     if gui.dj.first.is_some() || gui.dj.recent.is_some() {
         return Some(t!("gui.tips.dj_list").to_string());
     }
-    if gui.app.capture == Some(Capture::DjSeed) {
-        return Some(t!("gui.tips.dj_pick").to_string());
+    match gui.app.capture {
+        Some(Capture::DjSeed) => return Some(t!("gui.tips.dj_pick").to_string()),
+        Some(Capture::Seeds(_)) => return Some(t!("gui.tips.dj_seed_pick").to_string()),
+        _ => {}
     }
     if !in_room(gui) {
         return None;
@@ -1300,15 +1463,22 @@ pub(crate) fn tips(gui: &Gui) -> Option<String> {
     let tip = match gui.dj.cursor {
         None => t!("gui.tips.dj_room"),
         Some(Item::Toggle | Item::Preview) => t!("gui.tips.dj_button"),
-        Some(Item::Row(Row::Harmonic)) => t!("gui.tips.dj_switch"),
+        Some(Item::Row(Row::Harmonic | Row::Learn)) => t!("gui.tips.dj_switch"),
         Some(Item::Row(_)) => t!("gui.tips.dj_row"),
     };
     Some(tip.to_string())
 }
 
-/// The banner the "Let me choose" road wears (clause 4), when it is armed.
+/// The banner an armed pick of the DJ's wears: the "Let me choose" road's
+/// (clause 4), and Add song's for its list (clause 65).
 pub(crate) fn banner(gui: &Gui) -> Option<String> {
-    (gui.app.capture == Some(Capture::DjSeed)).then(|| t!("gui.dj.pick_banner").to_string())
+    let words = match gui.app.capture? {
+        Capture::DjSeed => t!("gui.dj.pick_banner"),
+        Capture::Seeds(SeedList::MoreLike) => t!("gui.dj.seeds_pick_more"),
+        Capture::Seeds(SeedList::LessLike) => t!("gui.dj.seeds_pick_less"),
+        _ => return None,
+    };
+    Some(words.to_string())
 }
 
 /// The empty queue panel's openers (clause 16): while the DJ is armed, the

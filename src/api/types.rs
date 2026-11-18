@@ -307,6 +307,11 @@ pub struct LayeredFeatures {
     /// [`Client::mood_scores_async`]: super::Client::mood_scores_async
     #[serde(rename = "moodScores", deserialize_with = "soft")]
     pub mood_scores: Option<u32>,
+    /// Auto DJ's generation: 1 — random-songs takes `lessLike`, Less like's
+    /// negatives (mStream #1108; auto-dj clause 23). 0 when absent: a
+    /// server from before it is never sent the key.
+    #[serde(rename = "autoDj", deserialize_with = "generation")]
+    pub auto_dj: u32,
 }
 
 /// `features.federationProxy`.
@@ -1518,10 +1523,19 @@ pub struct RandomSongRequest {
     /// it, failing loudly instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_similarity: Option<f64>,
+    /// Less like's negatives (mStream #1108; auto-dj clause 23): 1–8 paths
+    /// in the `similarTo` form, songs a pick should not sound like. Apart
+    /// from the pool — they go with it or without it, and a bad one is
+    /// ignored and counted, never a refusal. Only to a server whose
+    /// `features.autoDj` says it takes them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub less_like: Vec<String>,
 }
 
 /// Most seed paths the server will average into a centroid.
 pub const SIMILAR_TO_MAX: usize = 8;
+/// Most negatives one pick may carry; more is a 400.
+pub const LESS_LIKE_MAX: usize = 8;
 
 impl RandomSongRequest {
     /// Attach the sonic pool, or leave it off entirely.
@@ -1553,6 +1567,26 @@ pub struct RandomSongsResponse {
     pub ignore_list: Vec<u32>,
     /// Present only when the request carried a sonic pool.
     pub sonic: Option<SonicReport>,
+    /// Present only when the request carried negatives (`lessLike`). Soft:
+    /// an odd echo costs the echo, never the songs.
+    #[serde(rename = "lessLike", deserialize_with = "soft")]
+    pub less_like: Option<LessLikeEcho>,
+}
+
+/// What a pick's negatives did (mStream #1108) — for the log alone.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LessLikeEcho {
+    /// Negatives the server could use.
+    pub used: u32,
+    /// Negatives it could not — unknown, not analysed, or a positive too —
+    /// in one bucket, so the count says nothing of which paths exist.
+    pub ignored: u32,
+    /// The cosine at which a candidate is like a negative.
+    pub threshold: Option<f64>,
+    /// One flag per song of the answer, in its order: the song is like a
+    /// skip (served because nothing cleaner was left).
+    pub avoided: Vec<bool>,
 }
 
 /// What the sonic pool did on this pick — the feedback that makes the
@@ -2639,6 +2673,40 @@ mod tests {
         // appear — the server's waterfall branches on field presence.
         let body = serde_json::to_value(RandomSongRequest::default()).unwrap();
         assert_eq!(body, serde_json::json!({}));
+    }
+
+    #[test]
+    fn auto_djs_generation_reads_as_a_number_and_nothing_else_as_zero() {
+        let features = |value: serde_json::Value| -> LayeredFeatures { serde_json::from_value(value).unwrap() };
+        assert_eq!(features(serde_json::json!({"autoDj": 1, "discovery": true})).auto_dj, 1);
+        assert_eq!(features(serde_json::json!({"autoDj": "1"})).auto_dj, 1, "a numeric string");
+        assert_eq!(features(serde_json::json!({"discovery": true})).auto_dj, 0, "absent: an older server");
+        assert_eq!(features(serde_json::json!({"autoDj": "yes"})).auto_dj, 0, "junk costs the feature");
+        assert_eq!(features(serde_json::json!({"autoDj": null, "discovery": true})).auto_dj, 0);
+        assert!(features(serde_json::json!({"autoDj": [1], "discovery": true})).discovery, "never the rest");
+    }
+
+    #[test]
+    fn the_negatives_go_out_as_less_like_and_their_echo_reads_softly() {
+        let request = RandomSongRequest { less_like: vec!["demo/a.mp3".into()], ..Default::default() };
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(body, serde_json::json!({"lessLike": ["demo/a.mp3"]}), "camelCase, alone");
+        let none = serde_json::to_value(RandomSongRequest::default()).unwrap();
+        assert!(none.get("lessLike").is_none());
+
+        let json = r#"{"songs":[{"filepath":"demo/b.mp3"}],"ignoreList":[1],
+            "lessLike":{"used":1,"ignored":2,"threshold":0.85,"avoided":[true]}}"#;
+        let r: RandomSongsResponse = serde_json::from_str(json).unwrap();
+        let echo = r.less_like.expect("the echo");
+        assert_eq!((echo.used, echo.ignored, echo.threshold, echo.avoided), (1, 2, Some(0.85), vec![true]));
+
+        // An echo that does not read costs the echo, never the songs.
+        let json = r#"{"songs":[{"filepath":"demo/b.mp3"}],"ignoreList":[1],"lessLike":"odd"}"#;
+        let r: RandomSongsResponse = serde_json::from_str(json).unwrap();
+        assert!(r.less_like.is_none());
+        assert_eq!(r.songs.len(), 1);
+        let r: RandomSongsResponse = serde_json::from_str(r#"{"songs":[],"ignoreList":[]}"#).unwrap();
+        assert!(r.less_like.is_none(), "no negatives sent, no echo");
     }
 
     #[test]

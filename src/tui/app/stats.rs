@@ -22,6 +22,10 @@ pub const BATCH_MAX: usize = 200;
 /// The legacy route's threshold: a server without the Stats API counts a
 /// play thirty seconds in.
 pub const LEGACY_SCROBBLE_MS: u64 = 30_000;
+/// The server's default play threshold (`decideCounted`: thirty seconds,
+/// or half a known length), mirrored for Auto DJ's quick skip (auto-dj
+/// contract, clause 23); the server's own word still decides the play.
+pub const PLAY_COUNTS_MS: u64 = 30_000;
 /// How long a kept batch waits before the next try.
 pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 pub const CLIENT_NAME: &str = "mstream-terminal-player";
@@ -562,9 +566,28 @@ impl App {
     }
 }
 
+/// Whether a listen counts as a play by the server's default rule
+/// (`decideCounted`): [`PLAY_COUNTS_MS`] heard, or half a known length. A
+/// mirror — an operator's own threshold is the server's to apply — used
+/// only to tell Auto DJ's quick skip from a play (auto-dj clause 23).
+pub fn counts_as_play(played_ms: u64, duration_ms: Option<u64>) -> bool {
+    played_ms >= PLAY_COUNTS_MS || duration_ms.is_some_and(|d| d > 0 && played_ms.saturating_mul(2) >= d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_play_counts_at_thirty_seconds_or_half_a_known_length() {
+        assert!(!counts_as_play(29_999, None));
+        assert!(counts_as_play(30_000, None));
+        assert!(counts_as_play(10_000, Some(20_000)), "half of a twenty-second song");
+        assert!(!counts_as_play(9_999, Some(20_000)));
+        assert!(!counts_as_play(29_999, Some(0)), "an unknown length waits for thirty seconds");
+        assert!(counts_as_play(30_000, Some(600_000)), "thirty seconds of a long one");
+        assert!(!counts_as_play(0, Some(0)));
+    }
 
     fn session() -> Session {
         Session {
