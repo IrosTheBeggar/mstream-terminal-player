@@ -4655,6 +4655,20 @@ read the `-- device: … --` line and the `longest tick` at the end; with
 `MSTREAM_ENGINE_TRACE=<file>` the file says how long each open took and what each device
 refused with.
 
+**Found in the stage's tests later (2026-11-17).** The macOS runner failed one of them once,
+`a_sleeping_stream_is_replaced_like_any_other…` ("and sleeps when nothing needs it"), on a
+branch that changes nothing on that path. Four places in the stage's tests ticked for the idle
+time and 300 to 400 ms more, and then expected the stream asleep. A suspend is refused while a
+pull is in flight and asked again at the next tick, which with a device's callback is a matter
+of microseconds. A stage's puller is an ordinary thread mixing in an unoptimized build. With a
+test suite running on every core beside it, one pull took as long as the 10 ms it is due in,
+the puller made the pulls it owed back to back, and the stream was found mid-pull at six ticks
+running, 45 ms apart (the engine's own trace, with a line added for each refusal). So run, the
+test failed 10 times in 288; with the tests waiting for the sleep
+(`tick_until(&engine, asleep)`), none in 288. Nothing in the engine changed: asking again at
+the next tick is what a refused suspend is for, and a device's callback is not a thread that
+waits its turn.
+
 ## Appendix — Decoding off the device callback (2026-11-16)
 
 **Why.** After the device-switch fix, a read-through of the threading (main `c012d72`) found one
@@ -4726,6 +4740,43 @@ part-way through, so the track stops a few tens of milliseconds short of the las
 came. A seek the decoder refuses loses up to the second that had been decoded ahead, where it
 used to lose nothing; the refusal is still reported.
 
+**Found after it merged (2026-11-17).**
+
+- Every Ogg Vorbis track ended as it started: `play` on one stood at 0.00 and said the track had
+  run out a tenth of a second in, and a queue skipped it. rodio's decoder gives the packet it
+  has in hand as its span and decodes the next only when a sample of it is asked for, and the
+  first packet of a Vorbis stream decodes to no samples. An empty span is rodio's word for a
+  source that has ended, and the converter that pins a source's format (`UniformSourceIterator`)
+  takes nothing of one and never asks. rodio's queue used to stand between the two, and it asks
+  whatever the span says. The decode thread reads its source through `Asked` now, which passes
+  an empty span on as a span of one frame: the frame is asked for, and the source answers with
+  its next span or with `None`. Nothing under "What was run" played a Vorbis file. The feed's
+  tests have a source that hands itself over in packets, an empty one first: played from its
+  first sample to its last, and sought before it has given one. Both failed without `Asked`.
+- A seek could let go of the first sound of the place it was sent to. Placing one, the
+  callback's end let go of everything that was waiting, which also makes room for a decode
+  thread waiting to hand a block over — and a thread woken by that room can take the order up,
+  seek and hand over the first block of the new place while the callback is still looking
+  through the old ones. That block says where the decoder really is, once. Gone with the rest,
+  a seek the decoder refused left the position reading the place that was asked for (how it was
+  found: one of the feed's tests read 30.02 s there, once, on a machine busy with another
+  build), a seek that landed started a block or more late with the position as far behind the
+  sound, and a seek to a track's end could lose the end and leave the track waiting for sound.
+  It takes the callback being held up for the moment it is looking, which a test thread is far
+  more often than a device's. `Fed::try_seek` looks through what waits the way a pull does now
+  (`take`), and keeps what was made for the order it has just placed. With that look made 5 ms
+  long on purpose, three of the feed's seek tests failed every time before, one of them with
+  the same 30.02 s, and none after; a test that hands the blocks over itself in that order
+  holds it without the delay.
+- The macOS runner failed one of the feed's tests ("the track never ended", the decoder that
+  panics) in main's own run after the merge and in the next two pull requests' runs, and
+  nowhere else. The test heard two of its three blocks and left the third to a five-second
+  wait that looks every 2 ms: 320 looks, 0.64 s as asked, and more than the five seconds once
+  a look takes 16 ms, which it can on a runner busy with three thousand other tests — the
+  tests beside it were done within a second, and it gave up at five. With the wait's sleep
+  made 16 ms on purpose it failed here with the same words, and alone. It hears all three
+  blocks first now, which waits for nothing that is already there.
+
 **What was run.**
 
 - `engine::feed`'s own tests (a source that says which frame each sample is from): what the
@@ -4755,3 +4806,95 @@ used to lose nothing; the refusal is still reported.
   and a local server holding everything past the first 500 KB — the position stood at 2.76 s
   marked `(waiting for sound)`, a seek to 1.0 s with the server still silent was at 1.52 s
   half a second later and ran dry again at 2.66 s, longest tick 0 ms.
+
+## Appendix — rodio 0.23 and cpal 0.18 (2026-11-16)
+
+**What the bump is.** rodio 0.23.0 is 0.22 moved onto cpal 0.18.2 and nothing else: between
+0.22.2 and 0.23.0 the decoders, the `Player`, the mixer and every source are the same files, and
+what changed is the error type its stream code hands on. rodio's CHANGELOG on its main branch
+lists more under "Unreleased" — a `Zero::new_samples` that returns a `Result`, a `Done` that
+takes a callback, a resampler behind a `ResampleConfig`, 48 kHz as rodio's own default,
+`stream::supported_output_configs` gone — and none of that is in the release, which calls
+itself a minimal one for people held on an old cpal. The engine makes its own cpal calls,
+through `rodio::cpal`, so the move is cpal's: eleven compile errors, all in `engine/output.rs`
+(one `cpal::Error` with a `kind()` where there were five error enums; `StreamConfig` passed by
+value), and a set of changes no compiler shows, found by reading cpal's CoreAudio, WASAPI and
+ALSA hosts at 0.17.3 and 0.18.2 side by side.
+
+**What cpal 0.18 does differently, and what the engine does about each.**
+
+- **A stream is handed over paused on every host**; CoreAudio's and ALSA's used to come
+  running. The engine already started its streams by name, for WASAPI. Nothing to change.
+- **One error type, and new things said through it** (`output::meaning`).
+  - WASAPI now opens the default through Windows' own default-device interface, watches the
+    system default for a stream opened on it, and reports a change as `StreamInvalidated` —
+    "must be rebuilt" — while the stream's thread runs on (on the endpoint it started on, by
+    cpal's account). Read as it was before, that pulls the death tripwire: the stream is closed
+    first and a new one opened after, which is silence for as long as the new default takes
+    to open, and the engine's own answer to a moved default — open the new one while the old
+    one sounds, and go on trying it for half a minute — never gets its turn. So on WASAPI the
+    kind is written down and the move left to the default watch. A WASAPI stream that says it
+    and has in fact ended stops asking, and the pulse finds it. Everywhere else it is still
+    the end of the stream: CoreAudio pauses a stream whose device changed its sample rate,
+    and then says so.
+  - CoreAudio reports `DeviceChanged` when the default moves under a stream opened on it. The
+    stream has gone to the new default by itself, in the old one's format — as it did under
+    0.17, unannounced. It plays on, and the default watch opens a stream of the new device's
+    own, as before.
+  - An underrun is `Xrun`, and CoreAudio reports them now. Written down, five a second at
+    most, as every stream error is.
+  - `DeviceNotAvailable` is also what CoreAudio and WASAPI say of a stream opened on the
+    default when no default is left at all.
+  - Everything else — `BackendError`, a `DeviceBusy`, kinds yet to be added — counts toward
+    the limit, as `BackendSpecific` did.
+- **A device that would refuse any configuration.** cpal's ALSA host called a device that was
+  gone, one held by another program and one the user may not open "not available" alike, and
+  the walk moved on from each at once. 0.18 gives each its own kind, so `DeviceBusy`,
+  `PermissionDenied` and `HostUnavailable` end a device's turn as `DeviceNotAvailable` does.
+- **ALSA's default rate.** CoreAudio and WASAPI report the format a device is running in as
+  its default, and still do. ALSA has no such thing; cpal picks one, and 0.18 picks 48 kHz
+  where 0.17 picked 44.1. Followed, that would put nearly every track through rodio's linear
+  interpolation on Linux, where a 44.1 kHz track has always reached the sound server as it
+  was decoded. The engine keeps the rate where it was: 44.1 kHz where the device lists it in
+  the shape cpal chose, cpal's choice where it does not (`output::default_config`).
+- **ALSA's pause.** 0.17 swallowed the error from hardware that cannot pause, and the engine
+  took the stream for asleep. 0.18 says "does not support pausing", and the idle suspend
+  would have asked again at every tick. A stream that says so is left running and not asked
+  again (`Output::sleepless`), which is what it was doing all along.
+
+Read and found to hold as they were: cpal still initializes COM on the thread that calls it
+and still keeps one device enumerator for the process, so the device thread still outlives its
+engine on Windows; a WASAPI stream opened on the default now also unregisters a notification
+client when it is dropped, which is one more wait for the retire thread and none for anyone
+else; and the WASAPI thread still waits without limit on the device's event, so the pulse is
+still the only word on a stream that stops asking.
+
+**What was run.**
+
+- macOS, on the Mac's own output (the built-in speakers, 48 kHz): `cargo test` 3095,
+  `--features desktop` 3214, both wasm checks clean. The tests marked "needs an audio device",
+  one at a time: 46 of 46, the two that need a live server run against a scratch mStream on the
+  same machine. `play` on a local file, PASS. `play --drop-device-at 7`: a new stream open 27 ms
+  after the old one was closed, "audio is back", longest tick 0 ms. A stream from the scratch
+  server with a seek to 150 s: at 150.51 s half a second later. `serve --gapless` over three
+  MP3 tracks from that server, its status asked every 40 ms: seeks forward and back answered
+  in 11-17 ms and landed; two boundaries, 16 ms and 77 ms from where the ending track's own
+  clock put them, the next track at 0.01 s and 0.04 s and keeping real time, the status never
+  once stopped on the way; a pause held and a resume went on. The same run on main gave 13 ms
+  and 87 ms. No stream error was written in any of it. (MP3 only: an Ogg Vorbis track ends as
+  it starts on main since the decode thread, on rodio 0.22 as on 0.23 — reported apart.)
+- Linux, in Docker, on the rig the device-switch appendix describes (PulseAudio behind ALSA's
+  default device): `cargo test` 3096; the device tests one at a time, 44 of 46, the other two
+  needing a live server. The stream opens at 44.1 kHz, f32. `play`: plain, `--drop-device-at`,
+  the sink suspended for ten seconds, the sound server killed for eight, the default sink
+  changed and changed back — all PASS, longest tick 5 ms. The killed server is five lines of
+  error (EIO out of `snd_pcm_poll_descriptors_revents`, a backend error to cpal 0.18), the
+  stream closed 35 ms after the kill and the audio back half a second after the server. The
+  suspended sink is the outage told once and "audio is back" when it resumes. A stopped
+  player's stream is corked, as PulseAudio reports it, five seconds on, a paused one's thirty
+  seconds on, and each plays again when woken.
+- Windows: CI's build and suite, and nothing else. What cpal's WASAPI host does at a change of
+  default is read from its source, not seen, and the engine's answer — leave a stream called
+  invalid to the default watch — has not met a real endpoint. The check is the one the
+  device-switch appendix names: `mstream-player play <library path> --test-seconds 120` with
+  `MSTREAM_ENGINE_TRACE=<file>`, switching between outputs meanwhile.

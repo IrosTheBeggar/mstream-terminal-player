@@ -67,11 +67,6 @@ rust-i18n = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fastrand = "2"
-# The Add-torrent room's release-name parser: a ladder of the record's
-# own patterns (scene grammar, "Artist - Album (1999)", dot names). Already
-# in the tree through tracing-subscriber's env-filter; shared because the
-# parser is pure string work.
-regex = "1"
 # Display width for the GUI's cell budgets: a CJK label is two cells a
 # character, and ratatui measures the same way.
 unicode-width = "0.2"
@@ -160,9 +155,20 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # problem in five triples at once, and image-defaults turns image's default
 # features back on, undoing the jpeg+png trim above and pulling every
 # codec. What the crate needs from image (png) it asks for itself. rayon
-# arrives regardless — icy_sixel quantises through quantette, which brings
-# it — so the trim's win is the codec and C-library weight, not rayon.
-ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+# stays out as well: icy_sixel quantises through quantette with its threads
+# off since icy_sixel 0.5.1 (before that, quantette brought rayon whatever
+# this line said).
+#
+# Held to 11.1's patch releases (`~`), on purpose: upstream breaks its API
+# in minor releases (11.1.0 gave `Kitty::new` a fifth argument), and
+# tui::graphics builds kitty's placeholders through it, so the next minor is
+# a port to check rather than a bump to take. Since 11.1 those placeholders
+# are one per cell, each forced to width 1 for ratatui's diff, and
+# tui::graphics rides its own transmission on the picture's first cell; a
+# query nothing answered falls back on environment hints, which the probe
+# declines (`answered`). 12.0, in release candidates since 2026-09-17, keeps
+# that layout and adds a shared-memory transmit and a reworked picker.
+ratatui-image = { version = "~11.1", default-features = false, features = ["crossterm"] }
 # zlib for kitty covers sent over ssh (tui::graphics, `deflate_kitty`).
 # Already in the tree as png's deflate backend, with these features; named
 # here for one call each way.
@@ -171,12 +177,17 @@ miniz_oxide = "0.8"
 # Native-only — the wasm build has no wizard (rust-i18n itself is a plain
 # dependency: the shared App's notes go through t!() on every target).
 sys-locale = "0.3"
-rodio = { version = "0.22", features = ["symphonia-all"] }
+# rodio brings cpal with it (0.23 is 0.22 moved to cpal 0.18, and nothing
+# else), and the engine makes its own cpal calls through `rodio::cpal`
+# (src/engine/output.rs): a rodio bump that moves cpal is an engine change,
+# read against cpal's UPGRADING.md and its hosts, not a version number.
+rodio = { version = "0.23", features = ["symphonia-all"] }
 tiny_http = "0.12"
-# Held at 0.5 on purpose: rodio 0.22 decodes through symphonia 0.5.x, and a
-# direct 0.6 dep would compile a second symphonia tree whose format support
-# differs from what playback actually uses. Bump together with rodio.
-# (Checked 2026-07-31: symphonia 0.6.0 still has no opus decoder, so the
+# Held at 0.5 on purpose: rodio 0.23 decodes through symphonia 0.5.x (it
+# asks for 0.5.5), and a direct 0.6 dep would compile a second symphonia
+# tree whose format support differs from what playback actually uses. Bump
+# together with rodio.
+# (Checked 2026-11-16: symphonia 0.6.1 still has no opus decoder, so the
 # transcode codec=mp3/aac rule from PLAN.md finding #14 stands either way.)
 symphonia = { version = "0.5", features = ["all"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -239,21 +250,30 @@ tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-
 # compiled-in Mozilla bundle — corporate networks put a TLS-inspecting proxy
 # in front of :443 and re-sign with a CA that only the OS keychain knows
 # (the tunnel research round).
-mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tunnel", tag = "v0.2.0", default-features = false, features = ["os-trust"] }
+mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tunnel", tag = "v0.2.1", default-features = false, features = ["os-trust"] }
 # The optional debug log (MSTREAM_LOG): a fmt subscriber writing to a file,
 # never the terminal. env-filter so RUST_LOG chooses what third-party crates
 # (iroh's relay and holepunch narration above all) get to say.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The Add-torrent room's release-name parser: a ladder of the record's
+# own patterns (scene grammar, "Artist - Album (1999)", dot names). Already
+# in the tree through tracing-subscriber's env-filter, just above. Native
+# only, like its users (gui/ and replay.rs): on wasm32 cargo flags it unused.
+regex = "1"
 # The player's own voice in the same stream as its dependencies': the
 # engine's flight-recorder lines are emitted as tracing events too, so the
 # in-memory ring holds the story of a session at the default level rather
 # than waiting for someone to turn iroh's chatter up.
 tracing = "0.1"
-# 0.22 rather than 0.23: reqwest, iroh, portmapper and tokio-websockets are
-# all on 0.22.1, and pinning a major of our own put two copies of base64 in
-# the tree for one decode call (PLAN.md finding #70).
+# 0.22 rather than 0.23: the tunnel crate, portmapper and tokio-websockets
+# (iroh's relay connection) decode with 0.22.1, and pinning a major of our
+# own once put two copies of base64 in the tree for one decode call (PLAN.md
+# finding #70). Since the 2026-11 lockfile refresh 0.23 is in the tree too —
+# hyper-util (reqwest's and iroh-relay's HTTP client) and espflash moved to
+# it — so both copies are there whichever this line names; follow the
+# tunnel crate and iroh to 0.23 when they move.
 base64 = "0.22"
-mdns-sd = "0.20.3"
+mdns-sd = "0.21.7"
 # The setup wizard's QR code, drawn as unicode half-blocks — no image
 # pipeline, just text the terminal already knows how to show.
 qrcode = { version = "0.14", default-features = false }
@@ -362,7 +382,7 @@ unicode-segmentation = "1.13"
 # it never fronted) — the mac picker shells out to osascript instead,
 # which runs the chooser in its own app context.
 [target.'cfg(windows)'.dependencies]
-rfd = { version = "0.15", default-features = false }
+rfd = { version = "0.18", default-features = false }
 # The desktop flavour's two Win32 calls into the console (FreeConsole, and
 # GetConsoleProcessList to know the console is its own) and the launcher
 # stub's MessageBoxW (whose HWND is Foundation's). The 0.61 line is already
@@ -429,7 +449,11 @@ objc2-foundation = { version = "0.3.2", optional = true, default-features = fals
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+# The pickers' portal client (the folder-picker note above the Windows
+# block says why it is ashpd on Linux). Since 0.14 each portal is a feature
+# of its own: `file_chooser` is the one the pickers open, and `tokio` runs
+# zbus (6, since 0.14) on the player's runtime.
+ashpd = { version = "0.14", default-features = false, features = ["tokio", "file_chooser"] }
 # fd 2 pointed at /dev/null around the ALSA device walk (engine/output.rs:
 # libasound writes its config complaints straight onto the TUI). Already in
 # the tree through cpal and alsa.

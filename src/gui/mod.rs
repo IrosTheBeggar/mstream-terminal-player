@@ -978,10 +978,12 @@ impl Gui {
                     }
                 }
                 if sonic {
-                    // Home to the Library leaves the MP3 Player tab too, and
-                    // its page goes with it (clause 8).
-                    device::close(self);
-                    self.screen = Screen::Library;
+                    // Home to the Library by the screens' own door, so the
+                    // screen the [X] was pressed on goes with it: the MP3
+                    // Player tab's page (mp3-player-screen clause 8), the
+                    // Stats page, the Admin room and its log — and the App's
+                    // full-screen flag follows.
+                    self.act(Act::Screen(Screen::Library));
                     self.active = SONIC_NAV;
                     self.app.tab = Tab::SonicPath;
                 }
@@ -5807,6 +5809,49 @@ mod tests {
     }
 
     #[test]
+    fn a_picks_banner_over_the_stats_page_keeps_its_row_and_its_x_takes_the_click() {
+        let _en = crate::setup::tests::in_locale("en");
+        use ratatui::crossterm::event::MouseEvent;
+        // Stats-screen clause 5: a pick's banner takes the row under the top
+        // bar and the page starts a row lower. The banner's row is the GUI's
+        // while it stands — the page took the [X]'s click from under it, and
+        // the pick stayed armed — but a press begun on the page keeps its
+        // drag and its release there, as on the bar's row.
+        let mut gui = browsing_gui();
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        gui.app.capabilities.discovery_path = true;
+        gui.active = SONIC_NAV;
+        gui.app.tab = Tab::SonicPath;
+        gui.act(Act::SonBrowse(crate::tui::app::SonicSide::End));
+        gui.act(Act::Screen(Screen::Stats));
+        assert!(gui.stats.page.is_some());
+        let rows = draw(&mut gui);
+        let x = rows[1].rfind("[X]").map(|i| rows[1][..i].chars().count() as u16 + 1).expect("the banner's [X]");
+        let at = |kind, x, y| MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE };
+        let left = MouseButton::Left;
+
+        assert!(!stats::pointer(&mut gui, at(MouseEventKind::Moved, 30, 1)), "the banner's row is the GUI's");
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Moved, 30, 2)), "the page's rows start under it");
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Down(left), 30, 5)));
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Drag(left), 30, 1)), "a drag from the page onto the banner is the page's");
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Up(left), 30, 1)), "and so is its release");
+
+        // The [X], clicked as the loop routes a click: the pick let go, home
+        // to the room that asked, the page gone with the tab.
+        press_at(&mut gui, x, 1);
+        release_at(&mut gui, x, 1);
+        assert!(gui.app.capture.is_none(), "the [X] let the pick go");
+        assert_eq!((gui.screen, gui.active), (Screen::Library, SONIC_NAV));
+        assert!(gui.stats.page.is_none());
+
+        // With no banner the row under the bar is the page's own again.
+        gui.act(Act::Screen(Screen::Stats));
+        draw(&mut gui);
+        assert!(stats::pointer(&mut gui, at(MouseEventKind::Moved, 30, 1)), "no banner: the page's first row");
+    }
+
+    #[test]
     fn the_top_bar_has_the_library_and_stats_tabs_and_0_opens_now_playing() {
         let _en = crate::setup::tests::in_locale("en");
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -6764,6 +6809,44 @@ mod tests {
         assert!(gui.app.capture.is_none(), "Esc disarms");
         assert_eq!(gui.active, SONIC_NAV, "and follows the cancel home");
         assert!(gui.app.sonic.end.is_none(), "nothing landed");
+    }
+
+    /// The banner's [X] on the Stats or the Admin tab goes home by the
+    /// screens' own door, so the tab lets go of what it hosted on the way:
+    /// the Stats page, the Admin room and its log's poll (stats-screen
+    /// contract, the states; admin-screen clause 11) — then the room that
+    /// asked (sonic-path clause 12).
+    #[test]
+    fn the_banners_x_on_stats_or_admin_lets_the_tab_go_on_the_way_home() {
+        let _en = crate::setup::tests::in_locale("en");
+        for screen in [Screen::Stats, Screen::Admin] {
+            let mut gui = browsing_gui();
+            // A server nobody answers for: the page and the room open, and
+            // nothing a test does reaches out.
+            gui.app.session.server = "http://host.invalid:3000".into();
+            gui.app.session.server_id = "http://host.invalid:3000".into();
+            gui.app.capabilities.discovery_path = true;
+            gui.active = SONIC_NAV;
+            gui.app.tab = Tab::SonicPath;
+            gui.act(Act::SonBrowse(crate::tui::app::SonicSide::Start));
+            gui.act(Act::Screen(screen));
+            match screen {
+                Screen::Stats => assert!(gui.stats.page.is_some(), "the Stats page is up"),
+                _ => assert!(gui.admin.room.is_some() && gui.admin.log.running(), "the Admin room and its log are up"),
+            }
+            // The [X] on the banner's row, under the top bar, clicked as the
+            // loop routes a click: past the tab's own page or room.
+            let rows = draw(&mut gui);
+            let x = rows[1].rfind("[X]").map(|i| rows[1][..i].chars().count() as u16 + 1);
+            let act = x.and_then(|x| gui.ui.hit(Position { x, y: 1 }));
+            assert_eq!(act, Some(Act::CaptureCancel), "{screen:?}: the banner's [X]: {:?}", rows[1]);
+            press_at(&mut gui, x.unwrap(), 1);
+            release_at(&mut gui, x.unwrap(), 1);
+            assert!(gui.app.capture.is_none(), "{screen:?}: the pick let go");
+            assert_eq!((gui.screen, gui.active, gui.app.tab), (Screen::Library, SONIC_NAV, Tab::SonicPath), "{screen:?}: home");
+            assert!(gui.stats.page.is_none(), "{screen:?}: the Stats page went with the tab");
+            assert!(gui.admin.room.is_none() && !gui.admin.log.running(), "{screen:?}: the Admin room and its log too");
+        }
     }
 
     #[test]

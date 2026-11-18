@@ -1057,20 +1057,20 @@ mod tests {
     }
 
     /// Every picture row on screen: its first cell, and the image id its
-    /// placeholders name in their foreground colour.
+    /// placeholders name in their foreground colour. Since ratatui-image
+    /// 11.1 a placeholder is one a cell and the colour is the cell's own;
+    /// a row's first cell is the one whose placeholder carries the row's
+    /// diacritics, the rest of the row being bare placeholders.
     fn placeholders(buffer: &ratatui::buffer::Buffer) -> Vec<(u16, u16, u32)> {
         let area = *buffer.area();
         let mut rows = Vec::new();
         for y in 0..area.height {
             for x in 0..area.width {
-                let symbol = buffer[(x, y)].symbol();
-                if let Some(at) = symbol.find("\x1b[38;2;")
-                    && symbol.contains('\u{10EEEE}')
-                {
-                    let rest = &symbol[at + 7..];
-                    let rgb: Vec<u32> =
-                        rest[..rest.find('m').unwrap()].split(';').map(|v| v.parse().unwrap()).collect();
-                    rows.push((x, y, (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]));
+                let cell = &buffer[(x, y)];
+                let symbol = cell.symbol();
+                let starts_row = symbol.contains('\u{10EEEE}') && !symbol.ends_with('\u{10EEEE}');
+                if starts_row && let ratatui::style::Color::Rgb(r, g, b) = cell.fg {
+                    rows.push((x, y, (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)));
                 }
             }
         }

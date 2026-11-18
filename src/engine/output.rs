@@ -1,23 +1,24 @@
 //! The output device, and everything needed to notice it is the wrong one.
 //!
-//! rodio (through cpal) opens a stream on one concrete device and stays
-//! there for the stream's whole life. The operating system does not: plug
-//! headphones into the jack, pair a Bluetooth speaker, and the *default*
-//! output moves while the old stream plays on at the old endpoint —
-//! Windows and macOS both leave it running; pull the device the stream is
-//! on and the stream just dies. Neither event reaches the engine on its
-//! own, which is how "I plugged in headphones and the speakers kept
-//! playing" happens.
+//! rodio (through cpal) opens a stream on one concrete device, and the
+//! stream is that device's for its whole life. The operating system's
+//! *default* output is not: plug headphones into the jack, pair a
+//! Bluetooth speaker, and it moves. What the old stream does then is the
+//! host's affair — cpal's WASAPI stream is told it must be rebuilt and runs
+//! on, CoreAudio carries a stream opened on the default over to the new one
+//! in the old one's format, a Linux sound server moves it and tells nobody
+//! — and pull the device the stream is on and the stream just dies. None of
+//! that is a stream opened on the right device, which is how "I plugged in
+//! headphones and the speakers kept playing" happens.
 //!
 //! So three things are watched. The stream's error callback sets a flag
-//! when the device dies under it. The identity of the system default is
-//! looked up once a second, to notice it moving. And the callback keeps a
-//! pulse — when it last asked for a buffer — because a death is not always
-//! announced: cpal's WASAPI thread waits without limit on an event a
-//! removed endpoint never signals again, and ends without a flag on any
-//! error it does get, so on Windows a stream can simply stop asking. What
-//! to *do* about any of the three is the engine's business
-//! (`Engine::ensure_output`).
+//! when the device dies under it ([`meaning`] reads what cpal reports). The
+//! identity of the system default is looked up once a second, to notice it
+//! moving. And the callback keeps a pulse — when it last asked for a buffer
+//! — because a death is not always announced: cpal's WASAPI thread waits
+//! without limit on an event a removed endpoint never signals again, so on
+//! Windows a stream can simply stop asking. What to *do* about any of the
+//! three is the engine's business (`Engine::ensure_output`).
 //!
 //! None of it happens on the engine's thread. Opening a device, asking
 //! which one is the default and closing a stream are calls into the
@@ -228,13 +229,23 @@ impl Stream {
         }
     }
 
-    fn pause(&self) -> Result<(), String> {
+    fn pause(&self) -> Result<(), NoPause> {
         match self {
-            Stream::Device(stream) => stream.pause().map_err(|e| e.to_string()),
+            Stream::Device(stream) => stream.pause().map_err(|e| NoPause {
+                never: e.kind() == cpal::ErrorKind::UnsupportedOperation,
+                why: e.to_string(),
+            }),
             #[cfg(test)]
             Stream::Staged(puller) => puller.pause(),
         }
     }
+}
+
+/// Why a stream would not pause.
+struct NoPause {
+    why: String,
+    /// The device has no pause to give, now or later.
+    never: bool,
 }
 
 /// An open output stream, its name, and what there is to watch about it.
@@ -256,6 +267,9 @@ pub(crate) struct Output {
     /// which is why a missing or broken device is still an error at launch
     /// — and the engine suspends it once nothing has needed it for a while.
     awake: bool,
+    /// Set once the device has said it cannot pause at all. The stream is
+    /// left running from then on, and not asked again at every tick.
+    sleepless: bool,
     /// `None` once the stream has been closed under an output that died
     /// ([`Output::bury`]): the output is still what the next one is compared
     /// with, and has nothing left to play, pause or wake.
@@ -306,9 +320,9 @@ impl Output {
     /// the machine — awake on the player's behalf. Nothing on the bus is
     /// touched: the players, their positions and a paused track's decoder
     /// stay exactly where they stand, frozen, until [`Output::wake`].
-    /// True when the stream is now asleep. A backend that cannot pause
-    /// keeps running (cpal's ALSA host swallows the error on raw hardware
-    /// without pause support), which costs what it always did.
+    /// True when the stream is now asleep. A device that cannot pause
+    /// keeps running — raw ALSA hardware without pause support, of which
+    /// cpal says as much — and costs what it always did.
     ///
     /// Never under a pull in flight. Pausing waits for the callback it
     /// interrupts — CoreAudio's AudioDeviceStop queues on the lock the IO
@@ -320,7 +334,7 @@ impl Output {
     /// is a thread of its own (`engine::feed`), and this is the cheap side
     /// of the same care.
     pub(crate) fn suspend(&mut self) -> bool {
-        if !self.awake || self.is_dead() || self.pulse.is_pulling() {
+        if !self.awake || self.sleepless || self.is_dead() || self.pulse.is_pulling() {
             return false;
         }
         let Some(stream) = &self.stream else { return false };
@@ -329,8 +343,9 @@ impl Output {
                 self.awake = false;
                 true
             }
-            Err(e) => {
-                etrace!("output would not suspend on {}: {e}", self.name);
+            Err(NoPause { why, never }) => {
+                etrace!("output would not suspend on {}: {why}", self.name);
+                self.sleepless = never;
                 false
             }
         }
@@ -677,20 +692,19 @@ fn quiet_alsa<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
-/// How many backend-specific stream errors one stream may report before
-/// they count as the device dying. The variant has no single meaning —
-/// ALSA reports a vanished raw hw device this way (`DeviceNotAvailable`
-/// is not in its vocabulary; the desktop path never needs it because
-/// PipeWire and PulseAudio move streams themselves), and every host uses
-/// it for recoverable hiccups too. One is noise; a run of them is a
-/// stream that is not coming back, and the new stream that answers is
+/// How many errors of no certain meaning ([`Meaning::Unsure`]) one stream
+/// may report before they count as the device dying. cpal's ALSA thread
+/// reports an errno it has no kind for as a backend error and goes round
+/// again, so a device that went for good can say so without end, and every
+/// host has kinds for recoverable hiccups too. One is noise; a run of them
+/// is a stream that is not coming back, and the new stream that answers is
 /// self-limiting either way — it reopens in place and the count starts
 /// over with it.
 #[cfg(not(windows))]
 const BACKEND_ERROR_LIMIT: u32 = 5;
 /// On Windows the first is the last: cpal's WASAPI thread leaves its loop
-/// on any error it reports, whatever the variant, so a stream that has
-/// reported one will never ask for another buffer.
+/// on any error of the kind, so a stream that has reported one will never
+/// ask for another buffer.
 #[cfg(windows)]
 const BACKEND_ERROR_LIMIT: u32 = 1;
 
@@ -769,7 +783,7 @@ fn open_device(
     let (name, identity) = quiet_alsa(|| (name_of(device), identity(device)));
     let id = next_id();
     let pulse = Arc::new(Pulse::new());
-    let on_error = error_callback(name.clone(), pulse.clone());
+    let on_error = error_callback(name.clone(), pulse.clone(), cfg!(windows));
     let opened = quiet_alsa(|| open_on(device, on_error, bus, id, &pulse));
     let (stream, config, format) = match opened {
         Ok(opened) => opened,
@@ -796,6 +810,7 @@ fn open_device(
         default_at_open,
         pulse,
         awake: true,
+        sleepless: false,
         stream: Some(Stream::Device(stream)),
     })
 }
@@ -833,14 +848,68 @@ impl Said {
     }
 }
 
+/// What one of a stream's errors says about the stream.
+#[derive(Debug, PartialEq)]
+enum Meaning {
+    /// The stream is over, and a new one is the answer.
+    Over,
+    /// The stream plays on: the error is written down and that is all.
+    PlaysOn,
+    /// Nothing certain. Written down, until the run of them says the stream
+    /// is not coming back ([`BACKEND_ERROR_LIMIT`]).
+    Unsure,
+}
+
+/// Read one of cpal's error kinds as the engine's watch needs it read.
+/// `wasapi` is whether the stream is cpal's WASAPI one, which is the only
+/// host this turns on; a parameter, so that every machine's tests read both
+/// ways.
+fn meaning(kind: cpal::ErrorKind, wasapi: bool) -> Meaning {
+    use cpal::ErrorKind as Kind;
+    match kind {
+        // The device went — or, of a stream opened on the default, the last
+        // device did: CoreAudio and WASAPI say this when no default is left.
+        Kind::DeviceNotAvailable => Meaning::Over,
+        // "Must be rebuilt", and on WASAPI that is how cpal announces that
+        // the system default moved under a stream opened on it: its thread
+        // runs on, and the stream sounds wherever Windows has it — cpal
+        // opens the default through Windows' own default-device interface,
+        // and says the stream stays on the endpoint it started on. The move
+        // is the default watch's to make, with the old stream sounding until
+        // the new one has opened; pulling the tripwire would close it first,
+        // and a default that is slow to open — a Bluetooth link coming up —
+        // would be silence where the speakers were. A WASAPI stream that
+        // says this and has in fact ended stops asking, which is the pulse's
+        // to notice.
+        Kind::StreamInvalidated if wasapi => Meaning::PlaysOn,
+        // Elsewhere it has stopped: CoreAudio pauses a stream whose device
+        // changed its sample rate before saying so.
+        Kind::StreamInvalidated => Meaning::Over,
+        // An underrun hurts the ear once and heals.
+        Kind::Xrun => Meaning::PlaysOn,
+        // The route moved and the stream went with it — CoreAudio's, opened
+        // on the default. It plays on the new default already, in the old
+        // one's format; the default watch opens a stream of the new
+        // device's own and says where the audio went.
+        Kind::DeviceChanged => Meaning::PlaysOn,
+        // The stream runs, at whatever priority the system would give it.
+        Kind::RealtimeDenied => Meaning::PlaysOn,
+        // The rest — a backend error, a device busy for a moment, kinds yet
+        // to be added — have no one reading.
+        _ => Meaning::Unsure,
+    }
+}
+
 /// The error callback every stream carries: the death tripwire's trigger.
+/// `wasapi` as [`meaning`] takes it.
 fn error_callback(
     heard_on: String,
     pulse: Arc<Pulse>,
-) -> impl FnMut(cpal::StreamError) + Clone + Send + 'static {
+    wasapi: bool,
+) -> impl FnMut(cpal::Error) + Clone + Send + 'static {
     let errors = Arc::new(AtomicU32::new(0));
     let said = Arc::new(Said::new());
-    move |err: cpal::StreamError| {
+    move |err: cpal::Error| {
         // Runs on the OS audio thread: the recorder and an atomic, nothing
         // that can block or re-enter.
         let (unwritten, written) = said.hear(clock_ms());
@@ -852,15 +921,10 @@ fn error_callback(
         if written {
             crate::stderrln!("[engine] output stream error on {heard_on}: {err}");
         }
-        match err {
-            cpal::StreamError::DeviceNotAvailable | cpal::StreamError::StreamInvalidated => {
-                pulse.mark_gone();
-            }
-            // An underrun hurts the ear once and heals.
-            cpal::StreamError::BufferUnderrun => {}
-            // The grab-bag: log-only until the run of them says the stream
-            // is gone (raw-ALSA unplug's shape — see BACKEND_ERROR_LIMIT).
-            cpal::StreamError::BackendSpecific { .. } => {
+        match meaning(err.kind(), wasapi) {
+            Meaning::Over => pulse.mark_gone(),
+            Meaning::PlaysOn => {}
+            Meaning::Unsure => {
                 if errors.fetch_add(1, Ordering::Relaxed) + 1 >= BACKEND_ERROR_LIMIT {
                     pulse.mark_gone();
                 }
@@ -872,17 +936,86 @@ fn error_callback(
 /// Why one configuration did not start.
 struct NoStart {
     why: String,
-    /// The device itself is gone: no other configuration will do better.
+    /// The device itself is gone, or as good as: no other configuration
+    /// will do better.
     gone: bool,
+}
+
+impl NoStart {
+    fn of(e: cpal::Error) -> NoStart {
+        NoStart { gone: refuses_whatever_is_asked(e.kind()), why: e.to_string() }
+    }
+}
+
+/// Whether a device that answered an open with `kind` would answer any other
+/// configuration the same way. Gone, held by someone else, not ours to
+/// open, or behind a sound service that is not running: cpal's ALSA host
+/// called the first three "not available" alike until 0.18 gave each its
+/// own kind, and the walk moved on from all of them at once.
+fn refuses_whatever_is_asked(kind: cpal::ErrorKind) -> bool {
+    use cpal::ErrorKind as Kind;
+    matches!(
+        kind,
+        Kind::DeviceNotAvailable
+            | Kind::DeviceBusy
+            | Kind::PermissionDenied
+            | Kind::HostUnavailable
+    )
+}
+
+/// The configuration a device is asked for first: the one cpal calls its
+/// default. On CoreAudio and WASAPI that is the format the device is
+/// running in — the one the system mixes at, and a stream opened in it costs
+/// the system nothing.
+#[cfg(not(target_os = "linux"))]
+fn default_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, cpal::Error> {
+    device.default_output_config()
+}
+
+/// The configuration a device is asked for first. ALSA has no format a
+/// device is "running in": cpal chooses a default for it among what the
+/// device lists, and since 0.18 it chooses 48 kHz where it used to choose
+/// 44.1. Nearly all music is 44.1 kHz, and what brings it to another rate
+/// inside this process is rodio's linear interpolation; handed on at its own
+/// rate it is resampled, if at all, by the sound server, which does it
+/// properly. So the rate stays where it was: 44.1 kHz where the device
+/// lists it in the shape cpal chose, and cpal's choice where it does not.
+#[cfg(target_os = "linux")]
+fn default_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, cpal::Error> {
+    let default = device.default_output_config()?;
+    if default.sample_rate() == cpal::SAMPLE_RATE_CD {
+        return Ok(default);
+    }
+    Ok(match device.supported_output_configs() {
+        Ok(listed) => at_cd_rate(default, listed),
+        Err(_) => default,
+    })
+}
+
+/// `default` at 44.1 kHz, where `listed` has its channels and its sample
+/// format at that rate; `default` as it is where not.
+#[cfg(any(target_os = "linux", test))]
+fn at_cd_rate(
+    default: cpal::SupportedStreamConfig,
+    listed: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+) -> cpal::SupportedStreamConfig {
+    listed
+        .filter(|range| {
+            range.channels() == default.channels()
+                && range.sample_format() == default.sample_format()
+        })
+        .find_map(|range| range.try_with_sample_rate(cpal::SAMPLE_RATE_CD))
+        .unwrap_or(default)
 }
 
 /// One device's open, as rodio makes it (`DeviceSinkBuilder::from_device`
 /// then `open_sink_or_fallback`) but keeping the stream: the device's
-/// default config with rodio's ~50 ms fixed buffer first, then the same at
-/// the device's own buffer size — a fixed size is refused by some devices —
-/// and then the first few other configs the device lists, in rodio's
-/// order ([`OTHER_CONFIGS`]). A device that says it is gone is not asked
-/// again, nor one that has spent its budget refusing ([`DEVICE_BUDGET`]).
+/// default config ([`default_config`]) with rodio's ~50 ms fixed buffer
+/// first, then the same at the device's own buffer size — a fixed size is
+/// refused by some devices — and then the first few other configs the
+/// device lists, in rodio's order ([`OTHER_CONFIGS`]). A device that says
+/// it is gone is not asked again, nor one that has spent its budget
+/// refusing ([`DEVICE_BUDGET`]).
 fn open_on<E>(
     device: &cpal::Device,
     on_error: E,
@@ -891,18 +1024,18 @@ fn open_on<E>(
     pulse: &Arc<Pulse>,
 ) -> Result<(cpal::Stream, StreamConfig, SampleFormat), String>
 where
-    E: FnMut(cpal::StreamError) + Clone + Send + 'static,
+    E: FnMut(cpal::Error) + Clone + Send + 'static,
 {
-    let default = device.default_output_config().map_err(|e| e.to_string())?;
+    let default = default_config(device).map_err(|e| e.to_string())?;
     let format = default.sample_format();
     let preferred = StreamConfig {
         channels: default.channels(),
         sample_rate: default.sample_rate(),
         buffer_size: BufferSize::Fixed(nearest_power_of_two(default.sample_rate() / 20)),
     };
-    let plain = StreamConfig { buffer_size: BufferSize::Default, ..preferred.clone() };
+    let plain = StreamConfig { buffer_size: BufferSize::Default, ..preferred };
     let attempt = |format: SampleFormat, config: StreamConfig| {
-        start(device, format, &config, on_error.clone(), bus.clone(), id, pulse.clone())
+        start(device, format, config, on_error.clone(), bus.clone(), id, pulse.clone())
             .map(|stream| (stream, config, format))
     };
 
@@ -915,7 +1048,7 @@ where
     if first.gone || spent() {
         return Err(first.why);
     }
-    match attempt(format, plain.clone()) {
+    match attempt(format, plain) {
         Ok(opened) => return Ok(opened),
         Err(refusal) if refusal.gone => return Err(first.why),
         Err(_) => {}
@@ -944,17 +1077,19 @@ where
 
 /// Build and start one stream whose callback asks the bus for every buffer
 /// — in whichever sample format the device asked for, and under the pulse.
+/// Started here, by name: cpal hands every host's stream over paused, where
+/// CoreAudio's and ALSA's used to come already running.
 fn start<E>(
     device: &cpal::Device,
     format: SampleFormat,
-    config: &StreamConfig,
+    config: StreamConfig,
     on_error: E,
     bus: Bus,
     id: u64,
     pulse: Arc<Pulse>,
 ) -> Result<cpal::Stream, NoStart>
 where
-    E: FnMut(cpal::StreamError) + Send + 'static,
+    E: FnMut(cpal::Error) + Send + 'static,
 {
     let refused = |why: &str| NoStart { why: why.to_string(), gone: false };
     let shape: Format = (
@@ -989,14 +1124,8 @@ where
         U32 => u32,
         U64 => u64,
     )
-    .map_err(|e| NoStart {
-        gone: matches!(e, cpal::BuildStreamError::DeviceNotAvailable),
-        why: e.to_string(),
-    })?;
-    stream.play().map_err(|e| NoStart {
-        gone: matches!(e, cpal::PlayStreamError::DeviceNotAvailable),
-        why: e.to_string(),
-    })?;
+    .map_err(NoStart::of)?;
+    stream.play().map_err(NoStart::of)?;
     Ok(stream)
 }
 
@@ -1040,6 +1169,8 @@ pub(crate) mod stage {
         /// Whether a stream opened from here on asks for one buffer and
         /// then no more.
         stalling: bool,
+        /// Whether a stream opened from here on has no pause to give.
+        pauseless: bool,
         /// How long closing a stream takes.
         closing_takes: Duration,
         /// The shape streams open in.
@@ -1057,6 +1188,10 @@ pub(crate) mod stage {
         mute: AtomicBool,
         /// Goes mute once it has asked for a buffer.
         stalls: AtomicBool,
+        /// Has no pause to give, and says so each time it is asked.
+        pauseless: AtomicBool,
+        /// How many times it has been asked to pause.
+        pauses_asked: AtomicU32,
         closed: AtomicBool,
         pulse: Arc<Pulse>,
     }
@@ -1072,6 +1207,7 @@ pub(crate) mod stage {
                 takes: Duration::ZERO,
                 silent: false,
                 stalling: false,
+                pauseless: false,
                 closing_takes: Duration::ZERO,
                 shape: (NonZero::new(2).unwrap(), NonZero::new(44_100).unwrap()),
                 asked: 0,
@@ -1118,6 +1254,21 @@ pub(crate) mod stage {
         /// streams, an endpoint mid-change.
         pub(crate) fn open_stalling(&self, stalling: bool) {
             self.plot().stalling = stalling;
+        }
+
+        /// Streams opened from here on have no pause to give, and say so
+        /// when asked — raw ALSA hardware without pause support, of which
+        /// cpal reports as much — or pause, as streams do.
+        pub(crate) fn open_pauseless(&self, pauseless: bool) {
+            self.plot().pauseless = pauseless;
+        }
+
+        /// How many times the newest stream has been asked to pause.
+        pub(crate) fn pauses_asked(&self) -> u32 {
+            self.plot()
+                .streams
+                .last()
+                .map_or(0, |(_, flags)| flags.pauses_asked.load(Ordering::Acquire))
         }
 
         /// Closing a stream takes this long from here on.
@@ -1209,9 +1360,9 @@ pub(crate) mod stage {
             name: &str,
             default_at_open: Option<String>,
         ) -> Result<Output, String> {
-            let (shape, silent, stalling, closing_takes) = {
+            let (shape, silent, stalling, pauseless, closing_takes) = {
                 let plot = self.plot();
-                (plot.shape, plot.silent, plot.stalling, plot.closing_takes)
+                (plot.shape, plot.silent, plot.stalling, plot.pauseless, plot.closing_takes)
             };
             let id = next_id();
             let pulse = Arc::new(Pulse::new());
@@ -1219,6 +1370,8 @@ pub(crate) mod stage {
                 playing: AtomicBool::new(true),
                 mute: AtomicBool::new(silent),
                 stalls: AtomicBool::new(stalling),
+                pauseless: AtomicBool::new(pauseless),
+                pauses_asked: AtomicU32::new(0),
                 closed: AtomicBool::new(false),
                 pulse: pulse.clone(),
             });
@@ -1235,6 +1388,7 @@ pub(crate) mod stage {
                 default_at_open,
                 pulse,
                 awake: true,
+                sleepless: false,
                 stream: Some(Stream::Staged(puller)),
             })
         }
@@ -1290,7 +1444,12 @@ pub(crate) mod stage {
             Ok(())
         }
 
-        pub(super) fn pause(&self) -> Result<(), String> {
+        pub(super) fn pause(&self) -> Result<(), NoPause> {
+            self.flags.pauses_asked.fetch_add(1, Ordering::AcqRel);
+            if self.flags.pauseless.load(Ordering::Acquire) {
+                let why = "Device does not support pausing".to_string();
+                return Err(NoPause { why, never: true });
+            }
             self.flags.playing.store(false, Ordering::Release);
             Ok(())
         }
@@ -1379,6 +1538,154 @@ mod tests {
         for second in 10..20 {
             assert_eq!(said.hear(second * 1_000), (0, true));
         }
+    }
+
+    #[test]
+    fn what_a_stream_reports_is_read_for_what_it_says_of_the_stream() {
+        use cpal::ErrorKind as Kind;
+        for wasapi in [false, true] {
+            // The device went, or the last one did.
+            assert_eq!(meaning(Kind::DeviceNotAvailable, wasapi), Meaning::Over);
+            // Heard, written down, and the stream plays on: an underrun,
+            // CoreAudio's default stream carried to the new default, a
+            // thread that was not given real-time priority.
+            for kind in [Kind::Xrun, Kind::DeviceChanged, Kind::RealtimeDenied] {
+                assert_eq!(meaning(kind, wasapi), Meaning::PlaysOn, "{kind:?}");
+            }
+            // No one reading: counted.
+            for kind in [Kind::BackendError, Kind::Other, Kind::DeviceBusy, Kind::HostUnavailable]
+            {
+                assert_eq!(meaning(kind, wasapi), Meaning::Unsure, "{kind:?}");
+            }
+        }
+        // "Must be rebuilt" is the end of a stream everywhere but on WASAPI,
+        // where it is said of one that still plays where it was opened:
+        // cpal's word there for "the system default moved".
+        assert_eq!(meaning(Kind::StreamInvalidated, false), Meaning::Over);
+        assert_eq!(meaning(Kind::StreamInvalidated, true), Meaning::PlaysOn);
+    }
+
+    #[test]
+    fn the_error_callback_pulls_the_tripwire_for_a_stream_that_is_over_and_no_other() {
+        use cpal::ErrorKind as Kind;
+        let heard = |wasapi: bool, kinds: &[Kind]| {
+            let pulse = Arc::new(Pulse::new());
+            let mut on_error = error_callback("Speakers".to_string(), pulse.clone(), wasapi);
+            for &kind in kinds {
+                on_error(kind.into());
+            }
+            pulse.is_gone()
+        };
+
+        // A stream that plays on is never called gone, however often it
+        // says so.
+        assert!(!heard(false, &[Kind::Xrun; 40]));
+        assert!(!heard(false, &[Kind::DeviceChanged; 40]));
+        assert!(!heard(true, &[Kind::RealtimeDenied; 40]));
+        // One whose device went is, at the first word.
+        assert!(heard(false, &[Kind::DeviceNotAvailable]));
+        assert!(heard(true, &[Kind::DeviceNotAvailable]));
+
+        // A WASAPI stream told that the default moved is left playing for
+        // the default watch to move; its device going is still its end.
+        assert!(!heard(true, &[Kind::StreamInvalidated; 3]));
+        assert!(heard(true, &[Kind::StreamInvalidated, Kind::DeviceNotAvailable]));
+        assert!(heard(false, &[Kind::StreamInvalidated]));
+
+        // Errors of no certain meaning count up to the limit, and the ones
+        // a stream plays through are not counted among them.
+        let under: Vec<Kind> = (1..BACKEND_ERROR_LIMIT).map(|_| Kind::BackendError).collect();
+        assert!(!heard(cfg!(windows), &under));
+        let mut noisy = under.clone();
+        noisy.extend([Kind::Xrun; 20]);
+        assert!(!heard(cfg!(windows), &noisy));
+        noisy.push(Kind::Other);
+        assert!(heard(cfg!(windows), &noisy));
+    }
+
+    #[test]
+    fn a_device_that_would_refuse_any_configuration_is_not_asked_for_another() {
+        use cpal::ErrorKind as Kind;
+        // Gone, held by another program, not ours to open, or its sound
+        // service is not running: the walk moves on to the next device.
+        let wherever = [
+            Kind::DeviceNotAvailable,
+            Kind::DeviceBusy,
+            Kind::PermissionDenied,
+            Kind::HostUnavailable,
+        ];
+        for kind in wherever {
+            assert!(NoStart::of(kind.into()).gone, "{kind:?}");
+        }
+        // Refused for what was asked: another configuration may do.
+        let for_what_was_asked = [
+            Kind::UnsupportedConfig,
+            Kind::InvalidInput,
+            Kind::BackendError,
+            Kind::UnsupportedOperation,
+        ];
+        for kind in for_what_was_asked {
+            assert!(!NoStart::of(kind.into()).gone, "{kind:?}");
+        }
+        let refusal = NoStart::of(cpal::Error::with_message(Kind::DeviceBusy, "hw:0 is in use"));
+        assert_eq!(refusal.why, "hw:0 is in use");
+    }
+
+    #[test]
+    fn the_linux_default_keeps_cd_rate_where_the_device_lists_it() {
+        use cpal::{SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange};
+        let unknown = SupportedBufferSize::Unknown;
+        let range = |channels, low, high, format| {
+            SupportedStreamConfigRange::new(channels, low, high, unknown, format)
+        };
+        let chosen =
+            |channels, rate, format| SupportedStreamConfig::new(channels, rate, unknown, format);
+        // What cpal 0.18 picks for a sound server's device: 48 kHz, stereo,
+        // f32, out of a range that holds 44.1 kHz too.
+        let default = chosen(2, 48_000, SampleFormat::F32);
+        let listed = vec![
+            range(2, 4_000, 192_000, SampleFormat::I16),
+            range(1, 4_000, 192_000, SampleFormat::F32),
+            range(2, 4_000, 192_000, SampleFormat::F32),
+        ];
+        let kept = at_cd_rate(default, listed.into_iter());
+        assert_eq!(
+            (kept.channels(), kept.sample_rate(), kept.sample_format()),
+            (2, 44_100, SampleFormat::F32),
+            "the same shape, at the rate the music is in"
+        );
+
+        // A device that has 44.1 kHz only in another shape — fewer channels,
+        // another sample format — keeps cpal's choice whole, and so does one
+        // that has no 44.1 kHz at all (an HDMI sink at 48 kHz and up).
+        let elsewhere = vec![
+            range(1, 44_100, 44_100, SampleFormat::F32),
+            range(2, 44_100, 44_100, SampleFormat::I16),
+            range(2, 48_000, 192_000, SampleFormat::F32),
+        ];
+        assert_eq!(at_cd_rate(default, elsewhere.into_iter()), default);
+        assert_eq!(at_cd_rate(default, std::iter::empty()), default);
+    }
+
+    #[test]
+    fn a_stream_with_no_pause_to_give_is_asked_once_and_left_running() {
+        let stage = stage::Stage::new("Speakers");
+        stage.open_pauseless(true);
+        let bus = Bus::new();
+        let mut output = stage.backend().open(&bus, true).expect("the stage opens");
+
+        // Asked, it says it cannot — and it is not asked again, tick after
+        // tick, for as long as the engine has nothing to play.
+        assert!(!output.suspend());
+        assert!(!output.suspend());
+        assert!(!output.suspend());
+        assert_eq!(stage.pauses_asked(), 1);
+        // It was never asleep, and is not taken for it: the callback runs
+        // on and the watch goes on watching it.
+        assert!(output.is_awake());
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(output.pulse().answers(Duration::from_millis(100)));
+        assert!(!output.is_dead());
     }
 
     #[test]

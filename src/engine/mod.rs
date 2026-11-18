@@ -5827,6 +5827,19 @@ mod tests {
         heard.iter().any(|notice| !notice.lost)
     }
 
+    /// Whether the stream has been let go to sleep — for [`tick_until`]: on
+    /// a stage a sleep is waited for, not looked for at a set time. The
+    /// suspend is refused while a pull is in flight and asked again at the
+    /// next tick ([`output::Output::suspend`]). A device's pull is over in
+    /// microseconds. A stage's is an ordinary thread mixing in an
+    /// unoptimized build, and on a machine with every core busy one pull
+    /// takes as long as the period it is due in: the stream is mid-pull at
+    /// tick after tick for as long as that lasts. (Seen with a test suite
+    /// running on every core: six refusals in a row, 45 ms apart.)
+    fn asleep(engine: &Engine, _: &[DeviceNotice]) -> bool {
+        !engine.output_awake()
+    }
+
     #[test]
     fn a_change_of_device_never_holds_the_tick_however_long_the_device_takes() {
         // The freeze this is about: the engine used to open the new device
@@ -6057,8 +6070,11 @@ mod tests {
         engine.play_source(track.clone(), None).unwrap();
         tick_for(&engine, Duration::from_millis(400));
         engine.pause();
-        tick_for(&engine, IDLE_PAUSED + CALLBACK_GAP + Duration::from_millis(400));
-        assert!(!engine.output_awake(), "paused long enough: the stream sleeps");
+        // Paused long enough, the stream sleeps; and it has slept for
+        // longer than a running one is ever silent when the seek is made.
+        tick_until(&engine, asleep);
+        tick_for(&engine, CALLBACK_GAP + Duration::from_millis(400));
+        assert!(!engine.output_awake(), "and it sleeps on");
 
         let seeker = engine.clone();
         within(Duration::from_secs(5), move || seeker.seek(12.0)).expect("the seek lands");
@@ -6419,16 +6435,20 @@ mod tests {
         // its own grace, and sleeps in its turn; a play then wakes it and
         // sounds on the device the system now means.
         let (engine, stage) = staged("Speakers");
-        tick_for(&engine, IDLE_STOPPED + Duration::from_millis(300));
-        assert!(!engine.output_awake(), "nothing played: the stream sleeps");
+        // Nothing played: the stream sleeps.
+        tick_until(&engine, asleep);
 
         stage.set_default(Some("Headphones"));
         let watched = tick_until(&engine, settled_somewhere);
         assert_eq!(watched.said(), ["audio moved to Headphones"]);
         assert!(engine.output_awake(), "a fresh stream opens running");
-        tick_for(&engine, IDLE_STOPPED + Duration::from_millis(300));
-        assert!(!engine.output_awake(), "and sleeps when nothing needs it");
-        assert!(engine.take_device_notices().is_empty(), "asleep is not gone quiet");
+        // And sleeps when nothing needs it — which is not going quiet,
+        // however long it lasts.
+        let slept = tick_until(&engine, asleep);
+        tick_for(&engine, Duration::from_millis(300));
+        assert!(!engine.output_awake(), "nothing woke it");
+        let nothing_said = slept.heard.is_empty() && engine.take_device_notices().is_empty();
+        assert!(nothing_said, "asleep is not gone quiet");
 
         let track = staged_track("after-sleep");
         engine.play_source(track.clone(), None).unwrap();
@@ -6565,10 +6585,9 @@ mod tests {
         let stopped = engine.status();
         assert!(!stopped.playing && stopped.file.is_empty());
         assert_eq!(stopped.position, 0.0, "nothing sounding stands at nothing");
-        // The stream sleeps when it is due. It used to be kept running for
-        // as long as the stalled read held the callback.
-        tick_for(&engine, STOP_FADE + IDLE_STOPPED + Duration::from_millis(400));
-        assert!(!engine.output_awake(), "the stream sleeps with the download still held");
+        // The stream sleeps, with the download still held. It used to be
+        // kept running for as long as the stalled read held the callback.
+        tick_until(&engine, asleep);
 
         let local = staged_track("after-a-stop");
         engine.play_source(local.clone(), None).unwrap();

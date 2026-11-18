@@ -67,11 +67,12 @@ federated peer's parent serves it as it serves the queue.
    keeps every key.
 5. **The pointer** below the top bar is the page's: hover, click, hold,
    drag and the wheel on its own controls, the hub's way. The top bar's
-   row is the GUI's, but for the drag and the release of a press that
-   began on the page, which stay the page's there (a thumb dragged to the
-   top overshoots onto it). A GUI modal (the add-server form, the server
-   menu, a torrent dialog) owns the pointer whole while open, as
-   elsewhere.
+   row is the GUI's, and so is the row under it while a pick's banner
+   stands there (its `[X]` lets the pick go), but for the drag and the
+   release of a press that began on the page, which stay the page's there
+   (a thumb dragged to the top overshoots onto them). A GUI modal (the
+   add-server form, the server menu, a torrent dialog) owns the pointer
+   whole while open, as elsewhere.
 6. **The footer** shows the page's hint line — the keys that work now, in
    the page's order — with "Esc library" after it while nothing on the
    page is selected or open.
@@ -215,3 +216,10 @@ the no-session sentence; `gui.tips.base` names `T` (and `M`, since
   held arrow went on stepping and a thumb kept following until the next
   click. The drag and the release of such a press are the page's now, as
   the Admin tab's rooms' are.
+- **2026-11-17 — A pick's banner over the page (clause 5).** The banner's
+  `[X]` could not be clicked while the page was up: the banner takes the
+  row under the top bar and the page starts a row lower, but the page
+  took every press below the bar, so the click fell through to it and the
+  pick stayed armed. The banner's row is the GUI's now while it stands,
+  as the Admin tab's room leaves its first row to it (admin-screen clause
+  18).
