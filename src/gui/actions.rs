@@ -762,7 +762,12 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         }
         Act::PickClose => gui.actions.picker = None,
         Act::InfoClose => gui.actions.info = false,
-        Act::QueueClear => gui.forward(Action::ClearQueue),
+        // Saved soon: Clear pins when the queue is cleared may have let
+        // the seed lists' pins go (auto-dj clause 66).
+        Act::QueueClear => {
+            gui.forward(Action::ClearQueue);
+            gui.save_soon();
+        }
         Act::QueueGrip(index) => {
             gui.app.focus = Focus::Queue;
             gui.app.queue.state.select(Some(index));
@@ -911,7 +916,10 @@ pub(crate) fn queue_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         KeyCode::PageUp => walk_queue(gui, Action::PageUp),
         KeyCode::Enter if held => gui.forward(Action::Activate),
         KeyCode::Char('d') | KeyCode::Delete if held => gui.forward(Action::RemoveFromQueue),
-        KeyCode::Char('C') => gui.forward(Action::ClearQueue),
+        KeyCode::Char('C') => {
+            gui.forward(Action::ClearQueue);
+            gui.save_soon();
+        }
         KeyCode::Char('<') if held => gui.forward(Action::MoveQueueUp),
         KeyCode::Char('>') if held => gui.forward(Action::MoveQueueDown),
         KeyCode::Char('i') => {

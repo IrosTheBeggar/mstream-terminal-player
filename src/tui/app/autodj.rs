@@ -5,9 +5,13 @@
 //! 19): every turn rides that server's own reach, its capabilities come from
 //! a probe of its own, and its tunnel is kept up while the DJ stands. What
 //! the DJ learns from the queue it is working — the cursor, the Camelot
-//! anchor, the sonic history and pin, the warning budgets — is the **lane**,
-//! reset whenever the user steers somewhere new and stamped with an epoch
-//! so a reply from a dead lane is dropped (clauses 10 and 11).
+//! anchor, which picks were its own, the first pick's blend and the songs
+//! its picks pass over, Stay close's one song to start, the warning budgets
+//! — is the **lane**, reset whenever
+//! the user steers somewhere new and stamped with an epoch so a reply from a
+//! dead lane is dropped (clauses 10 and 11). The seed lists outlive it: they
+//! are `App.seeds` (seeds.rs; clauses 23 and 64–66), and this file is their
+//! glue.
 //!
 //! Most of App's DJ fields are serviced from here and nowhere else (audit
 //! #57). The rule that matters lives in [`App::consume_dj`]: a reply in
@@ -30,7 +34,8 @@ pub struct DjSeed {
 }
 
 /// A session lane (clause 10): what the DJ has learned from the queue it is
-/// working, forgotten whenever the user steers somewhere new.
+/// working, forgotten whenever the user steers somewhere new. The seed
+/// lists are not the lane's: they outlive it (`App.seeds`, clause 66).
 #[derive(Debug, Default)]
 pub struct DjLane {
     /// Bumped on every reset; a reply under another epoch is dropped.
@@ -39,11 +44,47 @@ pub struct DjLane {
     pub ignore: Vec<u32>,
     /// The Camelot anchor, locked on the first keyed pick (clause 22).
     pub camelot_anchor: Option<String>,
-    /// DJ-picked paths on the DJ's server, oldest first, at most
-    /// [`dj::HISTORY_LEN`] — the rolling anchor (clause 23).
-    pub history: Vec<String>,
-    /// The locked anchor's pin (clause 23).
-    pub locked_pin: Option<String>,
+    /// This lane's DJ picks — the rows `queue_turn` queued: only these join
+    /// More like as they start (clause 15). A DJ row from an earlier lane or
+    /// a restored queue never joins as it starts; it can still be the song a
+    /// lane opens on, at its first real pick (clause 15).
+    pub picked: std::collections::HashSet<SeedKey>,
+    /// The row that last started, whatever the mode: a pick joins More like
+    /// once per track (a probe's retry or a repeat-one replay starts the
+    /// same row again).
+    pub last_started: Option<SeedKey>,
+    /// Stay close's one song to start is spent — or the lane had something
+    /// to stay close to (clause 23). A new lane resets it, and so does a new
+    /// queue for the seeds (clause 12) — and a real pick that finds the lane
+    /// held only by rows its server has refused since, with no song of its
+    /// own, lets it go, unless the user's edit left it so (decision 42).
+    pub stay_anchored: bool,
+    /// Stay close's one song came in this lane (clause 23(c)): after it
+    /// nothing more does, not even when the server refuses it. Before it, a
+    /// lane held only by rows its server has refused since looks again
+    /// (decision 42). Reset with `stay_anchored`.
+    pub stay_admitted: bool,
+    /// The user's own edit — a removal, a move to Less like — took the last
+    /// More like row this anchored Stay close lane could use, rows its
+    /// server refused still listed: no release, so the lane does not look
+    /// again (the phone's "never for the user's removals", decision 42). A
+    /// real pick that finds a usable row ends it. Reset with `stay_anchored`.
+    pub stay_emptied: bool,
+    /// A real pick has been composed in this lane (clause 15, decision 35):
+    /// the song current at the first one joins More like in Drift. A new
+    /// lane — and a new queue for the seeds (clause 12) — makes the next one
+    /// first again.
+    pub asked: bool,
+    /// The song this lane's start blended into More like (clause 15), by its
+    /// key: a quick skip of it, the user's own row and unpinned there, takes
+    /// it out as a skipped pick leaves and learns nothing (decision 39). A
+    /// new queue for the seeds starts the lane's start over, and drops it.
+    pub blended: Option<SeedKey>,
+    /// The blended songs the user quick-skipped out of More like in this
+    /// lane: never served, so no cursor id keeps them out, and out of More
+    /// like no seeds — the lane's picks pass over them (clause 26, decision
+    /// 39). For the lane, as its cursor is: a new lane lets them go.
+    pub passed_over: Vec<SeedKey>,
     /// A turn is out; the next trigger waits for it (clause 14).
     pub pending: bool,
     /// A turn that could not be asked for — the network, a tunnel down —
@@ -59,10 +100,28 @@ pub struct DjLane {
     pub warned_auth: bool,
     pub logged_not_ready: bool,
     pub logged_deferred: bool,
+    /// Stay close's one song found More like at sixteen rows, none of them
+    /// usable — said once each time the rule looks: a new lane, a new
+    /// queue, a switch into Stay close (clause 23(c), decision 42).
+    pub logged_stay_full: bool,
     /// Why this lane is picking without sonic similarity, once it had to
     /// let the pool go (clause 30) — what the room's row says in gold
     /// until the sonic settings change or the lane ends.
     pub sonic_drop: Option<DjNote>,
+    /// The re-roll's generations (clause 23): bumped by a quick skip that
+    /// changed the negatives with the Next moving forward; stamped on the
+    /// turn that goes out; the last one a landed pick settled. A reply
+    /// stamped before the newest skip is stale (clause 11).
+    pub skip_gen: u64,
+    pub turn_gen: u64,
+    pub reroll_gen: u64,
+    /// The pool's generations (decision 43): bumped by every retry of the
+    /// pool ([`App::dj_retry_sonic`]: a sonic setting, the mode, a More like
+    /// edit, a new queue); stamped on the turn that goes out. An answer
+    /// stamped before the newest retry was composed on what the retry left
+    /// behind: a degrade it brings is not this pool's.
+    pub pool_gen: u64,
+    pub turn_pool_gen: u64,
 }
 
 impl DjLane {
@@ -94,7 +153,10 @@ pub enum DjEdit {
     RemoveKeyword(String),
     // The GUI room's sheets: each closes on one edit of everything it holds.
     /// Sonic similarity: the switch, the floor in hundredths of cosine,
-    /// and the anchor. A lane that had dropped the pool gets another go.
+    /// and the seeds' mode — set through `set_seed_mode`, so a new one
+    /// freezes or thaws the lists (the Seeds sheet owns it now: its sheet
+    /// sends the mode as it stands). A lane that had dropped the pool gets
+    /// another go.
     Sonic { on: bool, floor: u32, anchor: dj::SonicAnchor },
     /// Smart filters: nothing chosen is the filter off.
     Moods(crate::api::types::MoodFilter),
@@ -108,6 +170,19 @@ pub enum DjEdit {
     /// Genres, for the library the rules are for: the way the list cuts,
     /// the kind of genre it matches, and the list — empty is the filter off.
     GenreRule { mode: dj::GenreMode, source: GenreSource, genres: Vec<String> },
+    // The Seeds sheet (clauses 23, 64–66): each press applies at once.
+    /// Drift · Stay close: the mode, both lists frozen or thawed with it.
+    SeedMode(dj::SonicAnchor),
+    /// Learn from skips.
+    LearnSkips(bool),
+    /// Clear pins when the queue is cleared.
+    ClearPinsOnQueueClear(bool),
+    /// A row's pin — refused while Stay close locks the pins.
+    SeedPin { list: SeedList, key: SeedKey, pinned: bool },
+    /// A row deleted.
+    SeedRemove { list: SeedList, key: SeedKey },
+    /// A row to the other list, pinned (the row menu's More / Less like this).
+    SeedMove { from: SeedList, key: SeedKey },
 }
 
 /// The empty-queue chooser (clause 2): "Start Auto DJ with what?" — Surprise
@@ -231,6 +306,26 @@ impl App {
         self.dj.sonic && self.dj_info.as_ref().is_some_and(|info| info.sonic_usable())
     }
 
+    /// Whether the DJ's server — or Play from's while off — takes `lessLike`,
+    /// Less like's negatives (clause 23): a probe said `features.autoDj` is
+    /// 1 or more, discovery is on, and its scan reported ready. A flag, never
+    /// a version floor; nothing is known (so nothing is sent) before a probe
+    /// answers.
+    pub fn dj_takes_negatives(&self) -> bool {
+        self.dj_info.as_ref().is_some_and(|info| {
+            info.auto_dj.is_some_and(|generation| generation >= 1)
+                && info.discovery
+                && info.discovery_ready == Some(true)
+        })
+    }
+
+    /// Whether a probe said that server predates negatives (`autoDj` 0) —
+    /// the GUI's "Needs a newer server" (clauses 59, 64). False while
+    /// nobody knows yet.
+    pub fn dj_lacks_negatives(&self) -> bool {
+        self.dj_info.as_ref().is_some_and(|info| info.auto_dj == Some(0))
+    }
+
     /// Why the sonic row is disabled, in the room's words (clause 43) — or
     /// `None` while it can be honoured.
     pub fn dj_sonic_reason(&self) -> Option<String> {
@@ -288,9 +383,12 @@ impl App {
         self.dj_library_target().is_some_and(|id| self.origin_of(&id).peer.is_some())
     }
 
-    /// The sonic settings changed: a lane that had dropped the pool gets
-    /// another go with them (the record's `retrySonic`).
+    /// The sonic settings changed — or the positives, or the queue (decision
+    /// 43): a lane that had dropped the pool gets another go with them (the
+    /// record's `retrySonic`), and a turn already out, composed before this,
+    /// cannot take it back (the pool's generation).
     fn dj_retry_sonic(&mut self) {
+        self.lane.pool_gen += 1;
         if self.lane.sonic_drop.take().is_some() {
             self.lane.warned_sonic = false;
         }
@@ -354,7 +452,7 @@ impl App {
     pub(crate) fn arm_dj(&mut self, identity: String) -> Vec<Effect> {
         let fresh = !self.dj_server.as_deref().is_some_and(|s| crate::config::same_server(s, &identity));
         if fresh {
-            self.lane.reset();
+            self.new_lane();
             self.forget_dj_info_unless_for(&identity);
         }
         // Play from always holds the server the DJ runs on, as its home.
@@ -412,7 +510,9 @@ impl App {
         self.dj_info = None;
         self.dj_chooser = None;
         self.dj_target = None;
-        self.lane.reset();
+        self.new_lane();
+        // The opener's pick goes with the DJ; a seed pick for the Seeds
+        // sheet stays — the sheet works with the DJ off (clause 65).
         if self.capture == Some(Capture::DjSeed) {
             self.capture = None;
         }
@@ -521,9 +621,11 @@ impl App {
                 return Vec::new();
             }
         };
-        let mut ask = self.compose_ask(&identity);
+        let mut ask = self.compose_ask(&identity, false);
         ask.opener = true;
         ask.ignore_list.clear();
+        // A new session: nothing of this lane's to pass over (decision 39).
+        ask.pass_over.clear();
         self.lane.opener = true;
         self.lane.pending = true;
         self.info(t!("dj.picking_opener"));
@@ -544,6 +646,258 @@ impl App {
         effects
     }
 
+    // ── The seed lists (clauses 23, 64–66) ──────────────────────────────────
+
+    /// A new lane (clause 10): the lane starts over, and in Drift the DJ's
+    /// own unpinned More like rows go with it — its picks, the opener, the
+    /// song the lane opened on. The pins and Less like's rows stay, and in
+    /// Stay close every row where this shell shows the Seeds sheet — its
+    /// pins alone where it shows none (clause 66, decision 41).
+    pub(super) fn new_lane(&mut self) {
+        self.lane.reset();
+        self.seeds.new_lane(self.dj_shows_seeds);
+    }
+
+    /// A new queue, for the seeds (clause 12, decision 27): a clear, or a
+    /// play that replaces the queue. In Drift the DJ's unpinned More like
+    /// picks start over — Stay close keeps every row it shows where a Seeds
+    /// sheet shows them, its pins alone in the TUI (clause 66, decision 41)
+    /// — the song current at the next real pick joins More like (clause 15),
+    /// and Stay close's one song is re-armed. With Clear pins when the queue
+    /// is cleared ticked, a queue that held a row lets the pins go — every
+    /// row in the GUI's Stay close. A pool the lane let go (clause 30) gets
+    /// another go (decision 43). The rest of the lane — its cursor, its
+    /// Camelot anchor, its epoch, a pick already out, the songs its picks
+    /// pass over — is clause 10's, untouched here.
+    pub(super) fn seeds_new_queue(&mut self, had_rows: bool) {
+        let shown = self.dj_shows_seeds;
+        self.seeds.new_lane(shown);
+        self.lane.asked = false;
+        self.lane.blended = None;
+        self.lane.stay_anchored = false;
+        self.lane.stay_admitted = false;
+        self.lane.stay_emptied = false;
+        self.lane.logged_stay_full = false;
+        if had_rows && self.dj.clear_pins_on_queue_clear {
+            self.seeds.without_pinned(shown);
+        }
+        // The owner's "try again" (decision 43): a pool the lane let go gets
+        // another go with the new music, as a More like edit gives it.
+        self.dj_retry_sonic();
+    }
+
+    /// A new queue made while a real pick is out (clause 15, decision 27):
+    /// that pick lands after the new rows and becomes the queue's end, where
+    /// its first real pick is composed — joining More like as a pick, it
+    /// would leave the new music nothing to blend, and in Stay close it
+    /// would be the one song. So the first real pick is composed now, on the
+    /// row the play started, and dropped: Drift's blend or Stay close's one
+    /// song, `asked` spent. No turn is stamped, so the pick out stays one
+    /// composed before the retry (decision 43).
+    pub(super) fn seeds_settle_lane_start(&mut self) {
+        if !self.lane.pending || self.lane.opener || self.lane.asked {
+            return;
+        }
+        let Some(identity) = self.dj_server.clone() else { return };
+        let _ = self.compose_ask(&identity, true);
+    }
+
+    /// A row started playing — a play, or a blend into it (clause 15): in
+    /// Drift, one of this lane's DJ picks joins More like, once per track,
+    /// before the top-up composes the next turn. Never in Stay close, never
+    /// with the DJ off; sonic on or off.
+    pub(super) fn seeds_note_start(&mut self, index: usize) {
+        let Some(row) = self.queue.items.get(index) else { return };
+        let key = SeedKey::new(&row.origin, &row.filepath);
+        if self.lane.last_started.as_ref() == Some(&key) {
+            return;
+        }
+        let ours = row.dj.is_some() && self.lane.picked.contains(&key);
+        let track = row.track.clone();
+        self.lane.last_started = Some(key.clone());
+        if ours && self.dj_armed() && self.dj.sonic_anchor == dj::SonicAnchor::Rolling {
+            self.seeds.push_pick(key, track, SeedFrom::Pick, crate::clock::Instant::now());
+        }
+    }
+
+    /// The owner's "blend in new music" (clause 15, decision 35): the song
+    /// current as a lane's first real pick is composed, as `(key, track)`,
+    /// when it joins More like.
+    fn lane_start_blend(&self, identity: &str) -> Option<(SeedKey, Track)> {
+        let row = self.queue.current.and_then(|i| self.queue.items.get(i))?;
+        let key = SeedKey::new(&row.origin, &row.filepath);
+        seeds::blends_at_lane_start(
+            self.dj.sonic_anchor == dj::SonicAnchor::Rolling,
+            !self.lane.asked,
+            same_origin(&row.origin, &self.origin_of(identity)),
+            self.seeds.holds(SeedList::LessLike, &key),
+            self.seeds.holds(SeedList::MoreLike, &key),
+            row.dj.is_some() && self.lane.picked.contains(&key),
+        )
+        .then(|| (key, row.track.clone()))
+    }
+
+    /// Drift · Stay close (clauses 23, 64): the mode, both lists frozen or
+    /// thawed with it, Stay close's one song re-armed on the way in, and
+    /// the pool given another go. The one writer of `sonic_anchor` after
+    /// load, so `seeds.frozen()` always says Stay close.
+    pub(crate) fn set_seed_mode(&mut self, mode: dj::SonicAnchor) {
+        let changed = self.dj.sonic_anchor != mode;
+        self.dj.sonic_anchor = mode;
+        let now = crate::clock::Instant::now();
+        match mode {
+            dj::SonicAnchor::Locked => {
+                self.seeds.freeze(now);
+                if changed {
+                    self.lane.stay_anchored = false;
+                    self.lane.stay_admitted = false;
+                    self.lane.stay_emptied = false;
+                    self.lane.logged_stay_full = false;
+                }
+            }
+            dj::SonicAnchor::Rolling => {
+                self.seeds.thaw(now);
+            }
+        }
+        if changed {
+            self.dj_retry_sonic();
+        }
+    }
+
+    /// Whether Add song's pick can come from the library on screen (clause
+    /// 65, decision 28): the room's server is the one browsed. A capture is
+    /// answered from the browser alone, which shows the session's library,
+    /// so a pick anywhere else could only be refused.
+    pub fn seeds_pickable(&self) -> bool {
+        self.dj_library_target().is_some_and(|target| same_origin(&self.origin_of(&target), &self.origin()))
+    }
+
+    /// The capture's answer (clause 65): the song as a pinned row of `list`
+    /// — or a refusal for the GUI to word, when the room's server changed
+    /// under the pick or the list can take no row.
+    pub(crate) fn seeds_picked(&mut self, list: SeedList, track: Track) -> Vec<Effect> {
+        self.seeds_refused = None;
+        let Some(target) = self.dj_library_target() else { return Vec::new() };
+        let here = self.origin();
+        if !same_origin(&self.origin_of(&target), &here) {
+            self.seeds_refused = Some(SeedRefusal::OtherServer(self.server_name_of(&target)));
+            return Vec::new();
+        }
+        let key = SeedKey::new(&here, &track.filepath);
+        if !self.seeds.add_manual(list, key, track, crate::clock::Instant::now()) {
+            self.seeds_refused = Some(SeedRefusal::Full);
+            return Vec::new();
+        }
+        if list == SeedList::MoreLike {
+            self.dj_retry_sonic();
+        }
+        Vec::new()
+    }
+
+    /// The user's Next (clause 23). A quick skip of a DJ pick, in Drift,
+    /// teaches the lists before the row moves on: out of More like unless
+    /// pinned, into Less like with Learn from skips; one of the user's own
+    /// song the lane's start blended in only takes it out, and the lane's
+    /// picks pass over it (decision 39). One that changed the negatives
+    /// with the Next moving forward re-rolls the DJ's rows ahead (no
+    /// shuffle, no wrap). The Next is computed once: under shuffle a second
+    /// roll would land somewhere else.
+    pub(super) fn next_track(&mut self) -> Vec<Effect> {
+        let now = crate::clock::Instant::now();
+        let (current, next) = (self.queue.current, self.queue.next_index(true));
+        let mut learned = false;
+        if let Some((key, track, blend)) = self.quick_skip_now(current, next)
+            && self.dj.sonic_anchor == dj::SonicAnchor::Rolling
+        {
+            self.seeds.prune(now);
+            // As sets: a re-skip that only moves a row to newest changes
+            // nothing the server reads (clause 23(f)).
+            let sorted = |mut paths: Vec<String>| {
+                paths.sort();
+                paths
+            };
+            let before = sorted(self.seeds_negatives());
+            // The user's own song a lane's start blended in only leaves More
+            // like: nothing is learned from it, Learn on or off (decision 39).
+            let learn = !blend && self.dj.learn_from_skips && self.dj.sonic && self.dj_takes_negatives();
+            self.seeds.quick_skip(&key, &track, learn, now);
+            learned = sorted(self.seeds_negatives()) != before;
+            if learned {
+                dj_log(format!("[dj] a quick skip of {} — less like it from here", track.display_name()));
+            }
+            // Out of More like, and never served: the lane's picks pass over
+            // it from here on (decision 39).
+            if blend && !self.seeds.holds(SeedList::MoreLike, &key) {
+                dj_log(format!(
+                    "[dj] a quick skip of {}, the song the lane opened on — out of More like, and passed over from here",
+                    track.display_name()
+                ));
+                if !self.lane.passed_over.contains(&key) {
+                    self.lane.passed_over.push(key);
+                }
+            }
+        }
+        let forward = !self.queue.shuffle && matches!((current, next), (Some(c), Some(n)) if n > c);
+        if learned && forward {
+            self.lane.skip_gen += 1;
+        }
+        // The row starts (and may already ask the top-up, the re-roll then).
+        let mut effects = self.skip_to(next);
+        if learned && forward && self.lane.reroll_gen < self.lane.skip_gen {
+            // Nothing while a turn is out: its answer is stale and re-asks.
+            effects.extend(self.request_turn());
+        }
+        effects
+    }
+
+    /// The quick skip a Next would be (clause 23(d), decision 25): the playing
+    /// row's key, its track and whether it is the lane's blended song, when
+    /// it is a DJ pick on the DJ's server or that song (decision 39), the DJ
+    /// armed, heard for a second or more and not yet a play, and the Next
+    /// really moves on. Read before the row moves — starting the next one
+    /// closes the play session this reads; a row parked for its tunnel has
+    /// none, and is no skip.
+    fn quick_skip_now(&self, current: Option<usize>, next: Option<usize>) -> Option<(SeedKey, Track, bool)> {
+        let index = current?;
+        let row = self.queue.items.get(index)?;
+        let dj_origin = self.dj_origin()?;
+        let session = self
+            .stats
+            .session
+            .as_ref()
+            .filter(|s| s.file_path == row.filepath && same_origin(&s.origin, &row.origin))?;
+        let key = SeedKey::new(&row.origin, &row.filepath);
+        let dj_pick = row.dj.is_some();
+        let dj_row = dj_pick && same_origin(&row.origin, &dj_origin);
+        // The user's own song the lane's start blended in is judged as a
+        // pick is, while More like holds it unpinned (decision 39).
+        let unpinned = self.seeds.more_like.iter().any(|s| s.key == key && !s.pinned);
+        let blend = seeds::quick_skips_blend(&key, self.lane.blended.as_ref(), dj_pick, unpinned);
+        let repeat_one = self.queue.repeat == Repeat::One;
+        seeds::is_quick_skip(dj_row || blend, session.played_ms, session.duration_ms, repeat_one, index, next, self.queue.shuffle)
+            .then(|| (key, row.track.clone(), blend))
+    }
+
+    /// The negatives a pick on the DJ's server would carry, as the lists
+    /// stand — what a quick skip compares before and after (clause 23(f)).
+    fn seeds_negatives(&self) -> Vec<String> {
+        self.dj_origin().map(|origin| self.seeds.negatives(&origin)).unwrap_or_default()
+    }
+
+    /// At load (clause 66): the seed rows of a server the app no
+    /// longer has go — one dropped by a hand edit, another tool or an older
+    /// player. The queue restore's own rule: the live session's server and
+    /// every saved one stay, a peer's rows with its parent.
+    pub(crate) fn seeds_drop_unknown(&mut self) {
+        let live = self.origin().server;
+        let saved: Vec<String> = self.servers.iter().map(|s| s.id.clone()).collect();
+        let known = |server: &str| {
+            (!live.is_empty() && crate::config::same_server(server, &live))
+                || saved.iter().any(|id| crate::config::same_server(id, server))
+        };
+        self.seeds.drop_where(|key| !known(&key.server));
+    }
+
     /// The row the "Let me choose" road landed on: the seed, and the DJ arms
     /// for the server it was chosen from (paths are per-library).
     pub(super) fn dj_seed_chosen(&mut self, track: Track) -> Vec<Effect> {
@@ -554,21 +908,39 @@ impl App {
     /// A seed opens exactly one session (clauses 5 and 7): the DJ arms for
     /// the seed's server, the queue becomes the seed, it plays, and the
     /// followers are asked for — one fetch, a second only if the first
-    /// left the queue under three deep.
+    /// left the queue under three deep; in the GUI's Stay close a song the
+    /// user chose joins More like pinned (decisions 37, 41).
     fn start_from_seed(&mut self, seed: DjSeed) -> Vec<Effect> {
         self.dj_target = None;
         let fresh = !self.dj_server.as_deref().is_some_and(|s| crate::config::same_server(s, &seed.server));
         if fresh {
-            self.lane.reset();
+            self.new_lane();
             self.forget_dj_info_unless_for(&seed.server);
         }
         self.dj_server = Some(seed.server.clone());
         self.dj_home = Some(seed.server.clone());
         // The clear that starts it consumes the seed: a new lane, and nothing
         // left for a later empty-queue start to replay.
-        self.lane.reset();
+        self.new_lane();
         let origin = self.origin_of(&seed.server);
         let mark = seed.picked_by_dj.then_some(DjMark { sonic: false });
+        // The first song (clause 15): in Drift More like's first row; in
+        // Stay close a song the user chose joins More like pinned, as Add
+        // song would, where this shell shows the Seeds sheet (decisions 37
+        // and 41) — in the TUI, as Random's is, it is held to by the first
+        // real pick when nothing else is (clause 23(c)).
+        let key = SeedKey::new(&origin, &seed.track.filepath);
+        let now = crate::clock::Instant::now();
+        let stay_close = self.dj.sonic_anchor == dj::SonicAnchor::Locked;
+        let can_take = self.seeds.can_take(SeedList::MoreLike);
+        if !stay_close {
+            self.seeds.push_pick(key.clone(), seed.track.clone(), SeedFrom::Opener, now);
+            self.lane.last_started = Some(key);
+        } else if seeds::adds_chosen_song(self.dj_shows_seeds, stay_close, !seed.picked_by_dj, can_take)
+            && self.seeds.add_manual(SeedList::MoreLike, key, seed.track.clone(), now)
+        {
+            dj_log(format!("[dj] stay close: {} chosen to start — pinned in More like", seed.track.display_name()));
+        }
         let row = Queued { origin, dj: mark, track: seed.track };
         // The seed opens an empty queue; a queue built while the opener
         // was out (or while the pick's banner stood) stays, and the seed
@@ -674,8 +1046,13 @@ impl App {
                 return Vec::new();
             }
         };
-        let ask = self.compose_ask(&identity);
+        let ask = self.compose_ask(&identity, true);
         self.lane.pending = true;
+        // What the lists stood at when it was asked: a learned skip since
+        // makes its answer stale (clause 23) — and the pool's generation: a
+        // retry since makes its degrade stale (decision 43).
+        self.lane.turn_gen = self.lane.skip_gen;
+        self.lane.turn_pool_gen = self.lane.pool_gen;
         vec![Effect::Api(ApiCmd::AutoDj(Box::new(DjRequest {
             identity,
             reach,
@@ -685,8 +1062,32 @@ impl App {
     }
 
     /// Everything a turn is composed from (clauses 20–27): the library's
-    /// rules, the playing track's tags, the lane's anchors, the cursor.
-    fn compose_ask(&mut self, identity: &str) -> dj::Ask {
+    /// rules, the playing track's tags, the lane's anchors, the seeds, the
+    /// cursor. `admit` is a real turn's: only one may spend the lane's
+    /// first-pick blend (clause 15) and Stay close's one song to start
+    /// (clause 23(c)) — the opener and Preview never do; Preview shows both
+    /// without keeping them.
+    fn compose_ask(&mut self, identity: &str, admit: bool) -> dj::Ask {
+        let now = crate::clock::Instant::now();
+        // A Less like row past its life never rides a pick (clause 23).
+        self.seeds.prune(now);
+        // The song a lane opens on joins More like before the pick is built
+        // (clause 15); Preview looks at what the next real pick will hold
+        // and keeps nothing (decision 35).
+        let blend = self.lane_start_blend(identity);
+        if admit {
+            self.lane.asked = true;
+        }
+        let before = (blend.is_some() && !admit).then(|| self.seeds.clone());
+        if let Some((key, track)) = blend
+            && self.seeds.push_pick(key.clone(), track.clone(), SeedFrom::Opener, now)
+            && admit
+        {
+            // The lane's start blended it in: a quick skip of it takes it out
+            // and learns nothing (decision 39).
+            self.lane.blended = Some(key);
+            dj_log(format!("[dj] {} opens the lane: it joins More like", track.display_name()));
+        }
         let playing = self.now_playing.clone();
         let playing_key = playing.as_ref().and_then(|t| t.metadata.musical_key.clone());
         // The anchor seeds from the playing track's key when there is none
@@ -697,7 +1098,18 @@ impl App {
         {
             self.lane.camelot_anchor = Some(code.code());
         }
-        let sonic_seeds = self.sonic_seeds(identity);
+        let sonic_seeds = self.sonic_seeds(identity, admit);
+        if let Some(before) = before {
+            self.seeds = before;
+        }
+        // Less like's negatives (clause 23): only while sonic is on and the
+        // server takes them — the flag, never a version floor. Stay close
+        // sends them too; the opener never does (`Ask::request`).
+        let less_like = if self.dj.sonic && self.dj_takes_negatives() {
+            self.seeds.negatives(&self.origin_of(identity))
+        } else {
+            Vec::new()
+        };
         dj::Ask {
             settings: self.dj.clone(),
             library: self.library_for(identity),
@@ -705,6 +1117,10 @@ impl App {
             playing_key,
             camelot_anchor: self.lane.camelot_anchor.clone(),
             sonic_seeds,
+            less_like,
+            // What the lane's picks pass over (clause 26, decision 39):
+            // Preview too; the opener clears it.
+            pass_over: seeds::pass_over_on(&self.lane.passed_over, &self.origin_of(identity)),
             ignore_list: self.lane.ignore.clone(),
             recent_artists: self.recent_artists(),
             opener: false,
@@ -715,10 +1131,19 @@ impl App {
         }
     }
 
-    /// The pool's seeds by the anchor rule (clause 23), all on the DJ's
-    /// server: rolling — the lane's history, else the playing track when
-    /// it lives there; locked — one pin, set on the lane's first turn.
-    fn sonic_seeds(&mut self, identity: &str) -> Vec<String> {
+    /// The pool's seeds (clause 23), all on that server, never a Less like
+    /// song. Drift: More like's rows — the song a lane opened on among them
+    /// (clause 15) — else the playing track. Stay close: the frozen rows the
+    /// server has not refused in this lane, eight at most, the oldest
+    /// unpinned staying home first (decision 42); a lane with nothing to
+    /// stay close to — no such row, or held only by rows refused since,
+    /// before it took a song of its own, and not by the user's own edit —
+    /// holds to the playing track unless the server refused it too,
+    /// admitted once as a row on a real turn (`admit`), past eight rows up
+    /// to sixteen; Preview shows what that turn would hold without keeping
+    /// it (clause 23(c)). Every row the user removes after that leaves the
+    /// picks with no positives at all.
+    fn sonic_seeds(&mut self, identity: &str, admit: bool) -> Vec<String> {
         if !self.dj_sonic_usable() {
             let not_ready = self
                 .dj_info
@@ -734,27 +1159,111 @@ impl App {
             return Vec::new();
         }
         let origin = self.origin_of(identity);
+        // The playing track when it lives there — a Less like song never
+        // stands in (the server ignores a negative that is a positive too).
         let playing_here = self
             .queue
             .current
             .and_then(|i| self.queue.items.get(i))
             .filter(|row| same_origin(&row.origin, &origin))
-            .map(|row| row.filepath.clone());
+            .map(|row| (SeedKey::new(&row.origin, &row.filepath), row.track.clone()))
+            .filter(|(key, _)| !self.seeds.holds(SeedList::LessLike, key));
         match self.dj.sonic_anchor {
             dj::SonicAnchor::Rolling => {
-                if !self.lane.history.is_empty() {
-                    self.lane.history.clone()
+                let positives = self.seeds.positives(&origin);
+                if !positives.is_empty() {
+                    positives
                 } else {
-                    playing_here.into_iter().collect()
+                    playing_here.map(|(key, _)| key.path).into_iter().collect()
                 }
             }
             dj::SonicAnchor::Locked => {
-                if self.lane.locked_pin.is_none() {
-                    self.lane.locked_pin = playing_here;
+                // What this lane's server refused as seeds (clause 31) is no
+                // row to stay close to (decision 42, the phone's
+                // `usableSeeds`): the worker's memory of the running lane,
+                // never a Preview's.
+                let refused = crate::tui::worker::dj_dead_seeds(identity, self.lane.epoch);
+                let usable = self.seeds.usable_positives(&origin, |path| refused.contains(path));
+                // Held only by rows the server has refused since, before the
+                // lane took a song of its own: nothing to stay close to after
+                // all (the phone's `stayCloseReleases`). Never after its own
+                // song — one a lane — and never for the user's edits: a list
+                // the user emptied holds no row here, and one whose last
+                // usable row the user took out holds refused rows alone
+                // (`stay_emptied`).
+                let released = self.lane.stay_anchored
+                    && !self.lane.stay_admitted
+                    && !self.lane.stay_emptied
+                    && usable.is_empty()
+                    && self.seeds.more_like.iter().any(|s| s.key.is_on(&origin));
+                if released && admit {
+                    self.lane.stay_anchored = false;
+                    dj_log(format!(
+                        "[dj] stay close: {} refused every row there — the lane takes one song to stay close to",
+                        self.server_name_of(identity)
+                    ));
                 }
-                self.lane.locked_pin.iter().cloned().collect()
+                if (self.lane.stay_anchored && !released) || !usable.is_empty() {
+                    if admit {
+                        self.lane.stay_anchored = true;
+                        // A usable row again: the user's edit is behind the
+                        // lane, and a refusal from here releases it.
+                        if !usable.is_empty() {
+                            self.lane.stay_emptied = false;
+                        }
+                    }
+                    return usable;
+                }
+                // A song the server refused in this lane is no song to stay
+                // close to: the lane keeps looking, and the next song that
+                // plays comes in.
+                let Some((key, track)) = playing_here.filter(|(key, _)| !refused.contains(&key.path)) else {
+                    return usable;
+                };
+                // Past eight rows the song comes in all the same (the owner's
+                // "let it in as a 9th row", decision 42) — never past
+                // sixteen, all a restart brings back: then the pick goes
+                // without, Preview shows the same, and the log says so once
+                // each time the rule looks (clause 23(c)).
+                if !self.seeds.admits_anchor(&key) {
+                    if admit && !self.lane.logged_stay_full {
+                        self.lane.logged_stay_full = true;
+                        dj_log(format!(
+                            "[dj] stay close: More like holds {} rows, none of them usable on {} — {} is not held to, so picks go without sonic similarity until a row is removed",
+                            seeds::SEEDS_STORED_MAX,
+                            self.server_name_of(identity),
+                            track.display_name()
+                        ));
+                    }
+                    return usable;
+                }
+                if !admit {
+                    return vec![key.path];
+                }
+                if self.seeds.admit_anchor(key, track.clone(), crate::clock::Instant::now()) {
+                    self.lane.stay_anchored = true;
+                    self.lane.stay_admitted = true;
+                    dj_log(format!("[dj] stay close: holding to {}", track.display_name()));
+                }
+                self.seeds.usable_positives(&origin, |path| refused.contains(path))
             }
         }
+    }
+
+    /// Whether `key` is the last More like row an anchored Stay close lane
+    /// can use — on the DJ's server, and not refused there in this lane
+    /// (decision 42): an edit of the user's that takes it leaves the lane
+    /// held to refused rows alone, which is no release.
+    fn stay_close_last_usable(&self, key: &SeedKey) -> bool {
+        if !self.seeds.frozen() || !self.lane.stay_anchored {
+            return false;
+        }
+        let Some(identity) = self.dj_server.as_deref() else { return false };
+        let origin = self.origin_of(identity);
+        let refused = crate::tui::worker::dj_dead_seeds(identity, self.lane.epoch);
+        let mut usable =
+            self.seeds.more_like.iter().filter(|s| s.key.is_on(&origin) && !refused.contains(&s.key.path));
+        usable.next().is_some_and(|s| s.key == *key) && usable.next().is_none()
     }
 
     /// What the DJ's server offers (clause 19): asked when the DJ arms, and
@@ -769,6 +1278,8 @@ impl App {
                 discovery_ready: None,
                 libraries: self.libraries.clone(),
                 mood_filters: self.capabilities.mood_filters,
+                // Whether it takes negatives waits for the probe (clause 23).
+                auto_dj: None,
             });
             self.dj_panel.rebuild(&self.dj, self.dj_info.as_ref(), self.dj_is_peer());
         }
@@ -849,9 +1360,18 @@ impl App {
                 if !opener && !self.dj_armed() {
                     return Vec::new(); // switched off while the request was out
                 }
-                self.lane.ignore = ignore_list;
                 let mut explained = false;
-                if let Some(note) = note {
+                // Composed before the newest retry of the pool (decision
+                // 43): a degrade it brings is about seeds or settings that
+                // no longer stand. The worker's lane takes its pool back
+                // again and the gold line stays away; its songs land as any
+                // pick already out does.
+                let stale_pool = !opener && self.lane.turn_pool_gen != self.lane.pool_gen;
+                if stale_pool {
+                    if let Some(identity) = self.dj_server.as_deref() {
+                        crate::tui::worker::dj_retry_sonic(identity, self.lane.epoch);
+                    }
+                } else if let Some(note) = note {
                     // What the room's row says until the sonic settings
                     // change or the lane ends.
                     if matches!(note, DjNote::SonicRange | DjNote::SonicUnscanned) {
@@ -863,6 +1383,15 @@ impl App {
                         explained = true;
                     }
                 }
+                // Asked before a learned skip (clause 23): stale. Its songs,
+                // its cursor and its failure go, and the pick is asked again
+                // at once — its note above stands, since the worker has let
+                // that lane's pool go already (decision 31). An opener never is.
+                if !opener && self.lane.turn_gen != self.lane.skip_gen {
+                    dj_log("[dj] a pick asked before a learned skip — asking again".to_string());
+                    return self.request_turn();
+                }
+                self.lane.ignore = ignore_list;
                 if let Some(failure) = failure {
                     return self.dj_turn_failed(failure, opener);
                 }
@@ -994,10 +1523,27 @@ impl App {
 
     /// The batch lands as the next rows in the server's order (clause 14),
     /// each wearing the badge (clause 60); the Camelot anchor locks on the
-    /// first keyed one (clause 22); every one joins the history (clause
-    /// 15). The first plays at once only when the queue had run dry.
+    /// first keyed one (clause 22); each is one of this lane's picks, to
+    /// join More like when it starts (clause 15). The first plays at once
+    /// only when the queue had run dry.
+    ///
+    /// A re-roll (clause 23) lands differently: its new songs take the
+    /// places of the DJ's rows after the playing one, nearest first, one for
+    /// one, and the rest append. A song already queued — a replaceable
+    /// row's own included — keeps its place, so none lands twice (clause 23(f)).
     fn queue_turn(&mut self, songs: Vec<Track>, sonic: bool, explained: bool) -> Vec<Effect> {
         let Some(origin) = self.dj_origin() else { return Vec::new() };
+        // The learned skip's debt is settled by this landing, new songs or
+        // none; a failed re-roll left it for the next.
+        let reroll = self.lane.reroll_gen < self.lane.turn_gen;
+        let slots = if reroll {
+            seeds::reroll_slots(&self.queue.items, self.queue.current, self.queue.shuffle)
+        } else {
+            Vec::new()
+        };
+        if reroll {
+            self.lane.reroll_gen = self.lane.turn_gen;
+        }
         // Queued already — or queued once and let go at a restore, which
         // for this rule is the same (multi-server clause 40).
         let already: std::collections::HashSet<&str> = self
@@ -1017,20 +1563,35 @@ impl App {
             && (self.queue.current.is_none() || self.queue.current == Some(last) || self.queue.items.is_empty());
         let first_new = self.queue.items.len();
         let mut names = Vec::new();
-        for track in fresh {
+        let (mut replaced, mut added) = (0, 0);
+        for (k, track) in fresh.into_iter().enumerate() {
             if self.dj.harmonic
                 && self.lane.camelot_anchor.is_none()
                 && let Some(code) = track.metadata.musical_key.as_deref().and_then(dj::to_camelot)
             {
                 self.lane.camelot_anchor = Some(code.code());
             }
-            self.lane.history.push(track.filepath.clone());
-            if self.lane.history.len() > dj::HISTORY_LEN {
-                let extra = self.lane.history.len() - dj::HISTORY_LEN;
-                self.lane.history.drain(..extra);
-            }
+            self.lane.picked.insert(SeedKey::new(&origin, &track.filepath));
             names.push(track.display_name());
-            self.queue.push(Queued { origin: origin.clone(), dj: Some(DjMark { sonic }), track });
+            let row = Queued { origin: origin.clone(), dj: Some(DjMark { sonic }), track };
+            match slots.get(k) {
+                Some(&at) => {
+                    self.queue.items[at] = row;
+                    replaced += 1;
+                }
+                None => {
+                    self.queue.push(row);
+                    added += 1;
+                }
+            }
+        }
+        if replaced > 0 {
+            // In place: the prepared next follows by itself (the refresh
+            // after every event re-announces a row that changed).
+            self.queue.touch();
+        }
+        if reroll {
+            dj_log(format!("[dj] re-roll: {replaced} replaced, {added} added"));
         }
         // The degrade note, when one was just said, outranks the track name.
         if !explained {
@@ -1170,12 +1731,9 @@ impl App {
                     self.dj.songs_per_fetch = step(self.dj.songs_per_fetch, delta, 1, dj::SONGS_PER_FETCH_MAX);
                 }
                 DjRow::Sonic => {
+                    // The seeds stay either way (clause 23): switched on
+                    // again, the picks pick up where they stand.
                     self.dj.sonic = !self.dj.sonic;
-                    // Switching off clears the lane's anchors (clause 43).
-                    if !self.dj.sonic {
-                        self.lane.history.clear();
-                        self.lane.locked_pin = None;
-                    }
                     self.dj_retry_sonic();
                 }
                 DjRow::Strictness => {
@@ -1183,11 +1741,8 @@ impl App {
                     self.dj.sonic_min_similarity = dj::clamp_similarity(raw);
                     self.dj_retry_sonic();
                 }
-                DjRow::Anchor => {
-                    self.dj.sonic_anchor = self.dj.sonic_anchor.next();
-                    self.lane.locked_pin = None;
-                    self.dj_retry_sonic();
-                }
+                // The TUI's row drives the Seeds sheet's mode (clause 64).
+                DjRow::Anchor => self.set_seed_mode(self.dj.sonic_anchor.next()),
                 DjRow::EmptyQueue => self.dj.empty_queue = self.dj.empty_queue.next(),
                 DjRow::Bpm => self.dj.bpm = !self.dj.bpm,
                 DjRow::Tolerance => {
@@ -1271,17 +1826,10 @@ impl App {
             DjEdit::Sonic { on, floor, anchor } => {
                 let floor = dj::clamp_similarity(f64::from(floor) / 100.0);
                 let changed = (self.dj.sonic, self.dj.sonic_min_similarity, self.dj.sonic_anchor) != (on, floor, anchor);
-                if self.dj.sonic_anchor != anchor {
-                    self.lane.locked_pin = None;
-                }
-                // Switching off clears the lane's anchors (clause 43).
-                if self.dj.sonic && !on {
-                    self.lane.history.clear();
-                    self.lane.locked_pin = None;
-                }
+                // The seeds stay when sonic goes off (clause 23).
                 self.dj.sonic = on;
                 self.dj.sonic_min_similarity = floor;
-                self.dj.sonic_anchor = anchor;
+                self.set_seed_mode(anchor);
                 if changed {
                     self.dj_retry_sonic();
                 }
@@ -1316,6 +1864,32 @@ impl App {
                 self.dj.keyword_filter = !self.dj.keywords.is_empty();
             }
             DjEdit::GenreRule { mode, source, genres } => effects = self.set_dj_genres(mode, source, genres),
+            DjEdit::SeedMode(mode) => self.set_seed_mode(mode),
+            DjEdit::LearnSkips(on) => self.dj.learn_from_skips = on,
+            DjEdit::ClearPinsOnQueueClear(on) => self.dj.clear_pins_on_queue_clear = on,
+            // What the positives may be changed: the pool gets another go
+            // (clause 64). Negatives never cost the pool, so theirs do not.
+            DjEdit::SeedPin { list, key, pinned } => {
+                if self.seeds.set_pinned(list, &key, pinned, crate::clock::Instant::now())
+                    && list == SeedList::MoreLike
+                {
+                    self.dj_retry_sonic();
+                }
+            }
+            DjEdit::SeedRemove { list, key } => {
+                let last = list == SeedList::MoreLike && self.stay_close_last_usable(&key);
+                if self.seeds.remove(list, &key) && list == SeedList::MoreLike {
+                    self.lane.stay_emptied |= last;
+                    self.dj_retry_sonic();
+                }
+            }
+            DjEdit::SeedMove { from, key } => {
+                let last = from == SeedList::MoreLike && self.stay_close_last_usable(&key);
+                if self.seeds.move_to_other(from, &key, crate::clock::Instant::now()) {
+                    self.lane.stay_emptied |= last;
+                    self.dj_retry_sonic();
+                }
+            }
         }
         self.dj_panel.rebuild(&self.dj, self.dj_info.as_ref(), self.dj_is_peer());
         effects
@@ -1591,7 +2165,7 @@ impl App {
         };
         self.dj_panel.sample_pending = true;
         self.dj_panel.sample.clear();
-        let ask = self.compose_ask(&identity);
+        let ask = self.compose_ask(&identity, false);
         vec![Effect::Api(ApiCmd::AutoDjSample {
             request: Box::new(DjRequest { identity, reach, epoch: self.lane.epoch, ask }),
             count: DJ_SAMPLE_COUNT,

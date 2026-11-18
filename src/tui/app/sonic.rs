@@ -383,8 +383,7 @@ impl App {
                     return Vec::new();
                 }
                 let tracks = self.queued_all(self.sonic.tracks());
-                self.queue.replace(tracks);
-                self.play_index(0)
+                self.play_replacing(tracks, 0)
             }
             SonicRow::QueueAll => {
                 let tracks = self.sonic.tracks();
@@ -431,8 +430,7 @@ impl App {
             return Vec::new();
         }
         let tracks = self.queued_all(self.sonic.tracks());
-        self.queue.replace(tracks);
-        self.play_index(index)
+        self.play_replacing(tracks, index)
     }
 
     /// Queue just stop `index` — the GUI's hover [+], the TUI's `a`.
@@ -554,6 +552,9 @@ impl App {
                     Vec::new()
                 }
             },
+            // A row for one of Auto DJ's seed lists (auto-dj clause 65); a
+            // refusal is the GUI's to word.
+            Capture::Seeds(list) => self.seeds_picked(list, track),
         }
     }
 

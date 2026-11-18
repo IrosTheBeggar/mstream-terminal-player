@@ -1,7 +1,8 @@
 //! Quick config (the record's split Auto DJ button, #226): the bar's
 //! `auto-dj` word starts and stops as it always has, and the chevron beside
 //! it opens this — Play from (the servers inline up to four, one row to the
-//! sheet past that), Sonic similarity with Drift · Stay close, Smart
+//! sheet past that), Sonic similarity with its match bar and the way to
+//! the Seeds sheet while it is on (auto-dj clause 58, E-Quick), Smart
 //! filters, and the way to the room. Every change applies at once: there is
 //! no draft and no Done. It rises from the rule between the button's
 //! halves — over the nav's rule, never over its rows — and never covers
@@ -14,10 +15,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Block;
 use rust_i18n::t;
 
-use crate::dj::SonicAnchor;
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{dim, width};
-use crate::tui::app::DjEdit;
+use crate::tui::app::{DjEdit, DjRow};
 
 use super::super::{Act, DJ_NAV, Gui, accent, bright_bold, put, sel};
 use super::{PickServer, Sheet, Tone};
@@ -38,8 +38,10 @@ pub(crate) enum QStop {
     PlayFrom,
     /// Sonic similarity's switch.
     Sonic,
-    /// Drift · Stay close.
-    Anchor(u8),
+    /// Its match bar: ← → step it, a click on a cell sets it.
+    Bar,
+    /// The way to the Seeds sheet.
+    Seeds,
     Smart,
     /// `All Auto DJ settings ▸`.
     All,
@@ -58,6 +60,10 @@ pub(crate) enum QuickAct {
     Toggle,
     Press(QStop),
     Close,
+    /// The match bar's `-` or `+`: a point down or up.
+    Step(i32),
+    /// A cell of the match bar: the floor it sets, in hundredths.
+    Set(u32),
 }
 
 /// A line of the popover. Its groups stand a blank row apart, as the
@@ -68,13 +74,23 @@ enum Line {
     PlayFrom,
     Gap,
     Sonic,
-    Anchor,
+    /// Sonic similarity's match bar, under its switch.
+    Bar,
+    /// `Seeds ▸`, under the bar.
+    Seeds,
     Smart,
     All,
 }
 
+/// Whether sonic similarity's own lines stand: switched on, and the server
+/// can do it (E-Quick: hidden otherwise, as Drift · Stay close was).
+fn sonic_lines(gui: &Gui) -> bool {
+    gui.app.dj.sonic && gui.app.dj_sonic_gate().is_none()
+}
+
 /// What it shows right now: the servers where there is a choice of them,
-/// the anchor only while sonic similarity is on and the server can do it.
+/// the match bar and the Seeds row only while sonic similarity is on and
+/// the server can do it.
 fn lines(gui: &Gui, servers: &[PickServer]) -> Vec<Line> {
     let mut out = Vec::new();
     if servers.len() > 1 {
@@ -87,8 +103,8 @@ fn lines(gui: &Gui, servers: &[PickServer]) -> Vec<Line> {
         out.push(Line::Gap);
     }
     out.push(Line::Sonic);
-    if gui.app.dj.sonic && gui.app.dj_sonic_gate().is_none() {
-        out.push(Line::Anchor);
+    if sonic_lines(gui) {
+        out.extend([Line::Bar, Line::Seeds]);
     }
     out.extend([Line::Gap, Line::Smart, Line::Gap, Line::All]);
     out
@@ -102,7 +118,8 @@ fn stops(gui: &Gui, servers: &[PickServer]) -> Vec<QStop> {
             Line::Server(i) => out.push(QStop::Server(i)),
             Line::PlayFrom => out.push(QStop::PlayFrom),
             Line::Sonic if gui.app.dj_sonic_gate().is_none() => out.push(QStop::Sonic),
-            Line::Anchor => out.extend([QStop::Anchor(0), QStop::Anchor(1)]),
+            Line::Bar => out.push(QStop::Bar),
+            Line::Seeds => out.push(QStop::Seeds),
             Line::Smart if gui.app.dj_mood_gate().is_none() => out.push(QStop::Smart),
             Line::All => out.push(QStop::All),
             _ => {}
@@ -187,16 +204,19 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                     }
                 }
             }
-            Line::Anchor => {
-                let now = gui.app.dj.sonic_anchor;
-                let words = [t!("gui.dj.drift").to_string(), t!("gui.dj.stay_close").to_string()];
-                let mut x = x0 + 4;
-                for (n, (kind, word)) in [SonicAnchor::Rolling, SonicAnchor::Locked].into_iter().zip(&words).enumerate() {
-                    let stop = QStop::Anchor(n as u8);
-                    let cells = Rect { x, y, width: 4 + width(word) as u16, height: 1 };
-                    choice(frame, gui, cells, (radio_on, radio_off), now == kind, accent(), word, hand(stop), stop);
-                    x += cells.width + 3;
-                }
+            // Under the switch's name: `-`, the cells, `+` — the value is
+            // the line above's.
+            Line::Bar => {
+                let spec = super::sheets::sonic_bar(floor_of(gui));
+                let step = |delta: i32| Act::DjQuick(QuickAct::Step(delta));
+                let set = |value: u32| Act::DjQuick(QuickAct::Set(value));
+                super::sheets::draw_bar(frame, gui, x0 + 4, y, &spec, hand(QStop::Bar), true, step, set, false);
+            }
+            // Under the switch's name too: the way to the Seeds sheet.
+            Line::Seeds => {
+                let stop = QStop::Seeds;
+                let row = Rect { x: x0 + 4, width: text_w.saturating_sub(4), ..row };
+                value_row(frame, gui, row, &t!("gui.dj.seeds"), (String::new(), Tone::Neutral), hand(stop), Some(stop));
             }
             Line::Smart => {
                 let label = t!("gui.dj.smart").to_string();
@@ -291,8 +311,19 @@ fn value_row(
     }
 }
 
-/// `stop` pressed: applied at once.
-fn press(gui: &mut Gui, stop: QStop) {
+/// Sonic similarity's floor as it stands, in hundredths.
+fn floor_of(gui: &Gui) -> u32 {
+    (gui.app.dj.sonic_min_similarity * 100.0).round() as u32
+}
+
+/// The match bar stepped a point, held inside its band: applied at once.
+fn step_bar(gui: &mut Gui, delta: i32) {
+    let value = super::sheets::sonic_bar(floor_of(gui)).stepped(delta);
+    super::edit(gui, DjEdit::Set(DjRow::Strictness, value));
+}
+
+/// `stop` pressed — by the keyboard when `key` — applied at once.
+fn press(gui: &mut Gui, stop: QStop, key: bool) {
     match stop {
         QStop::Server(i) => {
             let Some(server) = super::pickable_servers(gui).into_iter().nth(i) else { return };
@@ -301,16 +332,17 @@ fn press(gui: &mut Gui, stop: QStop) {
             gui.save_now();
         }
         QStop::PlayFrom => super::sheets::open(gui, Sheet::PlayFrom, false),
-        QStop::Sonic | QStop::Anchor(_) => {
+        // The mode rides along as it stands: it is the Seeds sheet's.
+        QStop::Sonic => {
             let s = &gui.app.dj;
-            let (mut on, floor, mut anchor) = (s.sonic, (s.sonic_min_similarity * 100.0).round() as u32, s.sonic_anchor);
-            match stop {
-                QStop::Sonic => on = !on,
-                QStop::Anchor(0) => anchor = SonicAnchor::Rolling,
-                _ => anchor = SonicAnchor::Locked,
-            }
+            let (on, anchor) = (!s.sonic, s.sonic_anchor);
+            let floor = floor_of(gui);
             super::edit(gui, DjEdit::Sonic { on, floor, anchor });
         }
+        // The bar is ← → and the pointer's: there is nothing to press.
+        QStop::Bar => {}
+        // Over whatever room this is; quick config goes with it.
+        QStop::Seeds => super::seeds::open(gui, key),
         QStop::Smart => {
             gui.dj.quick = None;
             super::super::moods::open_for_dj(gui, false);
@@ -323,13 +355,13 @@ fn press(gui: &mut Gui, stop: QStop) {
     }
 }
 
-/// The hand off a stop that went: the anchor's with its switch.
+/// The hand off a stop that went: the bar's with its switch.
 fn settle(gui: &mut Gui) {
     let Some(mut quick) = gui.dj.quick else { return };
     let stops = stops(gui, &super::pickable_servers(gui));
     if !stops.contains(&quick.hand) {
         quick.hand = match quick.hand {
-            QStop::Anchor(_) => QStop::Sonic,
+            QStop::Bar | QStop::Seeds => QStop::Sonic,
             _ => stops.first().copied().unwrap_or(QStop::All),
         };
         if !stops.contains(&quick.hand) {
@@ -358,14 +390,30 @@ pub(crate) fn act(gui: &mut Gui, act: QuickAct) {
                 quick.hand = stop;
                 quick.shown = false;
             }
-            press(gui, stop);
+            press(gui, stop, false);
             settle(gui);
+        }
+        // The pointer on the match bar: the hand stowed there.
+        QuickAct::Step(delta) => {
+            if let Some(quick) = gui.dj.quick.as_mut() {
+                quick.hand = QStop::Bar;
+                quick.shown = false;
+            }
+            step_bar(gui, delta);
+        }
+        QuickAct::Set(value) => {
+            if let Some(quick) = gui.dj.quick.as_mut() {
+                quick.hand = QStop::Bar;
+                quick.shown = false;
+            }
+            super::edit(gui, DjEdit::Set(DjRow::Strictness, value));
         }
     }
 }
 
-/// Its keys while it is up: ↑ ↓ and Tab walk the stops, ← → the anchor's
-/// two; Space and Enter press; Esc puts it away. `None` while it is down.
+/// Its keys while it is up: ↑ ↓ and Tab walk the stops, and so do ← →
+/// but on the match bar, which they step; Space and Enter press; Esc puts
+/// it away. `None` while it is down.
 pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     let mut quick = gui.dj.quick?;
     let stops = stops(gui, &super::pickable_servers(gui));
@@ -380,17 +428,14 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             gui.dj.quick = None;
             return Some(false);
         }
+        KeyCode::Left | KeyCode::Right if quick.shown && quick.hand == QStop::Bar => {
+            step_bar(gui, if code == KeyCode::Left { -1 } else { 1 });
+        }
         KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
             // A stowed hand is only shown by the first walking key.
             if quick.shown && !stops.is_empty() {
                 let back = matches!(code, KeyCode::Up | KeyCode::Left | KeyCode::BackTab);
                 let next = if back { at.saturating_sub(1) } else { (at + 1).min(last) };
-                // ↑ ↓ pass the anchor's second choice: it is beside the first.
-                let next = match (code, stops[at], stops[next]) {
-                    (KeyCode::Down, QStop::Anchor(0), QStop::Anchor(1)) => (next + 1).min(last),
-                    (KeyCode::Up, _, QStop::Anchor(1)) if !matches!(stops[at], QStop::Anchor(_)) => next.saturating_sub(1),
-                    _ => next,
-                };
                 quick.hand = stops[next];
             }
             quick.shown = true;
@@ -398,7 +443,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             if quick.shown {
-                press(gui, quick.hand);
+                press(gui, quick.hand, true);
                 settle(gui);
             } else {
                 quick.shown = true;

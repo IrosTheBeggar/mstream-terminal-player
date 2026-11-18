@@ -7113,7 +7113,8 @@ fn a_sheets_edit_applies_whole_and_a_changed_sonic_setting_gives_the_pool_anothe
     app.handle_action(Action::ToggleAutoDj);
     app.lane.sonic_drop = Some(DjNote::SonicRange);
     app.lane.warned_sonic = true;
-    app.lane.history = vec!["lib/x.mp3".into()];
+    let here = app.origin();
+    app.seeds.push_pick(SeedKey::new(&here, "lib/x.mp3"), track("lib/x.mp3"), SeedFrom::Pick, crate::clock::Instant::now());
     // Sonic similarity: closed as it stood, nothing is retried.
     app.dj_edit(DjEdit::Sonic { on: true, floor: 55, anchor: dj::SonicAnchor::Rolling });
     assert!(app.lane.sonic_drop.is_some());
@@ -7122,9 +7123,11 @@ fn a_sheets_edit_applies_whole_and_a_changed_sonic_setting_gives_the_pool_anothe
     app.dj_edit(DjEdit::Sonic { on: true, floor: 48, anchor: dj::SonicAnchor::Locked });
     assert_eq!((app.dj.sonic_min_similarity, app.dj.sonic_anchor), (0.48, dj::SonicAnchor::Locked));
     assert!(app.lane.sonic_drop.is_none() && !app.lane.warned_sonic);
-    assert_eq!(app.lane.history, vec!["lib/x.mp3"], "the session's sound is kept while it stays on");
+    assert_eq!(app.seeds.positives(&here), ["lib/x.mp3"], "the session's sound is kept while it stays on");
+    assert!(app.seeds.frozen(), "Stay close froze the lists");
     app.dj_edit(DjEdit::Sonic { on: false, floor: 48, anchor: dj::SonicAnchor::Locked });
-    assert!(!app.dj.sonic && app.lane.history.is_empty(), "switched off, the anchors go (clause 43)");
+    assert!(!app.dj.sonic);
+    assert_eq!(app.seeds.positives(&here), ["lib/x.mp3"], "switched off, the seeds stay (clause 23)");
     app.dj_edit(DjEdit::Sonic { on: true, floor: 99, anchor: dj::SonicAnchor::Locked });
     assert_eq!(app.dj.sonic_min_similarity, dj::SONIC_MAX_SIMILARITY, "held inside the band");
 
@@ -7188,6 +7191,7 @@ fn the_rooms_gates_read_the_dj_servers_own_answer() {
         discovery_ready: ready,
         libraries: vec!["Music".into()],
         mood_filters: moods,
+        auto_dj: None,
     };
     app.dj_info = Some(info("6.10.0", true, Some(true), false));
     assert_eq!(app.dj_sonic_gate(), Some(DjGate::NeedsServer(dj::FLOOR_SONIC)), "the version outranks the flag");
@@ -7282,9 +7286,10 @@ fn a_turn_carries_the_lane_and_the_playing_track() {
     assert!(request.reach.is_none(), "the session's own client");
     assert_eq!(request.ask.recent_artists, vec!["Gamma", "Beta", "Alpha"], "newest first");
     assert_eq!(request.ask.settings.artist_cooldown, 2);
-    // Rolling anchor, no history yet: the playing track seeds, since it
-    // lives on the DJ's server (clause 23).
+    // The lane's first pick: the song playing joins More like (clause 15)
+    // and seeds the turn, since it lives on the DJ's server.
     assert_eq!(request.ask.sonic_seeds, vec!["c"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Opener);
     assert!(!request.ask.opener);
 }
 
@@ -7304,7 +7309,11 @@ fn a_batch_lands_in_order_wears_the_badge_and_plays_when_the_queue_ran_dry() {
     assert_eq!(app.queue.items[1].dj, Some(crate::tui::app::DjMark { sonic: true }));
     assert_eq!(app.lane.ignore, vec![7], "the cursor is kept for the next turn");
     assert!(!app.lane.pending);
-    assert_eq!(app.lane.history, vec!["b", "c"], "every pick joins the rolling anchor");
+    assert_eq!(
+        app.seeds.positives(&app.origin()),
+        ["b"],
+        "b started, so More like holds b; c joins when it starts (clause 15)"
+    );
     // Idle on the last row: the first new row plays at once (clause 14).
     assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
     assert_eq!(app.queue.current, Some(1));
@@ -7529,6 +7538,7 @@ fn the_dj_tab_only_offers_rows_the_settings_and_the_server_allow() {
         discovery_ready: None,
         libraries: vec!["Music".into(), "Audiobooks".into()],
         mood_filters: false,
+        auto_dj: None,
     };
     app.dj_panel.rebuild(&app.dj, Some(&info), true);
     let rows = &app.dj_panel.rows;
@@ -7728,6 +7738,7 @@ fn the_sources_chooser_keeps_one_library_on() {
         discovery_ready: Some(true),
         libraries: vec!["Music".into(), "Audiobooks".into()],
         mood_filters: false,
+        auto_dj: None,
     });
     app.dj_panel.rebuild(&app.dj, app.dj_info.as_ref(), false);
     on_the_dj_tab(&mut app);
@@ -7742,6 +7753,2303 @@ fn the_sources_chooser_keeps_one_library_on() {
     assert!(effects.is_empty());
     assert_eq!(app.dj_sources_off(), vec!["Music"], "the last source stays on");
     assert!(app.message.as_ref().unwrap().text.contains("At least one source"));
+}
+
+// ── Auto DJ's seeds (auto-dj.md, clauses 23 and 64–66) ──────────────────────
+
+/// What a current mStream says of itself, negatives (`features.autoDj`)
+/// included.
+fn takes_negatives() -> crate::tui::worker::DjServerInfo {
+    crate::tui::worker::DjServerInfo {
+        version: Some("6.34.0".into()),
+        discovery: true,
+        discovery_ready: Some(true),
+        libraries: vec!["Music".into()],
+        mood_filters: false,
+        auto_dj: Some(1),
+    }
+}
+
+/// A seed's key on the test server.
+fn seed(path: &str) -> SeedKey {
+    SeedKey::new(&Origin { server: HOST.into(), peer: None }, path)
+}
+
+/// The DJ armed on the session's server, which takes negatives: the user's
+/// `a`, then a turn's `picks` landed — the first of them playing, as the
+/// queue had run dry, and so More like's first row.
+fn seeded(picks: &[&str]) -> App {
+    let mut app = stats_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.dj_info = Some(takes_negatives());
+    app.apply_event(pick(app.lane.epoch, picks.iter().map(|p| track(p)).collect()));
+    app
+}
+
+/// What the open play session has heard, set by hand.
+fn heard(app: &mut App, ms: u64) {
+    app.stats.session.as_mut().expect("a play session is open").played_ms = ms;
+}
+
+fn queue_paths(app: &App) -> Vec<&str> {
+    app.queue.items.iter().map(|t| t.filepath.as_str()).collect()
+}
+
+fn sample_request(effects: &[Effect]) -> Option<&crate::tui::worker::DjRequest> {
+    effects.iter().find_map(|e| match e {
+        Effect::Api(ApiCmd::AutoDjSample { request, .. }) => Some(request.as_ref()),
+        _ => None,
+    })
+}
+
+fn known_server(id: &str) -> KnownServer {
+    KnownServer {
+        id: id.into(),
+        name: id.into(),
+        token: None,
+        username: None,
+        self_signed: false,
+        peer: None,
+        pairing: None,
+        dj: Default::default(),
+    }
+}
+
+#[test]
+fn a_dj_pick_joins_more_like_as_it_starts_once_and_only_this_lanes() {
+    let mut app = seeded(&["b", "c"]);
+    let here = app.origin();
+    assert_eq!(app.seeds.positives(&here), ["b"], "b started; c is only queued (clause 15)");
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Pick);
+    assert!(!app.seeds.more_like[0].pinned);
+
+    // The same row starting again — a probe's retry, a repeat-one replay —
+    // is the same track: nothing moves.
+    app.seeds.push_pick(seed("x"), track("x"), SeedFrom::Pick, crate::clock::Instant::now());
+    app.play_index(1);
+    assert_eq!(app.seeds.positives(&here), ["x", "b"], "once per track");
+    app.play_index(2);
+    assert_eq!(app.seeds.positives(&here), ["c", "x", "b"]);
+    app.play_index(0);
+    assert_eq!(app.seeds.positives(&here), ["c", "x", "b"], "the user's own row never joins");
+
+    // A DJ row this lane never queued — an earlier lane's, a restored
+    // queue's — never joins either.
+    app.queue.push(Queued { origin: here.clone(), dj: Some(DjMark { sonic: true }), track: track("restored") });
+    app.play_index(3);
+    assert!(!app.seeds.holds(SeedList::MoreLike, &seed("restored")));
+
+    // Stay close pushes nothing; nor does a DJ that is off.
+    let mut app = seeded(&["b", "c", "d"]);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.play_index(2);
+    assert!(!app.seeds.holds(SeedList::MoreLike, &seed("c")), "Stay close");
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Rolling));
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(!app.dj_armed());
+    app.play_index(3);
+    assert!(!app.seeds.holds(SeedList::MoreLike, &seed("d")), "off");
+}
+
+#[test]
+fn a_blend_into_a_pick_is_its_start_and_the_top_up_already_holds_it() {
+    let mut app = seeded(&["b", "c"]);
+    app.crossfade = 6.0;
+    let url = played_url(&app.play_index(1));
+    let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
+    let announced = announced_url(&app.apply_event(Event::Status(status))).expect("c is announced");
+    let effects = app.apply_event(Event::HandedOver { from: url, to: announced });
+    assert_eq!(app.queue.current, Some(2));
+    let request = dj_request(&effects).expect("the last row asks the top-up");
+    assert_eq!(request.ask.sonic_seeds, ["c", "b"], "c joined before the turn was built (clause 15)");
+    let body = serde_json::to_value(request.ask.request()).unwrap();
+    assert!(body.get("lessLike").is_none(), "no negatives, no key");
+}
+
+#[test]
+fn a_seeded_start_holds_to_its_first_song_in_either_mode_and_stay_close_pins_a_chosen_one() {
+    // Drift: the first song is More like's first row — and the followers,
+    // the lane's first pick, find it there already (clause 15).
+    let mut app = connected_app();
+    app.dj.empty_queue = dj::EmptyQueueStart::Pick;
+    app.handle_action(Action::ToggleAutoDj);
+    browsing(&mut app, &["one", "two"], 1);
+    let effects = app.handle_action(Action::Activate);
+    assert_eq!(app.seeds.positives(&app.origin()), ["two"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Opener);
+    assert_eq!(dj_request(&effects).expect("the followers").ask.sonic_seeds, ["two"]);
+
+    // Stay close where the Seeds sheet shows the pin: a song the user chose
+    // joins More like pinned, as Add song would (decision 37), and the lane
+    // holds to it.
+    let mut app = connected_app().with_seeds_sheet(true);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.dj.empty_queue = dj::EmptyQueueStart::Pick;
+    app.handle_action(Action::ToggleAutoDj);
+    browsing(&mut app, &["one", "two"], 1);
+    let effects = app.handle_action(Action::Activate);
+    assert_eq!(dj_request(&effects).expect("the followers").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.positives(&app.origin()), ["two"]);
+    assert!(app.seeds.more_like[0].pinned, "pinned, the user's own");
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Manual);
+    assert!(app.lane.stay_anchored);
+
+    // The TUI shows no pin: the first real pick holds to it as Stay close's
+    // one song (decision 41).
+    let mut app = connected_app();
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.dj.empty_queue = dj::EmptyQueueStart::Pick;
+    app.handle_action(Action::ToggleAutoDj);
+    browsing(&mut app, &["one", "two"], 1);
+    let effects = app.handle_action(Action::Activate);
+    assert_eq!(dj_request(&effects).expect("the followers").ask.sonic_seeds, ["two"]);
+    let rows: Vec<(&str, bool, SeedFrom)> =
+        app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.pinned, s.from)).collect();
+    assert_eq!(rows, [("two", false, SeedFrom::Anchor)], "unpinned, Stay close's one song");
+    assert!(app.lane.stay_anchored);
+}
+
+#[test]
+fn drift_falls_back_on_the_playing_song_but_never_a_less_like_one() {
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: seed("b") });
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).unwrap().ask.sonic_seeds, ["b"], "no row: the playing song");
+    app.seeds.add_manual(SeedList::LessLike, seed("b"), track("b"), crate::clock::Instant::now());
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    let ask = &dj_request(&effects).unwrap().ask;
+    assert!(ask.sonic_seeds.is_empty(), "a Less like song never stands in");
+    assert_eq!(ask.less_like, ["b"]);
+}
+
+#[test]
+fn stay_close_holds_to_one_song_on_a_real_turn_and_previews_it_without_keeping_it() {
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: seed("b") });
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    // Preview shows what the next pick would hold to, and keeps nothing.
+    let effects = app.sample_dj();
+    assert_eq!(sample_request(&effects).expect("a preview").ask.sonic_seeds, ["b"]);
+    assert!(app.seeds.more_like.is_empty() && !app.lane.stay_anchored);
+    // The real turn admits it, once.
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).unwrap().ask.sonic_seeds, ["b"]);
+    assert_eq!(app.seeds.positives(&app.origin()), ["b"]);
+    assert!(app.lane.stay_anchored);
+
+    // Every row removed: no positives at all — and nothing comes back —
+    // while the negatives still go.
+    app.seeds.add_manual(SeedList::LessLike, seed("z"), track("z"), crate::clock::Instant::now());
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: seed("b") });
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    let body = serde_json::to_value(dj_request(&effects).unwrap().ask.request()).unwrap();
+    assert!(body.get("similarTo").is_none() && body.get("minSimilarity").is_none(), "{body}");
+    assert_eq!(body["lessLike"], serde_json::json!(["z"]));
+    assert!(app.seeds.more_like.is_empty(), "nothing is added back");
+
+    // Into Stay close again: the admission is re-armed.
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Rolling));
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    assert!(!app.lane.stay_anchored);
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).unwrap().ask.sonic_seeds, ["b"]);
+}
+
+#[test]
+fn every_way_to_the_mode_freezes_and_thaws_the_lists_with_it() {
+    let mut app = connected_app();
+    let agree = |app: &App| app.seeds.frozen() == (app.dj.sonic_anchor == dj::SonicAnchor::Locked);
+    assert!(agree(&app) && !app.seeds.frozen());
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    assert!(agree(&app) && app.seeds.frozen(), "the Seeds sheet");
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Rolling));
+    assert!(agree(&app) && !app.seeds.frozen());
+    app.dj_edit(DjEdit::Step(DjRow::Anchor, 1));
+    assert!(agree(&app) && app.seeds.frozen(), "the TUI's Anchor row");
+    app.dj_edit(DjEdit::Step(DjRow::Anchor, -1));
+    assert!(agree(&app) && !app.seeds.frozen());
+    app.dj_edit(DjEdit::Sonic { on: true, floor: 55, anchor: dj::SonicAnchor::Locked });
+    assert!(agree(&app) && app.seeds.frozen(), "a Sonic edit naming another mode");
+    app.dj_edit(DjEdit::Sonic { on: true, floor: 60, anchor: dj::SonicAnchor::Locked });
+    assert!(agree(&app) && app.seeds.frozen(), "and one naming the same");
+    let stay = crate::config::PlayerPrefs {
+        dj: crate::config::AutoDjPrefs { sonic_anchor: "locked".into(), ..Default::default() },
+        ..Default::default()
+    };
+    let loaded = App::new(Some(HOST.into()), None, None).with_prefs(&stay);
+    assert!(agree(&loaded) && loaded.seeds.frozen(), "a Stay close file loads frozen");
+}
+
+#[test]
+fn negatives_go_only_to_a_server_that_said_it_takes_them_and_never_on_the_opener() {
+    use crate::tui::worker::DjServerInfo;
+    let mut app = seeded(&["b", "c"]);
+    app.seeds.quick_skip(&seed("s"), &track("s"), true, crate::clock::Instant::now());
+    let less_like = |app: &mut App| {
+        app.lane.pending = false;
+        let effects = app.request_turn();
+        dj_request(&effects).unwrap().ask.less_like.clone()
+    };
+    assert_eq!(less_like(&mut app), ["s"]);
+    let gates = [
+        ("autoDj 0", DjServerInfo { auto_dj: Some(0), ..takes_negatives() }),
+        ("no probe answered", DjServerInfo { auto_dj: None, ..takes_negatives() }),
+        ("readiness unsaid", DjServerInfo { discovery_ready: None, ..takes_negatives() }),
+        ("still scanning", DjServerInfo { discovery_ready: Some(false), ..takes_negatives() }),
+        ("discovery off", DjServerInfo { discovery: false, ..takes_negatives() }),
+    ];
+    for (why, info) in gates {
+        app.dj_info = Some(info);
+        assert!(less_like(&mut app).is_empty(), "{why}");
+    }
+    app.dj_info = Some(takes_negatives());
+    app.dj.sonic = false;
+    assert!(less_like(&mut app).is_empty(), "sonic off");
+    app.dj.sonic = true;
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    assert_eq!(less_like(&mut app), ["s"], "Stay close sends them too");
+
+    // The opener: the library's filters and nothing else (clause 3).
+    app.lane.pending = false;
+    let effects = app.dj_surprise();
+    let request = dj_request(&effects).expect("the opener");
+    assert!(request.ask.opener);
+    let body = serde_json::to_value(request.ask.request()).unwrap();
+    assert!(body.get("lessLike").is_none(), "{body}");
+}
+
+#[test]
+fn needs_a_newer_server_waits_for_a_probe_that_said_so() {
+    use crate::tui::worker::DjServerInfo;
+    let mut app = connected_app();
+    assert!(!app.dj_lacks_negatives() && !app.dj_takes_negatives(), "nobody knows yet");
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_info.is_some(), "the session's provisional answer");
+    assert!(!app.dj_lacks_negatives() && !app.dj_takes_negatives(), "it says nothing of negatives");
+    app.dj_info = Some(DjServerInfo { auto_dj: Some(0), ..takes_negatives() });
+    assert!(app.dj_lacks_negatives() && !app.dj_takes_negatives());
+    app.dj_info = Some(takes_negatives());
+    assert!(!app.dj_lacks_negatives() && app.dj_takes_negatives());
+}
+
+#[test]
+fn a_quick_skip_of_a_dj_pick_leaves_more_like_and_with_learn_joins_less_like() {
+    let mut app = seeded(&["b", "c", "d", "e"]);
+    let here = app.origin();
+    heard(&mut app, 5_000);
+    let effects = app.handle_action(Action::NextTrack);
+    assert_eq!(app.queue.current, Some(2));
+    assert_eq!(app.seeds.positives(&here), ["c"], "b left More like, Learn off and all");
+    assert!(app.seeds.less_like.is_empty(), "Learn from skips is off by default");
+    assert!(dj_request(&effects).is_none(), "nothing to re-roll");
+
+    app.dj_edit(DjEdit::LearnSkips(true));
+    heard(&mut app, 5_000);
+    let effects = app.handle_action(Action::NextTrack);
+    assert_eq!(app.seeds.negatives(&here), ["c"]);
+    assert_eq!(app.seeds.positives(&here), ["d"]);
+    assert_eq!(app.lane.skip_gen, 1);
+    let request = dj_request(&effects).expect("the learned skip re-rolls the rows ahead");
+    assert_eq!(request.ask.less_like, ["c"]);
+
+    // A pin in More like holds: the song stays, and nothing is learned.
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::LearnSkips(true));
+    app.dj_edit(DjEdit::SeedPin { list: SeedList::MoreLike, key: seed("b"), pinned: true });
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert!(app.seeds.holds(SeedList::MoreLike, &seed("b")) && app.seeds.less_like.is_empty());
+}
+
+#[test]
+fn only_a_next_off_a_short_listen_that_moves_on_is_a_quick_skip() {
+    let quiet = |app: &App| app.seeds.less_like.is_empty() && app.seeds.holds(SeedList::MoreLike, &seed("b"));
+    let learning = |picks: &[&str]| {
+        let mut app = seeded(picks);
+        app.dj_edit(DjEdit::LearnSkips(true));
+        app
+    };
+    // A play by the server's rule, or a mis-click.
+    let mut app = learning(&["b", "c"]);
+    heard(&mut app, 30_000);
+    app.handle_action(Action::NextTrack);
+    assert!(quiet(&app), "thirty seconds is a play");
+    let mut app = learning(&["b", "c"]);
+    heard(&mut app, 999);
+    app.handle_action(Action::NextTrack);
+    assert!(quiet(&app), "under a second");
+    // Repeat-one: the Next moves here, but it is no skip.
+    let mut app = learning(&["b", "c"]);
+    app.queue.repeat = Repeat::One;
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert_eq!(app.queue.current, Some(2));
+    assert!(quiet(&app), "repeat-one");
+    // The last row, and a wrap.
+    let mut app = learning(&["b"]);
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert!(quiet(&app), "the last row");
+    let mut app = learning(&["b"]);
+    app.queue.repeat = Repeat::All;
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert_eq!(app.queue.current, Some(0));
+    assert!(quiet(&app), "a wrap");
+    // A queue-row tap and the error walk are not skips at all.
+    let mut app = learning(&["b", "c"]);
+    heard(&mut app, 5_000);
+    app.play_index(2);
+    assert!(app.seeds.less_like.is_empty(), "a tap");
+    let mut app = learning(&["b", "c"]);
+    heard(&mut app, 5_000);
+    app.skip_failed(None);
+    assert!(quiet(&app), "the error walk");
+    // The user's own row; and Stay close.
+    let mut app = learning(&["b", "c"]);
+    app.play_index(0);
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert!(quiet(&app), "the user's row");
+    let mut app = learning(&["b", "c"]);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert!(quiet(&app), "Stay close");
+}
+
+#[test]
+fn a_re_skip_restarts_the_clock_but_changes_nothing_the_server_reads() {
+    let mut app = seeded(&["b", "c", "d"]);
+    app.dj_edit(DjEdit::LearnSkips(true));
+    let earlier = crate::clock::Instant::now();
+    app.seeds.quick_skip(&seed("b"), &track("b"), true, earlier);
+    app.seeds.quick_skip(&seed("x"), &track("x"), true, earlier);
+    assert_eq!(app.seeds.negatives(&app.origin()), ["x", "b"]);
+    // A turn is out when the skip comes.
+    app.lane.pending = false;
+    assert!(dj_request(&app.request_turn()).is_some());
+    let epoch = app.lane.epoch;
+    heard(&mut app, 5_000);
+    let before = crate::clock::Instant::now();
+    let effects = app.handle_action(Action::NextTrack);
+    assert_eq!(app.seeds.negatives(&app.origin()), ["b", "x"], "newest again");
+    assert!(app.seeds.less_like[0].since >= before, "its clock restarted");
+    assert_eq!(app.lane.skip_gen, 0, "the same set: no re-roll");
+    assert!(dj_request(&effects).is_none());
+    // So the pick already out is no stale one: it lands.
+    app.apply_event(pick(epoch, vec![track("f")]));
+    assert_eq!(queue_paths(&app), ["a", "b", "c", "d", "f"]);
+}
+
+#[test]
+fn a_learned_skip_re_rolls_the_djs_rows_ahead_and_never_the_users() {
+    let mut app = seeded(&["b", "c"]);
+    app.queue.push(item("d"));
+    app.apply_event(pick(app.lane.epoch, vec![track("e")]));
+    assert_eq!(queue_paths(&app), ["a", "b", "c", "d", "e"]);
+    app.dj_edit(DjEdit::LearnSkips(true));
+    heard(&mut app, 5_000);
+    let effects = app.handle_action(Action::NextTrack);
+    let request = dj_request(&effects).expect("the re-roll is asked at once");
+    let body = serde_json::to_value(request.ask.request()).unwrap();
+    assert_eq!(body["lessLike"], serde_json::json!(["b"]));
+    assert_eq!(body["similarTo"], serde_json::json!(["c"]), "c started before the turn was built");
+    app.apply_event(pick(app.lane.epoch, vec![track("x"), track("y")]));
+    assert_eq!(queue_paths(&app), ["a", "b", "c", "d", "x", "y"], "e became x, y appended, d stayed");
+    assert!(app.queue.items[4].dj.is_some() && app.queue.items[3].dj.is_none());
+    assert_eq!(app.lane.reroll_gen, app.lane.skip_gen, "the debt is settled");
+    // The next landing is an ordinary one: it appends.
+    app.apply_event(pick(app.lane.epoch, vec![track("z")]));
+    assert_eq!(queue_paths(&app), ["a", "b", "c", "d", "x", "y", "z"]);
+}
+
+#[test]
+fn a_re_roll_never_lands_a_song_twice() {
+    // X and Y were queued by an earlier lane: not in this lane's cursor, so
+    // the server may serve one of them again.
+    let setup = || {
+        let mut app = seeded(&["p", "q"]);
+        let here = app.origin();
+        for path in ["X", "Y"] {
+            app.queue.push(Queued { origin: here.clone(), dj: Some(DjMark { sonic: true }), track: track(path) });
+        }
+        app.dj_edit(DjEdit::LearnSkips(true));
+        heard(&mut app, 5_000);
+        let effects = app.handle_action(Action::NextTrack);
+        assert!(dj_request(&effects).is_some());
+        app
+    };
+    let mut app = setup();
+    assert_eq!(seeds::reroll_slots(&app.queue.items, app.queue.current, false), [3, 4]);
+    app.apply_event(pick(app.lane.epoch, vec![track("Y")]));
+    assert_eq!(queue_paths(&app), ["a", "p", "q", "X", "Y"], "Y keeps its own place");
+    assert_eq!(app.lane.reroll_gen, app.lane.skip_gen);
+    let mut app = setup();
+    app.apply_event(pick(app.lane.epoch, vec![track("Y"), track("Z")]));
+    assert_eq!(queue_paths(&app), ["a", "p", "q", "Z", "Y"], "X became Z; Y stayed");
+}
+
+#[test]
+fn a_re_roll_appends_with_no_playing_row_or_under_shuffle() {
+    let out = || {
+        let mut app = seeded(&["b", "c", "d"]);
+        app.dj_edit(DjEdit::LearnSkips(true));
+        heard(&mut app, 5_000);
+        assert!(dj_request(&app.handle_action(Action::NextTrack)).is_some());
+        app
+    };
+    // The playing row was removed while the re-roll was out.
+    let mut app = out();
+    app.queue.remove(2);
+    assert_eq!(app.queue.current, None);
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    assert_eq!(queue_paths(&app), ["a", "b", "d", "x"], "nothing replaced");
+    // Shuffle switched on meanwhile.
+    let mut app = out();
+    app.queue.shuffle = true;
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    assert_eq!(queue_paths(&app), ["a", "b", "c", "d", "x"], "nothing dropped under shuffle");
+    // A learned skip under shuffle teaches the lists and re-rolls nothing.
+    let mut app = seeded(&["b", "c", "d"]);
+    app.dj_edit(DjEdit::LearnSkips(true));
+    app.queue.shuffle = true;
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert_eq!(app.seeds.negatives(&app.origin()), ["b"]);
+    assert_eq!(app.lane.skip_gen, 0);
+}
+
+#[test]
+fn a_pick_asked_before_a_learned_skip_is_asked_again() {
+    let mut app = seeded(&["b", "c", "d"]);
+    app.dj_edit(DjEdit::LearnSkips(true));
+    app.lane.pending = false;
+    assert!(dj_request(&app.request_turn()).is_some());
+    let epoch = app.lane.epoch;
+    let cursor = app.lane.ignore.clone();
+    heard(&mut app, 5_000);
+    let effects = app.handle_action(Action::NextTrack);
+    assert!(dj_request(&effects).is_none(), "one turn out at a time");
+    let stale = Event::AutoDjPick {
+        epoch,
+        songs: vec![track("stale")],
+        ignore_list: vec![99],
+        sonic: true,
+        note: None,
+        failure: None,
+    };
+    let effects = app.apply_event(stale);
+    assert_eq!(queue_paths(&app), ["a", "b", "c", "d"], "its songs go");
+    assert_eq!(app.lane.ignore, cursor, "and its cursor");
+    let request = dj_request(&effects).expect("asked again at once");
+    assert_eq!(request.ask.less_like, ["b"]);
+    assert!(app.lane.pending);
+    // A clear while the re-roll is out: the new lane drops it.
+    let epoch = app.lane.epoch;
+    app.handle_action(Action::ClearQueue);
+    app.apply_event(pick(epoch, vec![track("x")]));
+    assert!(app.queue.items.is_empty());
+}
+
+#[test]
+fn a_new_queue_keeps_the_pins_and_the_skips_and_the_box_lets_the_pins_go() {
+    let setup = |ticked: bool| {
+        let mut app = seeded(&["b", "c"]);
+        app.dj_edit(DjEdit::SeedPin { list: SeedList::MoreLike, key: seed("b"), pinned: true });
+        app.play_index(2);
+        app.seeds.quick_skip(&seed("s"), &track("s"), true, crate::clock::Instant::now());
+        app.seeds.add_manual(SeedList::LessLike, seed("l"), track("l"), crate::clock::Instant::now());
+        app.dj_edit(DjEdit::ClearPinsOnQueueClear(ticked));
+        app
+    };
+    let mut app = setup(false);
+    let since = app.seeds.less_like.iter().find(|s| s.key == seed("s")).unwrap().since;
+    app.handle_action(Action::ClearQueue);
+    let here = app.origin();
+    assert_eq!(app.seeds.positives(&here), ["b"], "the DJ's own pick went, the pin stayed");
+    assert_eq!(app.seeds.negatives(&here), ["l", "s"]);
+    assert_eq!(app.seeds.less_like[1].since, since, "the skip keeps its clock");
+
+    // Ticked: the pins of both lists go, the skip stays, and the file
+    // holds no pin from now on.
+    let mut app = setup(true);
+    app.handle_action(Action::ClearQueue);
+    assert!(app.seeds.more_like.is_empty());
+    assert_eq!(app.seeds.negatives(&here), ["s"]);
+    let prefs = app.prefs();
+    assert!(prefs.dj.more_like_pins.is_empty() && prefs.dj.less_like_pins.is_empty());
+
+    // A clear of an empty queue only starts a lane.
+    let mut app = setup(true);
+    app.handle_action(Action::ClearQueue);
+    app.seeds.add_manual(SeedList::MoreLike, seed("m"), track("m"), crate::clock::Instant::now());
+    app.handle_action(Action::ClearQueue);
+    assert_eq!(app.seeds.positives(&here), ["m"], "nothing was cleared");
+
+    // A play that replaces the queue is a new queue for the seeds (decision
+    // 27): the DJ's pick goes, the pin and the skips stay — and the lane
+    // stays the lane. c's top-up is still out, so the new queue's start is
+    // settled on one, which the play started (clause 15).
+    let mut app = setup(false);
+    let since = app.seeds.less_like.iter().find(|s| s.key == seed("s")).unwrap().since;
+    let epoch = app.lane.epoch;
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    assert_eq!(queue_paths(&app), ["one", "two"], "the queue was replaced");
+    assert_eq!(app.seeds.positives(&here), ["one", "b"], "c, the DJ's pick, went; the pin stayed");
+    assert_eq!(app.seeds.negatives(&here), ["l", "s"]);
+    assert_eq!(app.seeds.less_like[1].since, since, "the skip keeps its clock");
+    assert_eq!(app.lane.epoch, epoch, "no new lane");
+    // Ticked, its pins go as a clear's do.
+    let mut app = setup(true);
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    assert_eq!(app.seeds.positives(&here), ["one"], "the pin went; one opens the new queue");
+    assert_eq!(app.seeds.negatives(&here), ["s"]);
+    // A replace of an empty queue clears nothing.
+    let mut app = setup(true);
+    app.handle_action(Action::ClearQueue);
+    app.seeds.add_manual(SeedList::MoreLike, seed("m"), track("m"), crate::clock::Instant::now());
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    assert_eq!(app.seeds.positives(&here), ["m"], "nothing was cleared");
+}
+
+#[test]
+fn sonic_off_keeps_the_seeds_from_the_tuis_row_too() {
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::Step(DjRow::Sonic, 1));
+    assert!(!app.dj.sonic);
+    assert_eq!(app.seeds.positives(&app.origin()), ["b"]);
+    app.dj_edit(DjEdit::Step(DjRow::Sonic, 1));
+    app.lane.pending = false;
+    assert_eq!(dj_request(&app.request_turn()).unwrap().ask.sonic_seeds, ["b"], "picked up where it stood");
+}
+
+#[test]
+fn the_stored_pins_learn_and_the_box_are_remembered_and_no_skip_is() {
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::LearnSkips(true));
+    app.dj_edit(DjEdit::ClearPinsOnQueueClear(true));
+    app.dj_edit(DjEdit::SeedPin { list: SeedList::MoreLike, key: seed("b"), pinned: true });
+    app.play_index(2);
+    app.seeds.quick_skip(&seed("s"), &track("s"), true, crate::clock::Instant::now());
+    app.seeds.add_manual(SeedList::LessLike, seed("l"), track("l"), crate::clock::Instant::now());
+    let prefs = app.prefs();
+    assert!(prefs.dj.learn_from_skips && prefs.dj.clear_pins_on_queue_clear);
+    let paths = |rows: &[crate::config::SeedPrefs]| rows.iter().map(|r| r.path.clone()).collect::<Vec<_>>();
+    assert_eq!(paths(&prefs.dj.more_like_pins), ["b"], "the pin, not the DJ's own pick");
+    assert_eq!(paths(&prefs.dj.less_like_pins), ["l"], "the pin, not the skip");
+    assert_eq!(prefs.dj.more_like_pins[0].server, HOST);
+
+    let back = App::new(Some(HOST.into()), None, None).with_prefs(&prefs);
+    assert!(back.dj.learn_from_skips && back.dj.clear_pins_on_queue_clear);
+    assert_eq!(back.seeds.positives(&back.origin()), ["b"]);
+    assert_eq!(back.seeds.negatives(&back.origin()), ["l"]);
+    assert!(back.seeds.more_like.iter().chain(&back.seeds.less_like).all(|s| s.pinned));
+}
+
+#[test]
+fn a_removed_server_takes_its_seeds_and_a_renamed_one_keeps_them() {
+    let now = crate::clock::Instant::now();
+    let mut app = seeded(&["b", "c"]);
+    let peer = Origin { server: HOST.into(), peer: Some(4) };
+    let other = Origin { server: "http://other:3000".into(), peer: None };
+    app.seeds.add_manual(SeedList::MoreLike, seed("pinned"), track("pinned"), now);
+    app.seeds.add_manual(SeedList::LessLike, SeedKey::new(&peer, "theirs"), track("theirs"), now);
+    app.seeds.add_manual(SeedList::LessLike, SeedKey::new(&other, "far"), track("far"), now);
+
+    // A rename follows: the rows, the lane's own picks, Play from's home.
+    app.rename_server(HOST, "http://new:3000");
+    let moved = Origin { server: "http://new:3000".into(), peer: None };
+    assert_eq!(app.seeds.positives(&moved), ["pinned", "b"]);
+    assert!(app.lane.picked.contains(&SeedKey::new(&moved, "c")));
+    assert_eq!(app.dj_home.as_deref(), Some("http://new:3000"));
+    let peer = Origin { server: "http://new:3000".into(), peer: Some(4) };
+    assert_eq!(app.seeds.negatives(&peer), ["theirs"]);
+
+    // A forgotten peer takes its rows alone; its parent takes the rest.
+    app.drop_peer_items("http://new:3000", 4);
+    assert!(app.seeds.negatives(&peer).is_empty());
+    assert_eq!(app.seeds.positives(&moved), ["pinned", "b"]);
+    app.drop_server_items("http://new:3000");
+    assert!(app.seeds.positives(&moved).is_empty(), "pinned or not");
+    assert_eq!(app.seeds.negatives(&other), ["far"], "another server's row stays");
+}
+
+#[test]
+fn a_removal_that_empties_the_queue_is_a_new_lane_though_the_dj_stays() {
+    // The DJ on the session's server, the queue wholly another's: its
+    // removal empties the queue, a new lane by clause 10 — the pick out
+    // is dropped (clause 11) and the DJ's unpinned More like rows go,
+    // the pin staying. The box is a user's new queue's — a clear or a
+    // replacing play — never a removal's (decision 27).
+    let mut app = seeded(&["b", "c"]);
+    let here = app.origin();
+    app.dj_edit(DjEdit::ClearPinsOnQueueClear(true));
+    app.seeds.add_manual(SeedList::MoreLike, seed("pin"), track("pin"), crate::clock::Instant::now());
+    assert_eq!(app.seeds.positives(&here), ["pin", "b"]);
+    app.servers.push(known_server("http://other:3000"));
+    app.queue.items = vec![at("http://other:3000", "x")];
+    app.queue.current = Some(0);
+    playing(&mut app);
+    let epoch = app.lane.epoch;
+    let effects = app.maybe_autodj();
+    assert_eq!(dj_request(&effects).expect("the top-up goes out").epoch, epoch);
+    assert!(app.lane.pending);
+
+    app.drop_server_items("http://other:3000");
+    assert!(app.queue.items.is_empty());
+    assert!(app.dj_armed(), "the DJ's own server is still here");
+    assert_ne!(app.lane.epoch, epoch, "a new lane");
+    assert!(!app.lane.pending);
+    assert_eq!(app.seeds.positives(&here), ["pin"], "the DJ's own pick goes, the pin stays");
+    let effects = app.apply_event(pick(epoch, vec![track("late")]));
+    assert!(app.queue.items.is_empty(), "the late pick never fills the emptied queue");
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+
+    // A pick owed — the DJ's tunnel down as the queue ran out — goes the
+    // same way: nothing is asked for the emptied queue when it is back.
+    app.queue.items = vec![at("http://other:3000", "y")];
+    app.queue.current = Some(0);
+    app.lane.owed = true;
+    app.drop_server_items("http://other:3000");
+    assert!(app.queue.items.is_empty() && !app.lane.owed);
+}
+
+#[test]
+fn the_pins_of_a_server_the_app_no_longer_has_go_at_load() {
+    let row = |server: &str, peer: Option<i64>, path: &str| crate::config::SeedPrefs {
+        server: server.into(),
+        peer,
+        path: path.into(),
+        ..Default::default()
+    };
+    let saved = "http://saved:3000";
+    let prefs = crate::config::PlayerPrefs {
+        dj: crate::config::AutoDjPrefs {
+            more_like_pins: vec![
+                row(HOST, None, "live"),
+                row(saved, None, "kept"),
+                row("http://gone:3000", None, "gone"),
+                row(saved, Some(4), "peer"),
+            ],
+            less_like_pins: vec![row("http://gone:3000", None, "x"), row(&format!("{saved}/"), None, "y")],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut app = App::new(Some(HOST.into()), None, None).with_prefs(&prefs);
+    assert_eq!(app.seeds.more_like.len(), 4, "the servers are not known yet");
+    app.servers = vec![known_server(saved)];
+    app.seeds_drop_unknown();
+    let paths: Vec<&str> = app.seeds.more_like.iter().map(|s| s.key.path.as_str()).collect();
+    assert_eq!(paths, ["live", "kept", "peer"], "the live session's, a saved one's, a peer's with its parent");
+    assert_eq!(app.seeds.less_like.len(), 1);
+    assert_eq!(app.seeds.less_like[0].key.path, "y");
+}
+
+#[test]
+fn add_song_lands_a_pinned_row_from_the_rooms_own_server() {
+    let mut app = connected_app();
+    assert!(app.seeds_pickable(), "the DJ off: Play from's server is the session's");
+    app.arm_capture(Capture::Seeds(SeedList::MoreLike));
+    browsing(&mut app, &["one", "two"], 1);
+    app.handle_action(Action::Activate);
+    assert!(app.capture.is_none());
+    assert_eq!(app.seeds.positives(&app.origin()), ["two"]);
+    assert!(app.seeds.more_like[0].pinned && app.seeds.more_like[0].from == SeedFrom::Manual);
+    assert!(app.seeds_refused.is_none());
+
+    // Into Less like: the other list's row moves over, pinned.
+    app.arm_capture(Capture::Seeds(SeedList::LessLike));
+    browsing(&mut app, &["one", "two"], 1);
+    app.handle_action(Action::Activate);
+    assert!(app.seeds.more_like.is_empty());
+    assert_eq!(app.seeds.negatives(&app.origin()), ["two"]);
+
+    // Cancel: nothing changes, and the room is the GUI's to go back to.
+    app.arm_capture(Capture::Seeds(SeedList::MoreLike));
+    let effects = app.handle_action(Action::Cancel);
+    assert!(effects.is_empty() && app.capture.is_none());
+    assert!(app.seeds.more_like.is_empty());
+
+    // Stop leaves a seed pick standing: the sheet works with the DJ off.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.arm_capture(Capture::Seeds(SeedList::MoreLike));
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(!app.dj_armed());
+    assert_eq!(app.capture, Some(Capture::Seeds(SeedList::MoreLike)));
+}
+
+#[test]
+fn add_song_is_refused_once_the_rooms_server_is_not_the_one_browsed() {
+    let mut app = connected_app();
+    app.servers = vec![known_server(HOST), known_server("http://other:3000")];
+    app.arm_capture(Capture::Seeds(SeedList::MoreLike));
+    // The room's server changes under the pick: the DJ now runs elsewhere.
+    app.dj_server = Some("http://other:3000".into());
+    assert!(!app.seeds_pickable());
+    browsing(&mut app, &["one"], 0);
+    app.handle_action(Action::Activate);
+    assert!(app.capture.is_none(), "the pick is spent either way");
+    assert!(app.seeds.more_like.is_empty());
+    assert_eq!(app.seeds_refused, Some(SeedRefusal::OtherServer("http://other:3000".into())));
+    // With the DJ off, the room's server is Play from's.
+    app.dj_server = None;
+    app.dj_shows_play_from = true;
+    app.dj_home = Some("http://other:3000".into());
+    assert!(!app.seeds_pickable(), "Play from names another server");
+    app.dj_home = Some(HOST.into());
+    assert!(app.seeds_pickable());
+
+    // A list that can take no row refuses, quietly.
+    let mut app = connected_app();
+    let now = crate::clock::Instant::now();
+    for i in 0..seeds::SEEDS_MAX {
+        let path = format!("p{i}");
+        app.seeds.add_manual(SeedList::LessLike, seed(&path), track(&path), now);
+    }
+    app.arm_capture(Capture::Seeds(SeedList::LessLike));
+    browsing(&mut app, &["one"], 0);
+    app.handle_action(Action::Activate);
+    assert_eq!(app.seeds_refused, Some(SeedRefusal::Full));
+    assert!(!app.seeds.holds(SeedList::LessLike, &seed("one")));
+}
+
+#[test]
+fn an_unpinned_skip_expires_on_the_tick_but_not_while_stay_close_holds_it() {
+    let mut app = connected_app();
+    let start = crate::clock::Instant::now();
+    app.seeds.quick_skip(&seed("s"), &track("s"), true, start);
+    let thirty = std::time::Duration::from_secs(30 * 60);
+    app.tick_at(start + thirty - std::time::Duration::from_secs(1));
+    assert!(app.seeds.holds(SeedList::LessLike, &seed("s")), "29:59");
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.tick_at(start + thirty * 2);
+    assert!(app.seeds.holds(SeedList::LessLike, &seed("s")), "Stay close pauses the clock");
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Rolling));
+    app.tick_at(start + thirty + std::time::Duration::from_secs(1));
+    assert!(!app.seeds.holds(SeedList::LessLike, &seed("s")), "past its life in Drift time");
+}
+
+// ── The owner's second answers (2026-11-17): blend in new music, keep
+// everything shown, add the chosen song (clauses 12, 15, 66; decisions 27,
+// 35–37) ────────────────────────────────────────────────────────────────────
+
+/// A new queue of `names` whose last row starts while playing: the lane's
+/// first real pick, and what it sent.
+fn new_queue_first_pick(app: &mut App, names: &[&str]) -> Vec<Effect> {
+    browsing(app, names, 0);
+    app.play_listing(false);
+    playing(app);
+    app.play_index(names.len() - 1)
+}
+
+#[test]
+fn a_new_queues_first_pick_blends_the_song_playing_beside_the_pins() {
+    let mut app = seeded(&["b", "c"]);
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), crate::clock::Instant::now());
+    let effects = new_queue_first_pick(&mut app, &["one", "two"]);
+    let request = dj_request(&effects).expect("the last row asks the lane's first pick");
+    assert_eq!(request.ask.sonic_seeds, ["two", "p"], "the song playing, beside the pin");
+    let rows: Vec<(&str, bool, SeedFrom)> =
+        app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.pinned, s.from)).collect();
+    assert_eq!(rows, [("two", false, SeedFrom::Opener), ("p", true, SeedFrom::Manual)], "b went with the new queue");
+
+    // A later pick of the lane blends nothing: the song then playing is no
+    // lane's first.
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    app.queue.push(item("three"));
+    let effects = app.play_index(3);
+    assert!(dj_request(&effects).is_some(), "the last row asks again");
+    assert!(!app.seeds.holds(SeedList::MoreLike, &seed("three")));
+}
+
+#[test]
+fn the_blend_is_drifts_and_never_a_listed_song_another_servers_or_a_lanes_pick() {
+    let now = crate::clock::Instant::now();
+    // Stay close: no blend — its one song to start instead.
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: seed("b") });
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    let effects = new_queue_first_pick(&mut app, &["one", "two"]);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like.len(), 1);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Anchor, "Stay close's one song, not a blend");
+
+    // A Less like song: the user's word wins — not blended, not sent.
+    let mut app = seeded(&["b", "c"]);
+    app.seeds.add_manual(SeedList::LessLike, seed("two"), track("two"), now);
+    let effects = new_queue_first_pick(&mut app, &["one", "two"]);
+    let ask = &dj_request(&effects).expect("the lane's first pick").ask;
+    assert!(ask.sonic_seeds.is_empty(), "a Less like song never stands in");
+    assert_eq!(ask.less_like, ["two"]);
+    assert!(!app.seeds.holds(SeedList::MoreLike, &seed("two")));
+
+    // A pin already: it keeps its place and its pin.
+    let mut app = seeded(&["b", "c"]);
+    app.seeds.add_manual(SeedList::MoreLike, seed("two"), track("two"), now);
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), now);
+    let effects = new_queue_first_pick(&mut app, &["one", "two"]);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["p", "two"]);
+    assert!(app.seeds.more_like.iter().all(|s| s.pinned && s.from == SeedFrom::Manual));
+
+    // Another server's row: the lane picks from the DJ's server alone.
+    let mut app = seeded(&["b", "c"]);
+    app.handle_action(Action::ClearQueue);
+    app.servers.push(known_server("http://other:3000"));
+    app.queue.items = vec![at("http://other:3000", "x")];
+    app.queue.current = Some(0);
+    playing(&mut app);
+    assert!(dj_request(&app.maybe_autodj()).is_some(), "the lane's first pick");
+    assert!(app.seeds.more_like.is_empty(), "another server's song never joins");
+
+    // Sonic off: the song joins all the same, and nothing is sent of it.
+    let mut app = seeded(&["b", "c"]);
+    app.dj.sonic = false;
+    let effects = new_queue_first_pick(&mut app, &["one", "two"]);
+    let body = serde_json::to_value(dj_request(&effects).expect("the lane's first pick").ask.request()).unwrap();
+    assert!(body.get("similarTo").is_none(), "{body}");
+    assert_eq!(app.seeds.positives(&app.origin()), ["two"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Opener);
+
+    // Eight pins: the song does not stay, and the eight go out.
+    let mut app = seeded(&["b", "c"]);
+    let pins: Vec<String> = (0..seeds::SEEDS_MAX).map(|i| format!("p{i}")).collect();
+    for path in &pins {
+        app.seeds.add_manual(SeedList::MoreLike, seed(path), track(path), now);
+    }
+    let effects = new_queue_first_pick(&mut app, &["one", "two"]);
+    let newest_first: Vec<String> = pins.iter().rev().cloned().collect();
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, newest_first);
+    assert!(!app.seeds.holds(SeedList::MoreLike, &seed("two")));
+
+    // This lane's own pick, out when the queue is replaced: it still lands
+    // (no new lane), after the new rows, and joins as it starts — never as
+    // the blend, which the replacing play settled on the row it started
+    // (decision 27), so the new music stands beside it.
+    let mut app = seeded(&["b", "c"]);
+    playing(&mut app);
+    assert!(dj_request(&app.play_index(2)).is_some() && app.lane.pending, "c, the last, asked");
+    let epoch = app.lane.epoch;
+    browsing(&mut app, &["one", "two"], 0);
+    assert!(dj_request(&app.play_listing(false)).is_none(), "one is out already");
+    let rows: Vec<(&str, SeedFrom)> = app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.from)).collect();
+    assert_eq!(rows, [("one", SeedFrom::Opener)], "b and c went with the new queue; one, which started, opens it");
+    assert!(app.lane.asked && app.lane.blended == Some(seed("one")));
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    assert_eq!(queue_paths(&app), ["one", "two", "x"], "the pick out lands after the new rows");
+    let effects = app.play_index(2);
+    assert_eq!(app.lane.epoch, epoch, "no new lane");
+    assert_eq!(app.seeds.positives(&app.origin()), ["x", "one"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Pick, "x joins as a pick, never the blend");
+    assert_eq!(app.lane.blended, Some(seed("one")));
+    assert_eq!(dj_request(&effects).expect("x, the last, asks").ask.sonic_seeds, ["x", "one"]);
+}
+
+#[test]
+fn every_fresh_start_blends_the_song_playing() {
+    // Stop, then Start, on the last row playing: Start's own turn is the
+    // lane's first pick.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    app.handle_action(Action::ToggleAutoDj);
+    playing(&mut app);
+    app.play_index(1);
+    assert!(app.lane.asked && app.seeds.holds(SeedList::MoreLike, &seed("b")));
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.seeds.more_like.is_empty(), "the song a lane opened on went with it");
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(dj_request(&effects).expect("Start on the last row asks at once").ask.sonic_seeds, ["b"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Opener);
+
+    // A launch: an earlier run's DJ row is no pick of this lane, so it is
+    // the song this lane opens on.
+    let prefs = crate::config::PlayerPrefs {
+        autodj_server: Some(HOST.into()),
+        dj: crate::config::AutoDjPrefs {
+            more_like_pins: vec![crate::config::SeedPrefs {
+                server: HOST.into(),
+                path: "pin".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut app = connected_app().with_prefs(&prefs);
+    assert!(app.restore_queue(QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
+        index: Some(1),
+        position: 0.0,
+        shuffle: false,
+        repeat: "off".into(),
+        items: vec![item("a"), dj_row("b")],
+        retired: Vec::new(),
+    }));
+    playing(&mut app);
+    // No probe has answered at a launch.
+    app.dj_info = Some(takes_negatives());
+    let effects = app.maybe_autodj();
+    assert_eq!(dj_request(&effects).expect("the restored last row asks").ask.sonic_seeds, ["b", "pin"]);
+    assert!(app.seeds.more_like[0].from == SeedFrom::Opener && !app.seeds.more_like[0].pinned);
+
+    // The DJ's tunnel dialling: the pick owed is not the lane's first yet;
+    // the one the tunnel's return asks is.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.items = vec![at(FARAWAY, "x")];
+    app.queue.current = Some(0);
+    app.dj_server = Some(FARAWAY.into());
+    playing(&mut app);
+    app.tunnels.insert(FARAWAY.into(), crate::tui::app::TunnelState::Dialling);
+    assert!(app.maybe_autodj().is_empty(), "nothing to ask while it dials");
+    assert!(app.lane.owed && !app.lane.asked);
+    assert!(app.seeds.more_like.is_empty());
+    // Known before the tunnel answers, so its return asks no probe.
+    app.dj_info = Some(takes_negatives());
+    let effects = app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:5555".into(),
+        local_token: "lt".into(),
+    });
+    assert_eq!(dj_request(&effects).expect("the owed turn goes out").ask.sonic_seeds, ["x"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Opener);
+    assert!(app.lane.asked);
+
+    // A move of the DJ: a new lane on the new server, whose own turn
+    // brings the song playing there.
+    let other = "http://other:3000";
+    let mut app = connected_app();
+    app.servers = vec![known_server(HOST), known_server(other)];
+    app.queue.items = vec![at(other, "x"), at(other, "y")];
+    app.queue.current = Some(1);
+    app.dj_server = Some(HOST.into());
+    app.lane.asked = true;
+    let epoch = app.lane.epoch;
+    let effects = app.dj_move_to(other.into());
+    assert!(app.lane.epoch > epoch, "a new lane");
+    assert_eq!(dj_request(&effects).expect("its first pick").identity, other);
+    assert_eq!(app.seeds.positives(&Origin { server: other.into(), peer: None }), ["y"]);
+    assert!(app.seeds.more_like[0].from == SeedFrom::Opener && !app.seeds.more_like[0].pinned);
+    assert!(app.lane.asked);
+}
+
+#[test]
+fn preview_shows_the_blend_without_keeping_it() {
+    let now = crate::clock::Instant::now();
+    // The DJ off: Preview is of Play from's server.
+    let mut app = connected_app();
+    app.seeds.add_manual(SeedList::MoreLike, seed("pin"), track("pin"), now);
+    app.replace_queue(vec![track("a"), track("b")]);
+    app.play_index(0);
+    // No probe has answered with the DJ off.
+    app.dj_info = Some(takes_negatives());
+    let before = app.seeds.clone();
+    let effects = app.sample_dj();
+    assert_eq!(sample_request(&effects).expect("a preview").ask.sonic_seeds, ["a", "pin"]);
+    assert_eq!(app.seeds, before, "shown, not kept");
+    assert!(!app.lane.asked);
+
+    // Armed, on a row before the last: no turn has been asked.
+    let mut app = connected_app();
+    app.seeds.add_manual(SeedList::MoreLike, seed("pin"), track("pin"), now);
+    app.replace_queue(vec![track("a"), track("b")]);
+    app.handle_action(Action::ToggleAutoDj);
+    playing(&mut app);
+    app.play_index(0);
+    assert!(!app.lane.pending);
+    let before = app.seeds.clone();
+    let effects = app.sample_dj();
+    assert_eq!(sample_request(&effects).expect("a preview").ask.sonic_seeds, ["a", "pin"]);
+    assert_eq!(app.seeds, before, "shown, not kept");
+    assert!(!app.lane.asked, "Preview never spends the lane's first pick");
+    // The real turn keeps it.
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real turn").ask.sonic_seeds, ["a", "pin"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Opener);
+    assert!(app.lane.asked);
+}
+
+#[test]
+fn every_play_that_replaces_the_queue_is_a_new_queue_for_the_seeds() {
+    // The DJ armed by `seeded`'s recipe, idle: its unpinned pick in More
+    // like and the lane's first pick spent — and Stay close's one song, as
+    // a lane that had held to one would have it.
+    fn armed(mut app: App) -> App {
+        app.replace_queue(vec![track("a")]);
+        app.handle_action(Action::ToggleAutoDj);
+        app.dj_info = Some(takes_negatives());
+        app.apply_event(pick(app.lane.epoch, vec![track("b")]));
+        assert!(app.seeds.holds(SeedList::MoreLike, &seed("b")) && app.lane.asked);
+        app.lane.stay_anchored = true;
+        // Idle: the pick's Play was asked for, and nothing has answered it.
+        app.status.source.clear();
+        app
+    }
+    fn journey(app: &mut App) {
+        browsing(app, &["to"], 0);
+        app.handle_action(Action::StartJourney);
+        let length = app.sonic.length;
+        app.apply_event(Event::Journey {
+            stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
+            note: None,
+            length,
+            issue: crate::tui::worker::JourneyIssue::None,
+        });
+        assert_eq!(app.sonic.stops.len(), 3, "the path is plotted");
+    }
+    // Idle throughout, so no turn goes out to spend the next pick — not even
+    // where a play starts the last row.
+    let check = |app: &App, epoch: u64, rows: &[&str], what: &str| {
+        let mut queued = queue_paths(app);
+        queued.sort_unstable();
+        let mut want = rows.to_vec();
+        want.sort_unstable();
+        assert_eq!(queued, want, "{what}: the play's rows");
+        assert!(!app.seeds.holds(SeedList::MoreLike, &seed("b")), "{what}: the DJ's pick went");
+        assert!(!app.lane.asked, "{what}: the next real pick blends");
+        assert!(!app.lane.stay_anchored, "{what}: Stay close's one song re-armed");
+        assert_eq!(app.lane.epoch, epoch, "{what}: no new lane");
+    };
+
+    // The library: Play from here, Play, Shuffle.
+    let mut app = armed(stats_app());
+    let epoch = app.lane.epoch;
+    browsing(&mut app, &["one", "two"], 1);
+    app.handle_action(Action::Activate);
+    check(&app, epoch, &["one", "two"], "Play from here");
+    let mut app = armed(stats_app());
+    let epoch = app.lane.epoch;
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    check(&app, epoch, &["one", "two"], "Play");
+    let mut app = armed(stats_app());
+    let epoch = app.lane.epoch;
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(true);
+    check(&app, epoch, &["one", "two"], "Shuffle");
+
+    // A sonic path: its Play row, and a play from one of its stops.
+    let mut app = armed(stats_app());
+    journey(&mut app);
+    let epoch = app.lane.epoch;
+    on_sonic_row(&mut app, SonicRow::Play);
+    app.handle_action(Action::Activate);
+    check(&app, epoch, &["from", "mid", "to"], "a sonic path's Play");
+    let mut app = armed(stats_app());
+    journey(&mut app);
+    let epoch = app.lane.epoch;
+    app.play_sonic_from(1);
+    check(&app, epoch, &["from", "mid", "to"], "a sonic path's stop");
+
+    // Discover: a song's Play from, a connected server's row's, its Play,
+    // and an album played.
+    let mut app = armed(answered_taste());
+    let epoch = app.lane.epoch;
+    app.activate_taste_row(TasteRow::Song(1), TasteVerb::PlayFrom);
+    check(&app, epoch, &["music/a.mp3", "music/b.mp3"], "Discover's song");
+    let mut app = armed(answered_taste());
+    let epoch = app.lane.epoch;
+    app.activate_taste_row(TasteRow::Peer { group: 0, row: 0 }, TasteVerb::PlayFrom);
+    check(&app, epoch, &["music/peer.mp3", "music/peer2.mp3"], "a connected server's row");
+    let mut app = armed(answered_taste());
+    app.taste.tab = crate::tui::app::TasteTab::Library;
+    let epoch = app.lane.epoch;
+    app.taste_play_all(false);
+    check(&app, epoch, &["music/a.mp3", "music/b.mp3"], "Discover's Play");
+    let mut app = armed(answered_taste());
+    let epoch = app.lane.epoch;
+    app.taste_peer_album(0, true);
+    let generation = app.session_gen();
+    app.apply_event(Event::TasteAlbum {
+        generation,
+        tracks: None,
+        name: "Theirs".into(),
+        artist: Some("Them".into()),
+        album_artist: None,
+        peer: Some(3),
+        play: true,
+    });
+    check(&app, epoch, &["music/peer.mp3"], "an album played");
+}
+
+#[test]
+fn a_replacing_play_in_stay_close_keeps_every_row_and_re_arms_the_one_song() {
+    // A row carried on the DJ's server holds the new queue's lane at once.
+    let mut app = seeded(&["b", "c"]).with_seeds_sheet(true);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.request_turn();
+    assert!(app.lane.stay_anchored, "b holds this lane");
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    let kept = app.seeds.clone();
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    assert_eq!(app.seeds, kept, "Stay close keeps every row it shows");
+    assert!(!app.lane.stay_anchored, "its one song is re-armed");
+    playing(&mut app);
+    let effects = app.play_index(1);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["b"]);
+    assert_eq!(app.seeds, kept, "nothing admitted: b is something to stay close to");
+    assert!(app.lane.stay_anchored);
+
+    // Every row removed in this lane, so its picks send no positives — the
+    // new queue's lane takes one song to start.
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.request_turn();
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: seed("b") });
+    assert!(app.lane.stay_anchored && app.seeds.more_like.is_empty());
+    let effects = new_queue_first_pick(&mut app, &["one", "two"]);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.positives(&app.origin()), ["two"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Anchor);
+
+    // The TUI shows no sheet, so its Stay close starts over with each new
+    // queue (decision 41): the frozen pick goes, and the new queue's lane
+    // takes one song to start.
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.request_turn();
+    assert!(app.lane.stay_anchored, "b holds this lane");
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    assert!(app.seeds.more_like.is_empty(), "b, a frozen pick, went with the new queue");
+    assert!(!app.lane.stay_anchored);
+    playing(&mut app);
+    let effects = app.play_index(1);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["two"]);
+    let rows: Vec<(&str, SeedFrom)> = app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.from)).collect();
+    assert_eq!(rows, [("two", SeedFrom::Anchor)]);
+}
+
+/// The DJ armed on `app`'s own server, idle, a turn's `b` and `c` landed —
+/// then what a degrade leaves (clause 30): the worker's lane let its pool
+/// go, the gold line up. Its epoch.
+fn degraded(app: &mut App) -> u64 {
+    use crate::tui::worker::DjNote;
+    let id = app.origin().server;
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.dj_info = Some(takes_negatives());
+    app.apply_event(pick(app.lane.epoch, vec![track("b"), track("c")]));
+    let epoch = app.lane.epoch;
+    crate::tui::worker::dj_suppress_pool(&id, epoch);
+    app.lane.sonic_drop = Some(DjNote::SonicRange);
+    app.lane.warned_sonic = true;
+    assert!(crate::tui::worker::dj_pool_suppressed(&id, epoch));
+    epoch
+}
+
+#[test]
+fn a_replacing_play_gives_a_lane_that_let_its_pool_go_another_go() {
+    // The owner's "try again" (decision 43): a play that replaces the queue
+    // retries sonic matching, as a More like edit does; the rest of the
+    // lane stands.
+    let id = "http://pool-retry.test:3000";
+    let mut app = app_on(id);
+    let epoch = degraded(&mut app);
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    assert!(app.lane.sonic_drop.is_none(), "the gold line goes");
+    assert!(!app.lane.warned_sonic);
+    assert!(!crate::tui::worker::dj_pool_suppressed(id, epoch), "the pool is asked for again");
+    assert_eq!(app.lane.epoch, epoch, "still the lane");
+    playing(&mut app);
+    let effects = app.play_index(1);
+    let request = dj_request(&effects).expect("the lane's first pick");
+    assert_eq!(request.ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Opener);
+    // With the lane's pool back, this is the body the worker sends.
+    let body = serde_json::to_value(request.ask.request()).unwrap();
+    assert!(body.get("similarTo").is_some() && body.get("minSimilarity").is_some(), "{body}");
+
+    // Clear queue already starts a new lane, whose pool was never let go.
+    let id = "http://pool-clear.test:3000";
+    let mut app = app_on(id);
+    let epoch = degraded(&mut app);
+    app.handle_action(Action::ClearQueue);
+    assert!(app.lane.sonic_drop.is_none());
+    assert!(app.lane.epoch > epoch);
+    assert!(!crate::tui::worker::dj_pool_suppressed(id, app.lane.epoch));
+    app.queue.push(at(id, "one"));
+    playing(&mut app);
+    let effects = app.play_index(0);
+    let request = dj_request(&effects).expect("the next queue's first pick");
+    let body = serde_json::to_value(request.ask.request()).unwrap();
+    assert!(body.get("similarTo").is_some(), "{body}");
+}
+
+#[test]
+fn a_pick_out_before_the_retry_cannot_undo_it() {
+    use crate::tui::worker::DjNote;
+    // A replacing play keeps the lane, so a pick already out lands; one
+    // composed before the retry, degrading after it, must not let the new
+    // pool go again (decision 43: the pool's generation).
+    let id = "http://pool-race.test:3000";
+    let mut app = app_on(id);
+    app.replace_queue(vec![track("a")]);
+    // One row and no current: the arm asks, and that pick is out.
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.lane.pending);
+    app.dj_info = Some(takes_negatives());
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    // The worker degrades that pick: the lane's pool let go, and it lands
+    // saying so.
+    let epoch = app.lane.epoch;
+    crate::tui::worker::dj_suppress_pool(id, epoch);
+    let degrade = |songs: Vec<Track>| Event::AutoDjPick {
+        epoch,
+        songs,
+        ignore_list: vec![],
+        sonic: false,
+        note: Some(DjNote::SonicRange),
+        failure: None,
+    };
+    app.apply_event(degrade(vec![track("x")]));
+    assert!(app.lane.sonic_drop.is_none() && !app.lane.warned_sonic, "no gold line");
+    assert!(!crate::tui::worker::dj_pool_suppressed(id, epoch), "composed before the retry: its degrade is not the new pool's");
+    assert_eq!(queue_paths(&app), ["one", "two", "x"], "the pick already out still lands");
+
+    // A turn composed after the retry still says so.
+    app.lane.pending = false;
+    assert!(dj_request(&app.request_turn()).is_some());
+    app.apply_event(degrade(vec![track("y")]));
+    assert_eq!(app.lane.sonic_drop, Some(DjNote::SonicRange));
+}
+
+#[test]
+fn a_pick_out_at_a_replacing_play_leaves_the_new_queue_its_own_start() {
+    // A replacing play keeps the lane (decision 27), so a pick already out
+    // lands after the new rows — and must not become the new queue's start:
+    // that start is settled on the row the play started, so the new music
+    // still joins (clause 15). Played through to the late pick, each track
+    // running out in turn.
+    let through = |app: &mut App, started: Vec<Effect>| -> Vec<Effect> {
+        app.apply_event(status_at(&played_url(&started), 1.0, false));
+        app.apply_event(ended(&started))
+    };
+    let replaced_with_a_pick_out = |app: &mut App| -> Vec<Effect> {
+        app.replace_queue(vec![track("a")]);
+        // One row and no current: the arm asks, and that pick is out.
+        app.handle_action(Action::ToggleAutoDj);
+        assert!(app.lane.pending);
+        app.dj_info = Some(takes_negatives());
+        browsing(app, &["one", "two"], 0);
+        let started = app.play_listing(false);
+        app.note_pending(&started);
+        app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+        assert_eq!(queue_paths(app), ["one", "two", "x"], "the pick already out lands after the new rows");
+        let started = through(app, started);
+        assert_eq!(app.queue.current, Some(1));
+        assert!(dj_request(&started).is_none(), "two is not the last row");
+        let started = through(app, started);
+        assert_eq!(app.queue.current, Some(2), "x, the late pick, plays");
+        started
+    };
+
+    // Drift: one, which the play started, is the blend; x joins as a pick.
+    let mut app = app_on("http://settle-drift.test:3000");
+    let here = app.origin();
+    let started = replaced_with_a_pick_out(&mut app);
+    let request = dj_request(&started).expect("x, the last row, asks");
+    assert_eq!(request.ask.sonic_seeds, ["x", "one"], "the new music beside the late pick");
+    let rows: Vec<(&str, SeedFrom)> = app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.from)).collect();
+    assert_eq!(rows, [("x", SeedFrom::Pick), ("one", SeedFrom::Opener)]);
+    assert_eq!(app.lane.blended, Some(SeedKey::new(&here, "one")));
+
+    // The TUI's Stay close, nothing pinned: the new queue's one song is
+    // one, never the late pick.
+    let mut app = connected_app();
+    app.session.server = "http://settle-stay.test:3000".into();
+    app.session.server_id = "http://settle-stay.test:3000".into();
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    let started = replaced_with_a_pick_out(&mut app);
+    let request = dj_request(&started).expect("x, the last row, asks");
+    assert_eq!(request.ask.sonic_seeds, ["one"], "the new queue's one song");
+    let rows: Vec<(&str, SeedFrom, bool)> =
+        app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.from, s.pinned)).collect();
+    assert_eq!(rows, [("one", SeedFrom::Anchor, false)]);
+    assert!(app.lane.stay_anchored && app.lane.stay_admitted);
+}
+
+#[test]
+fn stay_close_keeps_every_row_through_a_clear_and_stop_and_start() {
+    let mut app = seeded(&["b", "c"]).with_seeds_sheet(true);
+    let now = crate::clock::Instant::now();
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), now);
+    app.seeds.quick_skip(&seed("s"), &track("s"), true, now);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    let kept = app.seeds.clone();
+    let flags: Vec<(&str, bool)> =
+        kept.more_like.iter().chain(&kept.less_like).map(|s| (s.key.path.as_str(), s.pinned)).collect();
+    assert_eq!(flags, [("p", true), ("b", false), ("s", false)]);
+    // Stop, then Start on the queue still there (Start on an empty one only
+    // asks the opening question): two new lanes.
+    let epoch = app.lane.epoch;
+    app.handle_action(Action::ToggleAutoDj);
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_armed() && app.lane.epoch > epoch);
+    assert_eq!(app.seeds, kept, "every row with its flag and its clock, still frozen");
+    app.handle_action(Action::ClearQueue);
+    assert_eq!(app.seeds, kept, "a clear too");
+    // The next queue's first pick: p and b hold it, nothing is admitted.
+    app.queue.push(item("one"));
+    playing(&mut app);
+    let effects = app.play_index(0);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["p", "b"]);
+    assert_eq!(app.seeds, kept);
+
+    // Stay close's one song outlives a clear, and holds the next lane.
+    let mut app = seeded(&["b", "c"]).with_seeds_sheet(true);
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: seed("b") });
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.request_turn();
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Anchor, "b, playing, held to");
+    app.handle_action(Action::ClearQueue);
+    assert_eq!(app.seeds.positives(&app.origin()), ["b"], "its one song stays");
+    app.queue.push(item("one"));
+    playing(&mut app);
+    let effects = app.play_index(0);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["b"]);
+    assert_eq!(app.seeds.more_like.len(), 1, "no second song");
+    assert!(app.lane.stay_anchored);
+
+    // The TUI shows no sheet (decision 41): Stop and Start and a clear keep
+    // More like's pins alone, and the skip with its clock stopped.
+    let mut app = seeded(&["b", "c"]);
+    let now = crate::clock::Instant::now();
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), now);
+    app.seeds.quick_skip(&seed("s"), &track("s"), true, now);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    let tui = |app: &App, what: &str| {
+        assert_eq!(app.seeds.positives(&app.origin()), ["p"], "{what}: b went, the pin stayed");
+        let skips: Vec<(&str, crate::clock::Instant)> =
+            app.seeds.less_like.iter().map(|s| (s.key.path.as_str(), s.since)).collect();
+        assert_eq!(skips, [("s", now)], "{what}: the skip, its clock untouched");
+        assert!(app.seeds.frozen(), "{what}: still Stay close");
+    };
+    app.handle_action(Action::ToggleAutoDj);
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_armed());
+    tui(&app, "Stop and Start");
+    app.handle_action(Action::ClearQueue);
+    tui(&app, "a clear");
+    app.queue.push(item("one"));
+    playing(&mut app);
+    let effects = app.play_index(0);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["p"]);
+
+    // …and its one song does not outlive a clear: the next queue's lane
+    // takes one of its own.
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: seed("b") });
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.request_turn();
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Anchor, "b, playing, held to");
+    app.handle_action(Action::ClearQueue);
+    assert!(app.seeds.more_like.is_empty(), "its one song went with the queue");
+    app.queue.push(item("one"));
+    playing(&mut app);
+    let effects = app.play_index(0);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["one"]);
+    let rows: Vec<(&str, SeedFrom)> = app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.from)).collect();
+    assert_eq!(rows, [("one", SeedFrom::Anchor)]);
+}
+
+#[test]
+fn stay_close_keeps_every_row_through_a_restart() {
+    let mut app = seeded(&["b", "c"]).with_seeds_sheet(true);
+    let now = crate::clock::Instant::now();
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), now);
+    app.seeds.quick_skip(&seed("s"), &track("s"), true, now);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    let prefs = app.prefs();
+    let flags = |rows: &[crate::config::SeedPrefs]| rows.iter().map(|r| (r.path.clone(), r.pinned)).collect::<Vec<_>>();
+    assert_eq!(flags(&prefs.dj.more_like_pins), [("p".to_string(), true), ("b".to_string(), false)]);
+    assert_eq!(flags(&prefs.dj.less_like_pins), [("s".to_string(), false)]);
+    assert!(prefs.dj.less_like_pins[0].drift_ms.is_some(), "the skip with the Drift time it had run");
+    assert!(prefs.dj.more_like_pins.iter().all(|r| r.drift_ms.is_none()));
+
+    let rows = |app: &App| {
+        app.seeds.more_like.iter().chain(&app.seeds.less_like).map(|s| (s.key.path.clone(), s.pinned)).collect::<Vec<_>>()
+    };
+    let mut back = App::new(Some(HOST.into()), None, None).with_seeds_sheet(true).with_prefs(&prefs);
+    assert!(back.seeds.frozen());
+    assert_eq!(rows(&back), [("p".to_string(), true), ("b".to_string(), false), ("s".to_string(), false)]);
+    // Back in Drift only the user's own pin stays pinned, and the skip's
+    // clock takes up where it stopped.
+    let launched = crate::clock::Instant::now();
+    back.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Rolling));
+    assert_eq!(rows(&back)[..2], [("p".to_string(), true), ("b".to_string(), false)]);
+    back.tick_at(launched + std::time::Duration::from_secs(29 * 60));
+    assert!(back.seeds.holds(SeedList::LessLike, &seed("s")), "its clock was paused, not run");
+    back.tick_at(launched + std::time::Duration::from_secs(30 * 60 + 1));
+    assert!(!back.seeds.holds(SeedList::LessLike, &seed("s")), "past its life in Drift time");
+
+    // The same file in Drift: the pin alone.
+    let mut drift = prefs.clone();
+    drift.dj.sonic_anchor = "rolling".into();
+    let back = App::new(Some(HOST.into()), None, None).with_prefs(&drift);
+    assert!(!back.seeds.frozen());
+    assert_eq!(rows(&back), [("p".to_string(), true)]);
+
+    // The TUI shows no sheet (decision 41): its file keeps the pin alone…
+    let mut app = seeded(&["b", "c"]);
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), now);
+    app.seeds.quick_skip(&seed("s"), &track("s"), true, now);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    let kept = app.prefs();
+    assert_eq!(flags(&kept.dj.more_like_pins), [("p".to_string(), true)]);
+    assert!(kept.dj.less_like_pins.is_empty(), "the skip is not kept");
+    assert!(kept.dj.more_like_pins.iter().all(|r| r.drift_ms.is_none()));
+    // …and opening it on the desktop's file lets go of the unpinned rows
+    // desktop Stay close kept, still in Stay close.
+    let back = App::new(Some(HOST.into()), None, None).with_prefs(&prefs);
+    assert!(back.seeds.frozen());
+    assert_eq!(rows(&back), [("p".to_string(), true)]);
+}
+
+#[test]
+fn the_box_in_stay_close_lets_every_row_go() {
+    let setup = || {
+        let mut app = seeded(&["b", "c"]).with_seeds_sheet(true);
+        let now = crate::clock::Instant::now();
+        app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), now);
+        app.seeds.quick_skip(&seed("s"), &track("s"), true, now);
+        app.dj_edit(DjEdit::ClearPinsOnQueueClear(true));
+        app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+        app
+    };
+    let emptied = |app: &App, what: &str| {
+        assert!(app.seeds.more_like.is_empty() && app.seeds.less_like.is_empty(), "{what}: every row drawn pinned went");
+        assert!(app.seeds.frozen(), "{what}: the mode is not the box's");
+        let prefs = app.prefs();
+        assert!(prefs.dj.more_like_pins.is_empty() && prefs.dj.less_like_pins.is_empty(), "{what}: nothing kept");
+    };
+    // Clear queue, then a row played as the last: the next lane takes one
+    // song to start.
+    let mut app = setup();
+    app.handle_action(Action::ClearQueue);
+    emptied(&app, "a clear");
+    app.queue.push(item("one"));
+    playing(&mut app);
+    let effects = app.play_index(0);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["one"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Anchor);
+
+    // A play that replaces the queue, the same.
+    let mut app = setup();
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    emptied(&app, "a replacing play");
+    playing(&mut app);
+    let effects = app.play_index(1);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Anchor);
+
+    // The TUI shows no sheet (decision 41): the box lets the stored pins
+    // go and the skip stays, round 1's box, still frozen.
+    let mut app = seeded(&["b", "c"]);
+    let now = crate::clock::Instant::now();
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), now);
+    app.seeds.quick_skip(&seed("s"), &track("s"), true, now);
+    app.dj_edit(DjEdit::ClearPinsOnQueueClear(true));
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.handle_action(Action::ClearQueue);
+    assert!(app.seeds.more_like.is_empty(), "the pin went, and b with the new queue");
+    let skips: Vec<&str> = app.seeds.less_like.iter().map(|s| s.key.path.as_str()).collect();
+    assert_eq!(skips, ["s"], "the skip stays");
+    assert!(app.seeds.frozen());
+    let prefs = app.prefs();
+    assert!(prefs.dj.more_like_pins.is_empty() && prefs.dj.less_like_pins.is_empty(), "no pin left to keep");
+    app.queue.push(item("one"));
+    playing(&mut app);
+    let effects = app.play_index(0);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["one"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Anchor);
+}
+
+#[test]
+fn stay_close_adds_a_chosen_first_song_pinned_and_random_adds_nothing() {
+    let now = crate::clock::Instant::now();
+    // Where the Seeds sheet shows the pin (decision 41).
+    let stay_close = || {
+        let mut app = connected_app().with_seeds_sheet(true);
+        app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), crate::clock::Instant::now());
+        app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+        app
+    };
+    // Let me choose: the library's pick opens the session.
+    let choose = |app: &mut App| -> Vec<Effect> {
+        app.dj.empty_queue = dj::EmptyQueueStart::Pick;
+        app.handle_action(Action::ToggleAutoDj);
+        browsing(app, &["one", "two"], 1);
+        app.handle_action(Action::Activate)
+    };
+    let rows = |app: &App| -> Vec<(String, bool, SeedFrom)> {
+        app.seeds.more_like.iter().map(|s| (s.key.path.clone(), s.pinned, s.from)).collect()
+    };
+
+    let mut app = stay_close();
+    let effects = choose(&mut app);
+    assert_eq!(rows(&app), [("two".into(), true, SeedFrom::Manual), ("p".into(), true, SeedFrom::Manual)]);
+    assert_eq!(dj_request(&effects).expect("the followers").ask.sonic_seeds, ["two", "p"]);
+
+    // Recently played: the same, with its song.
+    let mut app = stay_close();
+    app.handle_action(Action::ToggleAutoDj);
+    app.apply_event(Event::DjRecent { identity: HOST.into(), tracks: vec![track("lib/a.mp3"), track("lib/b.mp3")] });
+    let effects = app.answer_dj_start_recent(1, false);
+    assert_eq!(rows(&app), [("lib/b.mp3".into(), true, SeedFrom::Manual), ("p".into(), true, SeedFrom::Manual)]);
+    assert_eq!(dj_request(&effects).expect("the followers").ask.sonic_seeds, ["lib/b.mp3", "p"]);
+
+    // Surprise me: the DJ's song, not the user's — nothing added.
+    let mut app = stay_close();
+    app.dj.empty_queue = dj::EmptyQueueStart::Random;
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    let opener = dj_request(&effects).expect("the opener").epoch;
+    let effects = app.apply_event(pick(opener, vec![track("x")]));
+    assert_eq!(queue_paths(&app), ["x"]);
+    assert_eq!(rows(&app), [("p".into(), true, SeedFrom::Manual)]);
+    assert_eq!(dj_request(&effects).expect("the followers").ask.sonic_seeds, ["p"]);
+
+    // Eight rows drawn pinned: nothing added, and the song plays first.
+    let mut app = stay_close();
+    for i in 1..seeds::SEEDS_MAX {
+        let path = format!("p{i}");
+        app.seeds.add_manual(SeedList::MoreLike, seed(&path), track(&path), now);
+    }
+    assert!(!app.seeds.can_take(SeedList::MoreLike));
+    let before = app.seeds.clone();
+    let effects = choose(&mut app);
+    assert_eq!(app.seeds, before);
+    assert_eq!(queue_paths(&app), ["two"]);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), "the song plays first");
+
+    // A Less like song moves over, as Add song would move it.
+    let mut app = stay_close();
+    app.seeds.add_manual(SeedList::LessLike, seed("two"), track("two"), now);
+    choose(&mut app);
+    assert_eq!(rows(&app)[0], ("two".into(), true, SeedFrom::Manual));
+    assert!(!app.seeds.holds(SeedList::LessLike, &seed("two")));
+
+    // Sonic on or off.
+    let mut app = stay_close();
+    app.dj.sonic = false;
+    choose(&mut app);
+    assert_eq!(rows(&app)[0], ("two".into(), true, SeedFrom::Manual));
+
+    // Drift, as before: the opener joins unpinned.
+    let mut app = connected_app();
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), now);
+    choose(&mut app);
+    assert_eq!(rows(&app), [("two".into(), false, SeedFrom::Opener), ("p".into(), true, SeedFrom::Manual)]);
+
+    // The TUI shows no pin: nothing is added, and the pin holds the lane
+    // (decision 41).
+    let mut app = connected_app();
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), now);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    let effects = choose(&mut app);
+    assert_eq!(rows(&app), [("p".into(), true, SeedFrom::Manual)]);
+    assert_eq!(dj_request(&effects).expect("the followers").ask.sonic_seeds, ["p"]);
+}
+
+// ── The owner's afternoon answers (2026-11-17, round 3): a ninth row, the
+// pool's retry, the blend's quick skip, the TUI's old rules (decisions
+// 39–44) ───────────────────────────────────────────────────────────────────
+
+/// `[one, two]` armed with Learn from skips on, a pin p, the server taking
+/// negatives: two, the last row, starts, and its lane's first pick blends
+/// it into More like (clause 15).
+fn blended_two() -> App {
+    let mut app = stats_app();
+    app.replace_queue(vec![track("one"), track("two")]);
+    // Two rows, no current: the arm asks nothing.
+    app.handle_action(Action::ToggleAutoDj);
+    app.dj_info = Some(takes_negatives());
+    app.dj_edit(DjEdit::LearnSkips(true));
+    app.seeds.add_manual(SeedList::MoreLike, seed("p"), track("p"), crate::clock::Instant::now());
+    playing(&mut app);
+    let effects = app.play_index(1);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["two", "p"]);
+    assert_eq!(app.lane.blended, Some(seed("two")));
+    app
+}
+
+/// The lane's pick x lands after the blend, two is heard for five seconds,
+/// and Next: what that asked.
+fn skip_the_blend(app: &mut App) -> Vec<Effect> {
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    heard(app, 5_000);
+    app.handle_action(Action::NextTrack)
+}
+
+#[test]
+fn a_quick_skip_of_the_blended_song_takes_it_out_and_learns_nothing() {
+    // The owner's "take it out" (decision 39), with Learn from skips on.
+    let mut app = blended_two();
+    let effects = skip_the_blend(&mut app);
+    assert!(!app.seeds.holds(SeedList::MoreLike, &seed("two")), "out of More like, as a skipped pick leaves");
+    assert!(app.seeds.less_like.is_empty(), "no Less like row: nothing is learned from the user's own song");
+    assert_eq!(app.lane.skip_gen, 0, "no re-roll");
+    assert_eq!(app.lane.passed_over, [seed("two")]);
+    let ask = &dj_request(&effects).expect("x, the last row now, asks").ask;
+    assert!(ask.less_like.is_empty(), "no negative sent");
+    assert_eq!(ask.pass_over, ["two"], "the lane's picks pass over it");
+    assert_eq!(ask.sonic_seeds, ["x", "p"]);
+}
+
+#[test]
+fn a_blended_dj_pick_from_an_earlier_lane_keeps_the_dj_picks_rule() {
+    // The phone's first cut switched learning off for these rows (BRIEF-3
+    // rule 2): the guard is the row's own DJ flag, not "it was blended".
+    let mut app = seeded(&["b", "c"]);
+    app.dj_edit(DjEdit::LearnSkips(true));
+    // Stop, then Start: two new lanes; b is current but not the last, so
+    // Start asks nothing.
+    app.handle_action(Action::ToggleAutoDj);
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_armed() && !app.lane.pending);
+    // Stop forgot what the server said; Start's stand-in knows nothing of
+    // negatives.
+    app.dj_info = Some(takes_negatives());
+    playing(&mut app);
+    // c, the old lane's pick, opens the new lane.
+    let effects = app.play_index(2);
+    assert_eq!(app.lane.blended, Some(seed("c")));
+    assert!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds.contains(&"c".to_string()));
+    app.apply_event(pick(app.lane.epoch, vec![track("y")]));
+    heard(&mut app, 5_000);
+    let effects = app.handle_action(Action::NextTrack);
+    assert!(!app.seeds.holds(SeedList::MoreLike, &seed("c")));
+    assert_eq!(app.seeds.negatives(&app.origin()), ["c"], "learned, blended or not");
+    assert_eq!(app.lane.skip_gen, 1);
+    assert!(app.lane.passed_over.is_empty(), "the DJ served it: the cursor keeps it out");
+    assert_eq!(dj_request(&effects).expect("y, the last row now, asks").ask.less_like, ["c"]);
+}
+
+#[test]
+fn the_lanes_picks_pass_over_the_skipped_blend_until_a_new_lane() {
+    let mut app = blended_two();
+    skip_the_blend(&mut app);
+    // Preview shows what the next pick would do.
+    app.lane.pending = false;
+    let effects = app.sample_dj();
+    assert_eq!(sample_request(&effects).expect("a preview").ask.pass_over, ["two"]);
+    // A replacing play is no new lane (decision 27): the pass-over stands;
+    // the new queue's start blends a song of its own.
+    browsing(&mut app, &["three", "four"], 0);
+    app.play_listing(false);
+    assert!(app.lane.blended.is_none(), "the lane's start starts over");
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real pick").ask.pass_over, ["two"]);
+    assert_eq!(app.lane.blended, Some(seed("three")));
+    // The opener asks for a new session: nothing to pass over.
+    let effects = app.dj_surprise();
+    assert!(dj_request(&effects).expect("the opener").ask.pass_over.is_empty());
+    // Stop, then Start: a new lane lets both marks go.
+    app.handle_action(Action::ToggleAutoDj);
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.lane.passed_over.is_empty() && app.lane.blended.is_none());
+
+    // The marks follow a re-addressed server (decision 39): the blend's
+    // skip is still the blend's…
+    let new = Origin { server: "http://new:3000".into(), peer: None };
+    let mut app = blended_two();
+    app.rename_server(HOST, &new.server);
+    assert_eq!(app.lane.blended, Some(SeedKey::new(&new, "two")));
+    let effects = skip_the_blend(&mut app);
+    assert!(!app.seeds.holds(SeedList::MoreLike, &SeedKey::new(&new, "two")));
+    assert!(app.seeds.less_like.is_empty(), "nothing learned");
+    assert_eq!(app.lane.passed_over, [SeedKey::new(&new, "two")]);
+    assert_eq!(dj_request(&effects).expect("x, the last row now, asks").ask.pass_over, ["two"]);
+    // …and the pass-over still names it.
+    let mut app = blended_two();
+    skip_the_blend(&mut app);
+    app.rename_server(HOST, &new.server);
+    assert_eq!(app.lane.passed_over, [SeedKey::new(&new, "two")]);
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real pick").ask.pass_over, ["two"]);
+}
+
+#[test]
+fn a_track_ending_after_its_queue_was_cleared_or_removed_asks_no_pick() {
+    // BRIEF-3 rule 7 on this player (decision 40): the clear is one call on
+    // the App's thread, but its Stop is answered later — until then the
+    // status still names the thrown-away track, and its end, already on its
+    // way, read as the queue's end. The precondition is held, not raced
+    // for: the last row playing, no pick out, every answer empty.
+    let none = |epoch: u64| Event::AutoDjPick {
+        epoch,
+        songs: vec![],
+        ignore_list: vec![],
+        sonic: false,
+        note: None,
+        failure: Some(crate::tui::worker::DjFailure::NoMatch),
+    };
+    let armed = || {
+        let mut app = stats_app();
+        app.replace_queue(vec![track("a")]);
+        app.handle_action(Action::ToggleAutoDj);
+        app.dj_info = Some(takes_negatives());
+        app.apply_event(none(app.lane.epoch));
+        // a from idle; its first status asks the top-up, which comes back
+        // empty too.
+        let played = app.handle_action(Action::PlayPause);
+        let url = played_url(&played);
+        app.apply_event(status_at(&url, 1.0, false));
+        app.apply_event(none(app.lane.epoch));
+        assert_eq!((app.queue.current, app.queue.items.len()), (Some(0), 1), "the last row playing");
+        assert!(!app.lane.pending, "no pick out");
+        (app, played, url)
+    };
+    let cleared = || {
+        let (mut app, played, url) = armed();
+        let epoch = app.lane.epoch;
+        app.handle_action(Action::ClearQueue);
+        assert!(app.queue.items.is_empty() && app.lane.epoch > epoch && !app.lane.asked);
+        (app, played, url)
+    };
+    let asked_nothing = |app: &App, effects: &[Effect], what: &str| {
+        assert!(dj_request(effects).is_none(), "{what}: no pick for the emptied queue");
+        assert!(!app.lane.pending && !app.lane.asked, "{what}: the new lane's first pick unspent");
+        assert!(app.queue.items.is_empty() && app.seeds.more_like.is_empty(), "{what}");
+    };
+
+    // The track ran out just as the user cleared.
+    let (mut app, played, _) = cleared();
+    let effects = app.apply_event(ended(&played));
+    asked_nothing(&app, &effects, "an end");
+
+    // A crossfade the engine had committed to.
+    let (mut app, _, url) = cleared();
+    let effects = app.apply_event(Event::HandedOver { from: url, to: "http://host:3000/media/next".into() });
+    asked_nothing(&app, &effects, "a handover");
+    // The armed DJ waits for the next queue, whose first pick is the new
+    // lane's.
+    app.queue.push(item("one"));
+    playing(&mut app);
+    let effects = app.play_index(0);
+    assert_eq!(dj_request(&effects).expect("the next queue's first pick").ask.sonic_seeds, ["one"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Opener);
+
+    // A removal of the server the whole queue belonged to.
+    let other = "http://other:3000";
+    let mut app = stats_app();
+    app.servers.push(known_server(other));
+    app.queue.items = vec![at(other, "x")];
+    app.queue.current = Some(0);
+    app.dj_server = Some(HOST.into());
+    app.dj_info = Some(takes_negatives());
+    playing(&mut app);
+    assert!(!app.lane.pending);
+    app.drop_server_items(other);
+    let effects = app.apply_event(Event::TrackEnded { source: "http://host:3000/media/x".into() });
+    assert!(dj_request(&effects).is_none(), "a removal's emptied queue asks nothing either");
+    assert!(!app.lane.asked && app.queue.items.is_empty());
+
+    // A play that replaces the queue onto a row that waits for its tunnel
+    // (multi-server clause 37) sends a Stop and no Play, so the status still
+    // names the track left behind: its end, or its hand-over, is not the
+    // parked row's — read so, it skipped the user's choice, or asked the
+    // lane's first pick with no song to blend (decision 40).
+    let wait = Some(TunnelWait { index: 0, id: FARAWAY.into() });
+    for rows in [1, 2] {
+        for handover in [false, true] {
+            let what = format!("{rows} rows, {}", if handover { "a handover" } else { "an end" });
+            let (mut app, played, url) = armed();
+            app.servers.push(KnownServer { token: Some("t".into()), ..known_server(FARAWAY) });
+            app.tunnels.insert(FARAWAY.into(), TunnelState::Dialling);
+            let far: Vec<Queued> = (0..rows).map(|i| at(FARAWAY, &format!("music/far{i}.mp3"))).collect();
+            let effects = app.play_replacing(far, 0);
+            app.note_pending(&effects);
+            assert!(effects.iter().all(|e| !matches!(e, Effect::Audio(AudioCmd::Play { .. }))), "{what}: parked");
+            assert_eq!(app.tunnel_wait, wait, "{what}");
+            let effects = if handover {
+                app.apply_event(Event::HandedOver { from: url, to: "http://host:3000/media/next".into() })
+            } else {
+                app.apply_event(ended(&played))
+            };
+            assert!(dj_request(&effects).is_none(), "{what}: no pick");
+            assert_eq!((app.queue.current, &app.tunnel_wait), (Some(0), &wait), "{what}: the user's choice still waits");
+            assert!(!app.lane.asked, "{what}: the new queue's first pick unspent");
+        }
+    }
+}
+
+#[test]
+fn a_pinned_blend_stay_close_and_a_seeded_start_change_nothing_on_a_quick_skip() {
+    // A pin the user set since: the row stays put, and its skip says
+    // nothing (BRIEF-3 rule 3).
+    let mut app = blended_two();
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    app.dj_edit(DjEdit::SeedPin { list: SeedList::MoreLike, key: seed("two"), pinned: true });
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert!(app.seeds.more_like.iter().any(|s| s.key == seed("two") && s.pinned));
+    assert!(app.seeds.less_like.is_empty() && app.lane.passed_over.is_empty());
+
+    // Stay close changes nothing (rule 6): the lists are frozen.
+    let mut app = blended_two();
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert!(app.seeds.holds(SeedList::MoreLike, &seed("two")));
+    assert!(app.seeds.less_like.is_empty() && app.lane.passed_over.is_empty());
+
+    // A seeded start's first song is never the blend (rule 5): it is in
+    // More like already when the followers' pick comes.
+    let mut app = stats_app();
+    app.dj_edit(DjEdit::LearnSkips(true));
+    app.dj.empty_queue = dj::EmptyQueueStart::Pick;
+    app.handle_action(Action::ToggleAutoDj);
+    browsing(&mut app, &["one", "two"], 1);
+    app.handle_action(Action::Activate);
+    app.dj_info = Some(takes_negatives());
+    let rows: Vec<(&str, SeedFrom)> = app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.from)).collect();
+    assert_eq!(rows, [("two", SeedFrom::Opener)]);
+    assert!(app.lane.blended.is_none(), "a seeded start's first song is never the blend");
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    heard(&mut app, 5_000);
+    app.handle_action(Action::NextTrack);
+    assert!(app.seeds.holds(SeedList::MoreLike, &seed("two")), "the user's chosen opener stays");
+    assert!(app.seeds.less_like.is_empty());
+}
+
+#[test]
+fn stay_close_takes_the_new_servers_song_as_a_ninth_row_past_another_servers_eight() {
+    // A move of the DJ in Stay close keeps every row the GUI shows (clause
+    // 66), so eight of the old server's fill More like; the new lane's one
+    // song comes in all the same (the owner's "let it in as a 9th row",
+    // decision 42): nothing is removed, the pick and Preview carry it, the
+    // file keeps it.
+    let now = crate::clock::Instant::now();
+    let far = Origin { server: "http://other:3000".into(), peer: None };
+    let mut app = connected_app().with_seeds_sheet(true);
+    app.servers = vec![known_server(HOST), known_server(&far.server)];
+    // Drift on the other server: three pins and five picks there.
+    for name in ["p1", "p2", "p3"] {
+        app.seeds.add_manual(SeedList::MoreLike, SeedKey::new(&far, name), track(name), now);
+    }
+    for name in ["k1", "k2", "k3", "k4", "k5"] {
+        app.seeds.push_pick(SeedKey::new(&far, name), track(name), SeedFrom::Pick, now);
+    }
+    assert_eq!(app.seeds.more_like.len(), seeds::SEEDS_MAX);
+    app.dj_server = Some(far.server.clone());
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    // An album here, its last song playing; then Play from is set to here.
+    app.queue.items = vec![item("one"), item("two")];
+    app.queue.current = Some(1);
+    playing(&mut app);
+    let kept = app.seeds.clone();
+    let effects = app.dj_move_to(HOST.into());
+    assert!(app.dj_sonic_usable(), "sonic is on, and this server can answer it");
+    assert_eq!(dj_request(&effects).expect("the new lane's first pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like.len(), seeds::SEEDS_MAX + 1);
+    let first = &app.seeds.more_like[0];
+    assert_eq!((first.key.clone(), first.from, first.pinned), (seed("two"), SeedFrom::Anchor, false));
+    assert_eq!(app.seeds.more_like[1..], kept.more_like[..], "nothing removed");
+    assert!(app.lane.stay_anchored && app.lane.stay_admitted);
+    // Preview shows what that pick sent, and keeps nothing more.
+    let held = app.seeds.clone();
+    let effects = app.sample_dj();
+    assert_eq!(sample_request(&effects).expect("a preview").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds, held);
+
+    // Full all the same: Add song finds no room.
+    assert!(!app.seeds.can_take(SeedList::MoreLike));
+    app.arm_capture(Capture::Seeds(SeedList::MoreLike));
+    browsing(&mut app, &["three"], 0);
+    app.handle_action(Action::Activate);
+    assert_eq!(app.seeds_refused, Some(SeedRefusal::Full));
+    assert_eq!(app.seeds.more_like.len(), seeds::SEEDS_MAX + 1);
+
+    // A new queue: two holds its lane — one song a lane.
+    app.lane.pending = false;
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    playing(&mut app);
+    let effects = app.play_index(1);
+    assert_eq!(dj_request(&effects).expect("the new queue's first pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like.len(), seeds::SEEDS_MAX + 1, "anchored: one song a lane");
+
+    // The file keeps all nine, and the GUI loads them back; the TUI loads
+    // the pins alone.
+    let prefs = app.prefs();
+    let rows = &prefs.dj.more_like_pins;
+    assert_eq!(rows.len(), seeds::SEEDS_MAX + 1);
+    assert_eq!(rows.iter().filter(|r| r.pinned).count(), 3);
+    let back = App::new(Some(HOST.into()), None, None).with_seeds_sheet(true).with_prefs(&prefs);
+    assert!(back.seeds.frozen());
+    assert_eq!(back.seeds.more_like.len(), seeds::SEEDS_MAX + 1, "nothing at load trims it");
+    let tui = App::new(Some(HOST.into()), None, None).with_prefs(&prefs);
+    let pins: Vec<&str> = tui.seeds.more_like.iter().map(|s| s.key.path.as_str()).collect();
+    assert_eq!(pins, ["p3", "p2", "p1"]);
+
+    // Another move: one more row a server move.
+    let third = "http://third:3000";
+    app.servers.push(known_server(third));
+    app.queue.items = vec![at(third, "t")];
+    app.queue.current = Some(0);
+    app.dj_move_to(third.into());
+    // The move forgot what it knew, and no stand-in answers for a server
+    // that is not the session's: the move's own turn went without sonic.
+    app.dj_info = Some(takes_negatives());
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real pick").ask.sonic_seeds, ["t"]);
+    assert_eq!(app.seeds.more_like.len(), seeds::SEEDS_MAX + 2, "one more a server move");
+
+    // Back in Drift the caps apply: the pins and five unpinned rows, the
+    // oldest unpinned gone.
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Rolling));
+    let paths: Vec<&str> = app.seeds.more_like.iter().map(|s| s.key.path.as_str()).collect();
+    assert_eq!(paths, ["t", "two", "k5", "k4", "k3", "p3", "p2", "p1"]);
+
+    // The TUI's Stay close keeps its pins alone through the move — eight of
+    // them fill More like there, and the song comes in as a ninth row too.
+    let mut app = connected_app();
+    app.servers = vec![known_server(HOST), known_server(&far.server)];
+    for i in 1..=seeds::SEEDS_MAX {
+        let name = format!("p{i}");
+        app.seeds.add_manual(SeedList::MoreLike, SeedKey::new(&far, &name), track(&name), now);
+    }
+    app.dj_server = Some(far.server.clone());
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.queue.items = vec![item("one"), item("two")];
+    app.queue.current = Some(1);
+    playing(&mut app);
+    let effects = app.dj_move_to(HOST.into());
+    assert_eq!(dj_request(&effects).expect("the new lane's first pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like.len(), seeds::SEEDS_MAX + 1);
+}
+
+/// Sixteen rows on another server, as eight server moves past eight pins
+/// would leave them: pushed by hand, so the bar alone is under test.
+fn sixteen_on_another_server() -> App {
+    let now = crate::clock::Instant::now();
+    let far = Origin { server: "http://other:3000".into(), peer: None };
+    let mut app = connected_app().with_seeds_sheet(true);
+    app.servers = vec![known_server(HOST), known_server(&far.server)];
+    for i in 1..=seeds::SEEDS_MAX {
+        let name = format!("p{i}");
+        app.seeds.add_manual(SeedList::MoreLike, SeedKey::new(&far, &name), track(&name), now);
+    }
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    for i in 1..=seeds::SEEDS_MAX {
+        let name = format!("a{i}");
+        let key = SeedKey::new(&far, &name);
+        let row = Seed { key, track: track(&name), pinned: false, from: SeedFrom::Anchor, since: now, ran: std::time::Duration::ZERO };
+        app.seeds.more_like.insert(0, row);
+    }
+    assert_eq!(app.seeds.more_like.len(), seeds::SEEDS_STORED_MAX);
+    // The DJ armed here, on an album whose last song plays.
+    app.replace_queue(vec![track("one"), track("two")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.dj_info = Some(takes_negatives());
+    playing(&mut app);
+    app
+}
+
+#[test]
+fn stay_close_at_sixteen_rows_holds_to_nothing_and_preview_agrees() {
+    // All a restart brings back (decision 42): the one song finds no room,
+    // nothing is evicted, neither the pick nor Preview carries a positive,
+    // and the log says so once each time the rule looks.
+    let mut app = sixteen_on_another_server();
+    let kept = app.seeds.clone();
+    let effects = app.play_index(1);
+    assert!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds.is_empty());
+    assert_eq!(app.seeds, kept, "two is not taken, and nothing is evicted for it");
+    assert!(app.lane.logged_stay_full, "the log says so");
+    assert!(!app.lane.stay_anchored, "a row removed lets a later pick look again");
+    let effects = app.sample_dj();
+    assert!(sample_request(&effects).expect("a preview").ask.sonic_seeds.is_empty());
+    assert_eq!(app.seeds, kept);
+
+    // A new queue looks again, and a switch into Stay close: each says so anew.
+    app.lane.pending = false;
+    browsing(&mut app, &["one", "two"], 0);
+    app.play_listing(false);
+    assert!(!app.lane.logged_stay_full, "a new queue");
+    playing(&mut app);
+    let effects = app.play_index(1);
+    assert!(dj_request(&effects).expect("the new queue's first pick").ask.sonic_seeds.is_empty());
+    assert!(app.lane.logged_stay_full && app.seeds == kept);
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Rolling));
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    assert!(!app.lane.logged_stay_full, "a switch into Stay close");
+
+    // A row removed: the next real pick takes the song playing as the
+    // sixteenth row, once.
+    let mut app = sixteen_on_another_server();
+    app.play_index(1);
+    let far = Origin { server: "http://other:3000".into(), peer: None };
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: SeedKey::new(&far, "a1") });
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like.len(), seeds::SEEDS_STORED_MAX);
+    assert_eq!((app.seeds.more_like[0].key.clone(), app.seeds.more_like[0].from), (seed("two"), SeedFrom::Anchor));
+    assert!(app.lane.stay_anchored && app.lane.stay_admitted);
+}
+
+/// A connected app on a server of its own: the worker's memory of a lane
+/// (its pool, its refused seeds) is process-wide and keyed by server and
+/// epoch, and App epochs restart at the same small numbers — so a test
+/// that writes it stands alone (plan C3).
+fn app_on(id: &str) -> App {
+    let mut app = connected_app().with_seeds_sheet(true);
+    app.session.server = id.into();
+    app.session.server_id = id.into();
+    app
+}
+
+/// Stay close on `app`'s own server with `pins` pinned rows, `[one, two]`
+/// queued and the DJ armed, something playing.
+fn stay_close_on(app: &mut App, pins: usize) {
+    let here = app.origin();
+    let now = crate::clock::Instant::now();
+    for i in 1..=pins {
+        let name = format!("p{i}");
+        app.seeds.add_manual(SeedList::MoreLike, SeedKey::new(&here, &name), track(&name), now);
+    }
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    app.replace_queue(vec![track("one"), track("two")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.dj_info = Some(takes_negatives());
+    playing(app);
+}
+
+#[test]
+fn stay_close_takes_the_song_playing_when_the_server_refused_every_row() {
+    // The phone's review (addendum (c)): a More like whose every row the
+    // server refused in this lane has nothing to stay close to either.
+    let id = "http://refused-a.test:3000";
+    let mut app = app_on(id);
+    stay_close_on(&mut app, 3);
+    let here = app.origin();
+    let effects = app.play_index(1);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["p3", "p2", "p1"]);
+    assert!(app.lane.stay_anchored);
+    // The server refuses all three (clause 31), and the pick lands.
+    let epoch = app.lane.epoch;
+    crate::tui::worker::dj_mark_dead(id, epoch, &["p1", "p2", "p3"]);
+    app.apply_event(pick(epoch, vec![track("x")]));
+    // Preview agrees with the next pick, and keeps nothing.
+    let before = app.seeds.clone();
+    let effects = app.sample_dj();
+    assert_eq!(sample_request(&effects).expect("a preview").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds, before);
+    app.dj_panel.sample_pending = false;
+    // The next real pick takes the song playing, beside the rows refused.
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real pick").ask.sonic_seeds, ["two"]);
+    let rows: Vec<(&str, SeedFrom, bool)> =
+        app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.from, s.pinned)).collect();
+    assert_eq!(rows[0], ("two", SeedFrom::Anchor, false));
+    assert_eq!(app.seeds.positives(&here), ["two", "p3", "p2", "p1"], "the refused rows stay listed");
+    assert!(app.lane.stay_anchored && app.lane.stay_admitted);
+    let effects = app.sample_dj();
+    assert_eq!(sample_request(&effects).expect("a preview").ask.sonic_seeds, ["two"]);
+
+    // A full list of rows its server refused takes the song as a ninth row.
+    let id = "http://refused-b.test:3000";
+    let mut app = app_on(id);
+    stay_close_on(&mut app, seeds::SEEDS_MAX);
+    app.play_index(1);
+    let epoch = app.lane.epoch;
+    let pins: Vec<String> = (1..=seeds::SEEDS_MAX).map(|i| format!("p{i}")).collect();
+    let refused: Vec<&str> = pins.iter().map(String::as_str).collect();
+    crate::tui::worker::dj_mark_dead(id, epoch, &refused);
+    app.apply_event(pick(epoch, vec![track("x")]));
+    app.lane.pending = false;
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like.len(), seeds::SEEDS_MAX + 1);
+}
+
+#[test]
+fn a_pick_past_eight_usable_rows_leaves_the_stand_in_out_before_a_pin() {
+    // The phone's review (addendum (a)): rows refused in one lane are
+    // usable again in the next, so More like can hold nine a pick can
+    // send — the user's pins go out, and the stand-in stays home.
+    let mut app = connected_app().with_seeds_sheet(true);
+    let now = crate::clock::Instant::now();
+    for i in 1..=seeds::SEEDS_MAX {
+        let name = format!("p{i}");
+        app.seeds.add_manual(SeedList::MoreLike, seed(&name), track(&name), now);
+    }
+    app.dj_edit(DjEdit::SeedMode(dj::SonicAnchor::Locked));
+    let row = Seed { key: seed("two"), track: track("two"), pinned: false, from: SeedFrom::Anchor, since: now, ran: std::time::Duration::ZERO };
+    app.seeds.more_like.insert(0, row);
+    app.replace_queue(vec![track("one"), track("two")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.dj_info = Some(takes_negatives());
+    playing(&mut app);
+    let kept = app.seeds.clone();
+    let pins: Vec<String> = (1..=seeds::SEEDS_MAX).rev().map(|i| format!("p{i}")).collect();
+    let effects = app.play_index(1);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, pins, "the eight pins; the stand-in stays home");
+    assert_eq!(app.seeds, kept);
+    assert!(app.lane.stay_anchored);
+    let effects = app.sample_dj();
+    assert_eq!(sample_request(&effects).expect("a preview").ask.sonic_seeds, pins);
+}
+
+#[test]
+fn a_song_the_server_refused_this_lane_is_no_song_to_stay_close_to() {
+    let id = "http://refused-c.test:3000";
+    let mut app = app_on(id);
+    stay_close_on(&mut app, 0);
+    // As a Drift fallback found it (clause 31).
+    crate::tui::worker::dj_mark_dead(id, app.lane.epoch, &["two"]);
+    let effects = app.play_index(1);
+    assert!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds.is_empty());
+    assert!(app.seeds.more_like.is_empty());
+    assert!(!app.lane.stay_anchored, "the lane keeps looking");
+    let effects = app.sample_dj();
+    assert!(sample_request(&effects).expect("a preview").ask.sonic_seeds.is_empty());
+    // The next song that plays comes in.
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    let effects = app.play_index(2);
+    assert_eq!(dj_request(&effects).expect("x, the last, asks").ask.sonic_seeds, ["x"]);
+    let rows: Vec<(&str, SeedFrom)> = app.seeds.more_like.iter().map(|s| (s.key.path.as_str(), s.from)).collect();
+    assert_eq!(rows, [("x", SeedFrom::Anchor)]);
+    assert!(app.lane.stay_admitted);
+}
+
+#[test]
+fn after_its_own_song_a_stay_close_lane_takes_no_other_though_the_server_refuses_it() {
+    let id = "http://refused-d.test:3000";
+    let mut app = app_on(id);
+    stay_close_on(&mut app, 0);
+    let effects = app.play_index(1);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Anchor);
+    assert!(app.lane.stay_admitted);
+    let epoch = app.lane.epoch;
+    crate::tui::worker::dj_mark_dead(id, epoch, &["two"]);
+    app.apply_event(pick(epoch, vec![track("x")]));
+    let effects = app.play_index(2);
+    assert!(dj_request(&effects).expect("x, the last, asks").ask.sonic_seeds.is_empty());
+    let rows: Vec<&str> = app.seeds.more_like.iter().map(|s| s.key.path.as_str()).collect();
+    assert_eq!(rows, ["two"], "one song a lane");
+    assert!(app.lane.stay_anchored);
+    let effects = app.sample_dj();
+    assert!(sample_request(&effects).expect("a preview").ask.sonic_seeds.is_empty());
+}
+
+#[test]
+fn a_stay_close_list_the_user_emptied_stays_empty() {
+    let mut app = connected_app().with_seeds_sheet(true);
+    stay_close_on(&mut app, 3);
+    let effects = app.play_index(1);
+    assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["p3", "p2", "p1"]);
+    app.apply_event(pick(app.lane.epoch, vec![track("x")]));
+    for name in ["p1", "p2", "p3"] {
+        app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: seed(name) });
+    }
+    let effects = app.play_index(2);
+    assert!(dj_request(&effects).expect("x, the last, asks").ask.sonic_seeds.is_empty());
+    assert!(app.seeds.more_like.is_empty(), "nothing comes in for a list the user emptied");
+    assert!(app.lane.stay_anchored);
+    let effects = app.sample_dj();
+    assert!(sample_request(&effects).expect("a preview").ask.sonic_seeds.is_empty());
+}
+
+#[test]
+fn a_stay_close_lane_the_user_leaves_with_refused_rows_alone_takes_no_song() {
+    // The phone's "never for the user's removals" (decision 42): the server
+    // refused p1 and the lane stayed close to p2; the user then takes p2
+    // out — removed, or moved to Less like. Only refused rows are left, but
+    // the user's edit, not a refusal, left them: nothing comes in.
+    for (k, moved) in [false, true].into_iter().enumerate() {
+        let id = format!("http://emptied-{k}.test:3000");
+        let mut app = app_on(&id);
+        stay_close_on(&mut app, 2);
+        let here = app.origin();
+        let effects = app.play_index(1);
+        assert_eq!(dj_request(&effects).expect("the lane's first pick").ask.sonic_seeds, ["p2", "p1"]);
+        let epoch = app.lane.epoch;
+        crate::tui::worker::dj_mark_dead(&id, epoch, &["p1"]);
+        app.apply_event(pick(epoch, vec![track("x")]));
+        let effects = app.request_turn();
+        assert_eq!(dj_request(&effects).expect("a real pick").ask.sonic_seeds, ["p2"], "p1 refused");
+        app.apply_event(pick(epoch, vec![track("y")]));
+        let p2 = SeedKey::new(&here, "p2");
+        if moved {
+            app.dj_edit(DjEdit::SeedMove { from: SeedList::MoreLike, key: p2.clone() });
+            assert!(app.seeds.holds(SeedList::LessLike, &p2));
+        } else {
+            app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: p2 });
+        }
+        let effects = app.sample_dj();
+        assert!(sample_request(&effects).expect("a preview").ask.sonic_seeds.is_empty(), "moved: {moved}");
+        app.dj_panel.sample_pending = false;
+        let effects = app.request_turn();
+        assert!(dj_request(&effects).expect("a real pick").ask.sonic_seeds.is_empty(), "moved: {moved}: no positives");
+        let rows: Vec<&str> = app.seeds.more_like.iter().map(|s| s.key.path.as_str()).collect();
+        assert_eq!(rows, ["p1"], "moved: {moved}: nothing taken");
+        assert!(app.lane.stay_anchored && !app.lane.stay_admitted);
+    }
+
+    // A refusal of every row is the server's, whatever the user removes of
+    // them after: the lane takes the song playing, as the phone does.
+    let id = "http://emptied-refused.test:3000";
+    let mut app = app_on(id);
+    stay_close_on(&mut app, 3);
+    let here = app.origin();
+    app.play_index(1);
+    let epoch = app.lane.epoch;
+    crate::tui::worker::dj_mark_dead(id, epoch, &["p1", "p2", "p3"]);
+    app.apply_event(pick(epoch, vec![track("x")]));
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: SeedKey::new(&here, "p3") });
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real pick").ask.sonic_seeds, ["two"]);
+    assert_eq!((app.seeds.more_like[0].key.path.as_str(), app.seeds.more_like[0].from), ("two", SeedFrom::Anchor));
+
+    // A song added since is something to stay close to again, and its own
+    // refusal is the server's: the lane then takes the song playing.
+    let id = "http://emptied-added.test:3000";
+    let mut app = app_on(id);
+    stay_close_on(&mut app, 2);
+    let here = app.origin();
+    app.play_index(1);
+    let epoch = app.lane.epoch;
+    crate::tui::worker::dj_mark_dead(id, epoch, &["p1"]);
+    app.apply_event(pick(epoch, vec![track("x")]));
+    app.dj_edit(DjEdit::SeedRemove { list: SeedList::MoreLike, key: SeedKey::new(&here, "p2") });
+    app.seeds_picked(SeedList::MoreLike, track("q"));
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real pick").ask.sonic_seeds, ["q"]);
+    app.apply_event(pick(epoch, vec![track("y")]));
+    crate::tui::worker::dj_mark_dead(id, epoch, &["q"]);
+    let effects = app.request_turn();
+    assert_eq!(dj_request(&effects).expect("a real pick").ask.sonic_seeds, ["two"]);
+    assert_eq!(app.seeds.more_like[0].from, SeedFrom::Anchor);
+    assert!(app.lane.stay_admitted);
 }
 
 // ── Play reporting (docs/ux-contracts/play-reporting.md) ──────────────────

@@ -53,7 +53,7 @@ Two regimes, deliberately different:
 | DIM | hints, labels, idle borders, text buttons, table headers | `#7a82a0` | 60 | `DarkGray` |
 | GOLD | the bottom rule, warnings/errors, the warning modal | `#e5c07b` | 179 | `Yellow` |
 | OK | checked boxes, progress, success | `#98c379` | 114 | `Green` |
-| DANGER | destructive hover (the row [X]); never decoration | `#e06c75` | 167 | `Red` |
+| DANGER | destructive hover (the row [X]), and Remove in a seed row's menu at rest (auto-dj clause 64); never decoration | `#e06c75` | 167 | `Red` |
 | ON-ACCENT | fg on accent-filled cells (selection rows) | `#0d1017` | 232 | `Black` |
 
 Element specs below name colors by floor name (LightBlue = ACCENT,
@@ -105,6 +105,9 @@ border, pointing at the target) · `█▀▄` half-blocks (QR only).
   trust system) fall back to `[x]` — same width, same colors.
 - Radio dot is • U+2022 — never ● (ambiguous-width; double-wide in CJK
   terminals).
+- A seed row's pin (the Auto DJ Seeds sheet, auto-dj clause 64) is ◉
+  U+25C9 pinned and ◌ U+25CC not — both narrow, unlike ● — and its menu
+  `[⋯]` (U+22EF); a legacy console draws `*`, `o` and `[.]` (2026-11-17).
 - `ratatui-image` is reserved for album-art surfaces only — never chrome,
   never icons — so screens render identically over SSH and in ratzilla.
 - Glyphs live in code, never in the locale strings: a string that carries
@@ -159,7 +162,12 @@ banned.
   tooltip whose text says why it's disabled ("Add a folder first"), the
   one exception to disabled inertness. **Text buttons are never
   disabled — hide them instead** (a gray text button is indistinguishable
-  from an idle one in 16 colors).
+  from an idle one in 16 colors). One logged exception (2026-11-17): the
+  Auto DJ Seeds sheet's `+ Add song`, a list's last row, rests DIM and
+  inert — no click, no stop, no hover — while its list can take no row or
+  the library on screen is not the room's server (auto-dj clauses 64–65):
+  its place says where a song would go, and the `+` and the list's rows
+  above it tell it from an idle button.
 - Every clickable registers a click rect, participates in hover, and
   joins the OSC 22 hand-cursor set (see the pointer contract under
   Behavioral rules).
@@ -281,6 +289,23 @@ one in the plain selection colours and the hovered one BRIGHT — neither
 bold (the board `TermCopies` G); the row
 it hangs from gives up its slab and wears ACCENT BOLD while the list
 holds the keyboard's; Esc or ← folds it and the modal stays.
+**On a seed row** (the Auto DJ Seeds sheet, auto-dj clause 64;
+2026-11-17, the canvas "Auto DJ Seeds · Desktop", A-Drift): the list
+serves a song row — the one exception to "a context list is for a thing
+that is not a song row": a seed row's verbs (move it to the other list,
+remove it) are the sheet's own, not the track-actions sheet's. Opened
+from the row's `[⋯]` (Space or a click; `m` with the hand on the row's
+pin or its `[⋯]` — no right click, the `[⋯]` being the pointer's way
+in), it keeps the hung list's grammar with three more exceptions to the
+rules above: it hangs **one row under** its row, its right border on the
+`[⋯]`'s `]`, flipping above the row where it would pass the sheet's last
+inner row — the board's placement, not the modal row's rising one; a
+verb **not on offer right now is drawn DIM and passed by the cursor**,
+never hidden — a move a full list cannot take now may be taken a moment
+later, and the verbs keep their places; and **Remove is DANGER at rest**,
+BRIGHT BOLD under the pointer. Esc, ← or `m` folds it, as a click
+anywhere off it does, and the sheet stays; while it is down the sheet's
+hand is not drawn and the wheel rests.
 
 ### State line
 One row under the header, on rooms that watch a live thing: `• word` in
@@ -341,8 +366,9 @@ wizard, the admin rooms and the web shell still draw the steady `▏`;
 they can adopt the clock the same way.
 
 **A settings room's rows: one row per setting, one sheet behind each**
-(the Auto DJ room, from the canvas "Auto DJ Panel · GUI", 2026-11-10;
-auto-dj contract clauses 40–58. Before: the E′ board of 2026-09-23 — every
+(the Auto DJ room, from the canvas "Auto DJ Panel · GUI", 2026-11-10, and
+its FILTERS and MATCH from "Auto DJ Seeds · Desktop", 2026-11-17;
+auto-dj contract clauses 40–59. Before: the E′ board of 2026-09-23 — every
 control on the page at one value column, and a help line under the body).
 The room is a column of rows at ONE width — the room's own at a hundred
 columns (47 cells), up to a fifth more in a wider room, and past that the
@@ -354,9 +380,17 @@ it. The value says the setting's state in the row's own words and wears
 its tone: DIM at rest ("Any", "Off"), **OK** while the setting is doing
 something, **GOLD behind `!`** where it wants attention. The keyboard's
 hand is the accent slab the row's width; the pointer makes the name and
-the chevron BRIGHT + BOLD; a click or Enter opens. The one setting that is
-a plain yes or no keeps its `[✓]` on the row and its explanation DIM under
-it (Harmonic mixing) — a switch needs no sheet.
+the chevron BRIGHT + BOLD; a click or Enter opens. A setting that is a
+plain yes or no keeps its `[✓]` on the row — a switch needs no sheet —
+and its explanation DIM under it where it has one (Learn from skips;
+Harmonic mixing's line went 2026-11-17, auto-dj clause 45).
+- **A sub-row** (Learn from skips and Seeds under Sonic similarity,
+  2026-11-17; auto-dj clause 59) is a row of the same grammar with its
+  name two cells in, and its explanation, where it has one, four cells
+  in. While the row it belongs to is off or gated it rests **in place**,
+  DIM whole — name, value or switch glyph, chevron — with no click, no
+  hover, no tip, and the keyboard walks past it; it never hides, so rows
+  never move.
 - **A row the server cannot do stays in its place**, DIM whole: its
   reason ("Needs server 6.25+", "Discovery off", "Not on peers") stands
   where the value would, ending at the values' column, with no chevron
@@ -364,9 +398,12 @@ it (Harmonic mixing) — a switch needs no sheet.
   longer than the value's cells, the name gives its cells up — the reason
   is always whole. Rows never move.
 - **The room never scrolls.** Its rows stand whole from the floor up
-  (100×24); spare rows come back in a fixed order as the window grows —
-  the blank rows between groups, a hint line, the tall button, the blank
-  rows around the title.
+  (100×24); spare rows come back in a fixed order as the window grows,
+  each whole or not at all — a sub-row's explanation, the tall button,
+  the blank rows between groups, the blank rows around the button
+  (2026-11-17; before, the blank rows came first and a hint line after).
+  Where even the rows cannot all stand (100×24 with the tips line and
+  the Auto DJ room's Play from), the group headers fold first.
 - **The sheet** is the kit modal (66 cells; over the room, or the band the
   mood Filters use where the room is short): the row's name on the top
   border and the value after it, in its tone, **following the draft**;
@@ -375,8 +412,10 @@ it (Harmonic mixing) — a switch needs no sheet.
   `[ Done ]` at the right, with a DIM `clear` three cells to its left only
   while something is set. No `[X]`. A sheet edits a **draft**: Done, Enter
   and Esc all close it and apply the draft whole; a sheet closed as it
-  was opened writes nothing. Tab and the arrows walk its stops, Space
-  presses the one under the hand.
+  was opened writes nothing — except the Auto DJ Seeds sheet (auto-dj
+  clause 64), which applies each press at once and whose Done, Enter and
+  Esc only close, and which carries no value on its border. Tab and the
+  arrows walk its stops, Space presses the one under the hand.
 - **A bar in a sheet** is the volume widget's (`- ▰▰▰▰▰▱▱▱▱▱ +  4 songs`):
   **a cell a step** — the bar is as many cells as the setting has steps
   (25 songs, 20 BPM), or a whole number of steps a cell where that would
@@ -902,17 +941,18 @@ columns in from the left edge in its state colour — a **split button**
 since 2026-11-10, one rounded frame with a rule between its halves
 (`│ auto-dj │ ▴ │`): the word is the toggle, the chevron opens **quick
 config**, a 42-cell popover standing on the bar from the rule's column
-(the DJ's server, sonic and its anchor, Smart filters, and a door to the
-room; a choice there applies at once), `▾` while it is up — then ONE group centred
+(the DJ's server, sonic with its match and the Seeds door — its anchor
+before 2026-11-17 — Smart filters, and a door to the room; a choice there
+applies at once), `▾` while it is up — then ONE group centred
 in the span before
 the card — repeat, prev, play, next, shuffle: prev and next rounded in
 the text colour BOLD, play THICK in GOLD (`tall_frame_bordered`, the seek
 rule's colour on the one primary action), the toggles rounded in their
 state colours. The bottom row holds the volume group at the left,
 the screen's note after it, and the card's
-last line. An armed pick (a sonic endpoint, the DJ's opening song) is a
-mode, not news: its banner is a row above the room in the accent, BOLD,
-with `[X]` at its right, and the room stands one row lower while it lasts
+last line. An armed pick (a sonic endpoint, the DJ's opening song, a
+song for one of Auto DJ's seed lists) is a mode, not news: its banner is
+a row above the room in the accent, BOLD, with `[X]` at its right, and the room stands one row lower while it lasts
 (2026-09-23; the bar's note row carried it before). The card, at the right edge, is an eight-by-four cover with
 four lines beside it: title, artist · year, the spec line, the stars with
 key and tempo; a right click (or `m`) opens the track's sheet, the

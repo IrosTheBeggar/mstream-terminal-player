@@ -2806,8 +2806,11 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
                 crate::dj::SonicAnchor::Rolling => {
                     ("Follow the vibe", "each pick follows the session's recent sound")
                 }
+                // Stay close freezes the seed lists as they stand — the last
+                // picks, the pins — or holds to one song when they are
+                // empty (auto-dj contract, clause 23).
                 crate::dj::SonicAnchor::Locked => {
-                    ("Stay on seed", "every pick stays close to the seed song")
+                    ("Stay on seed", "picks stay close to the seeds as they stand")
                 }
             };
             vec![value(label.into()), note(what.into())]

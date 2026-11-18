@@ -212,13 +212,15 @@ impl App {
             }
         };
         // Stamped with the rating clock, so a block that answers after a
-        // newer write is known to carry an older rating.
-        self.info_asked.insert(filepath.to_string(), self.rating_seq);
+        // newer write is known to carry an older rating — and with the row's
+        // server, whose song's seed rows its tags fill (auto-dj decision 44).
+        self.info_asked.insert(filepath.to_string(), (self.rating_seq, origin.clone()));
         vec![Effect::Api(ApiCmd::TrackInfo { filepath: filepath.to_string(), reach })]
     }
 
-    /// The block arrived: kept for the sheet, and its facts patched into the
-    /// listing's copies where they were thinner.
+    /// The block arrived: kept for the sheet, its facts patched into the
+    /// listing's copies where they were thinner, and its tags into the
+    /// song's seed rows (auto-dj decision 44).
     pub(super) fn consume_track_info(&mut self, filepath: String, track: Option<Track>) {
         let asked = self.info_asked.remove(&filepath);
         let Some(mut track) = track else { return };
@@ -229,8 +231,8 @@ impl App {
         // block's copy (clause 10): the App's stands, in the block too, or
         // the sheet and the bar's card would show the older number while
         // the queue's row showed the new one (the review's race).
-        if let (Some(asked), Some(&written)) = (asked, self.rated_at.get(&filepath))
-            && written > asked
+        if let (Some((asked, _)), Some(&written)) = (&asked, self.rated_at.get(&filepath))
+            && written > *asked
         {
             track.metadata.rating = self.rating_of(&filepath);
         }
@@ -259,6 +261,12 @@ impl App {
             }
         };
         self.for_each_copy(&filepath, fill);
+        // The song's seed rows learn its tags too (auto-dj decision 44): a
+        // row the remote queued bare joined More like under its file name,
+        // and a pin keeps what its row shows.
+        if let Some((_, origin)) = asked {
+            self.seeds.fill_tags(&SeedKey::new(&origin, &filepath), &block);
+        }
         self.track_info = Some(track);
     }
 

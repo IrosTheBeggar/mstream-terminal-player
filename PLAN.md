@@ -2493,6 +2493,170 @@ a LATER secondary screen (party view), Columns retired.
   passing on the rig (the deviations log has the run, and what it could
   not show: a server with discovery data, mood scores or both genre
   kinds).
+- **Auto DJ's seeds ✅ 2026-11-17** — the record's Auto DJ grew seeds on
+  the phone (mstream_music `claude/autodj-seeds`, uncommitted on
+  `c1393e12`: More like and Less like, pins, Drift · Stay close on a
+  Seeds page, Learn from skips) against mStream #1108's negatives
+  (`lessLike`, `features.autoDj` 1; merged, not yet released), and the
+  canvas "Auto DJ Seeds · Desktop" drew it in cells — the owner picked
+  option A, a sheet over the room, with the library pick the sonic path
+  uses for Add song (auto-dj contract, clauses 10–15, 23, 25, 30, 31, 36,
+  41–43, 45, 51, 54, 57–59, 63–66; decisions 20–34). **The model**
+  (`src/tui/app/seeds.rs`, pure): two lists of at most 8, newest first, a
+  song in one only; More like keeps min(5, 8 − pinned) unpinned rows, a
+  DJ pick joining as it starts playing — once, this lane's own — and a
+  session's first song as its first row; Less like takes a quick skip (a
+  Next on a DJ pick heard a second and not yet a play by the server's
+  default rule) while Learn from skips is on, its unpinned rows gone after
+  30 minutes of Drift time; Stay close freezes both, with one song to
+  start; the pins live in `[player.dj]` through new lanes and restarts,
+  and the "Clear pins when the queue is cleared" box lets them go at a
+  clear. **The wire**: `lessLike` while sonic is on and the DJ's server
+  says `autoDj` ≥ 1, discovery on and ready, its echo one `[dj]` line; a
+  learned forward skip re-rolls the DJ rows after the playing one; a dead
+  seed costs one pick, not the lane's sonic. **The room**
+  (`src/gui/dj.rs`): FILTERS and MATCH where MUST MATCH and PREFER stood,
+  Artist cooldown with the session rows, Learn from skips and Seeds as
+  sub-rows under Sonic similarity resting DIM while sonic is off;
+  Harmonic's line gone, so the 23 rows stand at 100×30. **The Seeds
+  sheet** (`src/gui/dj/seeds.rs`): the mood Filters' shell with no draft
+  — Drift · Stay close and its line, the two lists with `◉` / `◌` pins and
+  a `[⋯]` context list, Add song arming the library pick and coming home
+  to the sheet, the checkbox on a row of its own. The Sonic sheet and
+  quick config give Drift · Stay close up; quick config gains the match
+  bar and a Seeds row. 19 locale keys arrive in ten languages (the record's
+  ARB words; the pick's banners and the two tips lines the player's own),
+  3 leave. Not built: the record's Add song sheet, negatives across
+  servers, seed art. Open for the owner: whether a Play that replaces the
+  queue is a new queue for the seeds, and whether the ticked box should
+  let the unpinned skips go too (decision 27) — the owner answered the
+  first the same day, and the box now follows the mode (the next entry).
+  Tests: 20 in the model, 24 in the App, 25 new in `gui::dj` (57 there
+  now: the room and the Seeds sheet cell for cell, the floor's order and
+  the headers' fold, the sheet's menu, keys and scroll, the pick's doors,
+  Play from asked again after a Stop or a reconnect, ten locales), with
+  `stats`, `dj`, the wire types, the config, the worker's dead seeds and
+  the MP3 Player tab's pick beside them; both suites green (3167
+  terminal, 3286 desktop).
+  `scenario_dj` waits for FILTERS and MATCH and Learn from skips now; it
+  was not run, and the rig, with no discovery data, cannot reach the
+  Seeds sheet anyway.
+- **Auto DJ's seeds, the owner's second answers ✅ 2026-11-17** — three
+  questions put to the owner about the phone and this player together,
+  answered the same day, with the phone's plan for them as the reference
+  (auto-dj contract, clauses 10, 12, 15, 23, 51, 63, 64, 66; decisions 27
+  and 32 amended, 35–38; the deviations log). **Blend in new music**: at a
+  lane's first real pick in Drift — after a new queue, Stop and Start, a
+  move of the DJ, a removal that empties the queue, a launch — the
+  queue's current song on the DJ's server joins More like unpinned beside
+  the pins and rotates out like a pick (`DjLane.asked`,
+  `seeds::blends_at_lane_start`, in `compose_ask` before the positives
+  are built); Preview shows it and keeps nothing. **A play that replaces
+  the queue is a new queue for the seeds**, the question the first build
+  left open: `App::play_replacing` at all eight places a play replaces
+  the queue, and Clear queue, run `App::seeds_new_queue` — the DJ's
+  unpinned picks start over, the next real pick blends, Stay close's one
+  song is re-armed, a ticked box lets the pins go — and no new lane, so
+  the cursor, the Camelot anchor, a pool the lane let go and a pick
+  already out stand (`replace_queue` is the tests' setup alone now); in
+  Stay close, once a ticked box emptied the lists, that pick can become
+  the new queue's one song. **Keep everything shown**: while Stay close
+  holds the lists every row survives new lanes and queues, Stop and
+  Start, and restarts; a ticked
+  box there empties both lists; back in Drift only the user's own pins
+  stay pinned. `[player.dj]` rows gain `pinned = false` and an unpinned
+  skip's `drift_ms` (its Drift time at the freeze; `Seed.ran` in the
+  model), both written only in Stay close; a row without the flag is a
+  pin, a junk one costs its row. **Add the chosen song**: Choose's or
+  Recently played's first song joins More like pinned in Stay close, as
+  Add song would (`seeds::adds_chosen_song`); Random's adds nothing. The
+  GUI saves soon whenever what the file keeps moves (`Seeds::kept_hash`,
+  checked in `save_rested`). Found in review: Stay close's one song that
+  a full More like refuses — eight rows of another server, which a move
+  of the DJ now keeps — is one `[dj]` line each time the rule looks
+  (`DjLane.logged_stay_full`), and Preview reads the admission's own
+  rule (`Seeds::admits_anchor`) instead of showing the song. No new
+  words, no visual change. Tests: 6 new in the model (26 there now) and 2
+  rewritten, 11 new in the App and 2 rewritten, 1 in the GUI, 1 in the
+  config; both suites green (3186 terminal, 3305 desktop). The review's
+  fix added 1 App test and the model's `admits_anchor` checks (both
+  suites green: 3187 terminal, 3306 desktop). Not seen in the window or on
+  the rig. Open for the owner then: whether a new queue should give a lane
+  that let its sonic pool go another go; a remote clear that an open
+  picker swallows (older than this round); a remote song's tags reaching
+  its seed row (in Drift, every remote Play while something plays blends
+  one bare); whether Stay close's one song should weigh only the DJ
+  server's rows, or come in past eight — all answered the same afternoon
+  (the next entry) but the picker gap, which is older than this work and
+  goes to a session of its own.
+- **Auto DJ's seeds, round 3 — the owner's afternoon answers ✅
+  2026-11-17** — five more questions, two of them asked of the phone too
+  (whose reviewed builds are the reference), answered the same afternoon
+  (auto-dj contract, clauses 10, 12, 15, 23, 26, 30, 31, 43, 63, 64, 66;
+  decisions 27, 32 and 37 amended, 39–44; the deviations log).
+  **Take it out**: a quick skip of the user's own song a lane's start
+  blended in takes it out of More like and learns nothing — no Less like
+  row, no re-roll, no negative — and the lane's picks, Preview's too,
+  pass over it until the lane ends; a blended DJ pick keeps a pick's
+  rule, a pinned one stays (`seeds::quick_skips_blend`, `DjLane.blended`
+  and `DjLane.passed_over`, both following a re-addressed server;
+  `dj::Ask.pass_over`, never sent, kept out by the worker's accept filter
+  and its last-answer fallback).
+  **The clear race**, checked here: the phone's window cannot open (one
+  call drops the rows and starts the lane), but the end of a cleared
+  track, or its crossfade, still on its way asked the new lane's first
+  pick for the emptied queue, and the pick played there; `App::consume`
+  now drops a track's end or hand-over with no queue left. **Old rules
+  there**: the TUI, which shows no Seeds sheet, keeps the lists' rules
+  from before the second answers — a chosen first song unpinned, Stay
+  close's More like keeping its pins alone through new lanes and queues,
+  the box letting the stored pins go, the file keeping pins — while the
+  GUI keeps the owner's answers (`App.dj_shows_seeds`, set before the
+  prefs load by `App::with_seeds_sheet` through `tui::app_for`, the
+  desktop's start being `gui::desktop_app`; `shown` on the model's
+  `new_lane`, `without_pinned`, `to_prefs`, `kept_hash` and `from_prefs`);
+  the box's and Less like's terminal rules are readings, told to the
+  owner. **A ninth row**: Stay close's one song comes in past eight rows
+  for a lane with nothing to stay close to — another server's rows, or,
+  as the phone's review added, rows that server refused in this lane
+  (`worker::dj_dead_seeds`) — up to sixteen (`seeds::SEEDS_STORED_MAX` in
+  `Seeds::admits_anchor`; the refusal and its `[dj]` line stay for
+  sixteen, reworded); a pick past eight usable rows leaves the oldest
+  unpinned out, never a pin (`Seeds::usable_positives`); a Stay close
+  load keeps sixteen, unpinned rows trimmed first (`Seeds::from_prefs`);
+  a lane held only by rows refused since looks again, unless it took a
+  song of its own (`DjLane.stay_admitted`). **Try again**: a new queue
+  gives a lane that let its pool go another go (`seeds_new_queue` calls
+  `dj_retry_sonic`), and a pick already out cannot take it back
+  (`DjLane.pool_gen`, closing the same gap for More like edits and sonic
+  settings). **Fill the seed rows**: a details fetch remembers its server
+  (`info_asked`), and the block fills its song's seed rows' title, artist
+  and album where they have none (`Seeds::fill_tags`); the GUI's
+  fingerprint saves a pin soon. No new words, no visual change. Tests: 7
+  new in the model (33 there now) and 2 rewritten; 14 new in the App, 2 of
+  them round 2's rewritten to the new rules, and 6 more rewritten with a
+  terminal half; 1 each in `dj.rs`, the worker, the TUI's startup, the
+  GUI's startup, the control face and `gui::dj` (58 there now); two
+  batches of mutations, 22 in all, failed every test written for them;
+  both suites green (3212 terminal, 3331 desktop). **The review's
+  fixes**: a pick out at a play that replaces the queue no longer becomes
+  the new queue's start — `play_replacing` composes the first pick at
+  once on the row it started and sends nothing
+  (`seeds_settle_lane_start`), so that row blends in Drift or is Stay
+  close's one song, the pick out still landing; a track's end or
+  hand-over while a row waits for its tunnel is dropped (`App::consume`,
+  `tunnel_wait`), so a stale end no longer skips the user's choice or asks
+  a pick over it; and Stay close's release no longer takes the song
+  playing after the user's own removal or move of the last usable row,
+  refused rows still listed (`DjLane.stay_emptied`, the phone's "never
+  for the user's removals"); the pass-over's and the one song's wording
+  corrected. 2 App tests new, 2 extended with the new cases, 2 of round
+  2's updated to the settle; each new half failed on the code before; both
+  suites green (3214 terminal, 3333 desktop) and the desktop build OK. Not
+  seen in the window or on the rig. Open: the remote picker gap (older; a
+  session of its own), a pick already out landing over a last row that
+  waits for its tunnel (older), and the readings the round's deviations
+  entry names.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
