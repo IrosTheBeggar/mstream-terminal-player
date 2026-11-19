@@ -52,6 +52,7 @@ use wgpu::{
     TextureView,
 };
 
+use super::panel::{Paint, Painter};
 use crate::tui::art::Art;
 use crate::tui::graphics::PictureHost;
 
@@ -115,6 +116,10 @@ struct Pixels {
 #[derive(Default)]
 pub(crate) struct Board {
     inner: Mutex<Inner>,
+    /// The egui panel's pass, between the face's draw and the
+    /// post-processor (panel.rs): a lock of its own, since the pass and the
+    /// covers are taken at different moments.
+    panel: Mutex<Paint>,
 }
 
 #[derive(Default)]
@@ -146,18 +151,56 @@ impl Board {
     pub(super) fn begin_frame(&self) {
         let mut inner = self.lock();
         inner.before = std::mem::take(&mut inner.placed);
+        let mut panel = self.panel();
+        panel.was_under = panel.under;
+        panel.under = false;
+        panel.shown = false;
+        panel.overlays.clear();
     }
 
     /// The frame is over. A face that skipped its draw (nothing new,
     /// `gui::Ctx::gate`) placed nothing and presented nothing, so the
     /// screen still holds last frame's covers: they stay on the board,
     /// where the next draw's comparison and the script's dump read them.
+    /// The panel likewise; one a drawn frame did not show is gone.
     pub(super) fn end_frame(&self, drew: bool) {
         let mut inner = self.lock();
         let before = std::mem::take(&mut inner.before);
         if !drew {
             inner.placed = before;
         }
+        let mut panel = self.panel();
+        if !drew {
+            panel.under = panel.was_under;
+        } else if !panel.shown && panel.area.is_some() {
+            panel.area = None;
+            panel.jobs = Some(Vec::new());
+        }
+    }
+
+    /// The panel's paint (panel.rs).
+    pub(super) fn panel(&self) -> MutexGuard<'_, Paint> {
+        self.panel.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A panel is on screen and painted: the last drawn frame showed one,
+    /// and no overlay stands over it.
+    pub(super) fn panel_on_screen(&self) -> bool {
+        let panel = self.panel();
+        panel.area.is_some() && !panel.under
+    }
+
+    /// The face's pass over `area` this frame. Texture changes pile up
+    /// behind any the post-processor has not taken yet.
+    pub(super) fn panel_drawn(&self, area: Rect, pass: Paint) {
+        let mut panel = self.panel();
+        panel.under = panel.overlays.iter().any(|overlay| overlay.intersects(area));
+        panel.area = Some(area);
+        panel.shown = true;
+        panel.jobs = pass.jobs;
+        panel.pixels_per_point = pass.pixels_per_point;
+        panel.set.extend(pass.set);
+        panel.free.extend(pass.free);
     }
 
     /// A resample the worker finished waits for a present: the next frame
@@ -180,6 +223,12 @@ impl Board {
             if placed.rect.intersects(rect) {
                 placed.under = true;
             }
+        }
+        // The panel stands down under it too, shown before it or after.
+        let mut panel = self.panel();
+        panel.overlays.push(rect);
+        if panel.shown && panel.area.is_some_and(|area| area.intersects(rect)) {
+            panel.under = true;
         }
     }
 
@@ -292,6 +341,8 @@ pub(crate) struct CoverPost {
     uploads: u64,
     decodes: u64,
     worker: Option<Sender<Request>>,
+    /// The egui panel's paint, over the covers (panel.rs).
+    panel: Painter,
 }
 
 /// Four floats a vertex: NDC position, then texture coordinate.
@@ -667,6 +718,7 @@ impl PostProcessor for CoverPost {
             uploads: 0,
             decodes: 0,
             worker: None,
+            panel: Painter::default(),
         }
     }
 
@@ -805,14 +857,19 @@ impl PostProcessor for CoverPost {
         }
         self.drawn = placed;
         self.evict();
+        self.panel.process(&self.board, &self.device, queue, encoder, surface_config, surface_view);
     }
 
     /// The backend composites and presents only when a cell changed; a
     /// cover arriving on a still screen, one that moved without its cells
-    /// changing, or a sharper texture landing must present too.
+    /// changing, or a sharper texture landing must present too — and so
+    /// must a new pass of the panel's.
     fn needs_update(&self) -> bool {
-        let inner = self.board.lock();
-        inner.placed != self.drawn || !inner.decoded.is_empty()
+        let changed = {
+            let inner = self.board.lock();
+            inner.placed != self.drawn || !inner.decoded.is_empty()
+        };
+        changed || self.board.panel().is_news()
     }
 }
 

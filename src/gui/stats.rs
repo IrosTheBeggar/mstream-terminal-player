@@ -36,6 +36,10 @@ pub(crate) struct StatsUi {
     top: u16,
     /// A press began on the page: its drag and release are the page's.
     pressed: bool,
+    /// The last frame drew the page with egui (the window's panel), and
+    /// the pointer was over something egui would act on: the hand.
+    #[cfg(feature = "window")]
+    egui_hand: bool,
 }
 
 /// Open the screen: the page on the session's server — a peer session's
@@ -101,6 +105,19 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     gui.stats.drawn = true;
     let view = Rect { y: view.y + 1, height: view.height.saturating_sub(1), ..view };
     gui.stats.top = view.y;
+    // In a window of its own the page is drawn by egui over these cells,
+    // which stay blank (window/panel.rs); keys still reach it as below.
+    #[cfg(feature = "window")]
+    {
+        gui.stats.egui_hand = false;
+        if let (Some(panel), Some(page)) = (gui.panel.clone(), gui.stats.page.as_mut()) {
+            let grid = frame.area();
+            if let Some(shown) = panel.show(view, grid, &mut |ui| page::egui_view::show(ui, page)) {
+                gui.stats.egui_hand = shown.hand;
+                return;
+            }
+        }
+    }
     match gui.stats.page.as_mut() {
         Some(page) => page::render_hosted(frame, page, view),
         None => {
@@ -247,5 +264,9 @@ pub(crate) fn frame(gui: &mut Gui) -> Duties {
         stepped = true;
     }
     page.ui().dwell_tick();
-    Duties { over: shown && page.ui().hovering_clickable(), stepped }
+    #[cfg(feature = "window")]
+    let over = page.ui().hovering_clickable() || gui.stats.egui_hand;
+    #[cfg(not(feature = "window"))]
+    let over = page.ui().hovering_clickable();
+    Duties { over: shown && over, stepped }
 }

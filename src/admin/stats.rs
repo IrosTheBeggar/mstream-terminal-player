@@ -35,6 +35,10 @@ use crate::kit::theme::th;
 use crate::kit::{self, Surface, bold, dim};
 use crate::setup::g;
 
+/// The same page drawn by egui, in the window's panel (the egui spike).
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
+
 const MIN_W: u16 = 80;
 const MIN_H: u16 = 24;
 /// The webapp's "show all": twenty rows of the ranking.
@@ -2423,7 +2427,7 @@ mod tests {
     use ratatui::crossterm::event::KeyModifiers;
     use serde_json::json;
 
-    fn english() -> std::sync::RwLockReadGuard<'static, ()> {
+    pub(super) fn english() -> std::sync::RwLockReadGuard<'static, ()> {
         let guard = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale("en");
         crate::kit::theme::pin_modern_terminal();
@@ -2571,7 +2575,8 @@ mod tests {
         Box::new(Loaded { periods, summary, previous: Some(previous), series, hours, top, history })
     }
 
-    fn ready() -> Page {
+    /// A page with a September loaded (the egui page's tests draw it too).
+    pub(super) fn ready() -> Page {
         let mut p = page();
         p.reload(true);
         p.queued = None;
