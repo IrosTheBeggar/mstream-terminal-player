@@ -54,6 +54,9 @@ use crate::setup::{
 
 /// The room in character cells: the terminal's room and the GUI's Admin tab.
 pub(crate) mod cells;
+/// The same room drawn by egui, in the desktop window's panel.
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
 
 /// Where a server-side browse starts: the server user's home, which the
 /// admin file explorer spells `~` and resolves itself.

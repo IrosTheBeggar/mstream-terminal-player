@@ -100,6 +100,19 @@ impl Screen for Room {
             _ => {}
         }
     }
+
+    #[cfg(feature = "window")]
+    fn has_egui(&self) -> bool {
+        true
+    }
+
+    /// The room's egui face (egui_view.rs), the input method's composition
+    /// taken from the surface the host handed it to.
+    #[cfg(feature = "window")]
+    fn egui(&mut self, ui: &mut egui::Ui) -> Option<crate::admin::EguiShown> {
+        let composition = self.cells.ui.composition().to_string();
+        Some(super::egui_view::show(ui, self, &composition))
+    }
 }
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
