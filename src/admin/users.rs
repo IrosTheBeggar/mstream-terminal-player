@@ -38,6 +38,11 @@ use crate::input::{KeyCode, KeyEvent};
 /// tab.
 pub(crate) mod cells;
 
+/// The room in pixels: its egui face, for the GUI player's Admin tab in a
+/// window of its own.
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
+
 /// A quiet reload: users rarely change, and the webapp never polls here.
 const POLL: Duration = Duration::from_secs(30);
 const NAME_MAX: usize = 64;
