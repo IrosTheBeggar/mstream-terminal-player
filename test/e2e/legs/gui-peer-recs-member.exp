@@ -1,0 +1,89 @@
+#!/usr/bin/expect -f
+# The GUI's Peer recs room as a member, against the fake server's taste
+# generation 3 (test/e2e/fake_mstream.py, FAKE_P2P=1 FAKE_MEMBER=1: the
+# account cannot add, so the strip carries the shelf alone;
+# docs/ux-contracts/peer-recommendations.md §1.5). The seat is silent and
+# local to the leg as R's is (run.sh seeds `[player] volume = 0.0`;
+# SSH_CLIENT keeps any copy in the stream).
+#
+# At 100 × 30 with the queue panel folded (Tab), `R` opens the room: the
+# strip on row 4 reads All and the four shelf peers with no `›`, since
+# nothing lies past them, and the twelve leads read 6 | 6 (@@PR:open@@).
+# ↓ picks the first row and ↑ climbs to the tabs stop on All; → five
+# times, one more than it takes, walks it to the strip's last tab, mStream
+# · 3f9a, where it stays (@@PR:end@@); Enter selects that tab, whose two leads
+# read 1 | 1 (@@PR:tab@@). No frame draws a `+`, `adding…` or `try again`,
+# and the fake counts no Add. q quits. check_peer_recs.py replays the
+# stream at every synchronized-update end and at the marks (the README's
+# first law). Gates on first-paint words only; each gate's braces span
+# lines.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(SSH_CLIENT) "127.0.0.1 50000 22"
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+set env(MSTREAM_LOG) $::env(WIZHOME)/mstream.log
+proc drain {secs} { expect -timeout $secs timeout {} }
+# A sub-second drain: whatever the player writes is read meanwhile, never
+# a bare sleep with the pty's buffer filling under a frame.
+proc drain_ms {ms} {
+    set end [expr {[clock milliseconds] + $ms}]
+    while {[clock milliseconds] < $end} {
+        expect -timeout 0 -re ".+" {} timeout {}
+        after 5
+    }
+}
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+# A mark in the stream, and the fake's state at that moment beside it.
+proc mark {name} {
+    puts "@@PR:${name}@@"
+    exec curl -s -m 5 -o $::env(WIZHOME)/state-${name}.json $::env(FAKE_URL)/_state
+}
+proc key {k} { send $k; drain_ms 300 }
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    "connected to" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-SESSION" 2 }
+}
+drain 1
+# The queue panel folds: the room takes its 80 cells.
+send "\t"
+drain 1
+send "R"
+expect {
+    "Recommendations" {}
+    eof { puts "DIED-ON-OPEN"; exit 7 }
+    timeout { fail "NO-ROOM" 3 }
+}
+expect {
+    "Breakwater" {}
+    eof { puts "DIED-ON-ANSWER"; exit 8 }
+    timeout { fail "NO-LEADS" 4 }
+}
+# The strip, the plug-ins and the destination land.
+drain 2
+mark open
+key "\x1b\[B"
+key "\x1b\[A"
+key "\x1b\[C"
+key "\x1b\[C"
+key "\x1b\[C"
+key "\x1b\[C"
+key "\x1b\[C"
+drain 1
+mark end
+send "\r"
+drain 2
+mark tab
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 20 }
+}
+catch wait result
+exit [lindex $result 3]
