@@ -11,6 +11,7 @@
 //! Queue entries carry an optional duration hint so remote tracks don't need
 //! a costly second fetch to probe duration.
 
+mod aside;
 mod bus;
 pub(crate) mod fade;
 pub(crate) mod feed;
@@ -294,27 +295,33 @@ fn open_entry_unless(
         // would be pure ceremony.
         return open_entry(entry).map_err(OpenError::Failed);
     }
-    let (tx, rx) = mpsc::channel();
-    let moved = entry.clone();
-    let spawned = std::thread::Builder::new()
-        // The prepare thread's name, deliberately: its pact with the
-        // panic hook (symphonia panics on malformed files; the hook
-        // stands back for this name) is exactly the pact this thread
-        // needs.
-        .name(PREPARE_THREAD.into())
-        .spawn(move || {
-            let opened =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open_entry(&moved)));
-            if let Ok(result) = opened {
-                let _ = tx.send(result);
-            }
-        });
-    let Ok(thread) = spawned else {
+    let Ok(opener) = spawn_open(entry.clone()) else {
         // A box that cannot spawn a thread still deserves its music; the
         // unbounded open is the behaviour this path always had.
         return open_entry(entry).map_err(OpenError::Failed);
     };
-    await_open(Opener { rx, thread }, superseded)
+    await_open(opener, superseded)
+}
+
+/// Open `entry` on a thread of its own, its answer down the opener's
+/// channel. The thread takes the prepare thread's name, deliberately: its
+/// pact with the panic hook (symphonia panics on malformed files; the hook
+/// stands back for this name) is exactly the pact every open needs. The
+/// open is caught, so a panic drops the sender unfired, and whoever waits
+/// reads the disconnect as a failed open. The catch alone is not the whole
+/// defence — the process panic hook runs at the panic site, *before* any
+/// catch — which is why the TUI's hook knows this thread by name. A direct
+/// play, a blend's prepare and an aside clip all open this way.
+fn spawn_open(entry: QueueEntry) -> std::io::Result<Opener> {
+    let (tx, rx) = mpsc::channel();
+    let thread = std::thread::Builder::new().name(PREPARE_THREAD.into()).spawn(move || {
+        let opened =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open_entry(&entry)));
+        if let Ok(result) = opened {
+            let _ = tx.send(result);
+        }
+    })?;
+    Ok(Opener { rx, thread })
 }
 
 /// Wait for an opener's answer: at most [`START_TIMEOUT`], and only for as
@@ -674,24 +681,11 @@ fn append_gapless(s: &mut State) {
 /// the network's full patience, and the whole point of preparing is that
 /// nobody holds the state lock — or the audio — waiting on it.
 fn spawn_prepare(entry: QueueEntry, index: Option<usize>) -> NextTrack {
-    let (tx, rx) = mpsc::channel();
-    let spawned = std::thread::Builder::new()
-        .name(PREPARE_THREAD.into())
-        .spawn(move || {
-            // Caught, because symphonia panics on malformed files (audit
-            // #32): the sender drops unfired and the tick reads the
-            // disconnect as a failed open. The catch alone is not the
-            // whole defence — the process panic hook runs at the panic
-            // site, *before* any catch — which is why the TUI's hook
-            // knows this thread by name and stands back for it.
-            let opened =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open_entry(&entry)));
-            if let Ok(result) = opened {
-                let _ = tx.send(result);
-            }
-        });
-    match spawned {
-        Ok(thread) => NextTrack::Opening { index, opener: Opener { rx, thread } },
+    // Caught, because symphonia panics on malformed files (audit #32): the
+    // sender drops unfired and the tick reads the disconnect as a failed
+    // open — see [`spawn_open`].
+    match spawn_open(entry) {
+        Ok(opener) => NextTrack::Opening { index, opener },
         // A box that cannot spawn a thread still has the ordinary advance
         // path; a blend is not worth an error.
         Err(_) => NextTrack::Failed { at: Instant::now() },
@@ -847,6 +841,18 @@ struct State {
     /// by the transition gate checking emptiness.
     outgoing: Vec<Outgoing>,
     q: QueueState,
+    /// The aside clip session, while one lives: a preview playing beside
+    /// main, which pauses main once it has opened and gives it back when it
+    /// ends ([`aside`]). None for every engine that never plays a clip,
+    /// serve's included, and then every main command behaves as before.
+    aside: Option<aside::Aside>,
+    /// Clips on their way out: each breathes out over [`STOP_FADE`] here.
+    /// Kept apart from `outgoing`, so the blend gate, `hush_drainers` and
+    /// the drainer cap never see a clip.
+    aside_drains: Vec<Outgoing>,
+    /// How each clip ended, oldest first, for the driver to collect
+    /// ([`Engine::take_aside_ends`]). Bounded by [`State::push_aside_end`].
+    aside_ends: Vec<crate::player::AsideEnded>,
 }
 
 impl State {
@@ -1043,9 +1049,18 @@ impl State {
         let looped = next.path == self.current_file;
         self.tap_live.store(false, Ordering::Relaxed);
         self.fade = next.fade;
+        // A soft pause still ramping was ramping the track that just ran
+        // out: the one now sounding rides the ramp down too, or it plays at
+        // full under the silence until the landing's net.
+        if self.pausing.is_some() {
+            self.fade.ramp_to(0.0, PAUSE_FADE);
+        }
         self.tap_live = next.tap_live;
         self.feed = next.feed;
-        self.current_file = next.path;
+        let left = std::mem::replace(&mut self.current_file, next.path);
+        // A seam is not the listener touching main: a clip session's
+        // promise follows the track across it.
+        self.aside_follow_seam(&left);
         self.duration = next.duration;
         self.advance_failures = 0;
         match next.index {
@@ -1171,6 +1186,9 @@ impl State {
     /// paused with the pause landed and a track still in the sink — and no
     /// breath draining, no orphaned remnant to skip, no open in flight.
     /// Every other state has something the tick will do on its own.
+    ///
+    /// An aside clip that opens, sounds or holds main is never at rest; a
+    /// paused one is, as a landed pause is ([`State::aside_quiet`]).
     fn at_rest(&self) -> bool {
         let still = self.stopped || (self.sink.is_paused() && !self.sink.empty());
         still
@@ -1178,6 +1196,8 @@ impl State {
             && self.outgoing.is_empty()
             && !self.orphaned_tail
             && !matches!(self.next, NextTrack::Opening { .. })
+            && self.aside_drains.is_empty()
+            && self.aside_quiet()
     }
 
     /// Seconds left of the sounding track — negative once it has run past
@@ -1217,6 +1237,51 @@ impl State {
             return None;
         }
         Some(near)
+    }
+
+    /// Pause everything audible — during a blend that is two sinks, and
+    /// pausing only one would leave the other playing under the silence.
+    /// [`Engine::pause`]'s body, and the pause an aside clip puts main in
+    /// when it opens ([`State::pause_main_for_clip`]), so that one honours
+    /// the soft pause too.
+    fn pause_now(&mut self) {
+        if self.sink.is_paused() || self.pausing.is_some() {
+            return;
+        }
+        // The soft pause (C6, opt-in): ramp down first, land the pause when
+        // the ramp does — the tick performs the landing, since nothing here
+        // may sleep. Without the option, or with nothing audible to fade,
+        // the pause lands now, exactly as it always has.
+        if self.pause_fade && !self.stopped && !self.sink.empty() {
+            self.fade.ramp_to(0.0, PAUSE_FADE);
+            self.pausing = Some(Instant::now() + PAUSE_FADE + Duration::from_millis(400));
+            return;
+        }
+        self.sink.pause();
+        for out in &self.outgoing {
+            out.sink.pause();
+        }
+    }
+
+    /// [`Engine::resume`]'s body, after its wake: and the resume an aside
+    /// session gives main back with ([`State::restore_main`]).
+    fn resume_now(&mut self) {
+        // A soft pause still mid-ramp: the resume overtakes it — cancel the
+        // landing and ramp straight back up from wherever the fade stands.
+        let overtaking = self.pausing.take().is_some();
+        if (overtaking || self.sink.is_paused()) && self.pause_fade && !self.stopped {
+            self.fade.ramp_to(1.0, PAUSE_FADE);
+        }
+        self.sink.play();
+        for out in &mut self.outgoing {
+            out.sink.play();
+            // The wall clock ran through the pause while the blend stood
+            // frozen; a deadline that came due in that time would cut the
+            // outgoing at audible gain on the very next tick. Re-arm with
+            // the full window — the deadline is a pathology net, and a
+            // generous net still catches what it exists for.
+            out.deadline = Instant::now() + out.fade_dur + OUTGOING_SLACK;
+        }
     }
 }
 
@@ -1494,6 +1559,23 @@ impl OutputWatch {
         self.out.is_dead() || self.quiet
     }
 
+    /// Whether an outage has been announced and still holds: nothing to
+    /// play on, and the listener has been told so.
+    fn no_output(&self) -> bool {
+        self.outage_told && self.unusable()
+    }
+
+    /// What an aside clip needs to know of the device each tick
+    /// ([`aside::Device`]).
+    fn for_the_clip(&self) -> aside::Device {
+        aside::Device {
+            lost: self.no_output(),
+            taking: !self.unusable()
+                && self.out.is_awake()
+                && self.out.pulse().answers(CALLBACK_FRESH),
+        }
+    }
+
     /// Wake the stream for something about to need its callback, and
     /// restart the idle clock.
     fn wake(&mut self) {
@@ -1660,6 +1742,9 @@ impl Engine {
                 shuffle: false,
                 loop_mode: LoopMode::None,
             },
+            aside: None,
+            aside_drains: Vec::new(),
+            aside_ends: Vec::new(),
         }));
 
         Ok(Engine {
@@ -1731,7 +1816,9 @@ impl Engine {
             w.wake();
             return None;
         }
-        Some(s.stopped)
+        // A paused clip over a stopped main sleeps as a pause does, not as
+        // a stop: the clip is still there to resume.
+        Some(s.stopped && s.aside.is_none())
     }
 
     /// Once the engine has been at rest long enough — [`IDLE_STOPPED`] or
@@ -2090,6 +2177,11 @@ impl Engine {
         // held the state's comes first.
         self.wake_output();
         let mut s = self.state.lock().unwrap();
+        // Main always wins: an aside clip ends here, as the command lands
+        // and not when main's open finishes, so the driver and the engine
+        // never disagree about whether a clip is live. Nothing is given
+        // back for it.
+        s.end_aside_for_main();
         // Boundary first, staging second — every mutator's discipline now:
         // promotion writes the index and queue, and must never overwrite
         // what this caller is about to decide (fix-round review).
@@ -2186,26 +2278,14 @@ impl Engine {
         s.invalidate_next();
     }
 
-    /// Pause everything audible — during a blend that is two sinks, and
-    /// pausing only one would leave the other playing under the silence.
+    /// Pause everything audible — see [`State::pause_now`]. A clip
+    /// playing aside ends first, as `Taken`, and gives nothing back: the
+    /// listener's pause is for main as it stands, which the clip has
+    /// already paused.
     pub fn pause(&self) {
         let mut s = self.state.lock().unwrap();
-        if s.sink.is_paused() || s.pausing.is_some() {
-            return;
-        }
-        // The soft pause (C6, opt-in): ramp down first, land the pause when
-        // the ramp does — the tick performs the landing, since nothing here
-        // may sleep. Without the option, or with nothing audible to fade,
-        // the pause lands now, exactly as it always has.
-        if s.pause_fade && !s.stopped && !s.sink.empty() {
-            s.fade.ramp_to(0.0, PAUSE_FADE);
-            s.pausing = Some(Instant::now() + PAUSE_FADE + Duration::from_millis(400));
-            return;
-        }
-        s.sink.pause();
-        for out in &s.outgoing {
-            out.sink.pause();
-        }
+        s.end_aside_for_main();
+        s.pause_now();
     }
 
     /// Land a soft pause whose ramp has finished (or whose net came due).
@@ -2232,22 +2312,9 @@ impl Engine {
         // track sounds from where it stood as soon as a stream is there.
         self.wake_output();
         let mut s = self.state.lock().unwrap();
-        // A soft pause still mid-ramp: the resume overtakes it — cancel the
-        // landing and ramp straight back up from wherever the fade stands.
-        let overtaking = s.pausing.take().is_some();
-        if (overtaking || s.sink.is_paused()) && s.pause_fade && !s.stopped {
-            s.fade.ramp_to(1.0, PAUSE_FADE);
-        }
-        s.sink.play();
-        for out in &mut s.outgoing {
-            out.sink.play();
-            // The wall clock ran through the pause while the blend stood
-            // frozen; a deadline that came due in that time would cut the
-            // outgoing at audible gain on the very next tick. Re-arm with
-            // the full window — the deadline is a pathology net, and a
-            // generous net still catches what it exists for.
-            out.deadline = Instant::now() + out.fade_dur + OUTGOING_SLACK;
-        }
+        // Main resumes and the clip is over: the listener chose main.
+        s.end_aside_for_main();
+        s.resume_now();
     }
 
     pub fn stop(&self) {
@@ -2256,7 +2323,9 @@ impl Engine {
         // No new stream is asked for on a dead device's account — a stop
         // leaves nothing that needs one.
         self.wake();
-        self.state.lock().unwrap().stop_softly();
+        let mut s = self.state.lock().unwrap();
+        s.end_aside_for_main();
+        s.stop_softly();
     }
 
     pub fn seek(&self, position: f64) -> Result<(), EngineError> {
@@ -2284,6 +2353,9 @@ impl Engine {
         // lock out of that wait; the wait itself is gone now).
         let (sink, fade, feed) = {
             let mut s = self.state.lock().unwrap();
+            // A seek is a main command: an aside clip ends, and main stays
+            // paused at its new place — the bar showed it paused.
+            s.end_aside_for_main();
             // rodio's seek order is sink-wide, and under gapless a sink can
             // briefly hold two tracks. A boundary that has already crossed
             // is promoted before the order is placed so the seek aims at
@@ -2385,6 +2457,8 @@ impl Engine {
         for out in &s.outgoing {
             out.sink.set_volume(v);
         }
+        // The aside clip and its breaths answer to the same knob.
+        s.aside_volume(v);
     }
 
     /// Seconds of blend between tracks; 0 turns it off. Serve mode sets
@@ -2470,6 +2544,7 @@ impl Engine {
     pub fn next_manual(&self) -> Result<(), EngineError> {
         self.wake_output();
         let mut s = self.state.lock().unwrap();
+        s.end_aside_for_main();
         s.promote_if_crossed();
         match pick_next(&s.q, true) {
             Some(idx) => {
@@ -2494,6 +2569,7 @@ impl Engine {
         let _waiting = CallbackWait::new(&self.callback_waits);
         self.wake_output();
         let mut s = self.state.lock().unwrap();
+        s.end_aside_for_main();
         s.promote_if_crossed();
         if s.q.index == 0 {
             if s.q.loop_mode == LoopMode::All && !s.q.queue.is_empty() {
@@ -2585,6 +2661,8 @@ impl Engine {
         // alone meant /stop-then-add (or clear-then-add) landed in that
         // beat and never started (C4 review, critic).
         if was_empty && (s.stopped || s.sink.empty()) {
+            // Playback starts, a main command like any other.
+            s.end_aside_for_main();
             s.q.index = 0;
             let _ = s.start_current(&self.bus);
         }
@@ -2598,6 +2676,7 @@ impl Engine {
         s.q.queue.extend(files.into_iter().map(QueueEntry::new));
         s.invalidate_next();
         if was_empty && (s.stopped || s.sink.empty()) && !s.q.queue.is_empty() {
+            s.end_aside_for_main();
             s.q.index = 0;
             let _ = s.start_current(&self.bus);
         }
@@ -2606,6 +2685,7 @@ impl Engine {
     pub fn queue_play_index(&self, index: usize) -> Result<(), EngineError> {
         self.wake_output();
         let mut s = self.state.lock().unwrap();
+        s.end_aside_for_main();
         s.promote_if_crossed();
         if index >= s.q.queue.len() {
             return Err(EngineError::OutOfBounds);
@@ -2654,6 +2734,7 @@ impl Engine {
         }
         match outcome {
             RemoveOutcome::EmptiedQueue => {
+                s.end_aside_for_main();
                 s.stop_softly();
             }
             RemoveOutcome::RemovedCurrent => {
@@ -2662,6 +2743,7 @@ impl Engine {
                 // playing; the original started audio as a side effect of
                 // removing a track while stopped.
                 if !s.stopped {
+                    s.end_aside_for_main();
                     let _ = s.start_current(&self.bus);
                 }
             }
@@ -2676,6 +2758,7 @@ impl Engine {
         // Awake for the stop's sake, as in Engine::stop.
         self.wake();
         let mut s = self.state.lock().unwrap();
+        s.end_aside_for_main();
         s.stop_softly();
         s.q.queue.clear();
         s.q.index = 0;
@@ -2707,9 +2790,16 @@ impl Engine {
         // on entry, and this covers the stretches where nobody is pressing
         // anything — the exact stretch an unplug usually lands in.
         self.ensure_output();
+        // The device's word for the aside clip, read before the state lock:
+        // where both locks are held, the state's is taken first.
+        let device = self.output.lock().unwrap().for_the_clip();
         let mut s = self.state.lock().unwrap();
         Self::land_pause(&mut s);
         s.retire_outgoing();
+        // Before the blend machine: a clip installed here pauses main in
+        // the same tick, so no blend step runs against a main about to
+        // stop sounding.
+        s.aside_step(&self.bus, device, Instant::now());
         self.crossfade_step(&mut s);
         // Awake unless at rest — ahead of the advance below, which is never
         // at rest — and asleep once the rest has lasted (audit #75).
@@ -3156,7 +3246,7 @@ mod tests {
 
     /// A server that sends headers and a few bytes, then nothing, forever:
     /// an open that can only end by a deadline or by being given up.
-    fn stalled_url() -> String {
+    pub(super) fn stalled_url() -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3345,7 +3435,7 @@ mod tests {
     /// samples are some 550 ms of work in an unoptimised build — more than
     /// the test build's open waits for an answer, and twice that with the
     /// suite's other servers making theirs beside it.
-    fn wav_bytes(seconds: usize) -> Vec<u8> {
+    pub(super) fn wav_bytes(seconds: usize) -> Vec<u8> {
         let rate = 44_100usize;
         let frames = rate * seconds;
         let mut data = Vec::with_capacity(44 + frames * 4);
@@ -3404,7 +3494,7 @@ mod tests {
     /// holds the rest until the flag it hands back is raised — on every
     /// connection, the download watchdog's range reconnects included, so
     /// the stall lasts exactly as long as the test wants it to.
-    fn held_wav_server(seconds: usize, sent_first: usize) -> (String, Arc<AtomicBool>) {
+    pub(super) fn held_wav_server(seconds: usize, sent_first: usize) -> (String, Arc<AtomicBool>) {
         let (url, release, _) = watched_held_wav_server(seconds, sent_first);
         (url, release)
     }
@@ -3735,7 +3825,9 @@ mod tests {
 
     /// A server that answers each request with a whole WAV and counts the
     /// requests — how a test proves an open was reused, not repeated.
-    fn counting_wav_server(seconds: usize) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    pub(super) fn counting_wav_server(
+        seconds: usize,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -5785,7 +5877,7 @@ mod tests {
     // how a stream dies.
 
     /// An engine on a stage whose default device is `default`.
-    fn staged(default: &str) -> (Arc<Engine>, output::stage::Stage) {
+    pub(super) fn staged(default: &str) -> (Arc<Engine>, output::stage::Stage) {
         let stage = output::stage::Stage::new(default);
         let engine = Engine::on(stage.backend()).unwrap_or_else(|e| panic!("the stage opens: {e}"));
         (Arc::new(engine), stage)
@@ -5793,7 +5885,7 @@ mod tests {
 
     /// Thirty seconds of WAV to play on a stage, at a path of this test's
     /// own.
-    fn staged_track(name: &str) -> String {
+    pub(super) fn staged_track(name: &str) -> String {
         let path =
             std::env::temp_dir().join(format!("mstream-stage-{}-{name}.wav", std::process::id()));
         std::fs::write(&path, wav_bytes(30)).unwrap();
@@ -5801,20 +5893,20 @@ mod tests {
     }
 
     /// What a stretch of ticking heard, and the longest any one tick took.
-    struct Watched {
-        heard: Vec<DeviceNotice>,
+    pub(super) struct Watched {
+        pub(super) heard: Vec<DeviceNotice>,
         longest_tick: Duration,
     }
 
     impl Watched {
-        fn said(&self) -> Vec<&str> {
+        pub(super) fn said(&self) -> Vec<&str> {
             self.heard.iter().map(|notice| notice.text.as_str()).collect()
         }
     }
 
     /// Tick the way a driver does until `done` says so, or fail after ten
     /// seconds of it never saying so.
-    fn tick_until(
+    pub(super) fn tick_until(
         engine: &Engine,
         mut done: impl FnMut(&Engine, &[DeviceNotice]) -> bool,
     ) -> Watched {
@@ -5834,7 +5926,7 @@ mod tests {
     }
 
     /// Whether the news so far says the audio is somewhere again.
-    fn settled_somewhere(_: &Engine, heard: &[DeviceNotice]) -> bool {
+    pub(super) fn settled_somewhere(_: &Engine, heard: &[DeviceNotice]) -> bool {
         heard.iter().any(|notice| !notice.lost)
     }
 
@@ -6698,7 +6790,7 @@ mod tests {
 
     /// A State with no device behind it: the sink is a rodio Player that
     /// nothing pulls, which is all the bookkeeping predicates need.
-    fn bare_state() -> State {
+    pub(super) fn bare_state() -> State {
         State {
             sink: Arc::new(Player::new().0),
             fade: fade::FadeHandle::new(1.0),
@@ -6723,6 +6815,9 @@ mod tests {
             next: NextTrack::Idle,
             outgoing: Vec::new(),
             q: QueueState { queue: Vec::new(), index: 0, shuffle: false, loop_mode: LoopMode::None },
+            aside: None,
+            aside_drains: Vec::new(),
+            aside_ends: Vec::new(),
         }
     }
 
@@ -6880,7 +6975,7 @@ mod tests {
     }
 
     /// Tick for `span`, the way a driver would.
-    fn tick_for(engine: &Engine, span: Duration) {
+    pub(super) fn tick_for(engine: &Engine, span: Duration) {
         let until = Instant::now() + span;
         while Instant::now() < until {
             engine.advance_tick();
