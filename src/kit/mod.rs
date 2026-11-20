@@ -28,6 +28,9 @@
 //! Text leaves through [`clipboard`], whose routes follow where the player
 //! runs; [`os`] names that place as data a test can hand in.
 
+// The design spec's board mocks and the matcher the GUI's board tests use.
+#[cfg(test)]
+pub(crate) mod boards;
 pub mod clipboard;
 pub mod frames;
 pub mod os;

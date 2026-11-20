@@ -134,6 +134,43 @@ run.sh):
   `/_state` of both fakes says what was started (each copy into the fake's
   `copies` library), what the proxy refused (nothing), the recursive
   listings (one a window) and the tag batch (one, ≤ 100 songs).
+- **R** — the GUI's Peer recs room as an admin, in Apple Terminal's mouse
+  dialect (`FAKE_P2P=1`: the ping's four flags, and the stage's peers,
+  leads, per-tab answers and previews from `test/fixtures/peer_recs`, the
+  files the Rust tests read; docs/ux-contracts/peer-recommendations.md).
+  The seat is silent and stays in the leg: `seed_quiet_home` writes
+  `[player] volume = 0.0` before the GUI starts, and the leg sets
+  `SSH_CLIENT`, so a copy goes out as OSC 52 into the stream, never onto
+  the machine's pasteboard. At 100 × 30 with the queue folded, `R` opens
+  the room: Peer recs on nav row 18 under Discover, the header on row 2,
+  the strip on row 4, the twelve leads 6 | 6 with their titles at x 19 and
+  59, and one golden R1 body. `y` copies the twelve lines in rank order. A
+  click on the Kitchen Radio tab asks for its five leads at once, pinned to
+  the batch's seeds (`networkPeers`, `pin`, `limit.seeds`); its echo asks
+  nothing more. A click on a row opens the lead's sheet, and its echo,
+  landing on the sheet's own `[X]`, closes nothing and presses no row. The
+  previews are asserted where the run's log (`MSTREAM_LOG`) says
+  `output opened on`, their absence where it does not (no Preview row, no
+  slot, no band, no resolve): on a machine with a device, `l` on the lead
+  whose clip URL is dead notes No preview and forgets the answer, so the
+  next `l` resolves once more, and its slot reads idle, not muted; `l` on
+  another plays its 2 s clip in the band. The tabs stop walks to
+  `+ Lighthouse Tapes`: Enter posts the Add once, the tab reads
+  `adding…` and is inert, the fast poll sees it land (Lighthouse Tapes on
+  the shelf, Attic Tapes gone), and one pinned re-ask follows.
+  `check_peer_recs.py admin` replays the stream at the leg's `@@PR:…@@`
+  marks, each with the fake's `/_state` kept beside it
+  (`state-<mark>.json` in the leg's HOME), and reads the colours where only
+  they tell a state (the stop's slab, an idle slot); with
+  `E2E_CAPTURES=DIR` it keeps every mark's decoded frame there. `/_state`
+  then says
+  one Add, three network asks, no preview artwork fetched
+  (`art_gets == 0`) and no Discover body carrying a generation-3 key
+  (`discover_gen3_bodies == 0`).
+- **R2** — the same room as a member (`FAKE_P2P=1 FAKE_MEMBER=1`): the
+  strip is the shelf alone with nothing past it, the tabs stop walks to its
+  last tab and selects it, no frame draws a `+`, `adding…` or
+  `try again`, and the fake counts no Add (`check_peer_recs.py member`).
 
 ## The three harness laws (learned the hard way)
 

@@ -6,7 +6,7 @@
 | **Server API** | `POST /api/v1/db/rate-song {filepath, rating}` — `rating` 0–10 or `null` to clear; 404 for a path the library does not hold · `POST /api/v1/playlist/add-song {playlist, song}` — appends the vpath-relative path, **creating the playlist when it does not exist** · `GET /api/v1/playlist/getall` → `[{name}]` sorted, case-insensitive · `POST /api/v1/db/metadata {filepath}` → the full block for one track · `GET /api/v1/db/rated` → the user's rated tracks (a browse list, not ported here) · `GET /api/v1/lyrics?path=` (not ported here). **Off the federation allowlist**: rate-song, every playlist route, lyrics — a peer's track has no rating, no playlist and no words to open. |
 | **Already in this repo** | The queue's verbs and their meanings are the multi-server contract's clauses 30–34 (Play now, Add next, Add to end, Play from here, Add all, Remove, Reorder, Clear, shuffle and repeat, what starts an empty queue, the panel's head); `Queue::{insert_next, move_row, remove, clear, replace}` and the App's `queue_selected_next`, `remove_queue_row`, `move_queue_row`, `jump_to_playing`, `play_index`; the TUI's keys `N` `P` `d` `C` `<` `>` `i`; the GUI's hover verbs `[▸] [»] [+]` on every track row (`draw_pane_rows`) and the queue panel (`src/gui/queue.rs`: rows three tall with covers, a click plays, a hover `[x]` removes, the DJ badge, the count with the total length); `TrackMetadata` carrying `rating`, `bpm`, `musical_key`, `has_lyrics`, `format`, `bitrate`, `sample_rate`, `bit_depth`, `channels`, `file_size`, `genres`, `track_total`, `disc_total`; the client's `metadata`, `playlists`, `playlist_new`; the playlists room's name dialog. **Missing**: any per-track sheet, a `rate-song` and an `add-song` client call, reorder in the GUI (a grip, or keys), a Clear verb in the panel, keyboard reach into the panel, Song info, a way to open the sheet from the playing track. |
 | **Target surface** | the GUI player — every track row (Files, the albums' tracks, the library rooms, Search, Playlists), the queue panel's rows, and the bar's playing card; the App gains the rating and add-to-playlist plumbing the TUI shares |
-| **Status** | contract extracted 2026-09-21 and **implemented the same day** — the shared half in `src/tui/app/track.rs` (rating, add to playlist, the block, playlist names), the GUI's in `src/gui/actions.rs` (the sheet, the picker, Song Info, the queue's grip, clear and keys); **checked on the rig the same day** (`smoke/gui/scenario_actions.py`: the sheet from a row's verb, a four-star rating the server kept, Song Info, a playlist created by the add and listed in its room, the header's clear) |
+| **Status** | contract extracted 2026-09-21 and **implemented the same day** — the shared half in `src/tui/app/track.rs` (rating, add to playlist, the block, playlist names), the GUI's in `src/gui/actions.rs` (the sheet, the picker, Song Info, the queue's grip, clear and keys); **checked on the rig the same day** (`smoke/gui/scenario_actions.py`: the sheet from a row's verb, a four-star rating the server kept, Song Info, a playlist created by the add and listed in its room, the header's clear); **the lead form** for the Peer recs room's network leads 2026-11-20 (entry point 5, clauses 23–31) |
 
 ## Intent
 
@@ -29,6 +29,10 @@ something you can only watch.
 4. The verbs the sheet gathers stay where they are: the row's own hover
    verbs and keys (`P` `N` `a`), the bar's Play / Queue all / Shuffle
    (browser-top-bar contract), the panel's `[x]`.
+5. **A network lead** in the Peer recs room (2026-11-20): Enter or `m` on
+   a held lead, a click or a right click on its row, and the room's band's
+   `[ get it ]` open the sheet in its **lead form** (clauses 23–31;
+   docs/ux-contracts/peer-recommendations.md §1.9).
 
 ## States & flows
 
@@ -86,7 +90,9 @@ drags it; `clear` empties the queue and ends playback.
    described thinly — a file explorer row, a search hit — fills in while
    the sheet is up; the header and badges update in place.
 9. **Esc closes**; a click outside closes; the sheet owns the keyboard
-   while it is up (the kit's modal law).
+   while it is up (the kit's modal law). Since 2026-11-20 the room
+   beneath it is also inert in every room — drawn without the pointer,
+   its hover and tooltips asleep — as that law says.
 
 ### Rating
 
@@ -160,6 +166,62 @@ drags it; `clear` empties the queue and ends playback.
 22. **Persistence**: the queue's order and badges are saved as today;
     a reorder or a removal is a save.
 
+### The lead form (2026-11-20)
+
+The Peer recs room's leads are songs on the p2p network that the user
+does not own: metadata with no file, no stream and no cover. Each opens
+this sheet, so a song has one window wherever it is met (clause 1); the
+room's contract is docs/ux-contracts/peer-recommendations.md, whose §1.9
+these clauses serve.
+
+23. **A lead is a subject without a file.** The sheet holds the lead's
+    index in the room's list and the lead's key, and re-finds the key on
+    every draw, key and action: at another index the sheet follows the
+    lead; gone from the list, the sheet closes. Opening it never plays.
+24. **The frame is clause 1's**: `66.min(w − 2).max(44)` wide, 12 tall
+    with four rows, centred on the whole frame (x 17–82, y 9–20 at
+    100×30; y 6–17 at 100×24), the rounded border in the accent, `[X]`
+    dim at x 79–81 on the first inner row.
+25. **The head names the lead by its words**: no cover (a lead has no
+    art); the title BOLD; the byline `artist · album`, either half
+    missing; the length alone, with no format; then the badge row, `from
+    {peer label}` dim and, only while the room's latest peers poll says
+    that peer is online, `•` ok and `online` dim — where a connected
+    server's row (discovery-page clause 102) always says online.
+26. **A lead is never the user's own song**: no stars are drawn, and `←
+    →` and `0`–`5` send no rating (clause 10 does not apply); no match
+    line, no lyrics badge.
+27. **The rows, in order**, each hidden when its gate fails, never
+    greyed: **Preview** (with an audio device and a preview plug-in; its
+    glyph follows the room's one clip for this lead — `▸` idle, `▮▮`
+    playing, `▸` BOLD paused, `◌` busy — and with no preview for the
+    visit it reads `No preview`, dim and inert); **Get it**, one row per
+    acquire plug-in other than federation-copy, with the plug-in's title
+    after it only when there are several (gated on `jobs.allowed` and a
+    destination); **Open elsewhere…** (the links plug-in, its list hung
+    from the row as for a connected server's row); **Copy title**,
+    always. Absent: Play now, Add next, Add to end, Add to playlist,
+    Song info and Keep a copy… — they want a file.
+28. **The cursor starts on Get it**, else Open elsewhere…, else Copy
+    title, so Enter never plays; `↑ ↓` skip a muted Preview. The slab
+    spans the inner width, BOLD.
+29. **Get it's job** stands at the row's right in its mark's word and
+    token, ending at x 80 — `downloading…` (accent) while it runs, then
+    the marks' `◷ waiting`, `✓ kept`, `! failed` and the rest — from one
+    lookup when the sheet opens and a poll every 1.5 s while it is open
+    and the job is live; it is not drawn while Open elsewhere's list
+    hangs. A live job takes no second press; after kept the row is
+    inert; after failed, stopped, cancelled or refused, Enter starts
+    again. Closing the sheet leaves the job running.
+30. **Copy title** copies `Artist - Title` (the title alone when there
+    is no artist), closes the sheet and leaves the note `Copied`, or
+    `Couldn't copy` when nothing took it — both dim.
+31. **Every track path skips a lead**: the details fetch on open (clause
+    8), the cover, Keep a copy's owner ask, the rating, the playlist
+    picker and Song info. The room's own keys do nothing while the sheet
+    is up; its Preview row is the clip's control. The tips are the
+    Discover room's sheet tips.
+
 ## Wording
 
 | String | Key |
@@ -176,6 +238,8 @@ drags it; `clear` empties the queue and ends playback.
 | Track N of M · Disc N of M · Length · BPM · Key · Genre · Format · Bitrate · Sample rate · Bit depth · Channels · File size · Play count · Path | `gui.info.*` — the record's chips are self-labelling; the labels here are this surface's |
 | clear (the header verb) · Clear queue (its tip) | `gui.queue.clear` · `gui.queue.clear_tip` — `mainClearQueue` |
 | Drag to reorder (the grip's tip) | `gui.queue.grip_tip` |
+| The lead form: Preview · No preview · Get it · downloading… · Copy title · Copied · Couldn't copy | `gui.peer_recs.preview` · `no_preview` · `get_it` · `downloading` · `copy` · `copied` · `copy_failed` (2026-11-20) |
+| The lead form's badge and links row: from %{server} · online · Open elsewhere… | `gui.act.from_server` · `gui.act.online` · `gui.act.open_elsewhere` (reused) |
 
 ## Out of scope here
 
@@ -206,6 +270,7 @@ drags it; `clear` empties the queue and ends playback.
 | Focus | The App's `Focus::Queue` set by a click on a row; the panel draws the highlighted row only while the keyboard holds the cursor (`queue_view.held`); the GUI routes `< > d C i m Enter ↑ ↓` to the App while the queue has focus, the row verbs only with the cursor up; Esc or a browse click returns to `Focus::Browser` and stows the cursor |
 | The playing card | The bar's card gets a hover `[⋯]` and `m` opens the sheet for `now_playing` |
 | Notes | The note line, the record's snackbar words |
+| The web's recommendation window and the phone's lead sheet for a network lead | The lead form (clauses 23–31): `Sheet` holds the lead's index and key beside its track subject; `actions::open_lead` opens it, `actions_for` builds its rows (`SheetAction::Preview`, `GetIt(n)`, `CopyTitle`, and Open elsewhere…), and the room's App methods answer them |
 
 ### What the tests pin
 
@@ -268,3 +333,16 @@ while the queue has focus and stop when a browse click takes it back;
   new-playlist name box has a Create button beside the field (clause 12).
   The bar's time slots widen with the total, so a track past a hundred
   minutes keeps its times off the seek cells.
+- **2026-11-20 — The lead form** (entry point 5, clauses 23–31;
+  docs/ux-contracts/peer-recommendations.md §1.9). Every client opens its
+  existing song window for a p2p lead — the webapp the now-playing
+  recommendation window, the phone its lead sheet — so here the sheet
+  takes a subject without a file. The approved Peer recs board's own
+  46-wide keep-window modal (title on the border, "Find elsewhere…",
+  "Get it…", "Copy") is superseded. A lead is never "own": no stars and
+  no rating keys, which the sheet's own-song test would otherwise have
+  switched on. Its words: "Get it" (it acts at once, so no ellipsis),
+  "Copy title", `downloading…` for a running job, "Open elsewhere…" (the
+  sheet's existing word). Clause 9 widens with it: the sheet now makes
+  the room beneath it inert in every room, as the kit's modal law
+  already said; before, it did not.

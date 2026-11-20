@@ -1132,6 +1132,15 @@ pub(crate) fn awaits_answer(effect: &Effect) -> bool {
             | Effect::Audio(
                 AudioCmd::Play { .. } | AudioCmd::Pause | AudioCmd::Resume | AudioCmd::Stop | AudioCmd::Seek(_)
             )
+            // A preview clip's commands: the band follows the clip's
+            // status and end, which the audio thread sends straight back.
+            | Effect::Audio(
+                AudioCmd::AsidePlay { .. }
+                    | AudioCmd::AsidePause { .. }
+                    | AudioCmd::AsideResume { .. }
+                    | AudioCmd::AsideStop { .. }
+                    | AudioCmd::AsideHold { .. }
+            )
     )
 }
 

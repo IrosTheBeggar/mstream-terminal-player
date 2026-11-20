@@ -18,6 +18,9 @@ pub mod types;
 pub mod urls;
 // Add from YouTube's routes, with an error that keeps what its copy needs.
 pub mod ytdl;
+// The Peer recs room's one door: its commands, its events and the shaper
+// both workers share (peer-recs contract §1.4).
+pub(crate) mod peer_recs_door;
 
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1312,6 +1315,67 @@ impl Client {
         let answer: PluginResolveResponse =
             self.send_plugin(Method::POST, &path, Some(serde_json::json!({ "recommendation": recommendation }))).await?;
         Ok(answer.result.map(|r| r.links).unwrap_or_default().into_iter().filter(PluginLink::is_web).collect())
+    }
+
+    // ── The Peer recs room (peer-recommendations plan §3.1–3.6) ────────────
+    //
+    // Every call goes to the user's own server (the room is hidden in a peer
+    // session) and has no sync twin: the door's shaper drives them
+    // (`crate::api::peer_recs_door`).
+
+    /// `POST /api/v1/discovery/taste` with the room's own body (taste
+    /// generation 3, peer-recs contract §1.4): answered as Discover's ask.
+    pub async fn taste_network_async(&self, body: &NetworkTasteRequest) -> Result<TasteResponse, ApiError> {
+        self.own_server()?;
+        let body = serde_json::to_value(body)
+            .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
+        self.post("api/v1/discovery/taste", body).await
+    }
+
+    /// `GET /api/v1/discovery/p2p/peers` — the strip (plan §3.2). A 403 is
+    /// `Forbidden` (p2p off, or no account), a 404 `NotFound` (a server
+    /// without the route).
+    pub async fn p2p_peers_async(&self) -> Result<P2pPeersAnswer, ApiError> {
+        self.send_plugin(Method::GET, "api/v1/discovery/p2p/peers", None).await
+    }
+
+    /// `POST /api/v1/admin/discovery/p2p/peer-dbs/add {endpointId}` — an
+    /// admin's async Add (plan §3.2, §5.6). Every status but a 401 is an
+    /// answer, the state read off a 200 or 202 body; no answer at all is
+    /// status 0. The server's words are never carried: the strip draws
+    /// only "adding…", "no room" or "try again".
+    pub async fn p2p_peer_add_async(&self, endpoint_id: &str) -> Result<PeerAddAnswer, ApiError> {
+        self.own_server()?;
+        let path = "api/v1/admin/discovery/p2p/peer-dbs/add";
+        let body = serde_json::json!({ "endpointId": endpoint_id });
+        match read_answer(self.request(Method::POST, path, Some(body), None)?).await {
+            Ok((StatusCode::UNAUTHORIZED, _)) => Err(ApiError::Unauthorized),
+            Ok((status, text)) => Ok(PeerAddAnswer::of_reply(status.as_u16(), &text)),
+            Err(ApiError::Network(_)) => Ok(PeerAddAnswer { status: 0, state: None }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `POST /api/v1/discovery/plugins/{plugin}/resolve` on a preview
+    /// plug-in: its clip for `recommendation`, sent as the lead came
+    /// (plan §3.4). `Ok(None)` is `preview: null`, no clip for this lead; a
+    /// plug-in's 429 stays `Server { status: 429 }` for the room's wait.
+    pub async fn plugin_preview_async(
+        &self,
+        plugin: &str,
+        recommendation: &serde_json::Value,
+    ) -> Result<Option<PluginPreview>, ApiError> {
+        let path = format!("api/v1/discovery/plugins/{}/resolve", urlencode(plugin));
+        let answer: PreviewResolveResponse =
+            self.send_plugin(Method::POST, &path, Some(serde_json::json!({ "recommendation": recommendation }))).await?;
+        Ok(answer.into_preview())
+    }
+
+    /// `GET /api/v1/discovery/plugin-jobs/{id}` — one job as it stands:
+    /// the lead sheet's Get it row, polled while the sheet is open.
+    pub async fn plugin_job_async(&self, id: i64) -> Result<Option<PluginJob>, ApiError> {
+        let answer: SingleJob = self.send_plugin(Method::GET, &format!("api/v1/discovery/plugin-jobs/{id}"), None).await?;
+        Ok(answer.job)
     }
 
     /// `POST /api/v1/db/artists-albums` with the credit facts the Keep
@@ -3902,7 +3966,123 @@ pub(crate) mod tests {
             assert!(matches!(wait(client.discovery_plugins_async()), Err(ApiError::Config(_))));
             assert!(matches!(wait(client.plugin_jobs_async(None, None)), Err(ApiError::Config(_))));
             assert!(matches!(wait(client.plugin_jobs_lookup_batch_async(&[serde_json::json!({})])), Err(ApiError::Config(_))));
+            // The Peer recs room's five: the room is hidden in a peer session,
+            // and its asks are refused before any request all the same.
+            let body = NetworkTasteRequest::new(30, Vec::new(), Vec::new(), 12, None);
+            assert!(matches!(wait(client.taste_network_async(&body)), Err(ApiError::Config(_))));
+            assert!(matches!(wait(client.p2p_peers_async()), Err(ApiError::Config(_))));
+            assert!(matches!(wait(client.p2p_peer_add_async(&"a".repeat(64))), Err(ApiError::Config(_))));
+            assert!(matches!(wait(client.plugin_preview_async("deezer", &serde_json::json!({}))), Err(ApiError::Config(_))));
+            assert!(matches!(wait(client.plugin_job_async(7)), Err(ApiError::Config(_))));
         }
+    }
+
+    #[test]
+    fn the_network_taste_posts_its_body_verbatim() {
+        let tab = types::fixtures::KITCHEN;
+        let (port, seen) = canned_server_bodies(vec![json_reply("200 OK", types::fixtures::json("taste_kitchen"))]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let pins = vec!["testlib/Vosto/Night Drive/01 - Highway.mp3".to_string()];
+        let body = NetworkTasteRequest::new(30, pins, vec!["h1".into()], 1, Some(tab));
+        let answer = wait(client.taste_network_async(&body)).unwrap();
+        assert_eq!(answer.network.unwrap().results.len(), 5);
+        let (line, sent) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/discovery/taste "), "{line}");
+        assert_eq!(
+            sent,
+            serde_json::json!({
+                "window": 30, "pin": ["testlib/Vosto/Night Drive/01 - Highway.mp3"], "exclude": ["h1"],
+                "sources": ["network"], "newArtistsOnly": false, "limit": { "seeds": 1, "network": 32 },
+                "networkOnRandomSeed": true, "networkPeers": [tab]
+            })
+        );
+    }
+
+    #[test]
+    fn the_peers_route_reads_its_answer_and_keeps_a_403_and_a_404() {
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("200 OK", types::fixtures::json("peers_admin")),
+            json_reply("403 Forbidden", serde_json::json!({ "error": "discovery P2P is disabled" })),
+            json_reply("404 Not Found", serde_json::json!({ "error": "Not Found" })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let answer = wait(client.p2p_peers_async()).unwrap();
+        assert_eq!(answer, types::fixtures::peers("peers_admin"));
+        assert!(answer.can_add && answer.peers.len() == 7);
+        let (line, _) = seen_json(&seen);
+        assert!(line.starts_with("GET /api/v1/discovery/p2p/peers "), "{line}");
+        assert!(matches!(wait(client.p2p_peers_async()), Err(ApiError::Forbidden(_))));
+        assert!(matches!(wait(client.p2p_peers_async()), Err(ApiError::NotFound(_))));
+    }
+
+    #[test]
+    fn an_add_posts_its_id_and_keeps_every_status() {
+        let id = types::fixtures::LIGHTHOUSE;
+        let state = |state: &str, code: Option<&str>| {
+            serde_json::json!({ "endpointId": id, "state": state, "code": code, "at": "2026-11-20T06:09:06.327Z" })
+        };
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("202 Accepted", state("adding", None)),
+            json_reply("200 OK", state("done", None)),
+            json_reply("200 OK", state("failed", Some("no-room"))),
+            json_reply("404 Not Found", serde_json::json!({ "error": "not-in-catalog" })),
+            json_reply("409 Conflict", serde_json::json!({ "error": "blocked" })),
+            json_reply("405 Method Not Allowed", serde_json::json!({ "error": "admin API is locked" })),
+            Vec::new(),
+            json_reply("401 Unauthorized", serde_json::json!({ "error": "no" })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let add = || wait(client.p2p_peer_add_async(id));
+        let adding = add().unwrap();
+        assert_eq!((adding.status, adding.state.map(|s| s.state)), (202, Some(PeerAddKind::Adding)));
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/admin/discovery/p2p/peer-dbs/add "), "{line}");
+        assert_eq!(body, serde_json::json!({ "endpointId": id }));
+        assert_eq!(add().unwrap().state.map(|s| s.state), Some(PeerAddKind::Done));
+        let no_room = add().unwrap();
+        assert!(no_room.status == 200 && no_room.state.is_some_and(|s| s.no_room()));
+        for status in [404, 409, 405] {
+            assert_eq!(add().unwrap(), PeerAddAnswer { status, state: None });
+        }
+        // A socket that drops without an answer is no answer: status 0.
+        assert_eq!(add().unwrap(), PeerAddAnswer { status: 0, state: None });
+        assert!(matches!(add(), Err(ApiError::Unauthorized)));
+    }
+
+    #[test]
+    fn a_preview_posts_the_lead_unchanged_and_a_429_stays_a_429() {
+        let lead = types::fixtures::json("taste_all")["network"]["results"][2].clone();
+        assert!(lead["peer"]["label"].is_string() && lead["tile"].is_object());
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("200 OK", types::fixtures::preview("preview_deezer")),
+            json_reply("200 OK", types::fixtures::preview("preview_null")),
+            json_reply("429 Too Many Requests", serde_json::json!({ "error": "Quota limit exceeded" })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let clip = wait(client.plugin_preview_async("deezer", &lead)).unwrap().unwrap();
+        assert_eq!(clip.url, "http://127.0.0.1:3996/preview/3.mp3");
+        let (line, body) = seen_json(&seen);
+        assert!(line.starts_with("POST /api/v1/discovery/plugins/deezer/resolve "), "{line}");
+        assert_eq!(body, serde_json::json!({ "recommendation": lead }));
+        assert_eq!(wait(client.plugin_preview_async("deezer", &lead)).unwrap(), None);
+        assert!(matches!(
+            wait(client.plugin_preview_async("deezer", &lead)),
+            Err(ApiError::Server { status: 429, .. })
+        ));
+    }
+
+    #[test]
+    fn a_single_job_reads_its_answer() {
+        let (port, seen) = canned_server_bodies(vec![
+            json_reply("200 OK", serde_json::json!({ "job": { "id": 7, "plugin": "noop-acquire", "state": "succeeded" } })),
+            json_reply("200 OK", serde_json::json!({ "job": null })),
+        ]);
+        let client = Client::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let job = wait(client.plugin_job_async(7)).unwrap().unwrap();
+        assert_eq!((job.id, job.plugin.as_str()), (7, "noop-acquire"));
+        let (line, _) = seen_json(&seen);
+        assert!(line.starts_with("GET /api/v1/discovery/plugin-jobs/7 "), "{line}");
+        assert_eq!(wait(client.plugin_job_async(7)).unwrap(), None);
     }
 
     #[test]

@@ -82,6 +82,7 @@ fn connected_app() -> App {
         federation_direct: false,
         stats: true,
         discovery_taste: 0,
+        discovery_p2p_peers: 0,
         discovery_plugins: false,
         uploads: true,
         mood_filters: false,

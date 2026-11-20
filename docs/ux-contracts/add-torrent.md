@@ -24,9 +24,13 @@ files and `magnet:` links is what makes the receiving half exist.
 
 1. **In-app navigation** — the screen on its own. *Here: the nav row
    `Add torrent`, the TOOLS group's after Discover (row 18 with all five
-   tools; the group packs the rooms it shows, so it stands higher where
-   the sonic path or Discover is absent, and on short terminals it rises
-   with the block — discovery-page clause 2), drawn
+   tools; where the server offers the Peer recs room it stands under
+   Discover on 18 and this row on 19, Add YouTube on 20 —
+   peer-recommendations.md §1.1; the group packs the rooms it shows, so
+   it stands higher where the sonic path, Discover or Peer recs is
+   absent, and on short terminals it rises with the block, three steps
+   at most, a fourth into row 1 with all six tools at 100 × 24 with the
+   footer on — discovery-page clause 2), drawn
    whenever the Library is: no ping flag exists, the room is the gate. A
    Library nav room, the Auto DJ room's shape: the title row the name in
    BOLD at the room's first cell and the gate's standing at the right, no
@@ -464,3 +468,8 @@ Mine, where the canvas named none: the letters `e` (Metadata) and `l`
   and mStream's test helpers script none — so the add itself, the seed
   check's outcomes, a refusal's real words and a row arriving in the list
   are the unit tests' alone, through the answers they hand the room.
+- **2026-11-20 — A row lower under Peer recs** (entry point 1;
+  discovery-page clause 2, peer-recommendations.md §1.1): where the
+  server offers the Peer recs room it stands under Discover on row 18,
+  Add torrent on 19 and Add YouTube on 20; with all six tools at 100 × 24
+  with the footer on the block takes a fourth step into row 1.

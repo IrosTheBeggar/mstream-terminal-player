@@ -293,6 +293,17 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             with_session(session, async |s| worker::plugin_links(&s.client, seq, generation, &plugin, &rec).await)
                 .await
         }
+        // The Peer recs room's door, through the native worker's shaper.
+        // The browser shell never opens the room (it is the GUI's), but the
+        // door answers here as it does there.
+        ApiCmd::PeerRecs { generation, cmd } => {
+            with_session(session, async |s| {
+                crate::api::peer_recs_door::peer_recs(&s.client, cmd.clone())
+                    .await
+                    .map(|event| Event::PeerRecs { generation, event: Box::new(event) })
+            })
+            .await
+        }
         // One client, the session's: the connected server's sizes are not
         // asked from here, the user's own library's are.
         ApiCmd::KeepFacts { seq, generation, ask, .. } => {

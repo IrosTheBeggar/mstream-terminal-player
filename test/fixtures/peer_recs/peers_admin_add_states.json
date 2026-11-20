@@ -1,0 +1,106 @@
+{
+  "canAdd": true,
+  "shelf": {
+    "held": 4,
+    "searchable": 4,
+    "running": false
+  },
+  "peers": [
+    {
+      "endpointId": "ba5eaa206eb20c70adb0cf0ad30db63b8920232f5da363f97a63e83de67cbfa0",
+      "name": "Basement Hi-Fi",
+      "label": "Basement Hi-Fi",
+      "monogram": "BH",
+      "hue": 210,
+      "online": true,
+      "onShelf": true,
+      "pinned": true,
+      "rowCount": 5,
+      "add": null
+    },
+    {
+      "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+      "name": "Kitchen Radio",
+      "label": "Kitchen Radio",
+      "monogram": "KR",
+      "hue": 25,
+      "online": true,
+      "onShelf": true,
+      "pinned": true,
+      "rowCount": 5,
+      "add": null
+    },
+    {
+      "endpointId": "a771c019b58e7329697be5d4bc8d2b14ddd82e4738bb019bca19ae733f53d2a7",
+      "name": "Attic Tapes",
+      "label": "Attic Tapes",
+      "monogram": "AT",
+      "hue": 112,
+      "online": false,
+      "onShelf": true,
+      "pinned": true,
+      "rowCount": 2,
+      "add": null
+    },
+    {
+      "endpointId": "3f9a1c7cbd00116d0312b285b279e969ca58077702b933169bdb017e0180a4c8",
+      "name": "mStream",
+      "label": "mStream · 3f9a",
+      "monogram": "mS",
+      "hue": 140,
+      "online": false,
+      "onShelf": true,
+      "pinned": true,
+      "rowCount": 2,
+      "add": null
+    },
+    {
+      "endpointId": "11fe908bbf9c90af43356bae07fe59911a2e2fa2f9e620d429bb5fe36d05959c",
+      "name": "Lighthouse Tapes",
+      "label": "Lighthouse Tapes",
+      "monogram": "LT",
+      "hue": 280,
+      "online": true,
+      "onShelf": false,
+      "pinned": false,
+      "rowCount": 9400,
+      "add": {
+        "state": "failed",
+        "code": "no-room",
+        "at": "2026-11-20T06:09:06.327Z"
+      }
+    },
+    {
+      "endpointId": "57a76a82389134bb7ecdb2db349e629901a5b586b0ae8794d56c4f208d18e557",
+      "name": "Static Garden",
+      "label": "Static Garden",
+      "monogram": "SG",
+      "hue": 330,
+      "online": true,
+      "onShelf": false,
+      "pinned": false,
+      "rowCount": 7000,
+      "add": {
+        "state": "adding",
+        "code": null,
+        "at": "2026-11-20T06:09:06.332Z"
+      }
+    },
+    {
+      "endpointId": "f00f709723df9278bcb2b7f62724bb0dee17a42b362970ab516a14a51ba72cff",
+      "name": "Rooftop FM",
+      "label": "Rooftop FM",
+      "monogram": "RF",
+      "hue": 232,
+      "online": true,
+      "onShelf": false,
+      "pinned": false,
+      "rowCount": 3100,
+      "add": {
+        "state": "failed",
+        "code": "offline",
+        "at": "2026-11-20T06:09:06.324Z"
+      }
+    }
+  ]
+}

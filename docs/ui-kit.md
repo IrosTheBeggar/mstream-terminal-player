@@ -83,6 +83,15 @@ Rules:
   — never the terminal default, which may be invisible on a painted
   ground. Anything that `Clear`s (modals) repaints the ground behind
   itself.
+- **One computed colour: a lead's swatch** (the Peer recs room,
+  docs/ux-contracts/peer-recommendations.md §1.12). Every other colour is
+  a token; the swatch is `hsl(hue, 45%, 60%)` of a hue the server stamps
+  on each lead (`kit::theme::swatch`, `swatch_rgb`), drawn only on the
+  truecolor tier (`kit::theme::truecolor()`). On the 256 and named tiers,
+  and for a lead with no hue, it is DIM: an approximated hue would borrow
+  a token's meaning (OK's green, DANGER's red). On the selection slab it
+  keeps its hue as its fg over the ACCENT bg. The native window is always
+  truecolor.
 
 ## Spacing — cells and rows
 
@@ -108,6 +117,17 @@ border, pointing at the target) · `█▀▄` half-blocks (QR only).
 - A seed row's pin (the Auto DJ Seeds sheet, auto-dj clause 64) is ◉
   U+25C9 pinned and ◌ U+25CC not — both narrow, unlike ● — and its menu
   `[⋯]` (U+22EF); a legacy console draws `*`, `o` and `[.]` (2026-11-17).
+- A lead's swatch (the Peer recs room's grid,
+  docs/ux-contracts/peer-recommendations.md §1.12) is ▌ U+258C: one cell
+  in the lead's own hue (Palette), standing in for a tile, never a
+  letter; CP437 has it (0xDD), so a legacy console draws it too
+  (`kit::theme::swatch_glyph`).
+- ◌ U+25CC is also the **busy slot**: a preview resolving or waiting out
+  a limit, GOLD, in the Peer recs room's grid, band and sheet; a legacy
+  console draws `~` (`kit::theme::busy_glyph`, 2026-11-20).
+- `‹ ›` (U+2039 / U+203A, `angle_glyphs`) mark a tab strip's overflow,
+  ACCENT and only where there is more that way (Tabs); a legacy console
+  draws `<` `>`.
 - `ratatui-image` is reserved for album-art surfaces only — never chrome,
   never icons — so screens render identically over SSH and in ratzilla.
 - Glyphs live in code, never in the locale strings: a string that carries
@@ -239,6 +259,21 @@ second: each tab wears its board's mark after the name (✓ ok, ! and ✗
 gold, ? and … DarkGray, a write's percentage in the accent; on the slab
 the mark takes the slab's colours), and the right edge carries a count or
 a text button (Update all).
+**A strip wider than its row scrolls by whole tabs** (the Peer recs
+room's peer tabs, docs/ux-contracts/peer-recommendations.md §1.5): a tab
+that does not fit whole is not drawn, never cut mid-word. `‹` at the
+row's first cell and `›` at its last, ACCENT, stand only where tabs are
+hidden that way (the first tab in view then starts two cells in); each
+click on one scrolls one tab and moves neither the selection nor the
+keyboard's stop, and a key that moves either scrolls it into view. The
+one exception: a single label wider than the whole row is clipped with
+`…` and drawn alone. Widths are cells (`kit::width`). The strip's
+**keyboard stop** is the kit's cursor: the held tab wears the slab, and
+the selected tab, while the stop holds another, reads ACCENT BOLD (the
+active nav row's idiom); a tab with no action (a pending or refused one)
+is skipped. What the strip holds by position — the stop, the first tab
+in view — is held by the tab's identity, so a refresh that reorders the
+tabs moves neither.
 
 ### Dropdown
 A choice among many that has one home on the screen: the current value
@@ -740,6 +775,10 @@ rect registries are dropped before the modal draws (the first tooltip
 registered under the pointer is the one that ripens, so a base layer's
 left standing wins over the modal's own). The GUI's hand follows what a
 click would press: a modal's `Guard` over the screen is no control.
+The track-actions sheet keeps this law in every room since 2026-11-20
+(docs/ux-contracts/track-actions.md clause 9); before, the GUI blanked
+the pointer only under the Discover room's modals, the mood filter and
+the Keep a copy and Add YouTube windows.
 Dismissable pickers (path entry, the server browser) carry a `[X]`
 close on the title row, right edge: DIM, hover BRIGHT + BOLD —
 dismissal is neutral; red stays reserved for the destructive row
@@ -856,6 +895,28 @@ headline — the state word BOLD (`Copying`, `Waiting for a free slot`,
 `▱` and DarkGray `starts on its own`; no counts line (the step already
 counts), and the same never-a-fake-0% rule.
 
+### Band
+**A band is one row that stands in for a room's verbs line while
+something the room started is playing** — the Peer recs room's 30 s
+preview (docs/ux-contracts/peer-recommendations.md §1.8). It holds,
+left to right: the toggle in a 2-cell slot (`▮▮` ACCENT BOLD playing, `▸`
+ACCENT BOLD paused, `◌` GOLD busy); `▸▸` DarkGray, the next one; the
+title in default fg, ` · ` and the artist DarkGray; then, ending at the
+room's last cell, a 10-cell bar (`▰` Green played, `▱` DarkGray to come),
+the source's attribution verbatim — DarkGray, never underlined, a text
+button that opens its link only when it is https — a bracketed `[ get
+it ]` (the kit's `[ Words ]`, DarkGray at rest like `[X]`), and `[X]`,
+which ends what plays; both brackets are BRIGHT + BOLD under the
+pointer. Before the source answers, no bar and no attribution. **Fit:**
+the text clips with `bar::clip` and ends 2 cells before the cluster; when
+fewer than 4 of the artist's cells would show, ` · artist` drops whole;
+when the text would get fewer than 16 cells the parts drop in this
+order — the bar, the `[ get it ]`, the text down to 8 cells, then `▸▸` —
+and the attribution and `[X]` never drop (the source must stay named
+while it plays). A legacy console draws `||`, `>>`, `~` and the bar as
+the words `NN%`. The band leaves when the playing ends, and the verbs
+line comes back.
+
 ## Screen chrome
 
 Top: content starts at the top (no app header); a `N / 4` step counter
@@ -882,15 +943,18 @@ LIBRARY group (Albums, Artists, Genres, Recent, Rated, Playlists, Last
 played, Most played), then a TOOLS group (Auto DJ, whose row wears a `•`
 in the ok colour while the DJ is armed, the capability-gated Sonic path,
 Discover on row 17, gated by the server's `discoveryTaste` —
-docs/ux-contracts/discovery-page.md — then Add torrent and the gated Add
-YouTube on 18 and 19, docs/ux-contracts/add-torrent.md and
-add-from-youtube.md), Settings on the column's last row; eighteen rows
-since 2026-11-09 with every room, the TOOLS group packing the rooms it
-shows (a hidden tool leaves no blank line) — where Settings would meet
-the last of them the rooms rise only as far as they must, into
-the blank under Search, then over the TOOLS heading, then over the
-LIBRARY heading (library-rooms clause 37), so no room is ever on
-Settings' row. Now Playing is the TUI's full-screen view,
+docs/ux-contracts/discovery-page.md — the gated Peer recs on 18 since
+2026-11-20, docs/ux-contracts/peer-recommendations.md — then Add torrent
+and the gated Add YouTube, on 18 and 19, or 19 and 20 under Peer recs,
+docs/ux-contracts/add-torrent.md and add-from-youtube.md), Settings on
+the column's last row; eighteen rows since 2026-11-09 with every room
+(nineteen with Peer recs), the TOOLS group packing the rooms it shows (a
+hidden tool leaves no blank line) — where Settings would meet the last of
+them the rooms rise only as far as they must, into the blank under
+Search, then over the TOOLS heading, then over the LIBRARY heading
+(library-rooms clause 37), and, with all six tools at 100×24 with the
+key hints on, into row 1, Files and Search with them (the fourth step,
+2026-11-20) — so no room is ever on Settings' row. Now Playing is the TUI's full-screen view,
 whole — the facts column with the cover beneath, the tabbed panel, the
 mirrored waveform band — with prev · play · next in the bar's frames
 under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);
@@ -1120,4 +1184,7 @@ owned `String`s so they translate like everything else.
   which Apple Terminal ignores and iTerm2 gates behind a setting, so the
   note says "if it allows it"), **Failed** (nothing took it; the note
   offers another way out). Tests never reach the system clipboard: under
-  test `copy` answers from a per-thread catcher.
+  test `copy` answers from a per-thread catcher. One logged exception: the
+  Peer recs room notes a bare `Copied` for Terminal too, and `Couldn't
+  copy` for Failed, both DarkGray, because its design keeps to the fewest
+  words (docs/ux-contracts/peer-recommendations.md §1.6.4, D20).

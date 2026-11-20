@@ -164,6 +164,17 @@ impl WebAudioPlayer {
             | AudioCmd::SetGapless(_)
             | AudioCmd::SetBlendSkips(_)
             | AudioCmd::SetPauseFade(_) => {}
+            // Preview clips are the GUI's (peer-recs contract §1.8), and
+            // this backend has one element, main's. A clip asked anyway is
+            // refused on its ticket, so the asker is never left waiting.
+            AudioCmd::AsidePlay { ticket, .. } => {
+                let end = crate::player::AsideEnd::Refused("the browser build plays no previews".into());
+                self.async_events.borrow_mut().push_back(Event::AsideEnded(crate::player::AsideEnded { ticket, end }));
+            }
+            AudioCmd::AsidePause { .. }
+            | AudioCmd::AsideResume { .. }
+            | AudioCmd::AsideStop { .. }
+            | AudioCmd::AsideHold { .. } => {}
             AudioCmd::Shutdown => {}
         }
         self.async_events.borrow_mut().push_back(Event::Status(self.status()));

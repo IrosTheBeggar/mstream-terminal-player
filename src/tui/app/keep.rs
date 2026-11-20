@@ -1437,6 +1437,10 @@ pub struct LinksState {
     /// again, whatever answer has landed since.
     rec: serde_json::Value,
     seq: u64,
+    /// The links plug-in a room named when it asked (the Peer recs room
+    /// reads its own gate): Try again asks it again. `None` is Keep's own
+    /// gate's.
+    plugin: Option<String>,
     pub status: LinksStatus,
 }
 
@@ -4053,7 +4057,12 @@ impl App {
     /// Try again: the same row asked again, as it was first sent — a new
     /// answer landing under the list never retargets it.
     pub(crate) fn links_retry(&mut self) -> Vec<Effect> {
-        let Some(rec) = self.keep.links.as_ref().map(|l| l.rec.clone()) else { return Vec::new() };
+        let Some((rec, named)) = self.keep.links.as_ref().map(|l| (l.rec.clone(), l.plugin.clone())) else {
+            return Vec::new();
+        };
+        if let Some(plugin) = named {
+            return self.links_open_rec(&plugin, rec);
+        }
         if !self.links_gate() {
             return Vec::new();
         }
@@ -4065,9 +4074,26 @@ impl App {
         else {
             return Vec::new();
         };
+        self.links_send(plugin, rec, false)
+    }
+
+    /// Open elsewhere's list for a row a room holds as it came (the Peer
+    /// recs room's lead, peer-recs contract §1.9), asked of the links
+    /// plug-in that room's own gate names: `links_ask`'s body with the
+    /// plug-in given. The list hangs from `keep.links`, as Discover's does.
+    pub(crate) fn links_open_rec(&mut self, plugin: &str, rec: serde_json::Value) -> Vec<Effect> {
+        if !self.connected || !self.capabilities.discovery_plugins || plugin.is_empty() {
+            return Vec::new();
+        }
+        self.keep_sync();
+        self.links_send(plugin.to_string(), rec, true)
+    }
+
+    fn links_send(&mut self, plugin: String, rec: serde_json::Value, named: bool) -> Vec<Effect> {
         let Some((generation, reach)) = self.keep_cmd() else { return Vec::new() };
         let seq = self.keep.next_seq();
-        self.keep.links = Some(LinksState { rec: rec.clone(), seq, status: LinksStatus::Asking });
+        let kept = named.then(|| plugin.clone());
+        self.keep.links = Some(LinksState { rec: rec.clone(), seq, plugin: kept, status: LinksStatus::Asking });
         vec![Effect::Api(ApiCmd::PluginLinks { seq, generation, reach, plugin, rec: Box::new(rec) })]
     }
 

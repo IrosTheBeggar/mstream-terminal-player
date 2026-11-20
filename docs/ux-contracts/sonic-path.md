@@ -280,3 +280,10 @@ Gaps in the shared App that this contract adds (verify at implementation):
   9 and the gate are unchanged. The group packs the rooms it shows (the owner's call, the same day):
   absent, the sonic row's line goes to Discover and the Add rooms under
   it.
+- **2026-11-20 — A third row under Discover** (discovery-page clause 2):
+  Peer recs joins TOOLS under Discover where the server offers it
+  (peer-recommendations.md §1.1). With all six tools Sonic path stays on
+  16 from 100×27 with the footer off and stands on 15, 14, 13 or 12 below
+  that — 12 only at 100×24 with the footer on, where the block takes a
+  fourth step and Files and Search rise into rows 1 and 2. Digit 9 and
+  the gate are unchanged.

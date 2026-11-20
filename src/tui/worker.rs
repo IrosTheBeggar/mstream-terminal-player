@@ -55,6 +55,28 @@ const TICK: Duration = Duration::from_millis(120);
 #[cfg(not(target_arch = "wasm32"))]
 const SETTLED_TICK: Duration = crate::engine::DEVICE_POLL;
 
+/// The wait between ticks while a preview clip opens: the engine installs
+/// an opened clip on its tick, so it sounds within this of being ready
+/// rather than up to a whole [`TICK`] later (peer-recs contract §1.8).
+#[cfg(not(target_arch = "wasm32"))]
+const ASIDE_POLL: Duration = Duration::from_millis(20);
+
+/// The audio thread's wait before its next tick, given whether the player
+/// is settled and the clip status it last sent: a settled player's long
+/// wait, an opening clip's brisk one, else the ordinary tick. The engine
+/// is never settled while a clip opens (`State::at_rest`), so the brisk
+/// wait is the one an opening clip gets.
+#[cfg(not(target_arch = "wasm32"))]
+fn tick_wait(settled: bool, clip: Option<&crate::player::AsideStatus>) -> Duration {
+    if settled {
+        SETTLED_TICK
+    } else if clip.is_some_and(|c| c.phase == crate::player::AsidePhase::Loading) {
+        ASIDE_POLL
+    } else {
+        TICK
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioCmd {
     Play { url: String, duration_hint: Option<f64> },
@@ -78,6 +100,21 @@ pub enum AudioCmd {
     SetBlendSkips(bool),
     /// Pause and resume ride a short ramp instead of landing mid-wave.
     SetPauseFade(bool),
+    /// Play a preview clip aside of main, named `ticket` (peer-recs
+    /// contract §1.8): main pauses once the clip has opened, and `then`
+    /// says whether its run-out hands main back or holds it for the next
+    /// clip. Every ticket is answered by exactly one [`Event::AsideEnded`].
+    AsidePlay { ticket: u64, url: String, then: crate::player::AsideThen },
+    /// Pause the sounding clip named `ticket`; main stays paused.
+    AsidePause { ticket: u64 },
+    /// Resume the paused clip named `ticket`.
+    AsideResume { ticket: u64 },
+    /// End the clip session (`None`: whatever runs). Main comes back when
+    /// `restore` and the session paused it.
+    AsideStop { ticket: Option<u64>, restore: bool },
+    /// End the clip in hand and hold main paused for `span`, while the
+    /// next clip resolves.
+    AsideHold { span: std::time::Duration },
     Shutdown,
 }
 
@@ -355,6 +392,11 @@ pub enum ApiCmd {
     TrackInfo { filepath: String, reach: Option<crate::tui::app::Reach> },
     /// A server's playlist names, for the picker (clause 12).
     PlaylistNames { reach: Option<crate::tui::app::Reach> },
+    /// The Peer recs room's own asks (peer-recs contract §1.4), all of the
+    /// session's own server: the room is hidden in a peer session.
+    /// `generation` is the session's, and the answer carries it back on
+    /// [`Event::PeerRecs`].
+    PeerRecs { generation: u64, cmd: crate::api::peer_recs_door::PeerRecsCmd },
     Shutdown,
 }
 
@@ -424,6 +466,8 @@ impl ApiCmd {
             | ApiCmd::RenamePlaylist { .. }
             | ApiCmd::DeletePlaylist { .. }
             | ApiCmd::Search { .. }
+            // The Peer recs room asks only the session's own server.
+            | ApiCmd::PeerRecs { .. }
             | ApiCmd::ArtWithdraw { .. }
             | ApiCmd::Shutdown => None,
         }
@@ -987,6 +1031,15 @@ pub enum Event {
     FederationPeers { parent: String, peers: Option<Vec<crate::api::types::PeerListing>> },
     /// The probe's answer: whether `server` answered its public `/api`.
     Reachable { server: String, reachable: bool },
+    /// A Peer recs ask's answer, never an [`Event::Error`]: the room words
+    /// its own failures (a 401 still goes out as [`Event::Unauthorized`]).
+    PeerRecs { generation: u64, event: Box<crate::api::peer_recs_door::PeerRecsEvent> },
+    /// The preview clip as the engine stands, every tick while a clip
+    /// session lives, and one `None` when it ends (peer-recs contract
+    /// §1.8). Never part of [`Event::Status`], which stays main's.
+    Aside(Option<crate::player::AsideStatus>),
+    /// One clip's end: every ticket sent gets exactly one.
+    AsideEnded(crate::player::AsideEnded),
     Error(String),
 }
 
@@ -1083,12 +1136,19 @@ pub fn spawn_audio(events: Sender<Event>) -> (Sender<AudioCmd>, Arc<AudioTap>) {
 }
 
 /// Keep answering the door so the UI's sends never error; the player stays
-/// usable for browsing with no audio at all.
+/// usable for browsing with no audio at all. A clip asked for is refused on
+/// its ticket, so every ticket still gets its one end (`AsideEnd`).
 #[cfg(not(target_arch = "wasm32"))]
-fn drain_until_shutdown(rx: &Receiver<AudioCmd>) {
+fn drain_until_shutdown(rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
     while let Ok(cmd) = rx.recv() {
-        if cmd == AudioCmd::Shutdown {
-            break;
+        match cmd {
+            AudioCmd::Shutdown => break,
+            AudioCmd::AsidePlay { ticket, .. } => {
+                let why = "the audio engine is not running".to_string();
+                let end = crate::player::AsideEnd::Refused(why);
+                let _ = events.send(Event::AsideEnded(crate::player::AsideEnded { ticket, end }));
+            }
+            _ => {}
         }
     }
 }
@@ -1120,13 +1180,36 @@ fn panic_note(panic: &(dyn std::any::Any + Send)) -> &str {
 /// batch has already moved past. Volume and the crossfade length are
 /// sticky, so the last of each is kept wherever it was said. A Shutdown
 /// makes everything else moot.
+///
+/// A preview clip's commands are order-sensitive against main's (peer-recs
+/// contract §1.8: main always wins), so they have a rule of their own.
+/// Before the decider they are dropped, since the decider ends any clip
+/// anyway. A tail after the decider that holds one is kept as it came, in
+/// order, with no folding; only an `AsidePlay` followed by another with no
+/// main command between goes, superseded. Every clip play dropped here is
+/// answered on its ticket, in the second list: each ticket sent gets
+/// exactly one end.
 #[cfg(not(target_arch = "wasm32"))]
-fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
+fn collapse(batch: Vec<AudioCmd>) -> (Vec<AudioCmd>, Vec<crate::player::AsideEnded>) {
+    use crate::player::{AsideEnd, AsideEnded};
+    let mut ends = Vec::new();
+    let answer = |cmds: &[AudioCmd], end: AsideEnd, ends: &mut Vec<AsideEnded>| {
+        for cmd in cmds {
+            if let AudioCmd::AsidePlay { ticket, .. } = cmd {
+                ends.push(AsideEnded { ticket: *ticket, end: end.clone() });
+            }
+        }
+    };
     if batch.contains(&AudioCmd::Shutdown) {
-        return vec![AudioCmd::Shutdown];
+        // The clip goes with the engine: a play boiled away is stopped.
+        answer(&batch, AsideEnd::Stopped, &mut ends);
+        return (vec![AudioCmd::Shutdown], ends);
     }
     let decider =
         batch.iter().rposition(|cmd| matches!(cmd, AudioCmd::Play { .. } | AudioCmd::Stop));
+    if let Some(at) = decider {
+        answer(&batch[..at], AsideEnd::Taken, &mut ends);
+    }
     let volume = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetVolume(_)));
     let crossfade = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetCrossfade(_)));
     let gapless = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetGapless(_)));
@@ -1142,9 +1225,36 @@ fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
     if let Some(at) = decider {
         kept.push(batch[at].clone());
     }
+    let tail = &batch[decider.map_or(0, |at| at + 1)..];
+    if tail.iter().any(is_clip) {
+        // As it came, the sticky settings apart (said above). A clip play
+        // still waiting for its successor sits at `open`.
+        let mut verbatim: Vec<Option<&AudioCmd>> = Vec::new();
+        let mut open: Option<usize> = None;
+        for cmd in tail {
+            match cmd {
+                AudioCmd::SetVolume(_)
+                | AudioCmd::SetCrossfade(_)
+                | AudioCmd::SetGapless(_)
+                | AudioCmd::SetBlendSkips(_)
+                | AudioCmd::SetPauseFade(_) => continue,
+                AudioCmd::AsidePlay { .. } => {
+                    if let Some(AudioCmd::AsidePlay { ticket, .. }) = open.and_then(|at| verbatim[at].take()) {
+                        ends.push(AsideEnded { ticket: *ticket, end: AsideEnd::Superseded });
+                    }
+                    open = Some(verbatim.len());
+                }
+                cmd if is_clip(cmd) => {}
+                _ => open = None,
+            }
+            verbatim.push(Some(cmd));
+        }
+        kept.extend(verbatim.into_iter().flatten().cloned());
+        return (kept, ends);
+    }
     let mut seek: Option<&AudioCmd> = None;
     let mut announced: Option<&AudioCmd> = None;
-    for cmd in &batch[decider.map_or(0, |at| at + 1)..] {
+    for cmd in tail {
         match cmd {
             AudioCmd::Pause | AudioCmd::Resume => kept.push(cmd.clone()),
             AudioCmd::Seek(_) => seek = Some(cmd),
@@ -1154,7 +1264,20 @@ fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
     }
     kept.extend(seek.cloned());
     kept.extend(announced.cloned());
-    kept
+    (kept, ends)
+}
+
+/// Whether a command is about the preview clip rather than main.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_clip(cmd: &AudioCmd) -> bool {
+    matches!(
+        cmd,
+        AudioCmd::AsidePlay { .. }
+            | AudioCmd::AsidePause { .. }
+            | AudioCmd::AsideResume { .. }
+            | AudioCmd::AsideStop { .. }
+            | AudioCmd::AsideHold { .. }
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1163,7 +1286,7 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>, tap: Arc<AudioTap
         Ok(e) => e,
         Err(e) => {
             let _ = events.send(Event::AudioFailed(e.to_string()));
-            drain_until_shutdown(rx);
+            drain_until_shutdown(rx, events);
             return;
         }
     };
@@ -1190,7 +1313,7 @@ fn listen_guarded(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Send
             "the audio engine crashed: {}",
             panic_note(panic.as_ref())
         )));
-        drain_until_shutdown(rx);
+        drain_until_shutdown(rx, events);
     }
 }
 
@@ -1200,13 +1323,15 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
     // What arrived while a Play was opening. It is the next batch, taken
     // without waiting — straight away when it overtook the Play.
     let mut backlog: Vec<AudioCmd> = Vec::new();
+    // The last clip status sent, so a session's end goes out once as
+    // `Aside(None)`, and an opening clip is ticked briskly.
+    let mut clip: Option<crate::player::AsideStatus> = None;
 
     'listening: loop {
-        let batch = if backlog.is_empty() {
-            let wait = if player.settled() { SETTLED_TICK } else { TICK };
-            match rx.recv_timeout(wait) {
+        let (batch, dropped) = if backlog.is_empty() {
+            match rx.recv_timeout(tick_wait(player.settled(), clip.as_ref())) {
                 Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => Vec::new(),
+                Err(RecvTimeoutError::Timeout) => (Vec::new(), Vec::new()),
                 Ok(first) => {
                     // Whatever else has queued up is taken now and boiled
                     // down, rather than paid for one blocking open at a time.
@@ -1224,6 +1349,11 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
             }
             collapse(batch)
         };
+        // The clips the batch boiled away are answered before anything in
+        // it runs.
+        for ended in dropped {
+            let _ = events.send(Event::AsideEnded(ended));
+        }
         let mut batch = batch.into_iter();
         while let Some(cmd) = batch.next() {
             if cmd == AudioCmd::Shutdown {
@@ -1238,6 +1368,12 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
             // answer to be about a track nobody is waiting for any more.
             let starting = match &cmd {
                 AudioCmd::Play { url, .. } => Some(url.clone()),
+                _ => None,
+            };
+            // A clip's refusal is the clip's news, answered on its ticket
+            // (peer-recs contract §1.8): never an error or a failed play.
+            let clip_ticket = match &cmd {
+                AudioCmd::AsidePlay { ticket, .. } => Some(*ticket),
                 _ => None,
             };
             let seeking = match &cmd {
@@ -1257,12 +1393,15 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
                 backlog.iter().any(decides)
             };
             if let Some(err) = apply_audio_cmd(player, cmd, &mut overtaken) {
-                let event = match starting {
-                    Some(source) => {
+                let event = match (starting, clip_ticket) {
+                    (Some(source), _) => {
                         watch.play_failed(&source);
                         Event::PlaybackFailed { source, error: err }
                     }
-                    None => Event::Error(err),
+                    (None, Some(ticket)) => {
+                        Event::AsideEnded(crate::player::AsideEnded { ticket, end: crate::player::AsideEnd::Refused(err) })
+                    }
+                    (None, None) => Event::Error(err),
                 };
                 let _ = events.send(event);
             }
@@ -1286,6 +1425,17 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
         for notice in player.take_device_notices() {
             let _ = events.send(Event::AudioDevice(notice));
         }
+        // The clip's news, before main's status (peer-recs contract
+        // §1.8): its ends, then its status while a session lives, and one
+        // `None` when the session is over.
+        for ended in player.take_aside_ends() {
+            let _ = events.send(Event::AsideEnded(ended));
+        }
+        let now_clip = player.aside_status();
+        if now_clip.is_some() || clip.is_some() {
+            let _ = events.send(Event::Aside(now_clip.clone()));
+        }
+        clip = now_clip;
         let status = player.status();
         // Sent before the status that reports the transition, and down the
         // same channel, so the UI always learns which track ended — or which
@@ -1334,6 +1484,13 @@ fn apply_audio_cmd(
         AudioCmd::SetPauseFade(on) => player.set_pause_fade(on),
         AudioCmd::PrepareNext { url, duration_hint } => player.prepare_next(&url, duration_hint),
         AudioCmd::ClearNext => player.clear_next(),
+        // The clip's refusal comes back as the error; `listen` answers it
+        // on the clip's own event, never as an `Error`.
+        AudioCmd::AsidePlay { ticket, url, then } => return player.aside_play(ticket, &url, then).err(),
+        AudioCmd::AsidePause { ticket } => player.aside_pause(ticket),
+        AudioCmd::AsideResume { ticket } => player.aside_resume(ticket),
+        AudioCmd::AsideStop { ticket, restore } => player.aside_stop(ticket, restore),
+        AudioCmd::AsideHold { span } => player.aside_hold(span),
         AudioCmd::Shutdown => {}
     }
     None
@@ -2121,6 +2278,10 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::PluginLinks { seq, generation, plugin, rec, .. } => {
             crate::api::wait(plugin_links(c, seq, generation, &plugin, &rec))
         }
+        // The Peer recs room's door: its shaper keeps every failure but a
+        // 401 inside the event (peer-recs contract §1.4).
+        ApiCmd::PeerRecs { generation, cmd } => crate::api::wait(crate::api::peer_recs_door::peer_recs(c, cmd))
+            .map(|event| Event::PeerRecs { generation, event: Box::new(event) }),
         // None of these fail as an error: a read that did not answer is
         // `None`, and the App reads that.
         ApiCmd::KeepFolderTags { seq, generation, filepaths, .. } => {
@@ -3943,6 +4104,40 @@ mod tests {
         listener.join().expect("the thread ended on its own terms");
     }
 
+    #[test]
+    fn a_clip_asked_of_a_crashed_audio_thread_is_refused_on_its_ticket() {
+        // Every ticket gets exactly one end (player.rs), the dead thread's too.
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let listener = thread::spawn(move || listen_guarded(&Grenade, &cmd_rx, &event_tx));
+        cmd_tx.send(play("http://x/bad.flac")).unwrap();
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(5)).expect("an event") {
+                Event::AudioFailed(_) => break,
+                _ => continue,
+            }
+        }
+        let clip = AudioCmd::AsidePlay {
+            ticket: 41,
+            url: "http://x/clip.mp3".into(),
+            then: crate::player::AsideThen::Restore,
+        };
+        cmd_tx.send(clip).unwrap();
+        cmd_tx.send(AudioCmd::AsidePause { ticket: 41 }).unwrap();
+        cmd_tx.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+        let ends: Vec<crate::player::AsideEnded> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::AsideEnded(ended) => Some(ended),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        assert_eq!(ends[0].ticket, 41);
+        assert!(matches!(ends[0].end, crate::player::AsideEnd::Refused(_)), "{ends:?}");
+    }
+
     /// A player that only counts: ticks (and when each came), pauses, and
     /// whether it calls itself settled.
     #[derive(Clone, Default)]
@@ -4200,6 +4395,13 @@ mod tests {
             crate::player::PlayerStatus::default()
         }
         fn tick(&self) {}
+        fn aside_play(&self, ticket: u64, _url: &str, _then: crate::player::AsideThen) -> Result<(), String> {
+            self.note(format!("clip {ticket}"));
+            Ok(())
+        }
+        fn aside_stop(&self, _ticket: Option<u64>, _restore: bool) {
+            self.note("clip stop".into());
+        }
     }
 
     /// The audio thread around a [`HeldOpens`] player, which a test walks
@@ -4317,6 +4519,366 @@ mod tests {
         audio.finish();
     }
 
+    // ── The preview clip (peer-recs contract §1.8; engine digest §9) ──────
+
+    fn clip_play(ticket: u64) -> AudioCmd {
+        AudioCmd::AsidePlay { ticket, url: format!("https://cdn.test/{ticket}.mp3"), then: crate::player::AsideThen::Restore }
+    }
+
+    fn clip_end(ticket: u64, end: crate::player::AsideEnd) -> crate::player::AsideEnded {
+        crate::player::AsideEnded { ticket, end }
+    }
+
+    fn clip_status(ticket: u64, phase: crate::player::AsidePhase) -> crate::player::AsideStatus {
+        crate::player::AsideStatus { ticket, phase, position: 0.0, duration: 0.0 }
+    }
+
+    #[test]
+    fn collapse_drops_clip_commands_before_a_play_and_answers_their_tickets_taken() {
+        use crate::player::AsideEnd::{Stopped, Taken};
+        // The play decides: every clip command before it was about a clip
+        // the play ends anyway, and each clip play it drops is answered.
+        let stop = AudioCmd::AsideStop { ticket: None, restore: true };
+        assert_eq!(
+            collapse(vec![clip_play(1), AudioCmd::AsidePause { ticket: 1 }, stop, play("a"), AudioCmd::Pause]),
+            (vec![play("a"), AudioCmd::Pause], vec![clip_end(1, Taken)])
+        );
+        // A stop decides the same way.
+        assert_eq!(
+            collapse(vec![clip_play(1), clip_play(2), AudioCmd::Stop]),
+            (vec![AudioCmd::Stop], vec![clip_end(1, Taken), clip_end(2, Taken)])
+        );
+        // A tail without a clip command folds as it always did.
+        assert_eq!(
+            collapse(vec![clip_play(1), play("a"), AudioCmd::Seek(3.0), AudioCmd::Seek(4.0)]),
+            (vec![play("a"), AudioCmd::Seek(4.0)], vec![clip_end(1, Taken)])
+        );
+        // A shutdown takes the clip with the engine, and still answers it.
+        assert_eq!(
+            collapse(vec![clip_play(3), AudioCmd::Shutdown]),
+            (vec![AudioCmd::Shutdown], vec![clip_end(3, Stopped)])
+        );
+    }
+
+    #[test]
+    fn collapse_keeps_a_tail_with_clip_commands_in_order_and_folds_consecutive_clip_plays() {
+        use crate::player::AsideEnd::Superseded;
+        let hold = AudioCmd::AsideHold { span: Duration::from_secs(15) };
+        // As it came: no seek folding in a tail that holds a clip command.
+        let tail = vec![play("a"), AudioCmd::Seek(5.0), clip_play(1), AudioCmd::Seek(6.0), AudioCmd::Pause];
+        assert_eq!(collapse(tail.clone()), (tail, vec![]));
+        // Clip plays back to back: only the last is opened.
+        assert_eq!(
+            collapse(vec![clip_play(1), clip_play(2), clip_play(3)]),
+            (vec![clip_play(3)], vec![clip_end(1, Superseded), clip_end(2, Superseded)])
+        );
+        // A clip command between them does not keep the first...
+        assert_eq!(
+            collapse(vec![clip_play(1), hold.clone(), clip_play(2)]),
+            (vec![hold, clip_play(2)], vec![clip_end(1, Superseded)])
+        );
+        // ...a main command does: main's pause lands between the two.
+        let between = vec![clip_play(1), AudioCmd::Pause, clip_play(2)];
+        assert_eq!(collapse(between.clone()), (between, vec![]));
+        // The sticky settings still go first, the last of each.
+        assert_eq!(
+            collapse(vec![AudioCmd::SetVolume(0.2), clip_play(1), AudioCmd::SetVolume(0.5)]),
+            (vec![AudioCmd::SetVolume(0.5), clip_play(1)], vec![])
+        );
+    }
+
+    #[test]
+    fn end_watch_ignores_clip_commands() {
+        let mut watch = EndWatch::default();
+        watch.note(&play("a"));
+        assert_eq!(watch.observe("a"), None);
+        // A clip's commands neither ask main to stop nor promise a source.
+        watch.note(&clip_play(1));
+        watch.note(&AudioCmd::AsideStop { ticket: None, restore: true });
+        watch.note(&AudioCmd::AsideHold { span: Duration::from_secs(5) });
+        watch.note(&AudioCmd::AsidePause { ticket: 1 });
+        watch.note(&AudioCmd::AsideResume { ticket: 1 });
+        assert_eq!(watch.observe(""), ended("a"), "main ran out on its own");
+        // And a promised source stays promised through them.
+        watch.note(&play("b"));
+        watch.note(&clip_play(2));
+        assert_eq!(watch.observe("b"), None, "the play it promised arrived");
+    }
+
+    #[test]
+    fn a_clip_command_never_overtakes_a_main_open() {
+        // Main always wins: a clip asked while main opens waits its turn,
+        // and the open runs to its end rather than being given up.
+        let audio = AudioThread::start(vec![play("a")]);
+        audio.player_did(&["opening a"]);
+        audio.send(clip_play(1));
+        audio.send(AudioCmd::AsideStop { ticket: None, restore: true });
+        audio.go();
+        audio.player_did(&["playing a", "clip 1", "clip stop"]);
+        let events = audio.finish();
+        assert!(!events.iter().any(|e| matches!(e, Event::PlaybackFailed { .. } | Event::Error(_))));
+    }
+
+    /// A player with a scripted clip: each tick takes the next step of the
+    /// script (the clip's status from then on, and the ends it brings), so
+    /// a step's end and status are always read by the same tick.
+    #[derive(Clone, Default)]
+    struct AsideFake {
+        did: Arc<std::sync::Mutex<Vec<String>>>,
+        /// `aside_play` refuses with these words.
+        refuse: Arc<std::sync::Mutex<Option<String>>>,
+        script: Arc<std::sync::Mutex<std::collections::VecDeque<ClipStep>>>,
+        live: Arc<std::sync::Mutex<ClipStep>>,
+        ticked_at: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct ClipStep {
+        status: Option<crate::player::AsideStatus>,
+        ends: Vec<crate::player::AsideEnded>,
+    }
+
+    impl AsideFake {
+        fn step(&self, status: Option<crate::player::AsideStatus>, ends: Vec<crate::player::AsideEnded>) {
+            self.script.lock().unwrap().push_back(ClipStep { status, ends });
+        }
+    }
+
+    impl crate::player::PlayerCtl for AsideFake {
+        fn play(&self, source: &str, _hint: Option<f64>) -> Result<(), String> {
+            self.did.lock().unwrap().push(format!("play {source}"));
+            Ok(())
+        }
+        fn pause(&self) {}
+        fn resume(&self) {}
+        fn stop(&self) {}
+        fn seek(&self, _position: f64) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_volume(&self, _volume: f32) {}
+        fn set_crossfade(&self, _seconds: f32) {}
+        fn set_gapless(&self, _on: bool) {}
+        fn set_blend_skips(&self, _on: bool) {}
+        fn set_pause_fade(&self, _on: bool) {}
+        fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
+        fn clear_next(&self) {}
+        fn status(&self) -> crate::player::PlayerStatus {
+            crate::player::PlayerStatus::default()
+        }
+        fn tick(&self) {
+            self.ticked_at.lock().unwrap().push(std::time::Instant::now());
+            if let Some(step) = self.script.lock().unwrap().pop_front() {
+                let mut live = self.live.lock().unwrap();
+                live.status = step.status;
+                live.ends.extend(step.ends);
+            }
+        }
+        fn settled(&self) -> bool {
+            false
+        }
+        fn aside_play(&self, ticket: u64, url: &str, _then: crate::player::AsideThen) -> Result<(), String> {
+            self.did.lock().unwrap().push(format!("clip {ticket} {url}"));
+            match self.refuse.lock().unwrap().clone() {
+                Some(words) => Err(words),
+                None => Ok(()),
+            }
+        }
+        fn aside_status(&self) -> Option<crate::player::AsideStatus> {
+            self.live.lock().unwrap().status.clone()
+        }
+        fn take_aside_ends(&self) -> Vec<crate::player::AsideEnded> {
+            std::mem::take(&mut self.live.lock().unwrap().ends)
+        }
+    }
+
+    /// The audio thread around an [`AsideFake`].
+    fn aside_thread(player: &AsideFake) -> (mpsc::Sender<AudioCmd>, mpsc::Receiver<Event>, thread::JoinHandle<()>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let theirs = player.clone();
+        let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
+        (cmd_tx, event_rx, listener)
+    }
+
+    /// Events until `done` says the last one was the one waited for.
+    fn events_until(events: &mpsc::Receiver<Event>, done: impl Fn(&Event) -> bool) -> Vec<Event> {
+        let mut seen = Vec::new();
+        loop {
+            let event = events.recv_timeout(Duration::from_secs(10)).expect("the awaited event");
+            let last = done(&event);
+            seen.push(event);
+            if last {
+                return seen;
+            }
+        }
+    }
+
+    #[test]
+    fn a_clip_that_fails_is_aside_ended_never_playback_failed_or_an_error() {
+        use crate::player::AsideEnd::{Failed, Refused};
+        let player = AsideFake::default();
+        let (cmds, events, listener) = aside_thread(&player);
+        // Refused at the ask: no output device.
+        *player.refuse.lock().unwrap() = Some("no output device".into());
+        cmds.send(clip_play(1)).unwrap();
+        let mut seen = events_until(&events, |e| matches!(e, Event::AsideEnded(_)));
+        assert!(
+            matches!(seen.last(), Some(Event::AsideEnded(e)) if *e == clip_end(1, Refused("no output device".into()))),
+            "{seen:?}"
+        );
+        // Failed after the open: the engine's own end, through the tick.
+        *player.refuse.lock().unwrap() = None;
+        cmds.send(clip_play(2)).unwrap();
+        player.step(None, vec![clip_end(2, Failed("the clip stalled".into()))]);
+        seen.extend(events_until(&events, |e| matches!(e, Event::AsideEnded(_))));
+        assert!(
+            matches!(seen.last(), Some(Event::AsideEnded(e)) if *e == clip_end(2, Failed("the clip stalled".into()))),
+            "{seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|e| matches!(e, Event::PlaybackFailed { .. } | Event::Error(_) | Event::AudioFailed(_))),
+            "{seen:?}"
+        );
+        cmds.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+    }
+
+    #[test]
+    fn aside_status_goes_out_each_tick_while_live_and_none_once_at_the_end() {
+        use crate::player::AsidePhase::Playing;
+        let player = AsideFake::default();
+        let (cmds, events, listener) = aside_thread(&player);
+        // Nothing live: main's status alone, tick after tick.
+        let quiet = events_until(&events, |e| matches!(e, Event::Status(_)));
+        assert!(!quiet.iter().any(|e| matches!(e, Event::Aside(_))), "{quiet:?}");
+        // Live for three ticks, then over: the end, the one `None`, then
+        // main's status, all from the same tick.
+        for _ in 0..3 {
+            player.step(Some(clip_status(4, Playing)), vec![]);
+        }
+        player.step(None, vec![clip_end(4, crate::player::AsideEnd::RanOut)]);
+        let seen = events_until(&events, |e| matches!(e, Event::Aside(None)));
+        let live = seen.iter().filter(|e| matches!(e, Event::Aside(Some(s)) if *s == clip_status(4, Playing))).count();
+        assert!(live >= 3, "a status every tick while live: {seen:?}");
+        // Order within the closing tick: the end came just before the None.
+        assert!(matches!(&seen[seen.len() - 2], Event::AsideEnded(e) if e.ticket == 4), "{seen:?}");
+        // Each clip status is followed by main's, nothing in between.
+        let after = events.recv_timeout(Duration::from_secs(5)).expect("main's status");
+        assert!(matches!(after, Event::Status(_)), "{after:?}");
+        for pair in seen.windows(2) {
+            if matches!(pair[0], Event::Aside(Some(_))) {
+                assert!(matches!(pair[1], Event::Status(_)), "{seen:?}");
+            }
+        }
+        // And nothing more about the clip once its None went out.
+        std::thread::sleep(Duration::from_millis(400));
+        let later: Vec<Event> = events.try_iter().collect();
+        assert!(!later.iter().any(|e| matches!(e, Event::Aside(_) | Event::AsideEnded(_))), "{later:?}");
+        cmds.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+    }
+
+    /// The wait itself, with no clock to race: an opening clip shortens it,
+    /// and nothing else does.
+    #[test]
+    fn only_an_opening_clip_shortens_the_wait() {
+        use crate::player::AsidePhase::{Held, Loading, Paused, Playing};
+        assert_eq!(tick_wait(false, Some(&clip_status(1, Loading))), ASIDE_POLL);
+        for phase in [Playing, Paused, Held] {
+            assert_eq!(tick_wait(false, Some(&clip_status(1, phase))), TICK, "{phase:?}");
+        }
+        assert_eq!(tick_wait(false, None), TICK);
+        assert_eq!(tick_wait(true, None), SETTLED_TICK);
+    }
+
+    /// And the loop keeps to it. A loaded runner can stretch every gap in a
+    /// stretch of time (macOS CI: none under 119 ms in 600), so each phase
+    /// is watched for up to ten seconds instead: one gap shorter than the
+    /// ordinary wait allows shows the brisk wait, and no gap is shorter
+    /// than the ordinary one once the clip sounds, as a loaded machine
+    /// only lengthens a gap. The fake's clip keeps the last status given.
+    #[test]
+    fn a_loading_clip_ticks_briskly() {
+        use crate::player::AsidePhase::{Loading, Playing};
+        let player = AsideFake::default();
+        let (cmds, events, listener) = aside_thread(&player);
+        // The ticks since the phase was published, once `done` says so.
+        let ticks_until = |phase: crate::player::AsidePhase, done: &dyn Fn(&[Duration]) -> bool| {
+            player.step(Some(clip_status(1, phase)), vec![]);
+            events_until(&events, |e| matches!(e, Event::Aside(Some(s)) if s.phase == phase));
+            player.ticked_at.lock().unwrap().clear();
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                std::thread::sleep(Duration::from_millis(50));
+                let ticked = player.ticked_at.lock().unwrap().clone();
+                let gaps: Vec<Duration> = ticked.windows(2).map(|pair| pair[1] - pair[0]).collect();
+                if done(&gaps) {
+                    return gaps;
+                }
+                assert!(std::time::Instant::now() < until, "{phase:?}: {gaps:?}");
+            }
+        };
+        let brisk = |gap: &Duration| *gap < Duration::from_millis(60);
+        ticks_until(Loading, &|gaps: &[Duration]| gaps.iter().any(brisk));
+        let sounding = ticks_until(Playing, &|gaps: &[Duration]| gaps.len() >= 4);
+        let ordinary = |gap: &Duration| *gap >= Duration::from_millis(100);
+        assert!(sounding.iter().all(ordinary), "sounding: {sounding:?}");
+        cmds.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+    }
+
+    #[test]
+    fn the_peer_recs_door_rides_the_session() {
+        use crate::api::peer_recs_door::PeerRecsCmd;
+        let rec = || Box::new(serde_json::json!({ "title": "Salt Road" }));
+        let body = Box::new(crate::api::types::NetworkTasteRequest::new(30, vec![], vec![], 12, None));
+        let asks = vec![
+            PeerRecsCmd::Taste { seq: 1, body },
+            PeerRecsCmd::Peers { poll: 1 },
+            PeerRecsCmd::Add { endpoint_id: "a".repeat(64) },
+            PeerRecsCmd::Gate { seq: 1 },
+            PeerRecsCmd::Preview { ticket: 1, plugin: "deezer".into(), rec: rec() },
+            PeerRecsCmd::Lookup { seq: 1, rec: rec() },
+            PeerRecsCmd::Job { seq: 1, id: 7 },
+            PeerRecsCmd::Start { seq: 1, plugin: "slskd".into(), rec: rec(), destination: None },
+            PeerRecsCmd::Probe,
+        ];
+        // The session's own server, always: the room is hidden in a peer
+        // session, and a connection change in flight holds the ask.
+        for cmd in asks {
+            let ask = ApiCmd::PeerRecs { generation: 3, cmd };
+            assert_eq!(ask.reach(), None, "{ask:?}");
+            assert!(rides_session(&ask), "{ask:?}");
+        }
+    }
+
+    #[test]
+    fn the_door_answers_on_its_event_never_an_error() {
+        use crate::api::peer_recs_door::{PeerRecsCmd, PeerRecsEvent, PeersFailure, RecsFailure};
+        use crate::api::tests::{canned_server_bodies, json_reply};
+        let (port, _seen) = canned_server_bodies(vec![
+            json_reply("500 Internal Server Error", serde_json::json!({ "error": "boom" })),
+            json_reply("403 Forbidden", serde_json::json!({ "error": "off" })),
+            json_reply("401 Unauthorized", serde_json::json!({ "error": "Authentication Error" })),
+        ]);
+        let c = Client::new(&format!("http://127.0.0.1:{port}")).unwrap().with_token(Some("tok".into()));
+        let ask = |cmd| answer(Some(&c), ApiCmd::PeerRecs { generation: 5, cmd });
+        match ask(PeerRecsCmd::Peers { poll: 2 }) {
+            Event::PeerRecs { generation: 5, event } => {
+                assert_eq!(*event, PeerRecsEvent::Peers { poll: 2, answer: Err(PeersFailure::Failed) });
+            }
+            other => panic!("a 500 is the room's: {other:?}"),
+        }
+        let body = Box::new(crate::api::types::NetworkTasteRequest::new(30, vec![], vec![], 12, None));
+        match ask(PeerRecsCmd::Taste { seq: 9, body }) {
+            Event::PeerRecs { generation: 5, event } => {
+                assert_eq!(*event, PeerRecsEvent::Taste { seq: 9, answer: Err(RecsFailure::Forbidden) });
+            }
+            other => panic!("a 403 is the room's: {other:?}"),
+        }
+        assert!(matches!(ask(PeerRecsCmd::Peers { poll: 3 }), Event::Unauthorized), "a 401 is the session's");
+    }
+
     #[test]
     fn the_panic_hook_stands_back_only_for_the_threads_that_catch() {
         assert!(panics_are_caught(Some(AUDIO_THREAD)));
@@ -4345,38 +4907,38 @@ mod tests {
         let vol = |v| AudioCmd::SetVolume(v);
         // Leaning on next: only the last of the run is opened at all.
         assert_eq!(
-            collapse(vec![play("a"), play("b"), play("c")]),
+            collapse(vec![play("a"), play("b"), play("c")]).0,
             vec![play("c")],
             "one open for a run of skips"
         );
         // Scrubbing: the positions passed through were never wanted.
         assert_eq!(
-            collapse(vec![AudioCmd::Seek(5.0), AudioCmd::Seek(6.0), AudioCmd::Seek(7.0)]),
+            collapse(vec![AudioCmd::Seek(5.0), AudioCmd::Seek(6.0), AudioCmd::Seek(7.0)]).0,
             vec![AudioCmd::Seek(7.0)]
         );
         // The last word on the transport wins, whichever way it fell.
         assert_eq!(
-            collapse(vec![play("a"), AudioCmd::Seek(30.0), AudioCmd::Stop]),
+            collapse(vec![play("a"), AudioCmd::Seek(30.0), AudioCmd::Stop]).0,
             vec![AudioCmd::Stop],
             "a stop after skips means silence, not one more fetch"
         );
-        assert_eq!(collapse(vec![AudioCmd::Stop, play("b")]), vec![play("b")]);
+        assert_eq!(collapse(vec![AudioCmd::Stop, play("b")]).0, vec![play("b")]);
         // A seek aimed at a track that got replaced dies with it; one aimed
         // at the track that plays survives.
-        assert_eq!(collapse(vec![AudioCmd::Seek(30.0), play("b")]), vec![play("b")]);
+        assert_eq!(collapse(vec![AudioCmd::Seek(30.0), play("b")]).0, vec![play("b")]);
         assert_eq!(
-            collapse(vec![play("b"), AudioCmd::Seek(30.0)]),
+            collapse(vec![play("b"), AudioCmd::Seek(30.0)]).0,
             vec![play("b"), AudioCmd::Seek(30.0)]
         );
         // Volume is sticky, so the last one said is kept wherever it was
         // said — and a pause after the deciding play still lands.
         assert_eq!(
-            collapse(vec![vol(0.2), play("a"), vol(0.8), play("b"), AudioCmd::Pause]),
+            collapse(vec![vol(0.2), play("a"), vol(0.8), play("b"), AudioCmd::Pause]).0,
             vec![vol(0.8), play("b"), AudioCmd::Pause]
         );
         // Shutdown makes the rest moot.
         assert_eq!(
-            collapse(vec![play("a"), AudioCmd::Shutdown, play("b")]),
+            collapse(vec![play("a"), AudioCmd::Shutdown, play("b")]).0,
             vec![AudioCmd::Shutdown]
         );
     }
@@ -4387,35 +4949,35 @@ mod tests {
         // An announcement before the decider was about a track the batch
         // has already moved past — applying it late would hand the engine
         // a next that belongs to nothing.
-        assert_eq!(collapse(vec![prep("b"), play("c")]), vec![play("c")]);
+        assert_eq!(collapse(vec![prep("b"), play("c")]).0, vec![play("c")]);
         // After the decider, only the last announcement counts, whichever
         // shape it takes.
         assert_eq!(
-            collapse(vec![play("c"), prep("d"), AudioCmd::ClearNext]),
+            collapse(vec![play("c"), prep("d"), AudioCmd::ClearNext]).0,
             vec![play("c"), AudioCmd::ClearNext]
         );
         assert_eq!(
-            collapse(vec![play("c"), AudioCmd::ClearNext, prep("d")]),
+            collapse(vec![play("c"), AudioCmd::ClearNext, prep("d")]).0,
             vec![play("c"), prep("d")]
         );
         // The blend length is sticky like volume: kept wherever it was
         // said, last one wins.
         assert_eq!(
-            collapse(vec![AudioCmd::SetCrossfade(4.0), play("c")]),
+            collapse(vec![AudioCmd::SetCrossfade(4.0), play("c")]).0,
             vec![AudioCmd::SetCrossfade(4.0), play("c")]
         );
         assert_eq!(
-            collapse(vec![AudioCmd::SetCrossfade(2.0), play("c"), AudioCmd::SetCrossfade(6.0)]),
+            collapse(vec![AudioCmd::SetCrossfade(2.0), play("c"), AudioCmd::SetCrossfade(6.0)]).0,
             vec![AudioCmd::SetCrossfade(6.0), play("c")]
         );
         // And gapless the same.
         assert_eq!(
-            collapse(vec![AudioCmd::SetGapless(true), play("c"), AudioCmd::SetGapless(false)]),
+            collapse(vec![AudioCmd::SetGapless(true), play("c"), AudioCmd::SetGapless(false)]).0,
             vec![AudioCmd::SetGapless(false), play("c")]
         );
         // The C6 pair ride the same sticky rule.
         assert_eq!(
-            collapse(vec![AudioCmd::SetBlendSkips(true), play("c"), AudioCmd::SetPauseFade(true)]),
+            collapse(vec![AudioCmd::SetBlendSkips(true), play("c"), AudioCmd::SetPauseFade(true)]).0,
             vec![AudioCmd::SetBlendSkips(true), AudioCmd::SetPauseFade(true), play("c")]
         );
     }

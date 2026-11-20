@@ -1,0 +1,212 @@
+{
+  "window": 30,
+  "widenedFrom": null,
+  "seedSource": "pinned",
+  "fallback": false,
+  "seeds": [
+    {
+      "hash": "dbd0ae2c76e2117f94b7e34970912a7e",
+      "filepath": "testlib/Vosto/Night Drive/01 - Highway.mp3",
+      "metadata": {
+        "title": "Highway",
+        "artist": "Vosto",
+        "artist-display": "Vosto",
+        "artists": [
+          "Vosto"
+        ],
+        "album": "Night Drive",
+        "album-artist": "Vosto",
+        "album-art": null,
+        "year": 2018,
+        "track": 1,
+        "disk": 1,
+        "duration": 1.045,
+        "rating": null,
+        "bpm": null,
+        "musical-key": null,
+        "genres": [
+          "Ambient"
+        ],
+        "has-lyrics": false,
+        "has-synced-lyrics": false,
+        "replaygain-track": null
+      },
+      "outcome": null,
+      "lastPlayed": "2026-11-19T06:04:43.742Z",
+      "plays": 1,
+      "pinned": true,
+      "analyzed": true
+    },
+    {
+      "hash": "030634c3ec1922159213338203f3c54d",
+      "filepath": "testlib/Vosto/Night Drive/02 - Neon.mp3",
+      "metadata": {
+        "title": "Neon",
+        "artist": "Vosto",
+        "artist-display": "Vosto",
+        "artists": [
+          "Vosto"
+        ],
+        "album": "Night Drive",
+        "album-artist": "Vosto",
+        "album-art": null,
+        "year": 2018,
+        "track": 2,
+        "disk": 1,
+        "duration": 1.045,
+        "rating": null,
+        "bpm": null,
+        "musical-key": null,
+        "genres": [
+          "Ambient"
+        ],
+        "has-lyrics": false,
+        "has-synced-lyrics": false,
+        "replaygain-track": null
+      },
+      "outcome": null,
+      "lastPlayed": "2026-11-18T06:04:43.742Z",
+      "plays": 1,
+      "pinned": true,
+      "analyzed": true
+    }
+  ],
+  "excluded": [],
+  "dropped": 0,
+  "notAnalyzed": false,
+  "model": {
+    "id": "test-fake",
+    "version": "1"
+  },
+  "library": null,
+  "network": {
+    "results": [
+      {
+        "artist": "Paper Lantern",
+        "title": "Signal Fires",
+        "album": "Night Ferry",
+        "year": null,
+        "isrc": "QZPRS2600003",
+        "releaseGroupMbid": null,
+        "duration": 198,
+        "similarity": 0.8270572961055667,
+        "recordingMbid": null,
+        "exportId": "anon:Signal Fires",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "paper lantern|night ferry",
+          "hue": 39,
+          "letter": "P"
+        }
+      },
+      {
+        "artist": "Paper Lantern",
+        "title": "Harbor Lights",
+        "album": "Night Ferry",
+        "year": null,
+        "isrc": "QZPRS2600004",
+        "releaseGroupMbid": null,
+        "duration": 177,
+        "similarity": 0.8183970706705299,
+        "recordingMbid": null,
+        "exportId": "anon:Harbor Lights",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "paper lantern|night ferry",
+          "hue": 39,
+          "letter": "P"
+        }
+      },
+      {
+        "artist": "Marlowe Fields",
+        "title": "Long Exposure",
+        "album": "Daylight Savings",
+        "year": null,
+        "isrc": "QZPRS2600007",
+        "releaseGroupMbid": null,
+        "duration": 230,
+        "similarity": 0.792416175363158,
+        "recordingMbid": null,
+        "exportId": "anon:Long Exposure",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "marlowe fields|daylight savings",
+          "hue": 352,
+          "letter": "M"
+        }
+      },
+      {
+        "artist": "Okra Bloom",
+        "title": "Sunday Wire",
+        "album": "Porchlight",
+        "year": null,
+        "isrc": "QZPRS2600010",
+        "releaseGroupMbid": null,
+        "duration": 248,
+        "similarity": 0.76643535305654,
+        "recordingMbid": null,
+        "exportId": "anon:Sunday Wire",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "okra bloom|porchlight",
+          "hue": 353,
+          "letter": "O"
+        }
+      },
+      {
+        "artist": "Ada Merrow",
+        "title": "Field Notes",
+        "album": "Cartography",
+        "year": null,
+        "isrc": "QZPRS2600012",
+        "releaseGroupMbid": null,
+        "duration": 207,
+        "similarity": 0.7491147561849587,
+        "recordingMbid": null,
+        "exportId": "anon:Field Notes",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "ada merrow|cartography",
+          "hue": 81,
+          "letter": "A"
+        }
+      }
+    ],
+    "searched": {
+      "peers": 1,
+      "tracks": 5
+    },
+    "reason": null
+  },
+  "peers": null
+}

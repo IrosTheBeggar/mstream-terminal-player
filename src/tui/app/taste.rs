@@ -32,6 +32,11 @@ use crate::api::types::{
 };
 use crate::tui::worker::{TasteFailure, TastePart};
 
+/// The Peer recs room's App half: a child of this module, so it embeds a
+/// [`TasteState`] of its own for the visit's steering and sees its private
+/// fields without widening them.
+pub(crate) mod peer_recs;
+
 /// The user picks at most this many songs (clause 14).
 pub const TASTE_MAX_PINS: usize = 8;
 
@@ -463,6 +468,12 @@ impl TasteState {
         self.seq += 1;
         self.seq
     }
+
+    /// A pin or a seed of the shown batch already: nothing to add.
+    fn holds(&self, filepath: &str) -> bool {
+        self.pins.iter().any(|pin| pin.track.filepath == filepath)
+            || self.head.as_ref().is_some_and(|h| h.seeds.iter().any(|s| s.filepath == filepath))
+    }
 }
 
 impl App {
@@ -646,12 +657,18 @@ impl App {
     /// row is the session server's own, not a peer's, not a pin or a seed
     /// already, and fewer than eight pins stand — otherwise hidden.
     pub fn taste_can_pin_playing(&self) -> bool {
+        self.can_pin_playing_in(&self.taste)
+    }
+
+    /// "Pin the playing song"'s rule over a room's steering: Discover's
+    /// and the Peer recs room's share it.
+    pub(crate) fn can_pin_playing_in(&self, taste: &TasteState) -> bool {
         let Some(item) = self.queue.current.and_then(|i| self.queue.items.get(i)) else { return false };
         self.session.peer.is_none()
             && item.origin.peer.is_none()
             && self.is_session_origin(&item.origin)
-            && self.taste.pins.len() < TASTE_MAX_PINS
-            && !self.taste_holds(&item.filepath)
+            && taste.pins.len() < TASTE_MAX_PINS
+            && !taste.holds(&item.filepath)
     }
 
     /// Pin the playing song; the ask waits for the modal to close.
@@ -672,23 +689,34 @@ impl App {
     /// [`App::taste_picked`].
     pub(crate) fn taste_choose_song(&mut self) -> Vec<Effect> {
         self.taste.refused = None;
+        // Discover's pick now: one the Peer recs room armed is let go (D32).
+        self.peer_recs.picking = false;
         self.arm_capture(Capture::TasteSeed)
     }
 
     /// Add a pin without asking — the modal's, which asks on close.
     pub(crate) fn taste_add_pin(&mut self, track: Track) -> Result<(), TastePinRefusal> {
         self.taste_sync();
-        if self.session.peer.is_some() {
-            return Err(TastePinRefusal::OtherServer(self.server_display()));
-        }
-        if self.taste_holds(&track.filepath) {
-            return Err(TastePinRefusal::AlreadyThere);
-        }
-        if self.taste.pins.len() >= TASTE_MAX_PINS {
-            return Err(TastePinRefusal::Full);
+        if let Some(refusal) = self.pin_refusal(&self.taste, &track) {
+            return Err(refusal);
         }
         self.taste.pins.push(TastePin { track });
         Ok(())
+    }
+
+    /// Why a pick may not be pinned in a room's steering, if it may not:
+    /// Discover's and the Peer recs room's rule alike (clause 14).
+    pub(crate) fn pin_refusal(&self, taste: &TasteState, track: &Track) -> Option<TastePinRefusal> {
+        if self.session.peer.is_some() {
+            return Some(TastePinRefusal::OtherServer(self.server_display()));
+        }
+        if taste.holds(&track.filepath) {
+            return Some(TastePinRefusal::AlreadyThere);
+        }
+        if taste.pins.len() >= TASTE_MAX_PINS {
+            return Some(TastePinRefusal::Full);
+        }
+        None
     }
 
     /// Unpin (`x`, clause 13); the ask waits for the modal to close.
@@ -700,7 +728,14 @@ impl App {
 
     /// A capture pick landed (clause 14: "a pin asks … when the pick
     /// lands"). A refusal leaves the pins as they were.
+    /// A pick the Peer recs room armed lands in the room, never here, and
+    /// its refusal stays there (peer-recs contract §1.1.9, D32). The capture is
+    /// already let go when the pick lands, so the room's own flag says
+    /// whose it was.
     pub(crate) fn taste_picked(&mut self, track: Track) -> Result<Vec<Effect>, TastePinRefusal> {
+        if self.peer_recs.picking {
+            return Ok(self.peer_recs_seed_picked(track));
+        }
         self.taste_add_pin(track)?;
         Ok(self.taste_ask())
     }
@@ -724,11 +759,6 @@ impl App {
         }
         self.taste.pins.clear();
         self.taste_ask()
-    }
-
-    fn taste_holds(&self, filepath: &str) -> bool {
-        self.taste.pins.iter().any(|pin| pin.track.filepath == filepath)
-            || self.taste.head.as_ref().is_some_and(|h| h.seeds.iter().any(|s| s.filepath == filepath))
     }
 
     // ── Rows ────────────────────────────────────────────────────────────────

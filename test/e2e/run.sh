@@ -24,7 +24,7 @@ BIN="${BIN:-target/debug/mstream-player}"
 
 # The scenarios, by name (each is a function below); a name asked for
 # that is none of them stops the run before anything is built.
-ALL="A B C D E F G H T K K2 W M KM P P2 I J"
+ALL="A B C D E F G H T K K2 W M KM P P2 R R2 I J"
 for s in "$@"; do
   case " $ALL " in *" $s "*) ;; *) echo "no scenario $s (the battery has $ALL)"; exit 2 ;; esac
 done
@@ -119,6 +119,14 @@ TOML
 server = "http://127.0.0.1:$2"
 token = "fake-token"
 TOML
+}
+
+# A silent seat: the output's volume at 0 before the GUI first starts, so a
+# machine with an output device plays every clip a leg asks for without a
+# sound (the Peer recs legs).
+seed_quiet_home() { # $1 = HOME
+  mkdir -p "$1/player"
+  printf '[player]\nvolume = 0.0\n' > "$1/player/config.toml"
 }
 
 fake_state() { curl -s "http://127.0.0.1:$1/_state"; }
@@ -557,6 +565,63 @@ assert s['lookup_sizes'] and all(0 < n <= 100 for n in s['lookup_sizes']), s['lo
 stop_fake P2-peer
 }
 
+# ── Scenario R: the Peer recs room as an admin, in Apple Terminal's dialect
+# The fake's taste generation 3 (FAKE_P2P: the four flags on the ping, the
+# stage's peers, leads, per-tab answers and previews from
+# test/fixtures/peer_recs) and a silent seat (seed_quiet_home). `R` opens
+# the room on the header, the strip and the twelve leads; `y` copies the
+# list as OSC 52 (the leg sets SSH_CLIENT); a Kitchen Radio tab click asks
+# for its leads pinned to the batch; a row click opens the lead's sheet and
+# its echo, on the sheet's [X], closes nothing; the dead clip's lead resolves
+# again after its No preview; a clip plays in the band; `+ Lighthouse Tapes`
+# posts once, reads adding…, lands, and one pinned re-ask follows
+# (docs/ux-contracts/peer-recommendations.md). The previews are asserted
+# where the run's log says an output device opened, their absence where
+# none did. check_peer_recs.py replays the stream at the leg's marks against
+# the fake's /_state kept beside each one.
+scenario_R() {
+FAKE_P2P=1 start_fake R || return
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+seed_quiet_home "$WORK/h21"
+leg gui-peer-recs gui-peer-recs.exp "$WORK/h21" "$WORK/gui-peer-recs.out" env FAKE_URL="http://127.0.0.1:$PORT"
+if python3 "$E2E/check_peer_recs.py" admin "$WORK/gui-peer-recs.out" "$E2E/replay.py" 30 100 "$WORK/h21" "${E2E_CAPTURES:-}"; then
+  echo "PASS peer recs as an admin: the room, copy list, a tab, the sheet's echo, previews, an Add"
+else
+  echo "FAIL peer recs as an admin: the room, copy list, a tab, the sheet's echo, previews, an Add"; FAILS=$((FAILS+1))
+fi
+assert "one Add and three network asks; no preview art, no Discover body with a generation-3 key" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['adds'] == 1 and s['add_answers'] == [202], (s['adds'], s['add_answers'])
+assert len(s['network_bodies']) == 3 and s['network_answers'] == ['taste_all', 'taste_kitchen', 'taste_kitchen'], s['network_answers']
+assert s['art_gets'] == 0, s['art_paths']
+assert s['discover_gen3_bodies'] == 0, s['discover_gen3_bodies']
+assert s['job_starts'] == [], s['job_starts']
+"
+}
+
+# ── Scenario R2: the Peer recs room as a member ──────────────────────────
+# The same fake as a member's (FAKE_MEMBER: canAdd false, no addable row):
+# the strip is the shelf alone, the tabs stop walks to its end, and nothing
+# anywhere offers or posts an Add.
+scenario_R2() {
+FAKE_P2P=1 FAKE_MEMBER=1 start_fake R2 || return
+ARGS=(gui --server "http://127.0.0.1:$PORT" --token fake-token)
+seed_quiet_home "$WORK/h22"
+leg gui-peer-recs-member gui-peer-recs-member.exp "$WORK/h22" "$WORK/gui-peer-recs-member.out" env FAKE_URL="http://127.0.0.1:$PORT"
+if python3 "$E2E/check_peer_recs.py" member "$WORK/gui-peer-recs-member.out" "$E2E/replay.py" 30 100 "$WORK/h22" "${E2E_CAPTURES:-}"; then
+  echo "PASS peer recs as a member: the shelf alone, no Add drawn"
+else
+  echo "FAIL peer recs as a member: the shelf alone, no Add drawn"; FAILS=$((FAILS+1))
+fi
+assert "a member posted no Add" "
+import json,urllib.request
+s=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/_state'))
+assert s['adds'] == 0, s['add_bodies']
+assert s['art_gets'] == 0 and s['discover_gen3_bodies'] == 0, s
+"
+}
+
 # ── Scenario I: the MP3 player's flash page, against the scripted board ──
 # No fake mStream at all: the page talks to a board, and the board is the
 # fake behind MSTREAM_DEVICE_FAKE. The image is a merged one in miniature —
@@ -639,8 +704,9 @@ assert out.returncode == 2 and 'volume' in out.stderr, (out.returncode, out.stdo
 # W 27, K and K2 23, F 21, C 20, M 19, H 16, B 13, E 11, D and I 10, G 9,
 # T 8, J 1 — 39 s in all, against 289 s one after another (J measured
 # 2026-11-11, when it joined the battery). P2 about 60 s and P 45 joined
-# 2026-11-16 (macOS, the whole battery side by side): they lead.
-LONGEST_FIRST="P2 P A KM W K K2 F C M H B E D I G T J"
+# 2026-11-16 (macOS, the whole battery side by side): they lead. R about
+# 43 s and R2 14 joined 2026-11-20 (macOS, the two side by side).
+LONGEST_FIRST="P2 P R A KM W K K2 F C M H R2 B E D I G T J"
 JOBS="${E2E_JOBS:-8}"
 [ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
 

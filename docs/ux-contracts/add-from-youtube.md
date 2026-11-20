@@ -22,8 +22,11 @@ keeps a list of what came in. Nothing is drawn where it cannot work.
 
 1. **The nav row `Add YouTube`** — the left nav's TOOLS group, last, on
    row 19 under `Add torrent` (TOOLS label 14, Auto DJ 15, Sonic path 16,
-   Discover 17, Add torrent 18, Add YouTube 19; the block rises on short
-   terminals — clause 2). It opens the room as a Library nav room, the
+   Discover 17, Add torrent 18, Add YouTube 19; where the server offers
+   the Peer recs room, Peer recs 18 under Discover, Add torrent 19 and
+   Add YouTube 20 — peer-recommendations.md §1.1; the block rises on short
+   terminals, with all six tools at 100 × 24 with the footer on a fourth
+   step into row 1 — clause 2). It opens the room as a Library nav room, the
    Auto DJ room's shape: no way back, the nav column beside it. No digit
    and no letter. Settings has no doorway (see the log).
 2. **Files, on a folder below a library root** — line one of the browse
@@ -75,7 +78,9 @@ session.
 2. **The row's place**: `NavId::YouTube`, last in `NAV`, after
    `NavId::Torrent` — rooms past the digits are the pointer's, and a row
    that comes and goes never renumbers the others. It closes the TOOLS
-   group, which packs the rooms it shows: with all five it stands on 19,
+   group, which packs the rooms it shows: with all five it stands on 19
+   (on 20 with all six, Peer recs on 18 under Discover where the server
+   offers it — peer-recommendations.md §1.1),
    two lines higher on a server with no sonic path and no Discover (Auto
    DJ 15, Add torrent 16, Add YouTube 17); absent, Add torrent closes the
    group and nothing stands under it (discovery-page clause 2). Where
@@ -84,8 +89,12 @@ session.
    then over the TOOLS heading, then over the LIBRARY heading — so with
    all five the row stands on 18 at 100 × 25 with the key hints off or
    100 × 26 with them on, on 17 at 100 × 24 with them off or 100 × 25
-   with them on, and on 16 at 100 × 24 with them on: never on Settings'
-   row or under it. The
+   with them on, and on 16 at 100 × 24 with them on; with all six it
+   stands on 19 at 100 × 26 with them off or 100 × 27 with them on, on 18
+   at 100 × 25 off or 100 × 26 on, on 17 at 100 × 24 off or 100 × 25 on,
+   and on 16 at 100 × 24 with them on, where the block takes a fourth
+   step, into row 1 under the top tabs: never on Settings' row or under
+   it. The
    label fits the nav's twelve cells in every locale (CJK two a
    character), and reads `▸ Add YouTube` while the room is up. A gate
    that closes while the room is up and the session still connected sends
@@ -648,8 +657,9 @@ its column, still looking, the late answer, the limits, a failed lookup,
 a row that didn't start and the first time's words among them. The
 shell's own (`gui`): the TOOLS group's
 give-way at ten sizes from 100 × 24 to 100 × 30, the footer on and off, with
-all five tools, none of the gated ones, Add YouTube without the sonic path
-and Discover, and Discover without the sonic path — packed every time, the
+all five tools, all six with Peer recs, none of the gated ones, Add YouTube
+without the sonic path and Discover, and Discover without the sonic path —
+packed every time, the
 rise only where the last tool would reach Settings; the Add rows last in
 `NAV`, with no key; each Add row opening its room, from Manage servers too,
 and Settings keeping TORRENTS to the torrent switch; both Add labels within
@@ -844,3 +854,8 @@ and Settings keeping TORRENTS to the torrent switch; both Add labels within
   windows carry it as a button; the canvas's sheets have a bracketed
   button of their own and a plain border, so a sheet closes by Esc, its
   button, or a click outside it — the tips line says Esc.
+- **2026-11-20 — A row lower under Peer recs** (entry point 1;
+  discovery-page clause 2, peer-recommendations.md §1.1): where the
+  server offers the Peer recs room it stands under Discover on row 18,
+  Add torrent on 19 and Add YouTube on 20; with all six tools at 100 × 24
+  with the footer on the block takes a fourth step into row 1.

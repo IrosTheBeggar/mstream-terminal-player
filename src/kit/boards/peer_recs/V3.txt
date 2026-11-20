@@ -1,0 +1,77 @@
+<!-- MOCK:V3 -->
+*QUEUE OPEN · 100×30 · terminal window, title `mStream Player — 100×30` · covers: queue row: cells x 68–73 × rows 4–6 (54 × 54 px); bar card: cells x 56–63 × rows 26–29 (72 × 72 px).*
+
+TEXT
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 0    Library   Stats   Admin   MP3 Player   Visualizer                      http://127.0.0.1:3995 [+]  
+ 1                                                                                                      
+ 2     Files       │ Peer recs     Last 30 days ▾  more options  ↻    │ QUEUE  clear  3 tracks · 11:29  
+ 3     Search      │                                                  │ ─────────────────────────────── 
+ 4                 │  All    • Basement Hi-Fi    • Kitchen Radio   ›  │        Glass Hours              
+ 5   LIBRARY       │                                                  │        Color Out                
+ 6     Albums      │ ▸ preview all · copy list                        │        Low Light          3:52  
+ 7     Artists     │   TRACK                  TRACK                   │ ╭────╮ Highway                  
+ 8     Genres      │ ───────────────────────────────────────────────  │ │    │ Vosto                    
+ 9     Recent      │ ▌ Salt Road        ▸   ▌ Long Exposure    ▸      │ ╰────╯ Night Drive        4:10  
+10     Rated       │ ▌ Breakwater       ▸   ▌ Arcade Rain      ▸      │ ╭────╮ Neon                     
+11     Playlists   │ ▌ Signal Fires     ▸   ▌ Paper Moons      ▸      │ │    │ Vosto                    
+12     Last played │ ▌ Harbor Lights    ▸   ▌ Sunday Wire      ▸      │ ╰────╯ Night Drive        3:27  
+13     Most played │ ▌ Glass Season     ▸   ▌ Copper Dawn      ▸      │                                 
+14   TOOLS         │ ▌ Quiet Engine     ▸   ▌ Field Notes      ▸      │                                 
+15     Auto DJ     │                                                  │                                 
+16     Sonic path  │                                                  │                                 
+17     Discover    │                                                  │                                 
+18   ▸ Peer recs   │                                                  │                                 
+19     Add torrent │                                                  │                                 
+20     Add YouTube │                                                  │                                 
+21                 │                                                  │                                 
+22                 │                                                  │                                 
+23                 │                                                  │                                 
+24     Settings    │                                                  │                                 
+25   1:24 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━█──────────────────────────────────────────────────────── 3:52 
+26      ╭─────────┬───╮  ╭───╮ ╭────╮ ┏━━━━┓ ╭────╮ ╭───╮             Glass Hours                    ▾  
+27      │ auto-dj │ ▴ │  │ ↻ │ │ ◂◂ │ ┃ ▮▮ ┃ │ ▸▸ │ │ ⇄ │             Color Out                         
+28      ╰─────────┴───╯  ╰───╯ ╰────╯ ┗━━━━┛ ╰────╯ ╰───╯             MP3 · 320 kbps · 44.1 kHz         
+29   - ▰▰▰▰▰▰▰▰▱▱ +  80%                                                                                
+```
+
+STYLE
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 0   SSSSSSSSS  ddddd   ddddd   ddd dddddd   dddddddddd                      ddddddddddddddddddddd ddd  
+ 1                                                                                                      
+ 2     ddddd       d TTTT TTTT     tttt tt tttt d  dddd ddddddd  a    d ddddd  ddddd  d dddddd d ddddd  
+ 3     dddddd      d                                                  d ddddddddddddddddddddddddddddddd 
+ 4                 d SSSSS   o tttttttt ttttt    o ttttttt ttttt   a  d cccccc OOOOO OOOOO              
+ 5   ddddddd       d                                                  d cccccc ooooo ooo                
+ 6     dddddd      d a aaaaaaa aaa d dddd dddd                        d cccccc ddd ddddd          dddd  
+ 7     ddddddd     d   ddddd                  ddddd                   d dddddd ttttttt                  
+ 8     dddddd      d ddddddddddddddddddddddddddddddddddddddddddddddd  d d    d ddddd                    
+ 9     dddddd      d 1 tttt tttt        a   4 tttt tttttttt    a      d dddddd ddddd ddddd        dddd  
+10     ddddd       d 1 tttttttttt       a   5 tttttt tttt      a      d dddddd tttt                     
+11     ddddddddd   d 2 tttttt ttttt     a   6 ttttt ttttt      a      d d    d ddddd                    
+12     dddd dddddd d 2 tttttt tttttt    a   7 tttttt tttt      a      d dddddd ddddd ddddd        dddd  
+13     dddd dddddd d 3 ttttt tttttt     a   8 tttttt tttt      a      d                                 
+14   ddddd         d 3 ttttt tttttt     a   9 ttttt ttttt      a      d                                 
+15     dddd dd     d                                                  d                                 
+16     ddddd dddd  d                                                  d                                 
+17     dddddddd    d                                                  d                                 
+18   A AAAA AAAA   d                                                  d                                 
+19     ddd ddddddd d                                                  d                                 
+20     ddd ddddddd d                                                  d                                 
+21                 d                                                  d                                 
+22                 d                                                  d                                 
+23                 d                                                  d                                 
+24     dddddddd    d                                                  d                                 
+25   dddd ggggggggggggggggggggggggggggggggdddddddddddddddddddddddddddddddddddddddddddddddddddddddd dddd 
+26      ddddddddddddddd  ddddd TTTTTT GGGGGG TTTTTT ddddd   cccccccc  TTTTT TTTTT                    d  
+27      d ddddddd d d d  d d d T TT T G GG G T TT T d d d   cccccccc  ddddd ddd                         
+28      ddddddddddddddd  ddddd TTTTTT GGGGGG TTTTTT ddddd   cccccccc  ddd d ddd dddd d dddd ddd         
+29   d aaaaaaaadd d  ddd                                    cccccccc                                    
+```
+<!-- /MOCK:V3 -->

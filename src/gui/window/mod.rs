@@ -2828,6 +2828,7 @@ mod tests {
             ground: None,
             ground_rgb: None,
             on_accent: Color::Black,
+            tier: crate::kit::theme::Tier::Truecolor,
         };
         let table = named_colours(&theme);
         assert_eq!(

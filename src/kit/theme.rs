@@ -61,6 +61,9 @@ pub struct Theme {
     pub ground_rgb: Option<(u8, u8, u8)>,
     /// Foreground on accent-filled cells (selection rows).
     pub on_accent: Color,
+    /// The tier this palette was resolved for, so a colour the palette
+    /// does not hold (a lead's swatch) follows the same ladder.
+    pub tier: Tier,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +233,7 @@ fn palette(tier: Tier) -> Theme {
             ground: Some(Color::Rgb(0x12, 0x13, 0x1c)),
             ground_rgb: Some((0x12, 0x13, 0x1c)),
             on_accent: Color::Rgb(0x0d, 0x10, 0x17),
+            tier,
         },
         // Hand-tuned cube/ramp indexes (16..=255 only — the first 16 are
         // theme-controlled and would defeat the point).
@@ -244,6 +248,7 @@ fn palette(tier: Tier) -> Theme {
             ground: Some(Color::Indexed(233)), // #121212
             ground_rgb: Some((0x12, 0x12, 0x12)),
             on_accent: Color::Indexed(232),    // #080808
+            tier,
         },
         // The named floor — the wizard's original adaptive palette.
         Tier::Ansi => Theme {
@@ -257,6 +262,7 @@ fn palette(tier: Tier) -> Theme {
             ground: None,
             ground_rgb: None,
             on_accent: Color::Black,
+            tier,
         },
     }
 }
@@ -278,6 +284,66 @@ pub fn th() -> &'static Theme {
 #[cfg(feature = "window")]
 pub(crate) fn pin_truecolor() {
     let _ = THEME.get_or_init(|| palette(Tier::Truecolor));
+}
+
+// ── Lead swatches and the room's glyphs ─────────────────────────────────────
+
+/// True when the resolved palette is the truecolor tier: the terminal said
+/// so, or the window pinned it. A colour the palette does not hold, such as
+/// a lead's swatch, is drawn only on this tier (peer-recs contract §0.6).
+pub fn truecolor() -> bool {
+    th().tier == Tier::Truecolor
+}
+
+/// A lead's swatch as RGB: `hsl(hue, 45%, 60%)` of the server-stamped hue
+/// (peer-recommendations plan §5.1, whose vectors the tests pin). A hue of
+/// 360 or more wraps, as the server's own `rem_euclid(360)` does.
+pub fn swatch_rgb(hue: u16) -> (u8, u8, u8) {
+    let (saturation, lightness) = (0.45_f64, 0.60_f64);
+    let sector = f64::from(hue % 360) / 60.0;
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let second = chroma * (1.0 - (sector % 2.0 - 1.0).abs());
+    let (r, g, b) = match sector as u8 {
+        0 => (chroma, second, 0.0),
+        1 => (second, chroma, 0.0),
+        2 => (0.0, chroma, second),
+        3 => (0.0, second, chroma),
+        4 => (second, 0.0, chroma),
+        _ => (chroma, 0.0, second),
+    };
+    let floor = lightness - chroma / 2.0;
+    let byte = |v: f64| ((v + floor) * 255.0).round() as u8;
+    (byte(r), byte(g), byte(b))
+}
+
+/// A lead's swatch colour: its hue in truecolor; dim on the 256- and
+/// 16-colour tiers, which cannot hold it, and for a lead without a tile.
+pub fn swatch(hue: Option<u16>) -> Color {
+    swatch_for(truecolor(), th().dim, hue)
+}
+
+/// [`swatch`] for a given tier's answer and dim, so each tier is tested
+/// whatever tier the test process resolved.
+fn swatch_for(truecolor: bool, dim: Color, hue: Option<u16>) -> Color {
+    match hue {
+        Some(hue) if truecolor => {
+            let (r, g, b) = swatch_rgb(hue);
+            Color::Rgb(r, g, b)
+        }
+        _ => dim,
+    }
+}
+
+/// The lead swatch's glyph, on every console: CP437 has the left half
+/// block (0xDD), so the legacy console draws it as it is.
+pub fn swatch_glyph() -> &'static str {
+    "▌"
+}
+
+/// The glyph of a slot that is resolving, or waiting out a 429: the dotted
+/// circle, which the legacy console's fonts lack, so it draws `~` there.
+pub fn busy_glyph() -> &'static str {
+    if legacy_conhost() { "~" } else { "◌" }
 }
 
 // ── Ground ownership ─────────────────────────────────────────────────────────
@@ -426,6 +492,62 @@ mod tests {
         // runner's tty) — the gate must default closed.
         assert!(!ground_owned());
         assert!(release_ground().is_none());
+    }
+
+    /// The plan's vectors (peer-recommendations plan §5.1, DS §0.6), within
+    /// one step a channel: the web and the phone round on their own.
+    #[test]
+    fn swatch_matches_the_spec_vectors() {
+        let vectors: [(u16, u32); 9] = [
+            (203, 0x6ba4c7),
+            (39, 0xc7a76b),
+            (4, 0xc7716b),
+            (352, 0xc76b77),
+            (78, 0xabc76b),
+            (154, 0x6bc79f),
+            (353, 0xc76b76),
+            (53, 0xc7bc6b),
+            (81, 0xa7c76b),
+        ];
+        for (hue, hex) in vectors {
+            let want = [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8];
+            let (r, g, b) = swatch_rgb(hue);
+            let close = [r, g, b].into_iter().zip(want).all(|(got, want)| got.abs_diff(want) <= 1);
+            assert!(close, "hue {hue}: got {r:02x}{g:02x}{b:02x}, want {hex:06x}");
+        }
+        assert_eq!(swatch_rgb(203 + 360), swatch_rgb(203), "a hue past 360 wraps");
+    }
+
+    #[test]
+    fn swatch_is_dim_without_truecolor_or_a_hue() {
+        let on = |p: &Theme, hue| swatch_for(p.tier == Tier::Truecolor, p.dim, hue);
+        let (r, g, b) = swatch_rgb(203);
+        assert_eq!(on(&palette(Tier::Truecolor), Some(203)), Color::Rgb(r, g, b));
+        for t in [Tier::Truecolor, Tier::C256, Tier::Ansi] {
+            let p = palette(t);
+            assert_eq!(p.tier, t, "each palette knows its tier");
+            assert_eq!(on(&p, None), p.dim, "{t:?}: no tile, no hue");
+        }
+        for t in [Tier::C256, Tier::Ansi] {
+            let p = palette(t);
+            assert_eq!(on(&p, Some(203)), p.dim, "{t:?} cannot hold the hue");
+        }
+        // The live swatch follows whatever tier this process resolved.
+        assert_eq!(truecolor(), th().tier == Tier::Truecolor);
+        assert_eq!(swatch(Some(203)), on(th(), Some(203)));
+        assert_eq!(swatch(None), th().dim);
+    }
+
+    #[test]
+    fn busy_glyph_has_a_legacy_stand_in() {
+        {
+            let _legacy = legacy_glyphs_here();
+            assert_eq!(busy_glyph(), "~");
+            assert_eq!(swatch_glyph(), "▌", "CP437 has the half block");
+        }
+        pin_modern_terminal();
+        assert_eq!(busy_glyph(), "◌");
+        assert_eq!(swatch_glyph(), "▌");
     }
 
     #[test]

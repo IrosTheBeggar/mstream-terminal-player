@@ -1,0 +1,169 @@
+#!/usr/bin/expect -f
+# The GUI's Peer recs room as an admin, in Apple Terminal's mouse dialect,
+# against the fake server's taste generation 3 (test/e2e/fake_mstream.py,
+# FAKE_P2P=1: the stage's peers, leads, per-tab answers and previews from
+# test/fixtures/peer_recs; docs/ux-contracts/peer-recommendations.md). The
+# player is spawned with TERM_PROGRAM=Apple_Terminal, so every click is sent
+# as that terminal sends one: the press an INSTANT pair (SGR M then m in one
+# write), then, once the frame shows what it opened, the same pair again
+# where the hand let go (the release echo; docs/ui-kit.md, behavioral
+# rules). The seat is silent and local to the leg: run.sh seeds
+# `[player] volume = 0.0`, and the leg sets SSH_CLIENT, so a copy goes out
+# as OSC 52 into the stream and never onto this machine's pasteboard.
+# MSTREAM_LOG names the run's log, where `output opened on` says whether
+# the machine has an output device: the checker asserts the previews with
+# one and their absence without.
+#
+# At 100 × 30 with the queue panel folded (Tab), `R` opens the room
+# (@@PR:before@@ is the frame before it): the header on row 2, the strip on
+# row 4, the twelve leads 6 | 6 from row 9, their titles at x 19 and 59.
+# `y` copies the list (@@PR:copied@@). A click on the Kitchen Radio tab
+# (x 47–59, row 4) asks for that peer's leads at once, pinned to the batch's
+# seeds; its echo selects nothing more (@@PR:kitchen@@). A click on Field
+# Notes' artist cell (x 80, row 10) opens the lead's sheet (x 17–82, rows
+# 9–20); its echo lands on the sheet's own [X] (x 79–81, row 10) and must
+# not close it, nor press a row (@@PR:sheet@@). Esc closes it and Esc stows.
+# ↓ ↓ ↓ holds Long Exposure, whose clip URL is dead: `l` resolves it, the
+# clip will not play, the note says No preview and the stored answer is
+# forgotten (@@PR:dead@@), so the next `l` resolves again (@@PR:dead2@@).
+# ↑ ↑ holds Signal Fires: `l` plays its 2 s clip, the band on row 6
+# (@@PR:clip@@). ↑ climbs to the tabs stop on Kitchen Radio, → → → walks it
+# to `+ Lighthouse Tapes` (@@PR:stop@@), Enter posts the Add: the tab reads
+# `Lighthouse Tapes adding…`, inert (@@PR:adding@@), so a second Enter posts
+# nothing (@@PR:inert@@). The fast poll sees it land: Lighthouse Tapes joins
+# the shelf, Attic Tapes leaves it, and one pinned re-ask follows
+# (@@PR:landed@@). q quits. At each mark the leg keeps the fake's /_state
+# beside the stream (WIZHOME/state-<mark>.json), so check_peer_recs.py reads
+# what had been asked by then; it replays the stream at every
+# synchronized-update end and at the marks (the README's first law). Gates
+# on first-paint words only; each gate's braces span lines.
+set timeout 20
+set env(TERM) xterm-256color
+set env(TERM_PROGRAM) Apple_Terminal
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(SSH_CLIENT) "127.0.0.1 50000 22"
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+set env(MSTREAM_LOG) $::env(WIZHOME)/mstream.log
+proc drain {secs} { expect -timeout $secs timeout {} }
+# A sub-second drain: whatever the player writes is read meanwhile, never
+# a bare sleep with the pty's buffer filling under a frame.
+proc drain_ms {ms} {
+    set end [expr {[clock milliseconds] + $ms}]
+    while {[clock milliseconds] < $end} {
+        expect -timeout 0 -re ".+" {} timeout {}
+        after 5
+    }
+}
+proc fail {word code} { puts $word; exec kill -9 [exp_pid]; expect eof; exit $code }
+# The pointer comes to rest at cell (x, y), 1-based as SGR counts.
+proc hover {x y} { send "\x1b\[<35;${x};${y}M" }
+# Apple Terminal's press at (x, y): the instant pair, SGR M then m in one
+# write; the release's echo is the same pair again.
+proc pair {x y} { send "\x1b\[<0;${x};${y}M\x1b\[<0;${x};${y}m" }
+# A mark in the stream, and the fake's state at that moment beside it.
+proc mark {name} {
+    puts "@@PR:${name}@@"
+    exec curl -s -m 5 -o $::env(WIZHOME)/state-${name}.json $::env(FAKE_URL)/_state
+}
+proc key {k} { send $k; drain_ms 300 }
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    "connected to" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { fail "NO-SESSION" 2 }
+}
+drain 1
+# The queue panel folds: the room takes its 80 cells.
+send "\t"
+drain 1
+mark before
+send "R"
+expect {
+    "Recommendations" {}
+    eof { puts "DIED-ON-OPEN"; exit 7 }
+    timeout { fail "NO-ROOM" 3 }
+}
+expect {
+    "Breakwater" {}
+    eof { puts "DIED-ON-ANSWER"; exit 8 }
+    timeout { fail "NO-LEADS" 4 }
+}
+# The strip, the plug-ins and the destination land.
+drain 2
+mark open
+send "y"
+drain 1
+mark copied
+# The Kitchen Radio tab: rest on it, press, and the echo.
+hover 51 5
+drain_ms 150
+pair 51 5
+drain_ms 300
+pair 51 5
+drain 2
+mark kitchen
+# Field Notes' artist cell (column B, row 10): the sheet opens, and the
+# echo lands on its [X].
+hover 81 11
+drain_ms 150
+pair 81 11
+expect {
+    "elsewhere" {}
+    eof { puts "DIED-ON-ROW"; exit 9 }
+    timeout { fail "NO-SHEET" 10 }
+}
+drain_ms 120
+pair 81 11
+drain 2
+mark sheet
+# The pointer leaves for a blank nav cell (x 1, row 22) before the keys
+# walk the rows.
+hover 2 23
+send "\x1b"
+drain 1
+send "\x1b"
+drain 1
+# Long Exposure, the third row of column A: its clip URL is dead.
+key "\x1b\[B"
+key "\x1b\[B"
+key "\x1b\[B"
+mark held
+send "l"
+drain 3
+mark dead
+send "l"
+drain 3
+mark dead2
+# Signal Fires, the first row: its clip plays its two seconds out.
+key "\x1b\[A"
+key "\x1b\[A"
+send "l"
+drain 4
+mark clip
+# The tabs stop, walked to the first Add.
+key "\x1b\[A"
+key "\x1b\[C"
+key "\x1b\[C"
+key "\x1b\[C"
+drain 1
+mark stop
+send "\r"
+drain 1
+mark adding
+send "\r"
+drain 1
+mark inert
+# The fast poll sees the Add land; the re-ask is answered.
+drain 10
+mark landed
+send "q"
+expect {
+    eof {}
+    timeout { fail "NO-QUIT" 20 }
+}
+catch wait result
+exit [lindex $result 3]

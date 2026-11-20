@@ -1,0 +1,65 @@
+<!-- MOCK:W2 -->
+*FLOOR · KEY HINTS · 100×24 · terminal window, title `mStream Player — 100×24` · covers: bar card: cells x 56–63 × rows 19–22 (72 × 72 px).*
+
+TEXT
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 0    Library   Stats   Admin   MP3 Player   Visualizer                      http://127.0.0.1:3995 [+]  
+ 1     Files                                                                                            
+ 2     Search      │ Peer Recommendations                   Last 30 days ▾  more options  ↻ new seeds   
+ 3     Albums      │  All    • Basement Hi-Fi    • Kitchen Radio    Attic Tapes    mStream · 3f9a   ›   
+ 4     Artists     │ ▸ preview all · copy list                                                          
+ 5     Genres      │   TRACK            ARTIST                 TRACK            ARTIST                  
+ 6     Recent      │ ────────────────────────────────────────────────────────────────────────────────   
+ 7     Rated       │ ▌ Salt Road        Hollow Coast     ▸   ▌ Long Exposure    Marlowe Fields   ▸      
+ 8     Playlists   │ ▌ Breakwater       Hollow Coast     ▸   ▌ Arcade Rain      Juniper Static   ▸      
+ 9     Last played │ ▌ Signal Fires     Paper Lantern    ▸   ▌ Paper Moons      The Vesper Lines ▸      
+10     Most played │ ▌ Harbor Lights    Paper Lantern    ▸   ▌ Sunday Wire      Okra Bloom       ▸      
+11     Auto DJ     │ ▌ Glass Season     Tidewater        ▸   ▌ Copper Dawn      Kestrel & Vine   ▸      
+12     Sonic path  │ ▌ Quiet Engine     Tidewater        ▸   ▌ Field Notes      Ada Merrow       ▸      
+13     Discover    │                                                                                    
+14   ▸ Peer recs   │                                                                                    
+15     Add torrent │                                                                                    
+16     Add YouTube │                                                                                    
+17     Settings    │                                                                                    
+18   1:24 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━█──────────────────────────────────────────────────────── 3:52 
+19      ╭─────────┬───╮  ╭───╮ ╭────╮ ┏━━━━┓ ╭────╮ ╭───╮             Glass Hours                    ▴  
+20      │ auto-dj │ ▴ │  │ ↻ │ │ ◂◂ │ ┃ ▮▮ ┃ │ ▸▸ │ │ ⇄ │             Color Out                         
+21      ╰─────────┴───╯  ╰───╯ ╰────╯ ┗━━━━┛ ╰────╯ ╰───╯             MP3 · 320 kbps · 44.1 kHz         
+22   - ▰▰▰▰▰▰▰▰▱▱ +  80%                                                                                
+23   ↓ pick a row · ← → peers · w window · e more options · R new seeds                                 
+```
+
+STYLE
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 0   SSSSSSSSS  ddddd   ddddd   ddd dddddd   dddddddddd                      ddddddddddddddddddddd ddd  
+ 1     ddddd                                                                                            
+ 2     dddddd      d TTTT TTTTTTTTTTTTTTT                   tttt tt tttt d  dddd ddddddd  a aaa aaaaa   
+ 3     dddddd      d SSSSS   o tttttttt ttttt    o ttttttt ttttt    ddddd ddddd    ddddddd d dddd   a   
+ 4     ddddddd     d a aaaaaaa aaa d dddd dddd                                                          
+ 5     dddddd      d   ddddd            dddddd                 ddddd            dddddd                  
+ 6     dddddd      d dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd   
+ 7     ddddd       d 1 tttt tttt        dddddd ddddd     a   4 tttt tttttttt    ddddddd dddddd   a      
+ 8     ddddddddd   d 1 tttttttttt       dddddd ddddd     a   5 tttttt tttt      ddddddd dddddd   a      
+ 9     dddd dddddd d 2 tttttt ttttt     ddddd ddddddd    a   6 ttttt ttttt      ddd dddddd ddddd a      
+10     dddd dddddd d 2 tttttt tttttt    ddddd ddddddd    a   7 tttttt tttt      dddd ddddd       a      
+11     dddd dd     d 3 ttttt tttttt     ddddddddd        a   8 tttttt tttt      ddddddd d dddd   a      
+12     ddddd dddd  d 3 ttttt tttttt     ddddddddd        a   9 ttttt ttttt      ddd dddddd       a      
+13     dddddddd    d                                                                                    
+14   A AAAA AAAA   d                                                                                    
+15     ddd ddddddd d                                                                                    
+16     ddd ddddddd d                                                                                    
+17     dddddddd    d                                                                                    
+18   dddd ggggggggggggggggggggggggggggggggdddddddddddddddddddddddddddddddddddddddddddddddddddddddd dddd 
+19      ddddddddddddddd  ddddd TTTTTT GGGGGG TTTTTT ddddd   cccccccc  TTTTT TTTTT                    d  
+20      d ddddddd d d d  d d d T TT T G GG G T TT T d d d   cccccccc  ddddd ddd                         
+21      ddddddddddddddd  ddddd TTTTTT GGGGGG TTTTTT ddddd   cccccccc  ddd d ddd dddd d dddd ddd         
+22   d aaaaaaaadd d  ddd                                    cccccccc                                    
+23   d dddd d ddd d d d ddddd d d dddddd d d dddd ddddddd d d ddd ddddd                                 
+```
+<!-- /MOCK:W2 -->
