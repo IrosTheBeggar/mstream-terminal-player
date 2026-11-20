@@ -62,8 +62,10 @@ struct Live {
     region: Option<egui::Rect>,
     /// The pointer, in physical pixels, as winit last placed it.
     cursor: Option<(f32, f32)>,
-    /// A press began in the region: its drag and release are egui's too.
-    captured: bool,
+    /// A press began in the region, of this button: its drag and release
+    /// are egui's too, and egui holds the button down until it hears the
+    /// release.
+    captured: Option<egui::PointerButton>,
     /// Events egui has been given since its last pass.
     pending: bool,
     /// When egui asked to run again (an animation, a tooltip's delay).
@@ -79,7 +81,7 @@ impl Panel {
             window: None,
             region: None,
             cursor: None,
-            captured: false,
+            captured: None,
             pending: false,
             repaint_at: None,
         };
@@ -119,13 +121,23 @@ impl Panel {
             return;
         }
         let mut live = self.lock();
-        let Live { state, window, captured, .. } = &mut *live;
+        let Live { state, window, captured, cursor, ctx, pending, .. } = &mut *live;
+        let (Some(state), Some(window)) = (state.as_mut(), window.as_deref()) else {
+            *captured = None;
+            return;
+        };
+        // The window lost the keyboard mid-press: the release may never
+        // come, so egui is told the button let go where the pointer stands,
+        // or its drag would hold until the next press.
         if matches!(event, WindowEvent::Focused(false)) {
-            *captured = false;
+            let ppp = window.scale_factor() as f32 * ctx.zoom_factor();
+            let at = cursor.map(|(x, y)| pos2(x, y) / ppp);
+            if let Some(release) = let_go(captured, at) {
+                state.egui_input_mut().events.push(release);
+                *pending = true;
+            }
         }
-        if let (Some(state), Some(window)) = (state.as_mut(), window.as_deref()) {
-            let _ = state.on_window_event(window, event);
-        }
+        let _ = state.on_window_event(window, event);
     }
 
     /// The pointer, as the window hands it to the grid (input.rs's [`Raw`],
@@ -143,10 +155,6 @@ impl Panel {
         if let Raw::Move { x, y } = raw {
             live.cursor = Some((*x as f32, *y as f32));
         }
-        if !on_screen {
-            live.captured = false;
-            return false;
-        }
         let Live { state, window, region, cursor, captured, pending, ctx, .. } = &mut *live;
         let (Some(state), Some(window)) = (state.as_mut(), window.as_deref()) else { return false };
         let ppp = window.scale_factor() as f32 * ctx.zoom_factor();
@@ -155,43 +163,12 @@ impl Panel {
             _ => false,
         };
         let at = cursor.map(|(x, y)| pos2(x, y) / ppp);
-        let input = state.egui_input_mut();
-        // No page here acts on a modified click or wheel yet.
-        let modifiers = egui::Modifiers::default();
-        let event = match raw {
-            Raw::Move { x, y } => {
-                input.events.push(egui::Event::PointerMoved(pos2(*x as f32, *y as f32) / ppp));
-                *pending = true;
-                return false;
-            }
-            Raw::Leave => {
-                *captured = false;
-                input.events.push(egui::Event::PointerGone);
-                *pending = true;
-                return false;
-            }
-            Raw::Button { button, down } if (*down && inside) || (!*down && *captured) => {
-                *captured = *down;
-                let button = match button {
-                    Button::Left => egui::PointerButton::Primary,
-                    Button::Right => egui::PointerButton::Secondary,
-                    Button::Middle => egui::PointerButton::Middle,
-                };
-                let Some(pos) = at else { return false };
-                egui::Event::PointerButton { pos, button, pressed: *down, modifiers }
-            }
-            Raw::Wheel(wheel) if inside => {
-                let (unit, delta) = match wheel {
-                    Wheel::Lines(lines) => (egui::MouseWheelUnit::Line, egui::vec2(0.0, *lines)),
-                    Wheel::Pixels(px) => (egui::MouseWheelUnit::Point, egui::vec2(0.0, *px as f32 / ppp)),
-                };
-                egui::Event::MouseWheel { unit, delta, phase: egui::TouchPhase::Move, modifiers }
-            }
-            _ => return false,
-        };
-        input.events.push(event);
-        *pending = true;
-        true
+        let (events, ours) = routed(raw, on_screen, inside, at, ppp, captured);
+        if !events.is_empty() {
+            state.egui_input_mut().events.extend(events);
+            *pending = true;
+        }
+        ours
     }
 
     /// The face's frame must run its pass though the player has nothing
@@ -250,6 +227,76 @@ impl Panel {
         let jobs = ctx.tessellate(std::mem::take(&mut output.shapes), output.pixels_per_point);
         self.board.panel_drawn(area, Paint::pass(jobs, output.pixels_per_point, output.textures_delta));
         Some(Shown { hand })
+    }
+}
+
+/// What [`Panel::route`] makes of one of the pointer's events: what egui is
+/// given of it, and whether it is egui's alone. `at` is the pointer's place
+/// in egui's points, `ppp` the pixels in a point, `captured` the button a
+/// press in the region holds down for egui.
+///
+/// A held button is egui's until the hand lets it go, whatever comes over
+/// the panel meanwhile. An overlay that comes up mid-drag (a GUI tooltip
+/// that ripens, a menu) stands the panel down, and the release still goes
+/// to egui, where the pointer is when it comes, so egui's press ends with
+/// the hand's: dropped, egui's button would stay down and the log's hold or
+/// a room's drag stick until the next press. It is not let go at the
+/// stand-down itself: the hand still holds it, and a stand-down that ends
+/// first finds the drag going on. Only where the release may never be
+/// reported — the pointer gone from the window — is it let go at once.
+fn routed(
+    raw: &Raw,
+    on_screen: bool,
+    inside: bool,
+    at: Option<egui::Pos2>,
+    ppp: f32,
+    captured: &mut Option<egui::PointerButton>,
+) -> (Vec<egui::Event>, bool) {
+    // No page here acts on a modified click or wheel yet.
+    let modifiers = egui::Modifiers::default();
+    match raw {
+        Raw::Leave => {
+            let mut events: Vec<egui::Event> = let_go(captured, at).into_iter().collect();
+            events.push(egui::Event::PointerGone);
+            (events, false)
+        }
+        Raw::Button { button, down: false } if *captured == Some(pointer_button(button)) => {
+            (let_go(captured, at).into_iter().collect(), true)
+        }
+        // Another button while one is held is the panel's too, and egui
+        // acts on one at a time.
+        Raw::Button { .. } if captured.is_some() => (Vec::new(), true),
+        _ if !on_screen => (Vec::new(), false),
+        Raw::Move { .. } => (at.map(egui::Event::PointerMoved).into_iter().collect(), false),
+        Raw::Button { button, down: true } if inside => {
+            let Some(pos) = at else { return (Vec::new(), false) };
+            let button = pointer_button(button);
+            *captured = Some(button);
+            (vec![egui::Event::PointerButton { pos, button, pressed: true, modifiers }], true)
+        }
+        Raw::Wheel(wheel) if inside => {
+            let (unit, delta) = match wheel {
+                Wheel::Lines(lines) => (egui::MouseWheelUnit::Line, egui::vec2(0.0, *lines)),
+                Wheel::Pixels(px) => (egui::MouseWheelUnit::Point, egui::vec2(0.0, *px as f32 / ppp)),
+            };
+            (vec![egui::Event::MouseWheel { unit, delta, phase: egui::TouchPhase::Move, modifiers }], true)
+        }
+        _ => (Vec::new(), false),
+    }
+}
+
+/// The release of the button egui holds, at `at`, if it holds one: the
+/// panel lets go of it.
+fn let_go(captured: &mut Option<egui::PointerButton>, at: Option<egui::Pos2>) -> Option<egui::Event> {
+    let button = captured.take()?;
+    Some(egui::Event::PointerButton { pos: at?, button, pressed: false, modifiers: egui::Modifiers::default() })
+}
+
+fn pointer_button(button: &Button) -> egui::PointerButton {
+    match button {
+        Button::Left => egui::PointerButton::Primary,
+        Button::Right => egui::PointerButton::Secondary,
+        Button::Middle => egui::PointerButton::Middle,
     }
 }
 
@@ -452,5 +499,102 @@ fn system_ui_faces() -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
             "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
         ];
         (regular.iter().map(PathBuf::from).collect(), strong.iter().map(PathBuf::from).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PPP: f32 = 2.0;
+
+    /// The pointer's events in order, the panel on screen or stood down for
+    /// each, the pointer inside the region throughout: what egui was given
+    /// of them, and what the grid was kept from.
+    fn feed(steps: &[(Raw, bool)], captured: &mut Option<egui::PointerButton>) -> (Vec<egui::Event>, Vec<bool>) {
+        let at = Some(pos2(40.0, 30.0));
+        let (mut given, mut ours) = (Vec::new(), Vec::new());
+        for (raw, on_screen) in steps {
+            let (events, alone) = routed(raw, *on_screen, true, at, PPP, captured);
+            given.extend(events);
+            ours.push(alone);
+        }
+        (given, ours)
+    }
+
+    fn button(down: bool) -> Raw {
+        Raw::Button { button: Button::Left, down }
+    }
+
+    fn release_at(event: &egui::Event) -> Option<egui::Pos2> {
+        match event {
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. } => Some(*pos),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_release_while_the_panel_stands_down_still_lets_go_of_eguis_press() {
+        let mut captured = None;
+        let moved = Raw::Move { x: 80.0, y: 60.0 };
+        // Pressed on the panel, then an overlay comes up mid-drag: the moves
+        // under it are not egui's, and the press is not let go by the
+        // stand-down itself.
+        let (given, ours) = feed(&[(button(true), true), (moved.clone(), false)], &mut captured);
+        assert_eq!(ours, [true, false], "the press is egui's, a move under the overlay the grid's too");
+        assert_eq!(given.len(), 1, "only the press: {given:?}");
+        assert_eq!(captured, Some(egui::PointerButton::Primary), "the hand still holds it");
+        // The release comes under the overlay: egui hears it, where the
+        // pointer is, and the grid does not.
+        let (given, ours) = feed(&[(button(false), false)], &mut captured);
+        assert_eq!(ours, [true]);
+        assert_eq!(given.iter().find_map(release_at), Some(pos2(40.0, 30.0)), "{given:?}");
+        assert_eq!(captured, None);
+        // Nothing held, a release under an overlay is the grid's.
+        let (given, ours) = feed(&[(button(false), false)], &mut captured);
+        assert!(given.is_empty() && ours == [false], "{given:?}");
+    }
+
+    #[test]
+    fn a_stand_down_that_ends_first_finds_the_drag_going_on() {
+        let mut captured = None;
+        let moved = Raw::Move { x: 80.0, y: 60.0 };
+        let steps = [(button(true), true), (moved.clone(), false), (moved, true), (button(false), true)];
+        let (given, ours) = feed(&steps, &mut captured);
+        assert_eq!(ours, [true, false, false, true]);
+        assert!(matches!(given[1], egui::Event::PointerMoved(_)), "the drag goes on once the panel is back: {given:?}");
+        assert!(release_at(&given[2]).is_some(), "and ends with the hand's release: {given:?}");
+        assert_eq!(captured, None);
+    }
+
+    #[test]
+    fn the_pointer_gone_from_the_window_lets_go_at_once_and_other_buttons_wait() {
+        let mut captured = None;
+        let right = Raw::Button { button: Button::Right, down: true };
+        let (given, ours) = feed(&[(button(true), true), (right, true)], &mut captured);
+        assert_eq!(ours, [true, true], "a second button while one is held is the panel's");
+        assert_eq!(given.len(), 1, "and egui acts on one: {given:?}");
+        let (given, _) = feed(&[(Raw::Leave, false)], &mut captured);
+        assert!(release_at(&given[0]).is_some(), "a release that may never come is made now: {given:?}");
+        assert!(matches!(given[1], egui::Event::PointerGone));
+        assert_eq!(captured, None);
+    }
+
+    #[test]
+    fn egui_holds_no_button_once_it_hears_the_forwarded_release() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
+        let run = |events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |_| {});
+            out.textures_delta.clear();
+        };
+        let mut captured = None;
+        let (pressed, _) = feed(&[(button(true), true)], &mut captured);
+        run(pressed);
+        assert!(ctx.input(|i| i.pointer.primary_down()), "egui holds the press");
+        let (released, _) = feed(&[(button(false), false)], &mut captured);
+        run(released);
+        assert!(!ctx.input(|i| i.pointer.any_down()), "and lets it go with the hand");
     }
 }
