@@ -1,0 +1,46 @@
+<!-- MOCK:REG-BAND -->
+- `01` Deezer, playing (`▮▮`), 12 s of 30: 26 cells of text, clipped mid-artist
+- `02` paused (`▸`): the bar holds
+- `03` resolving (`◌`): no bar or attribution before the answer
+- `04` iTunes: the longer attribution leaves 18 cells, so the artist drops and the bar stays
+
+TEXT
+
+```text
+    11122222222223333333333444444444455555555556666666666777777777788888888889999999
+    78901234567890123456789012345678901234567890123456789012345678901234567890123456
+01  ▮▮ ▸▸ Signal Fires · Paper Lant…  ▰▰▰▰▱▱▱▱▱▱  Preview from Deezer [ get it ] [X]
+02  ▸  ▸▸ Signal Fires · Paper Lant…  ▰▰▰▰▱▱▱▱▱▱  Preview from Deezer [ get it ] [X]
+03  ◌  ▸▸ Quiet Engine · Tidewater                                    [ get it ] [X]
+04  ▮▮ ▸▸ Signal Fires        ▰▰▰▰▱▱▱▱▱▱  Provided courtesy of iTunes [ get it ] [X]
+```
+
+STYLE
+
+```text
+    11122222222223333333333444444444455555555556666666666777777777788888888889999999
+    78901234567890123456789012345678901234567890123456789012345678901234567890123456
+01  AA dd tttttt ttttt d ddddd ddddd  oooodddddd  ddddddd dddd dddddd d ddd dd d ddd
+02  A  dd tttttt ttttt d ddddd ddddd  oooodddddd  ddddddd dddd dddddd d ddd dd d ddd
+03  g  dd ttttt tttttt d ddddddddd                                    d ddd dd d ddd
+04  AA dd tttttt ttttt        oooodddddd  dddddddd dddddddd dd dddddd d ddd dd d ddd
+```
+
+- `01` 47 cells (the queue open): the bar drops, then `[ get it ]`; 16 cells of text, so the artist drops and the title stands whole
+
+TEXT
+
+```text
+    11122222222223333333333444444444455555555556666
+    78901234567890123456789012345678901234567890123
+01  ▮▮ ▸▸ Signal Fires      Preview from Deezer [X]
+```
+
+STYLE
+
+```text
+    11122222222223333333333444444444455555555556666
+    78901234567890123456789012345678901234567890123
+01  AA dd tttttt ttttt      ddddddd dddd dddddd ddd
+```
+<!-- /MOCK:REG-BAND -->

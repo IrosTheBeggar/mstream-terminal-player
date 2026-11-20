@@ -1,0 +1,37 @@
+<!-- MOCK:S6 -->
+*PREVIEW PAUSED · 100×30 · terminal window, title `mStream Player — 100×30` · covers: bar card: cells x 56–63 × rows 26–29 (72 × 72 px).*
+
+Rows that differ from NO PEERS YET: 4, 6, 9, 10, 11, 12, 13, 14, 27. Every other row is as NO PEERS YET.
+
+TEXT
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 4                 │  All    • Basement Hi-Fi    • Kitchen Radio    Attic Tapes    mStream · 3f9a   ›   
+ 6     Albums      │ ▸  ▸▸ Signal Fires · Paper Lant…  ▰▰▰▰▱▱▱▱▱▱  Preview from Deezer [ get it ] [X]   
+ 9     Recent      │ ▌ Salt Road        Hollow Coast     ▸   ▌ Long Exposure    Marlowe Fields   ▸      
+10     Rated       │ ▌ Breakwater       Hollow Coast     ▸   ▌ Arcade Rain      Juniper Static   ▸      
+11     Playlists   │ ▌ Signal Fires     Paper Lantern    ▸   ▌ Paper Moons      The Vesper Lines ▸      
+12     Last played │ ▌ Harbor Lights    Paper Lantern    ▸   ▌ Sunday Wire      Okra Bloom       ▸      
+13     Most played │ ▌ Glass Season     Tidewater        ▸   ▌ Copper Dawn      Kestrel & Vine   ▸      
+14   TOOLS         │ ▌ Quiet Engine     Tidewater        ▸   ▌ Field Notes      Ada Merrow       ▸      
+27      │ auto-dj │ ▴ │  │ ↻ │ │ ◂◂ │ ┃ ▸  ┃ │ ▸▸ │ │ ⇄ │             Color Out                         
+```
+
+STYLE
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 4                 d SSSSS   o tttttttt ttttt    o ttttttt ttttt    ddddd ddddd    ddddddd d dddd   a   
+ 6     dddddd      d A  dd tttttt ttttt d ddddd ddddd  oooodddddd  ddddddd dddd dddddd d ddd dd d ddd   
+ 9     dddddd      d 1 tttt tttt        dddddd ddddd     a   4 tttt tttttttt    ddddddd dddddd   a      
+10     ddddd       d 1 tttttttttt       dddddd ddddd     a   5 tttttt tttt      ddddddd dddddd   d      
+11     ddddddddd   d 2 AAAAAA AAAAA     ddddd ddddddd    A   6 ttttt ttttt      ddd dddddd ddddd a      
+12     dddd dddddd d 2 tttttt tttttt    ddddd ddddddd    a   7 tttttt tttt      dddd ddddd       a      
+13     dddd dddddd d 3 ttttt tttttt     ddddddddd        a   8 tttttt tttt      ddddddd d dddd   a      
+14   ddddd         d 3 ttttt tttttt     ddddddddd        a   9 ttttt ttttt      ddd dddddd       a      
+27      d ddddddd d d d  d d d T TT T G G  G T TT T d d d   cccccccc  ddddd ddd                         
+```
+<!-- /MOCK:S6 -->

@@ -1,0 +1,57 @@
+<!-- MOCK:REG-GRID -->
+- `01` at rest: swatch, TRACK, ARTIST, idle slot `▸`
+- `02` Signal Fires live: title accent BOLD, slot `▮▮` | Paper Moons idle
+- `03` Breakwater idle | Arcade Rain muted (no preview this visit: `▸` dim, inert)
+- `04` Quiet Engine resolving or waiting out a 429: `◌` gold | Field Notes idle
+- `05` Signal Fires paused: title and slot `▸` accent BOLD
+- `06` Long Exposure held by the keyboard: the slab across the 38-cell cell, the swatch keeps its hue (`%`)
+- `07` no preview plug-in: no slot; ARTIST runs to +37
+
+TEXT
+
+```text
+    111222222222233333333334444444444555555555566666666667777777777888888888899999
+    789012345678901234567890123456789012345678901234567890123456789012345678901234
+01  ▌ Salt Road        Hollow Coast     ▸   ▌ Long Exposure    Marlowe Fields   ▸ 
+02  ▌ Signal Fires     Paper Lantern    ▮▮  ▌ Paper Moons      The Vesper Lines ▸ 
+03  ▌ Breakwater       Hollow Coast     ▸   ▌ Arcade Rain      Juniper Static   ▸ 
+04  ▌ Quiet Engine     Tidewater        ◌   ▌ Field Notes      Ada Merrow       ▸ 
+05  ▌ Signal Fires     Paper Lantern    ▸   ▌ Paper Moons      The Vesper Lines ▸ 
+06  ▌ Salt Road        Hollow Coast     ▸   ▌ Long Exposure    Marlowe Fields   ▸ 
+07  ▌ Salt Road        Hollow Coast         ▌ Long Exposure    Marlowe Fields     
+```
+
+STYLE
+
+```text
+    111222222222233333333334444444444555555555566666666667777777777888888888899999
+    789012345678901234567890123456789012345678901234567890123456789012345678901234
+01  1 tttt tttt        dddddd ddddd     a   4 tttt tttttttt    ddddddd dddddd   a 
+02  2 AAAAAA AAAAA     ddddd ddddddd    AA  6 ttttt ttttt      ddd dddddd ddddd a 
+03  1 tttttttttt       dddddd ddddd     a   5 tttttt tttt      ddddddd dddddd   d 
+04  3 ttttt tttttt     ddddddddd        g   9 ttttt ttttt      ddd dddddd       a 
+05  2 AAAAAA AAAAA     ddddd ddddddd    A   6 ttttt ttttt      ddd dddddd ddddd a 
+06  1 tttt tttt        dddddd ddddd     a   %SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+07  1 tttt tttt        dddddd ddddd         4 tttt tttttttt    ddddddd dddddd     
+```
+
+- `01` the queue open: 21-cell columns, TRACK and slot only
+
+TEXT
+
+```text
+    11122222222223333333333444444444455555555556666
+    78901234567890123456789012345678901234567890123
+01  ▌ Salt Road        ▸   ▌ Long Exposure    ▸    
+02  ▌ Breakwater       ▸   ▌ Arcade Rain      ▸    
+```
+
+STYLE
+
+```text
+    11122222222223333333333444444444455555555556666
+    78901234567890123456789012345678901234567890123
+01  1 tttt tttt        a   4 tttt tttttttt    a    
+02  1 tttttttttt       a   5 tttttt tttt      a    
+```
+<!-- /MOCK:REG-GRID -->

@@ -1,0 +1,77 @@
+<!-- MOCK:S1 -->
+*NO PEERS YET · 100×30 · terminal window, title `mStream Player — 100×30` · covers: bar card: cells x 56–63 × rows 26–29 (72 × 72 px).*
+
+TEXT
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 0    Library   Stats   Admin   MP3 Player   Visualizer                      http://127.0.0.1:3995 [+]  
+ 1                                                                                                      
+ 2     Files       │ Peer Recommendations                   Last 30 days ▾  more options  ↻ new seeds   
+ 3     Search      │                                                                                    
+ 4                 │  All    + Lighthouse Tapes    + Static Garden    + Rooftop FM                  ›   
+ 5   LIBRARY       │                                                                                    
+ 6     Albums      │                                                                                    
+ 7     Artists     │   TRACK            ARTIST                 TRACK            ARTIST                  
+ 8     Genres      │ ────────────────────────────────────────────────────────────────────────────────   
+ 9     Recent      │ No peers yet                                                                       
+10     Rated       │                                                                                    
+11     Playlists   │                                                                                    
+12     Last played │                                                                                    
+13     Most played │                                                                                    
+14   TOOLS         │                                                                                    
+15     Auto DJ     │                                                                                    
+16     Sonic path  │                                                                                    
+17     Discover    │                                                                                    
+18   ▸ Peer recs   │                                                                                    
+19     Add torrent │                                                                                    
+20     Add YouTube │                                                                                    
+21                 │                                                                                    
+22                 │                                                                                    
+23                 │                                                                                    
+24     Settings    │                                                                                    
+25   1:24 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━█──────────────────────────────────────────────────────── 3:52 
+26      ╭─────────┬───╮  ╭───╮ ╭────╮ ┏━━━━┓ ╭────╮ ╭───╮             Glass Hours                    ▴  
+27      │ auto-dj │ ▴ │  │ ↻ │ │ ◂◂ │ ┃ ▮▮ ┃ │ ▸▸ │ │ ⇄ │             Color Out                         
+28      ╰─────────┴───╯  ╰───╯ ╰────╯ ┗━━━━┛ ╰────╯ ╰───╯             MP3 · 320 kbps · 44.1 kHz         
+29   - ▰▰▰▰▰▰▰▰▱▱ +  80%                                                                                
+```
+
+STYLE
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 0   SSSSSSSSS  ddddd   ddddd   ddd dddddd   dddddddddd                      ddddddddddddddddddddd ddd  
+ 1                                                                                                      
+ 2     ddddd       d TTTT TTTTTTTTTTTTTTT                   tttt tt tttt d  dddd ddddddd  a aaa aaaaa   
+ 3     dddddd      d                                                                                    
+ 4                 d  AAA   SSSSSSSSSSSSSSSSSSSS   a aaaaaa aaaaaa    a aaaaaaa aa                  a   
+ 5   ddddddd       d                                                                                    
+ 6     dddddd      d                                                                                    
+ 7     ddddddd     d   ddddd            dddddd                 ddddd            dddddd                  
+ 8     dddddd      d dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd   
+ 9     dddddd      d dd ddddd ddd                                                                       
+10     ddddd       d                                                                                    
+11     ddddddddd   d                                                                                    
+12     dddd dddddd d                                                                                    
+13     dddd dddddd d                                                                                    
+14   ddddd         d                                                                                    
+15     dddd dd     d                                                                                    
+16     ddddd dddd  d                                                                                    
+17     dddddddd    d                                                                                    
+18   A AAAA AAAA   d                                                                                    
+19     ddd ddddddd d                                                                                    
+20     ddd ddddddd d                                                                                    
+21                 d                                                                                    
+22                 d                                                                                    
+23                 d                                                                                    
+24     dddddddd    d                                                                                    
+25   dddd ggggggggggggggggggggggggggggggggdddddddddddddddddddddddddddddddddddddddddddddddddddddddd dddd 
+26      ddddddddddddddd  ddddd TTTTTT GGGGGG TTTTTT ddddd   cccccccc  TTTTT TTTTT                    d  
+27      d ddddddd d d d  d d d T TT T G GG G T TT T d d d   cccccccc  ddddd ddd                         
+28      ddddddddddddddd  ddddd TTTTTT GGGGGG TTTTTT ddddd   cccccccc  ddd d ddd dddd d dddd ddd         
+29   d aaaaaaaadd d  ddd                                    cccccccc                                    
+```
+<!-- /MOCK:S1 -->

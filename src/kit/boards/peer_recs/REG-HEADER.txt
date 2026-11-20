@@ -1,0 +1,40 @@
+<!-- MOCK:REG-HEADER -->
+- `01` 80 cells, at rest (row 2)
+- `02` 80 cells, while an ask is out
+
+TEXT
+
+```text
+    11122222222223333333333444444444455555555556666666666777777777788888888889999999
+    78901234567890123456789012345678901234567890123456789012345678901234567890123456
+01  Peer Recommendations                   Last 30 days ▾  more options  ↻ new seeds
+02  Peer Recommendations                   Last 30 days ▾  more options  ↻ asking…  
+```
+
+STYLE
+
+```text
+    11122222222223333333333444444444455555555556666666666777777777788888888889999999
+    78901234567890123456789012345678901234567890123456789012345678901234567890123456
+01  TTTT TTTTTTTTTTTTTTT                   tttt tt tttt d  dddd ddddddd  a aaa aaaaa
+02  TTTT TTTTTTTTTTTTTTT                   tttt tt tttt d  dddd ddddddd  g ggggggg  
+```
+
+- `01` 47 cells (the queue open), step 2 of the narrow steps
+
+TEXT
+
+```text
+    11122222222223333333333444444444455555555556666
+    78901234567890123456789012345678901234567890123
+01  Peer recs     Last 30 days ▾  more options  ↻  
+```
+
+STYLE
+
+```text
+    11122222222223333333333444444444455555555556666
+    78901234567890123456789012345678901234567890123
+01  TTTT TTTT     tttt tt tttt d  dddd ddddddd  a  
+```
+<!-- /MOCK:REG-HEADER -->

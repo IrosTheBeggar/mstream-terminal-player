@@ -1,0 +1,33 @@
+<!-- MOCK:M4 -->
+*KITCHEN RADIO TAB · 100×30 · terminal window, title `mStream Player — 100×30` · covers: bar card: cells x 56–63 × rows 26–29 (72 × 72 px).*
+
+Rows that differ from ALL PEERS · IDLE: 4, 9, 10, 11, 12, 13, 14. Every other row is as ALL PEERS · IDLE.
+
+TEXT
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 4                 │ ‹  • Kitchen Radio    Attic Tapes    mStream · 3f9a    + Lighthouse Tapes      ›   
+ 9     Recent      │ ▌ Signal Fires     Paper Lantern    ▸   ▌ Sunday Wire      Okra Bloom       ▸      
+10     Rated       │ ▌ Harbor Lights    Paper Lantern    ▸   ▌ Field Notes      Ada Merrow       ▸      
+11     Playlists   │ ▌ Long Exposure    Marlowe Fields   ▸                                              
+12     Last played │                                                                                    
+13     Most played │                                                                                    
+14   TOOLS         │                                                                                    
+```
+
+STYLE
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 4                 d a SSSSSSSSSSSSSSSSS   ddddd ddddd    ddddddd d dddd    a aaaaaaaaaa aaaaa      a   
+ 9     dddddd      d 2 tttttt ttttt     ddddd ddddddd    a   7 tttttt tttt      dddd ddddd       a      
+10     ddddd       d 2 tttttt tttttt    ddddd ddddddd    a   9 ttttt ttttt      ddd dddddd       a      
+11     ddddddddd   d 4 tttt tttttttt    ddddddd dddddd   a                                              
+12     dddd dddddd d                                                                                    
+13     dddd dddddd d                                                                                    
+14   ddddd         d                                                                                    
+```
+<!-- /MOCK:M4 -->

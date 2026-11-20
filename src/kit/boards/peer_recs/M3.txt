@@ -1,0 +1,43 @@
+<!-- MOCK:M3 -->
+*LEAD SHEET · 100×30 · terminal window, title `mStream Player — 100×30` · covers: bar card: cells x 56–63 × rows 26–29 (72 × 72 px).*
+
+Rows that differ from ALL PEERS · IDLE: 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20. Every other row is as ALL PEERS · IDLE.
+
+TEXT
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 9     Recent      │ ╭────────────────────────────────────────────────────────────────╮ Fields   ▸      
+10     Rated       │ │ Long Exposure                                               [X]│ Static   ▸      
+11     Playlists   │ │ Marlowe Fields · Daylight Savings                              │per Lines ▸      
+12     Last played │ │ 3:50                                                           │oom       ▸      
+13     Most played │ │ from Kitchen Radio   • online                                  │ & Vine   ▸      
+14   TOOLS         │ │                                                                │row       ▸      
+15     Auto DJ     │ │ ▸  Preview                                                     │                 
+16     Sonic path  │ │ Get it                                                         │                 
+17     Discover    │ │ Open elsewhere…                                                │                 
+18   ▸ Peer recs   │ │ Copy title                                                     │                 
+19     Add torrent │ │                                                                │                 
+20     Add YouTube │ ╰────────────────────────────────────────────────────────────────╯                 
+```
+
+STYLE
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 9     dddddd      d aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaSSSSSSSSSSSS     
+10     ddddd       d a TTTT TTTTTTTT                                               ddda dddddd   a      
+11     ddddddddd   d a ddddddd dddddd d dddddddd ddddddd                              addd ddddd a      
+12     dddd dddddd d a dddd                                                           addd       a      
+13     dddd dddddd d a dddd ddddddd ddddd   o dddddd                                  a d dddd   a      
+14   ddddd         d a                                                                addd       a      
+15     dddd dd     d a a  ttttttt                                                     a                 
+16     ddddd dddd  d aSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSa                 
+17     dddddddd    d a tttt tttttttttt                                                a                 
+18   A AAAA AAAA   d a tttt ttttt                                                     a                 
+19     ddd ddddddd d a                                                                a                 
+20     ddd ddddddd d aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa                 
+```
+<!-- /MOCK:M3 -->

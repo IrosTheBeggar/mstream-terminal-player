@@ -1,0 +1,58 @@
+<!-- MOCK:REG-STRIP -->
+- `01` admin, All selected (ALL PEERS · IDLE): the `+` tabs lie beyond `›`
+- `02` member, All selected: no addable tabs, so no `›`
+- `03` admin, Kitchen Radio selected, scrolled two tabs (two `›` clicks), so All and Basement Hi-Fi lie beyond `‹` (KITCHEN RADIO TAB)
+- `04` Attic Tapes selected (NOTHING NEW)
+- `05` admin, empty shelf, at rest
+- `06` admin, at the strip's end (ADD STATES): no room · adding… · try again
+- `07` before the first answer: the skeleton
+- `08` admin, empty shelf, the tabs stop on `+ Lighthouse Tapes`: the slab, with All (still selected) accent BOLD (NO PEERS YET)
+
+TEXT
+
+```text
+    11122222222223333333333444444444455555555556666666666777777777788888888889999999
+    78901234567890123456789012345678901234567890123456789012345678901234567890123456
+01   All    • Basement Hi-Fi    • Kitchen Radio    Attic Tapes    mStream · 3f9a   ›
+02   All    • Basement Hi-Fi    • Kitchen Radio    Attic Tapes    mStream · 3f9a    
+03  ‹  • Kitchen Radio    Attic Tapes    mStream · 3f9a    + Lighthouse Tapes      ›
+04   All    • Basement Hi-Fi    • Kitchen Radio    Attic Tapes    mStream · 3f9a   ›
+05   All    + Lighthouse Tapes    + Static Garden    + Rooftop FM                  ›
+06  ‹  Lighthouse Tapes no room    Static Garden adding…    Rooftop FM try again    
+07  ░░░░░  ░░░░░░░░░░░░░░░░  ░░░░░░░░░░░░░░░                                        
+08   All    + Lighthouse Tapes    + Static Garden    + Rooftop FM                  ›
+```
+
+STYLE
+
+```text
+    11122222222223333333333444444444455555555556666666666777777777788888888889999999
+    78901234567890123456789012345678901234567890123456789012345678901234567890123456
+01  SSSSS   o tttttttt ttttt    o ttttttt ttttt    ddddd ddddd    ddddddd d dddd   a
+02  SSSSS   o tttttttt ttttt    o ttttttt ttttt    ddddd ddddd    ddddddd d dddd    
+03  a SSSSSSSSSSSSSSSSS   ddddd ddddd    ddddddd d dddd    a aaaaaaaaaa aaaaa      a
+04   ddd    o tttttttt ttttt    o ttttttt ttttt   SSSSSSSSSSSSS   ddddddd d dddd   a
+05  SSSSS   a aaaaaaaaaa aaaaa    a aaaaaa aaaaaa    a aaaaaaa aa                  a
+06  a  dddddddddd ddddd dd dddd    gggggg gggggg ggggggg    ggggggg gg AAA AAAAA    
+07  ddddd  dddddddddddddddd  ddddddddddddddd                                        
+08   AAA   SSSSSSSSSSSSSSSSSSSS   a aaaaaa aaaaaa    a aaaaaaa aa                  a
+```
+
+- `01` the queue open (47 cells): `›` at x 63
+
+TEXT
+
+```text
+    11122222222223333333333444444444455555555556666
+    78901234567890123456789012345678901234567890123
+01   All    • Basement Hi-Fi    • Kitchen Radio   ›
+```
+
+STYLE
+
+```text
+    11122222222223333333333444444444455555555556666
+    78901234567890123456789012345678901234567890123
+01  SSSSS   o tttttttt ttttt    o ttttttt ttttt   a
+```
+<!-- /MOCK:REG-STRIP -->

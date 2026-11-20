@@ -1,0 +1,27 @@
+<!-- MOCK:M2 -->
+*PREVIEW PLAYING · 100×30 · terminal window, title `mStream Player — 100×30` · covers: bar card: cells x 56–63 × rows 26–29 (72 × 72 px).*
+
+Rows that differ from ALL PEERS · IDLE: 6, 10, 11, 27. Every other row is as ALL PEERS · IDLE.
+
+TEXT
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 6     Albums      │ ▮▮ ▸▸ Signal Fires · Paper Lant…  ▰▰▰▰▱▱▱▱▱▱  Preview from Deezer [ get it ] [X]   
+10     Rated       │ ▌ Breakwater       Hollow Coast     ▸   ▌ Arcade Rain      Juniper Static   ▸      
+11     Playlists   │ ▌ Signal Fires     Paper Lantern    ▮▮  ▌ Paper Moons      The Vesper Lines ▸      
+27      │ auto-dj │ ▴ │  │ ↻ │ │ ◂◂ │ ┃ ▸  ┃ │ ▸▸ │ │ ⇄ │             Color Out                         
+```
+
+STYLE
+
+```text
+    0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999
+    0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ 6     dddddd      d AA dd tttttt ttttt d ddddd ddddd  oooodddddd  ddddddd dddd dddddd d ddd dd d ddd   
+10     ddddd       d 1 tttttttttt       dddddd ddddd     a   5 tttttt tttt      ddddddd dddddd   d      
+11     ddddddddd   d 2 AAAAAA AAAAA     ddddd ddddddd    AA  6 ttttt ttttt      ddd dddddd ddddd a      
+27      d ddddddd d d d  d d d T TT T G G  G T TT T d d d   cccccccc  ddddd ddd                         
+```
+<!-- /MOCK:M2 -->
