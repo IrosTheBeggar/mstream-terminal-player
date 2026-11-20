@@ -294,6 +294,45 @@ pub(crate) trait Screen {
     fn claim(&self) -> Claim {
         if self.modal_open() { Claim::All } else { Claim::Open }
     }
+
+    /// Whether the page draws itself with egui when its host has the
+    /// desktop window's panel to hand it ([`Screen::egui`]). A page
+    /// without an egui face says no, and is drawn in cells as ever.
+    #[cfg(feature = "window")]
+    fn has_egui(&self) -> bool {
+        false
+    }
+
+    /// One egui pass of the hosted page over the whole of `ui`, the
+    /// window's panel over the cells [`Screen::render_hosted`] would draw
+    /// in, less the area's first row (the host's pick banner's), which
+    /// stay blank. The host has styled egui and painted the Studio kit's
+    /// ground (src/gui/window/studio.rs), and handed the input method's
+    /// composition down to the page's surface ([`Surface::composition`])
+    /// as before a draw in cells. Keys never reach egui: they come to
+    /// [`Screen::key`] as ever, and a field is drawn from the page's own
+    /// value. A click is the page's to turn into one of its own acts and
+    /// apply in the pass, as the Stats page does. What it returns is what
+    /// the host must know: where the focused field's caret is, and a
+    /// click that ended the page. None draws nothing (no egui face).
+    #[cfg(feature = "window")]
+    fn egui(&mut self, _ui: &mut egui::Ui) -> Option<EguiShown> {
+        None
+    }
+}
+
+/// What a hosted page's egui pass tells its host ([`Screen::egui`]).
+#[cfg(feature = "window")]
+#[cfg_attr(not(test), allow(dead_code))] // made by the rooms' egui faces, as each lands
+pub(crate) struct EguiShown {
+    /// The foot of the focused field's caret in egui's points, if a field
+    /// has the page's keyboard: the host lifts it to the cell under it,
+    /// where the window floats the input method's candidates and which
+    /// tells the window a field has the keyboard (its paste and its input
+    /// method on), as a caret noted in cells does.
+    pub caret: Option<egui::Pos2>,
+    /// A click ended the page, as [`Screen::key`]'s Quit does.
+    pub outcome: Option<Outcome>,
 }
 
 /// The terminal session around a room: ground lease, mouse capture,
@@ -561,6 +600,20 @@ pub(crate) trait HostedRoom {
     /// [`HostedRoom::draw_in`], so the room's copy follows the host's from
     /// frame to frame ([`Surface::set_composition`]).
     fn set_composition(&mut self, text: &str);
+
+    /// Whether the room draws itself with egui on the window's panel
+    /// ([`Screen::has_egui`]). No, unless a room says so.
+    #[cfg(feature = "window")]
+    fn egui_face(&self) -> bool {
+        false
+    }
+
+    /// One egui pass of the room, in place of [`HostedRoom::draw_in`]
+    /// ([`Screen::egui`]). None draws nothing.
+    #[cfg(feature = "window")]
+    fn draw_egui(&mut self, _ui: &mut egui::Ui) -> Option<EguiShown> {
+        None
+    }
 }
 
 impl<S: Screen + 'static> HostedRoom for S {
@@ -618,6 +671,16 @@ impl<S: Screen + 'static> HostedRoom for S {
 
     fn set_composition(&mut self, text: &str) {
         self.ui().set_composition(text);
+    }
+
+    #[cfg(feature = "window")]
+    fn egui_face(&self) -> bool {
+        <S as Screen>::has_egui(self)
+    }
+
+    #[cfg(feature = "window")]
+    fn draw_egui(&mut self, ui: &mut egui::Ui) -> Option<EguiShown> {
+        <S as Screen>::egui(self, ui)
     }
 }
 
@@ -1519,5 +1582,72 @@ mod tests {
             "typed unix-style at a Windows server"
         );
         assert_eq!(join_home("/", "~/x"), "/x", "a root as the home keeps one separator");
+    }
+
+    /// A page with an egui face: its pass says where a caret stands and
+    /// that a click ended it.
+    #[cfg(feature = "window")]
+    #[derive(Default)]
+    struct Painted {
+        ui: Surface<u16>,
+    }
+
+    #[cfg(feature = "window")]
+    impl Screen for Painted {
+        type Act = u16;
+
+        fn ui(&mut self) -> &mut Surface<u16> {
+            &mut self.ui
+        }
+
+        fn absorb(&mut self) -> bool {
+            false
+        }
+
+        fn pump(&mut self) {}
+
+        fn awaiting(&self) -> bool {
+            false
+        }
+
+        fn render(&mut self, _frame: &mut Frame) {}
+
+        fn key(&mut self, _key: KeyEvent) -> Option<Outcome> {
+            None
+        }
+
+        fn act(&mut self, _act: u16) -> Option<Outcome> {
+            None
+        }
+
+        fn wheel(&mut self, _up: bool, _at: Position) {}
+
+        fn has_egui(&self) -> bool {
+            true
+        }
+
+        fn egui(&mut self, ui: &mut egui::Ui) -> Option<EguiShown> {
+            Some(EguiShown { caret: Some(ui.max_rect().center()), outcome: Some(Outcome::Quit) })
+        }
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn a_rooms_egui_face_reaches_its_host_and_a_room_without_one_is_drawn_in_cells() {
+        let mut painted: Box<dyn HostedRoom> = Box::new(Painted::default());
+        let mut cells: Box<dyn HostedRoom> = Box::new(Probe::default());
+        assert!(painted.egui_face());
+        assert!(!cells.egui_face(), "a room says nothing of egui unless it has a face");
+        let ctx = egui::Context::default();
+        let (mut shown, mut none) = (None, None);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            shown = painted.draw_egui(ui);
+            none = cells.draw_egui(ui);
+        });
+        out.textures_delta.clear();
+        let shown = shown.expect("the face's pass reached the host");
+        assert_eq!(shown.outcome, Some(Outcome::Quit));
+        assert!(shown.caret.is_some());
+        assert!(none.is_none());
     }
 }

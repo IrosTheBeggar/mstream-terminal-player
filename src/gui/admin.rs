@@ -190,6 +190,10 @@ pub(crate) struct AdminUi {
     /// dragged thumb lets go with the log, as a grip on the lines does. A
     /// bar of another list's holds on wherever that list stands.
     bar_held: bool,
+    /// The last frame drew the room with egui (the window's panel), and
+    /// the pointer was over something egui would act on: the hand.
+    #[cfg(feature = "window")]
+    egui_hand: bool,
 }
 
 impl AdminUi {
@@ -210,6 +214,8 @@ impl AdminUi {
             log_at: None,
             pressed: false,
             bar_held: false,
+            #[cfg(feature = "window")]
+            egui_hand: false,
         }
     }
 }
@@ -471,17 +477,53 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // a GUI field's; the composition while one is up is its own field's,
     // so the room's beneath does not draw it too.
     let composition = if gui.modal_open() { "" } else { gui.ui.composition() };
+    #[cfg(feature = "window")]
+    let panel = gui.panel.clone();
     let admin = &mut gui.admin;
+    #[cfg(feature = "window")]
+    {
+        admin.egui_hand = false;
+    }
     let mut drew_room = false;
     if let (Hall::Room(_), Some(room)) = (admin.showing, admin.room.as_mut()) {
         room.set_key_hints(key_hints);
         room.set_composition(composition);
-        room.draw_in(frame, lay.room);
-        if let Some(at) = room.caret_at() {
-            gui.ui.note_caret(at);
-        }
         // The first row is the pick banner's, so its [X] stays the GUI's.
-        admin.room_at = Rect { y: lay.room.y + 1, height: lay.room.height.saturating_sub(1), ..lay.room };
+        let below = Rect { y: lay.room.y + 1, height: lay.room.height.saturating_sub(1), ..lay.room };
+        // In a window of its own a room with an egui face is drawn by egui
+        // over the cells under its first row, which stay blank
+        // (window/panel.rs), as the Stats page is; keys still reach it as
+        // below, and the pointer inside those cells is egui's.
+        #[cfg(feature = "window")]
+        let by_egui = match panel.filter(|_| room.egui_face()).and_then(|panel| egui_pass(&panel, room.as_mut(), below, frame.area())) {
+            Some(pass) => {
+                admin.egui_hand = pass.hand;
+                if let Some(at) = pass.caret {
+                    gui.ui.note_caret(at);
+                }
+                // A press there never reached `pointer`: the panel took
+                // it. It hands the room the keys all the same.
+                if pass.pressed {
+                    admin.focus = Focus::Room;
+                }
+                // A click that ended the room is Esc at its base.
+                if pass.outcome == Some(Outcome::Quit) {
+                    admin.focus = Focus::Hall;
+                    admin.cursor = row_of(admin.showing);
+                }
+                true
+            }
+            None => false,
+        };
+        #[cfg(not(feature = "window"))]
+        let by_egui = false;
+        if !by_egui {
+            room.draw_in(frame, lay.room);
+            if let Some(at) = room.caret_at() {
+                gui.ui.note_caret(at);
+            }
+        }
+        admin.room_at = below;
         drew_room = true;
     } else if !session {
         // The sentence where the room would be, on a second row where the
@@ -514,6 +556,57 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     draw_hallway(frame, gui, &lay, session);
     if log_on {
         draw_log(frame, gui, &lay, key_hints);
+    }
+}
+
+/// What one egui pass of the room left its host: the hand, the cell under
+/// the focused field's caret, a click that ended the room, and whether a
+/// press landed in the room.
+#[cfg(feature = "window")]
+struct Pass {
+    hand: bool,
+    caret: Option<Position>,
+    outcome: Option<Outcome>,
+    pressed: bool,
+}
+
+/// One egui pass of `room` over `region`, the room's cells under its
+/// first row, on the window's panel: None while the panel drew nothing
+/// (there is no window yet), when the room draws its cells instead. egui
+/// may run the pass twice in a frame (a modal taking its body's height):
+/// a click either one reported stands, and the caret is the last one's.
+#[cfg(feature = "window")]
+fn egui_pass(panel: &super::window::panel::Panel, room: &mut dyn HostedRoom, region: Rect, grid: Rect) -> Option<Pass> {
+    let mut points = egui::Rect::NOTHING;
+    let mut caret = None;
+    let mut outcome = None;
+    let mut pressed = false;
+    let shown = panel.show(region, grid, &mut |ui| {
+        points = ui.max_rect();
+        pressed |= ui.input(|i| i.pointer.primary_pressed());
+        let _ = super::window::studio::begin(ui);
+        let pass = room.draw_egui(ui);
+        caret = pass.as_ref().and_then(|p| p.caret);
+        outcome = outcome.or(pass.and_then(|p| p.outcome));
+    })?;
+    let caret = caret.map(|at| cell_under(at, points, region));
+    Some(Pass { hand: shown.hand, caret, outcome, pressed })
+}
+
+/// The cell of `cells` under `at`, a point of an egui pass whose screen,
+/// `points`, is those cells: the region's size in cells and in points is
+/// the scale between the two.
+#[cfg(feature = "window")]
+fn cell_under(at: egui::Pos2, points: egui::Rect, cells: Rect) -> Position {
+    let along = |v: f32, from: f32, span: f32, n: u16| -> u16 {
+        if n == 0 || span <= 0.0 {
+            return 0;
+        }
+        (((v - from) / span * f32::from(n)).floor().max(0.0) as u16).min(n - 1)
+    };
+    Position {
+        x: cells.x + along(at.x, points.min.x, points.width(), cells.width),
+        y: cells.y + along(at.y, points.min.y, points.height(), cells.height),
     }
 }
 
@@ -965,7 +1058,8 @@ pub(super) fn wheel(gui: &mut Gui, at: Position, delta: i32) {
 /// and the note a download or a shown file left, the room's worker,
 /// timers, held control and tooltip dwell (the room is pumped while the
 /// Log room hides it). Returns whether the pointer rests on one of the
-/// shown room's clickables, for the hand.
+/// shown room's clickables, for the hand: its cells', or what egui drew
+/// of it.
 pub(super) fn frame(gui: &mut Gui) -> bool {
     if gui.screen != Screen::Admin {
         return false;
@@ -974,7 +1068,10 @@ pub(super) fn frame(gui: &mut Gui) -> bool {
     take_log_note(gui);
     let admin = &mut gui.admin;
     let drawn = !admin.room_at.is_empty() && matches!(admin.showing, Hall::Room(_));
-    admin.room.as_mut().is_some_and(|room| room.after_frame()) && drawn
+    let over = admin.room.as_mut().is_some_and(|room| room.after_frame());
+    #[cfg(feature = "window")]
+    let over = over || admin.egui_hand;
+    over && drawn
 }
 
 /// The footer's line by focus (contract clause 27): with no session the
@@ -1212,6 +1309,20 @@ mod tests {
     }
 
     // ── The pure parts ──────────────────────────────────────────────────────
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn an_egui_caret_lifts_to_the_cell_under_it() {
+        // The room's cells under its first row at 100×30, and the same
+        // region in points at 8×16 points a cell, starting at 136,32.
+        let cells = Rect::new(17, 2, 83, 22);
+        let points = egui::Rect::from_min_size(egui::pos2(136.0, 32.0), egui::vec2(83.0 * 8.0, 22.0 * 16.0));
+        assert_eq!(cell_under(egui::pos2(136.0, 32.0), points, cells), Position { x: 17, y: 2 });
+        assert_eq!(cell_under(egui::pos2(136.0 + 8.0 * 10.0 + 3.0, 32.0 + 16.0 * 5.0 + 15.9), points, cells), Position { x: 27, y: 7 });
+        // A point on the region's far edge is in its last cell, never past.
+        assert_eq!(cell_under(points.max, points, cells), Position { x: 99, y: 23 });
+        assert_eq!(cell_under(egui::pos2(0.0, 0.0), points, cells), Position { x: 17, y: 2 }, "before it, its first");
+    }
 
     #[test]
     fn layout_math_by_size() {
