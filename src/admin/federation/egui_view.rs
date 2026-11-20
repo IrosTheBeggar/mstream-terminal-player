@@ -72,6 +72,60 @@ fn form_focus() -> Id {
     Id::new("fed-form").with("focus")
 }
 
+/// Where egui's memory keeps which of the room's modals the last pass drew
+/// ([`opened`]).
+fn modal_shown() -> Id {
+    Id::new("fed-modal").with("shown")
+}
+
+/// Whether `modal` is up and was not on the last pass. egui keeps a scroll
+/// area's offset in its memory for good, so a modal opened again would come
+/// up where it was scrolled to the last time it was up (a form with its
+/// first heading above its window); a new one opens at its top instead
+/// ([`from_top`]), as the cells' do.
+fn opened(ctx: &egui::Context, modal: &Modal) -> bool {
+    let which: u8 = match modal {
+        Modal::None => 0,
+        Modal::Form(f) => match f.kind {
+            FormKind::Mint => 1,
+            FormKind::Accept => 2,
+            FormKind::Limits => 3,
+        },
+        Modal::Minted { .. } => 4,
+        Modal::PeerName { .. } => 5,
+        Modal::Decline(_) => 6,
+        Modal::Revoke(_) => 7,
+        Modal::Forget(_) => 8,
+        Modal::TurnOff => 9,
+    };
+    let last = ctx.data(|d| d.get_temp::<u8>(modal_shown())).unwrap_or(0);
+    ctx.data_mut(|d| d.insert_temp(modal_shown(), which));
+    which != 0 && which != last
+}
+
+/// A modal's body scrolled to its top on the pass it opened ([`opened`]).
+fn from_top(ui: &Ui, fresh: bool) {
+    if fresh {
+        scroll_to(ui, Rect::from_min_size(ui.next_widget_position(), Vec2::ZERO), Some(Align::Min));
+    }
+}
+
+/// Where egui's memory notes that the last pass moved a modal's scroll.
+fn scroll_asked() -> Id {
+    Id::new("fed-modal").with("scroll-asked")
+}
+
+/// `rect` of a modal's body brought into view at once, its top to the
+/// view's with `Align::Min`, just into view with None. egui's scroll area
+/// lands the move on the next pass, but draws that pass where it stood
+/// before and asks for no other: the note left in egui's memory has
+/// [`show`] ask on the next pass, or the body would stand where it was
+/// until something else woke the panel.
+fn scroll_to(ui: &Ui, rect: Rect, align: Option<Align>) {
+    ui.scroll_to_rect_animation(rect, align, ScrollAnimation::none());
+    ui.ctx().data_mut(|d| d.insert_temp(scroll_asked(), true));
+}
+
 /// What a pass gathers as it draws: the room's acts its clicks asked for,
 /// the keys sent in a click's stead, and the foot of the focused field's
 /// caret.
@@ -81,13 +135,17 @@ struct Gathered<'a> {
     caret: Option<Pos2>,
     /// The input method's composition, for the field with the keyboard.
     composition: &'a str,
+    /// The modal up this pass was not up on the last ([`opened`]).
+    fresh: bool,
 }
 
-/// What a modal's body gathers: its acts and its caret.
+/// What a modal's body gathers: its acts, its caret, and the part of it to
+/// bring into view.
 #[derive(Default)]
 struct Out {
     acts: Vec<Act>,
     caret: Option<Pos2>,
+    reveal: Option<Rect>,
 }
 
 /// One pass of the room over the whole of `ui` — the room's area less its
@@ -96,12 +154,24 @@ struct Out {
 /// and what the host must know handed back.
 pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown {
     let pal = begin(ui);
+    // A modal's scroll the last pass moved lands on this one, drawn where
+    // it stood ([`scroll_to`]): this pass runs again at once to draw it
+    // where it went, or, where egui runs no more this frame, the next
+    // frame comes.
+    if ui.ctx().data_mut(|d| d.remove_temp::<bool>(scroll_asked())).unwrap_or(false) {
+        ui.ctx().request_discard("a modal's scroll landed");
+        if !ui.ctx().will_discard() {
+            ui.ctx().request_repaint();
+        }
+    }
     let full = ui.max_rect();
     let column = Rect::from_min_max(full.min + vec2(PAD_X, PAD_TOP), full.max - vec2(PAD_X, PAD_FOOT));
     let note_rect = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
     let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, note_rect.min.y - GAP));
     let modal_open = room.modal_open();
-    let mut got = Gathered { acts: Vec::new(), keys: Vec::new(), caret: None, composition: if modal_open { "" } else { composition } };
+    let fresh = opened(ui.ctx(), &room.modal);
+    let mut got =
+        Gathered { acts: Vec::new(), keys: Vec::new(), caret: None, composition: if modal_open { "" } else { composition }, fresh };
 
     let mut ui_body = ui.new_child(UiBuilder::new().max_rect(body_rect).layout(Layout::top_down(Align::Min)));
     ui_body.set_clip_rect(body_rect.expand(1.0));
@@ -548,24 +618,27 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
     let focused = f.focused();
     let index_of = |field: Field| fields.iter().position(|x| *x == field).unwrap_or(0);
     let composition = got.composition;
-    // The focus moved since the last pass (or the form is new): the
-    // focused field is brought into view at once, as a table's cursor row
-    // is, where the form is taller than the room.
-    let moved = ui.ctx().data(|d| d.get_temp::<usize>(form_focus())) != Some(f.focus);
+    let fresh = got.fresh;
+    // The focus moved since the last pass: the focused field, its label
+    // with it, is brought into view at once, as a table's cursor row is,
+    // where the form is taller than the room. A new form opens at its top.
+    let moved = !fresh && ui.ctx().data(|d| d.get_temp::<usize>(form_focus())) != Some(f.focus);
     ui.ctx().data_mut(|d| d.insert_temp(form_focus(), f.focus));
     let shown = modal(ui, Id::new("fed-form"), over, FORM_W, &title, pal, |ui| {
+        from_top(ui, fresh);
         let mut out = Out::default();
         let w = ui.available_width();
         // A text field's click focuses it, and its caret is the pass's
-        // while the form's focus is on it.
-        let take = |out: &mut Out, typed: Typed, field: Field| {
+        // while the form's focus is on it; `whole` is the field with its
+        // label.
+        let take = |out: &mut Out, typed: Typed, field: Field, whole: Rect| {
             if typed.response.clicked() {
                 out.acts.push(Act::FormFocus(index_of(field)));
             }
             if focused == field {
                 out.caret = typed.caret;
                 if moved {
-                    typed.response.scroll_to_me_animation(None, ScrollAnimation::none());
+                    out.reveal = Some(whole);
                 }
             }
         };
@@ -576,7 +649,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
                 let input = input_of(&f.name, focused == Field::Name, composition);
                 let id = Id::new("fed-form-field").with(index_of(Field::Name));
                 let shown = labelled(ui, id, rect, &t!("fed.mint_name"), Head::Section, &input, pal);
-                take(&mut out, shown, Field::Name);
+                take(&mut out, shown, Field::Name, rect);
             }
             FormKind::Accept => {
                 let short = format!("{} · ", short_id(&f.endpoint_id));
@@ -613,7 +686,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
                     let here = focused == Field::Library(i);
                     let response = choice(ui, Id::new("fed-form-lib").with(i), rect, *on, here, name, pal);
                     if here && moved {
-                        response.scroll_to_me_animation(None, ScrollAnimation::none());
+                        out.reveal = Some(rect);
                     }
                     if response.clicked() {
                         out.acts.push(Act::FormToggle(first + i));
@@ -640,7 +713,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
             let rect = Rect::from_min_size(pos2(row.min.x + k as f32 * (col_w + FORM_GAP), row.min.y), vec2(col_w, LABELLED_H));
             let input = input_of(value, focused == field, composition).mono();
             let shown = labelled(ui, Id::new("fed-form-field").with(index_of(field)), rect, &label, Head::Field, &input, pal);
-            take(&mut out, shown, field);
+            take(&mut out, shown, field, rect);
         }
 
         match f.kind {
@@ -654,7 +727,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
                 let input = input_of(&f.expires, focused == Field::Expires, composition).mono();
                 let id = Id::new("fed-form-field").with(index_of(Field::Expires));
                 let shown = labelled(ui, id, rect, &t!("fed.field_new_expiry"), Head::Field, &input, pal);
-                take(&mut out, shown, Field::Expires);
+                take(&mut out, shown, Field::Expires, rect);
                 let x = rect.max.x + FORM_GAP;
                 let mid = rect.max.y - FIELD_H / 2.0;
                 text(ui, pos2(x, mid), &t!("fed.expiry_hint"), body(13.0), pal.dim, row.max.x - x, Align2::LEFT_CENTER);
@@ -666,7 +739,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
                 let here = focused == Field::TheirOffer;
                 let response = choice(ui, Id::new("fed-form-offer"), rect, f.accept_their_offer, here, &words, pal);
                 if here && moved {
-                    response.scroll_to_me_animation(None, ScrollAnimation::none());
+                    out.reveal = Some(rect);
                 }
                 if response.clicked() {
                     out.acts.push(Act::FormToggle(index_of(Field::TheirOffer)));
@@ -691,6 +764,9 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
         if buttons(ui, Id::new("fed-form-buttons"), &[(bare(&submit), f.can_submit())], pal) == Some(0) {
             out.acts.push(Act::FormSubmit);
         }
+        if let Some(rect) = out.reveal {
+            scroll_to(ui, rect, None);
+        }
         out
     });
     if shown.closed {
@@ -706,7 +782,9 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
 #[allow(clippy::too_many_arguments)]
 fn minted(ui: &Ui, name: &str, ticket: Option<&str>, libraries: &[String], over: Rect, pal: &Pal, got: &mut Gathered) {
     let title = t!("fed.minted_title", name = name);
+    let fresh = got.fresh;
     let shown = modal(ui, Id::new("fed-minted"), over, FORM_W, &title, pal, |ui| {
+        from_top(ui, fresh);
         para(ui, plain(&t!("fed.minted_text", libraries = libraries.join(", ")), body(14.0), pal.text), pal);
         ui.add_space(SECTION);
         match ticket {
@@ -747,8 +825,9 @@ fn minted(ui: &Ui, name: &str, ticket: Option<&str>, libraries: &[String], over:
 /// The pasted ticket's preview and the peer's name, then Add. The field
 /// always has the keyboard; a click on it adds, as the cells register it.
 fn peer_name(ui: &Ui, name: &tui_input::Input, preview: &TicketPreview, over: Rect, pal: &Pal, got: &mut Gathered) {
-    let composition = got.composition;
+    let (composition, fresh) = (got.composition, got.fresh);
     let shown = modal(ui, Id::new("fed-peer-name"), over, FORM_W, &t!("fed.peer_name_title"), pal, |ui| {
+        from_top(ui, fresh);
         let mut out = Out::default();
         para(ui, plain(&preview_words(preview), body(14.0), pal.ok), pal);
         ui.add_space(SECTION);
@@ -782,7 +861,9 @@ fn peer_name(ui: &Ui, name: &tui_input::Input, preview: &TicketPreview, over: Re
 fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (String, Act), go: (String, Act), pal: &Pal, got: &mut Gathered) {
     // The kit's window titles itself in the text colour: the gate leaves
     // its title blank and paints its own in gold where the kit's would be.
+    let fresh = got.fresh;
     let shown = modal(ui, id, over, GATE_W, "", pal, |ui| {
+        from_top(ui, fresh);
         for (i, line) in lines.iter().enumerate() {
             if i > 0 {
                 ui.add_space(6.0);
@@ -1412,8 +1493,12 @@ mod tests {
         assert!(room.starting);
         room.queued = None;
         let _ = settle(&ctx, &mut room, SMALL);
+        // The room refuses a second start whatever asks: that the card
+        // itself is deaf is in what it senses.
+        let card = ctx.read_response(Id::new("fed-turn-on")).expect("the card drawn");
+        assert!(!card.sense.senses_click(), "dim while the start is on its way, and deaf");
         let _ = click_on(&ctx, &mut room, SMALL, Id::new("fed-turn-on"));
-        assert!(room.queued.is_none(), "dim while the start is on its way, and deaf");
+        assert!(room.queued.is_none());
     }
 
     #[test]
@@ -1523,11 +1608,48 @@ mod tests {
             press(&mut room, KeyCode::Tab);
         }
         assert_eq!(form_of(&room).focused(), Field::Expires);
-        // egui lands a scroll on the frames after it is asked for, and asks
-        // for them: a third run.
+        // The run that asks for the scroll draws the form unmoved; egui
+        // lands it on the next, which draws it unmoved too unless run again,
+        // and nothing else would come to wake the panel.
+        let caret = settle(&ctx, &mut room, short).caret.expect("the expiry has the keyboard");
+        assert!(caret.y <= window_foot - 24.0, "brought into view on the run after the ask: {caret:?}");
+    }
+
+    #[test]
+    fn a_modal_opens_at_its_top_whatever_its_scroll_was_when_last_up() {
+        let _en = english();
+        let ctx = context();
+        let short = vec2(640.0, 340.0);
+        // Where the form's body starts: under the title row, whose middle
+        // the close button stands on, and the kit's 20 points under it.
+        let body_top = |ctx: &egui::Context| rect_of(ctx, Id::new("fed-form").with("close")).center().y + TITLE_H / 2.0 + 20.0;
+        let mut room = on();
+        room.act(Act::Mint);
         let _ = settle(&ctx, &mut room, short);
-        let caret = pass(&ctx, &mut room, short, Vec::new(), "").caret.expect("the expiry has the keyboard");
-        assert!(caret.y <= window_foot - 24.0, "brought into view: {caret:?}");
+        for _ in 0..9 {
+            press(&mut room, KeyCode::Tab);
+        }
+        let seen = settle(&ctx, &mut room, short);
+        assert!(seen.at("WHO IS THIS FOR?").max.y < body_top(&ctx), "scrolled down to the expiry, past the form's head");
+        press(&mut room, KeyCode::Esc);
+        let _ = settle(&ctx, &mut room, short);
+        // Opened again while egui still holds the old offset: the new form
+        // is at its top by the run after its first.
+        room.act(Act::Mint);
+        let seen = settle(&ctx, &mut room, short);
+        let head = seen.at("WHO IS THIS FOR?");
+        assert!(head.min.y >= body_top(&ctx) - 1.0, "the head in view: {head:?}, the body from {}", body_top(&ctx));
+        // Moving back up, a field comes into view with its label.
+        for _ in 0..9 {
+            press(&mut room, KeyCode::Tab);
+        }
+        let _ = settle(&ctx, &mut room, short);
+        for _ in 0..9 {
+            press(&mut room, KeyCode::BackTab);
+        }
+        let seen = settle(&ctx, &mut room, short);
+        assert_eq!(form_of(&room).focused(), Field::Name);
+        assert!(seen.at("WHO IS THIS FOR?").min.y >= body_top(&ctx) - 1.0, "the name's label shows with it");
     }
 
     #[test]
