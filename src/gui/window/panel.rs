@@ -372,10 +372,11 @@ impl Painter {
 /// Windows, San Francisco on a Mac, DejaVu or Noto elsewhere — so a page
 /// reads as the platform's, with egui's own Ubuntu Light and Hack behind
 /// it, and the system's CJK face for Japanese and Chinese (as the
-/// visualizer's controls borrow it). [`STRONG`] is the semibold face, or
-/// the regular where there is none. Each borrowed face is checked the way
-/// egui will read it, since egui panics on one it cannot parse. A page's
-/// tests lay it out with the same.
+/// visualizer's controls borrow it), behind the monospace too, where the
+/// server's log sets file names in any script. [`STRONG`] is the semibold
+/// face, or the regular where there is none. Each borrowed face is checked
+/// the way egui will read it, since egui panics on one it cannot parse. A
+/// page's tests lay it out with the same.
 pub(crate) fn fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::empty();
     fonts.font_data.insert("Ubuntu-Light".into(), Arc::new(FontData::from_static(epaint_default_fonts::UBUNTU_LIGHT)));
@@ -396,15 +397,16 @@ pub(crate) fn fonts(ctx: &egui::Context) {
         list.push("Ubuntu-Light".into());
         list.push("Hack".into());
     }
+    let mut monospace = vec!["Hack".to_string(), "Ubuntu-Light".to_string()];
     let lang = rust_i18n::locale().to_string();
     let cjk = crate::viz_window::overlay::cjk_faces(&lang).into_iter().find_map(|(path, index)| readable(&path, index));
     if let Some(mut face) = cjk {
         face.tweak.y_offset_factor = 0.12;
         fonts.font_data.insert("system-cjk".into(), Arc::new(face));
-        proportional.push("system-cjk".into());
-        bold.push("system-cjk".into());
+        for list in [&mut proportional, &mut bold, &mut monospace] {
+            list.push("system-cjk".into());
+        }
     }
-    let monospace = vec!["Hack".to_string(), "Ubuntu-Light".to_string()];
     fonts.families.insert(FontFamily::Proportional, proportional);
     fonts.families.insert(FontFamily::Monospace, monospace);
     fonts.families.insert(FontFamily::Name(STRONG.into()), bold);

@@ -440,6 +440,72 @@ not.
     changes nothing here: its own copy chord copies the terminal's text,
     and `y` copies the log's.
 
+### Drawn by egui in the window
+
+35. **In the desktop window, egui draws a room with an egui face and the
+    log**, in the Studio look of the Admin screen's canvas, over cells
+    the GUI leaves blank; everything else stays cells: the top bar, the
+    hallway and its rule, the pick banner's row, the rule beside or above
+    the log (`│` in the column, `─` over the band, dim, the accent while
+    the log has the focus), the bar, the GUI's note and the footer, and a
+    room with no egui face. The window's panel shows one region a frame:
+    - with the room's face and the log both on screen, the room's area
+      less its first row together with the log's rect and the cells
+      between them (17, 2)–(173, 39) at 176×46 with the footer on, and
+      (17, 2)–(135, 46) at 136×52 with it off. Each part draws in its own
+      rect, clipped to it, on the ground; the cells between them — the
+      column's `│` and its blank columns, the band's `─` row — egui leaves
+      unpainted, so the GUI's cells there show through;
+    - with the log on screen and a room with no egui face, the log's rect
+      alone, the room in cells beside it;
+    - in the Log room, the log's rect alone: the log is the room;
+    - with no log on screen (`L` hid it, or a room is shown in the Room
+      placement), the room's area less its first row, as before.
+
+    `MSTREAM_WINDOW_CELLS=1` (no panel), a terminal, and the frames before
+    the window exists keep everything in cells, as clauses 18–34 tell it.
+36. **The pointer in the region is egui's**: a press there, its drag and
+    its release, and the wheel over it never reach the GUI's cells. A press
+    in the room's part hands the room the keys, and its field's caret
+    comes up to the GUI's surface where the window floats the input
+    method's candidates (clause 28); a press anywhere in the log's rect
+    hands the log the keys, as a click on it does in cells, and the hand
+    shows anywhere over it, since its whole rect is that target. A press
+    on the cells between them is nobody's. Keys never reach egui: they go
+    where clause 13 sends them, the log's to its keys (clause 16), whose
+    steps and pages measure the rows egui last drew. The hand ORs in with
+    the room's own. A GUI modal or the server menu stands the whole region
+    down while it overlaps it (window/panel.rs): nothing egui draws shows
+    then, room and log alike, and no hand. Under a room's modal the log
+    neither lights nor shows the hand, takes no click, drag or wheel, and
+    a press on it hands it nothing.
+37. **The log's egui face is the cells' log**, the same model drawn
+    another way (boards Main and Log): a panel of the desk with its header
+    — the follow state at the left, the ok green's LED and FOLLOWING, or
+    PAUSED by an unlit LED as a control that follows again; COPY and
+    DOWNLOAD at the right as small outlined tools with their icons, each
+    with the cells' tooltip (its key's tail only while key names are
+    shown), whole or not at all in the cells' order, and DOWNLOADING… in
+    the accent with no target while a download runs; the `L` hint, dim,
+    before them while key names are shown, the first to give way — over a
+    hairline, then the rows. The rows are the model's: set in the
+    monospace (Hack, 12 points on 17-point rows), wrapped at the width in
+    monospace characters that fit beside the clock's ten, as many whole
+    rows as fit the height, so the two faces agree on every line, step
+    and page; only the lines on screen are laid out. Colours as clause 23,
+    a highlighted run filled in the accent with the on-accent ink. The
+    wheel moves whole lines through the model (no pixel scrolling) and
+    follows again at the newest line; the press-drag highlights whole
+    lines through the model's own hold (egui selects no text); the paused
+    word, copy and download do what their cells do. The scroll bar is the
+    canvas's: no endcaps, a slim thumb counted in lines as clause 24
+    counts it, in the strong edge, dim under the pointer and the accent
+    while held; a press on its column moves the bottom line there and the
+    thumb then follows the hand until the release. The sentence states
+    (waiting, ring off, empty, a failure, a refusal) are one row of prose,
+    cut with an ellipsis, where clause 23 puts them. Its notes go to the
+    GUI's note, as in cells.
+
 ## Wording
 
 | Key | English |
@@ -734,3 +800,27 @@ from every locale. The rooms' own strings (`admin.*`, `usr.*`, `bak.*`,
     every one shown. The rules that went with the menu went with it: a
     level picked no longer clears the highlight or follows, and the copy
     chord no longer waits on a menu.
+- **2026-11-20 — The rooms and the log drawn by egui in the window
+  (clauses 35–37).** The rooms' egui faces land one by one; the log's
+  came with the hosting of both in the window's one panel region.
+  Deliberate, each:
+  - **One region over both**, with the rule left to the cells: the panel
+    shows one region a frame, so the room and the log share it, and egui
+    paints only their two rects inside it. The rule stays the GUI's, so
+    its accent keeps telling where the keys are as it does in cells. The
+    cost: a GUI overlay that overlaps either part stands both down while
+    it is up (the server menu dropping over the docked log blanks the
+    room beside it too), until the panel paints over overlays.
+  - **The hand anywhere over the log**, as in cells: its whole rect is the
+    target that hands it the keys, so the hand says so, its controls
+    lighting on their own.
+  - **The scroll bar has no endcaps**, as the canvas draws it: ↑ and ↓,
+    the wheel and the thumb move the view a line or more, and the thumb is
+    taken where it is pressed, so a press on it moves nothing until the
+    hand does.
+  - **The copy and download tools carry the canvas's icons**, in the
+    kit's spaced capitals: the kit gained `Icon::Copy`, `Icon::Download`
+    and `tool_button`, for any panel's small tools.
+  - **The monospace falls back to the system's CJK face**, as the UI face
+    does (window/panel.rs): the log sets whatever the server wrote, file
+    names in any script, in the monospace, which had no CJK behind Hack.

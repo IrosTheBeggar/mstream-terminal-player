@@ -298,6 +298,10 @@ pub(crate) enum Icon {
     Back,
     /// A list to drop: a chevron pointing down.
     Chevron,
+    /// A copy: two sheets, one over the other.
+    Copy,
+    /// A download: an arrow down onto a line.
+    Download,
 }
 
 /// `icon` in `color`, centred on `at`.
@@ -321,6 +325,18 @@ pub(crate) fn draw_icon(ui: &Ui, at: Pos2, icon: Icon, color: Color32) {
         }
         Icon::Chevron => {
             painter.add(Shape::line(vec![p(2.0, 4.0), p(6.0, 8.0), p(10.0, 4.0)], stroke));
+        }
+        // The canvas draws the tools' two in a finer stroke.
+        Icon::Copy => {
+            let thin = Stroke::new(1.3, color);
+            painter.rect_stroke(Rect::from_min_max(p(3.5, 3.5), p(10.5, 10.5)), 0.0, thin, StrokeKind::Middle);
+            painter.add(Shape::line(vec![p(1.5, 8.0), p(1.5, 1.5), p(8.0, 1.5)], thin));
+        }
+        Icon::Download => {
+            let thin = Stroke::new(1.3, color);
+            painter.line_segment([p(6.0, 1.5), p(6.0, 8.0)], thin);
+            painter.add(Shape::line(vec![p(3.2, 5.4), p(6.0, 8.2), p(8.8, 5.4)], thin));
+            painter.line_segment([p(1.5, 10.5), p(10.5, 10.5)], thin);
         }
     }
 }
@@ -515,6 +531,59 @@ pub(crate) fn icon_button(ui: &Ui, id: Id, at: Pos2, icon: Icon, tone: Color32, 
         tone
     };
     draw_icon(ui, at, icon, color);
+    response
+}
+
+/// What a [`tool_button`] takes of the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tool {
+    /// The hover, the hand and the click.
+    Live,
+    /// Nothing while its act runs: drawn in the accent, the kit's busy
+    /// colour, with no hand and no click.
+    Busy,
+    /// Nothing while something lies over it (a room's modal): drawn at
+    /// rest, whatever the pointer does.
+    Inert,
+}
+
+/// A tool button's height, the canvas's, and its capitals' size.
+pub(crate) const TOOL_H: f32 = 28.0;
+const TOOL_SIZE: f32 = 11.0;
+/// A tool's icon, the gap after it, and the room either side.
+const TOOL_ICON: f32 = 12.0;
+const TOOL_GAP: f32 = 6.0;
+const TOOL_PAD: f32 = 10.0;
+
+/// How wide [`tool_button`] wants to be for `label`.
+pub(crate) fn tool_button_width(ui: &Ui, label: &str) -> f32 {
+    TOOL_ICON + TOOL_GAP + caps_width(ui, label, TOOL_SIZE) + 2.0 * TOOL_PAD
+}
+
+/// A panel's small tool at `rect`, as the canvas puts copy and download
+/// over the server's log: `icon` and `label` in spaced capitals in a
+/// strong-edged hairline, dim, raised with its ink in the text colour
+/// under the pointer, the hand over it. A busy one is in the accent and
+/// takes no click; an inert one stays at rest (see [`Tool`]).
+pub(crate) fn tool_button(ui: &Ui, id: Id, rect: Rect, icon: Icon, label: &str, tool: Tool, pal: &Pal) -> Response {
+    let live = tool == Tool::Live;
+    let response = ui.interact(rect, id, if live { Sense::click() } else { Sense::hover() });
+    let response = if live { hand(response) } else { response };
+    let hovered = live && response.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, square(), pal.raised);
+    }
+    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
+    let ink = match tool {
+        Tool::Busy => pal.accent,
+        _ if hovered => pal.text,
+        _ => pal.dim,
+    };
+    let words = caps_width(ui, label, TOOL_SIZE);
+    let left = rect.center().x - (TOOL_ICON + TOOL_GAP + words) / 2.0;
+    draw_icon(ui, pos2(left + TOOL_ICON / 2.0, rect.center().y), icon, ink);
+    let at = pos2(left + TOOL_ICON + TOOL_GAP, rect.center().y);
+    caps(ui, at, label, TOOL_SIZE, ink, words + 1.0, Align2::LEFT_CENTER);
     response
 }
 
