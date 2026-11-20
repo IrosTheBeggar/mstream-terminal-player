@@ -110,12 +110,24 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
         }
     }
     if acted {
-        // The room changed after this pass drew it: the next pass shows it,
-        // and a form a click closed leaves no field with the keyboard.
+        // The room changed after this pass drew it: the next pass shows it.
         ui.ctx().request_repaint();
-        if !matches!(room.modal, Modal::Form(_)) {
+        // The caret is the one this pass drew, the field's that had the keys
+        // then. A click that closed the form, or gave its keys to a choice
+        // (the library, the trigger), leaves no field with the keyboard now;
+        // one that gave them to another field keeps a caret until the next
+        // pass draws that field's, so the input method stays on between the
+        // two rather than dropping what it was composing.
+        let typing = matches!(&room.modal, Modal::Form(f) if !matches!(f.focused(), Field::Library | Field::Trigger));
+        if !typing {
             caret = None;
         }
+    }
+    if !matches!(room.modal, Modal::Browser { .. }) {
+        // The browser is down (or a click just closed it): what its list
+        // last showed goes, so the browser opened again opens on its
+        // cursor's row.
+        ui.ctx().data_mut(|d| d.remove::<DirsView>(dirs_memory()));
     }
     EguiShown { caret, outcome }
 }
@@ -517,22 +529,42 @@ fn choices(ui: &mut Ui, id: Id, names: &[String], chosen: usize, pal: &Pal) -> (
     (group, clicked)
 }
 
-/// A list of names with no headings, [`DIR_ROW`] points a row and at most
-/// [`DIRS_SHOWN`] on screen, scrolled by egui: the row the keys hold raised
-/// and ringed as a table's cursor row is, and brought into view on the pass
-/// it moved; a row under the pointer raised. Returns the row a click
-/// landed on.
-fn dirs(ui: &mut Ui, id: Id, names: &[String], sel: usize, pal: &Pal) -> Option<usize> {
+/// The folder browser's list, and where it keeps what it last showed.
+fn dirs_id() -> Id {
+    Id::new("backups-browser").with("dirs")
+}
+
+fn dirs_memory() -> Id {
+    dirs_id().with("view")
+}
+
+/// What the folder list last showed, kept from pass to pass: the listing
+/// (its path's id) and its cursor, then the scroll offset and the view's
+/// height.
+type DirsView = (Option<(Id, usize)>, f32, f32);
+
+/// A listing's folders with no headings, [`DIR_ROW`] points a row and at
+/// most [`DIRS_SHOWN`] on screen, scrolled by egui: the row the keys hold
+/// raised and ringed as a table's cursor row is, and brought into view on
+/// the pass it moved and on a new `listing`'s first (a folder opened, its
+/// parent, the browser opened again), which would otherwise open where the
+/// wheel left the last; a row under the pointer raised. Returns the row a
+/// click landed on.
+fn dirs(ui: &mut Ui, listing: &str, names: &[String], sel: usize, pal: &Pal) -> Option<usize> {
+    let id = dirs_id();
     let w = ui.available_width();
     let h = names.len().min(DIRS_SHOWN) as f32 * DIR_ROW;
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let mut child = ui.new_child(UiBuilder::new().id_salt(id).max_rect(rect).layout(Layout::top_down(Align::Min)));
-    let memory = id.with("view");
-    let (last, offset, height): (Option<usize>, f32, f32) = ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((None, 0.0, 0.0));
+    let memory = dirs_memory();
+    let now = (Id::new(listing), sel);
+    let (last, offset, height): DirsView = ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((None, 0.0, 0.0));
     let mut scroll = ScrollArea::vertical().id_salt(id).auto_shrink([false, false]);
-    if last != Some(sel) && height > 0.0 {
+    if last != Some(now) {
         let (top, bottom) = (sel as f32 * DIR_ROW, (sel + 1) as f32 * DIR_ROW);
-        if top < offset {
+        // No view measured yet (the browser just opened): the cursor's row
+        // at the top.
+        if height <= 0.0 || top < offset {
             scroll = scroll.vertical_scroll_offset(top);
         } else if bottom > offset + height {
             scroll = scroll.vertical_scroll_offset(bottom - height);
@@ -559,7 +591,8 @@ fn dirs(ui: &mut Ui, id: Id, names: &[String], sel: usize, pal: &Pal) -> Option<
             }
         }
     });
-    ui.ctx().data_mut(|d| d.insert_temp(memory, (Some(sel), out.state.offset.y, out.inner_rect.height())));
+    let shown: DirsView = (Some(now), out.state.offset.y, out.inner_rect.height());
+    ui.ctx().data_mut(|d| d.insert_temp(memory, shown));
     picked
 }
 
@@ -810,7 +843,7 @@ fn browser(ui: &Ui, browse: &Browse, over: Rect, pal: &Pal, acts: &mut Vec<Act>)
         if browse.dirs.is_empty() {
             let (row, _) = ui.allocate_exact_size(vec2(w, DIR_ROW), Sense::hover());
             text(ui, row.left_center() + vec2(10.0, 0.0), &t!("browse.empty"), body(14.0), pal.dim, w - 10.0, Align2::LEFT_CENTER);
-        } else if let Some(i) = dirs(ui, id.with("dirs"), &browse.dirs, browse.sel, pal) {
+        } else if let Some(i) = dirs(ui, &browse.path, &browse.dirs, browse.sel, pal) {
             acts.push(Act::BrowseRow(i));
         }
         ui.add_space(FORM_GAP);
@@ -868,10 +901,13 @@ fn history(ui: &Ui, dest: &BackupDestination, runs: &[BackupRun], loaded: bool, 
         ];
         let now = unix_now();
         // The table's own room, so its rows scroll inside it and not with
-        // the window's body.
+        // the window's body; and its own per destination, so one opened
+        // after another's starts on its cursor, not where the wheel left
+        // the other's runs.
         let (rect, _) = ui.allocate_exact_size(vec2(w, 34.0 + runs.len().min(RUNS_SHOWN) as f32 * RUN_ROW), Sense::hover());
-        let mut room = ui.new_child(UiBuilder::new().id_salt(id.with("runs")).max_rect(rect).layout(Layout::top_down(Align::Min)));
-        let table = Table::new(id.with("runs"), &cols, runs.len()).cursor(Some(sel)).row_height(RUN_ROW).show(&mut room, pal, |ui, i, row| {
+        let runs_id = id.with("runs").with(dest.id);
+        let mut room = ui.new_child(UiBuilder::new().id_salt(runs_id).max_rect(rect).layout(Layout::top_down(Align::Min)));
+        let table = Table::new(runs_id, &cols, runs.len()).cursor(Some(sel)).row_height(RUN_ROW).show(&mut room, pal, |ui, i, row| {
             let run = &runs[i];
             let started = iso_unix(&run.started_at).map(|t| age_text(now - t)).unwrap_or_default();
             cell(ui, row, 0, &started, mono(12.5), ink(row, pal.text, pal), false);
@@ -1172,7 +1208,13 @@ mod tests {
         ]);
         let texts = drawn(&out);
         assert!(texts.iter().any(|t| t.starts_with("— podcasts → /Volumes/Backup/podcasts · after each scan · 2m 1")), "{texts:?}");
-        // A first run has no estimate; a narrow room drops count groups.
+        // A narrow room drops whole count groups off the progress line's end.
+        let whole = "41% · 1,204 of 2,930 · 812 copied · 380 unchanged · 12 trashed · 3.4 GB written";
+        let (out, _) = pass(&ctx, &mut room, vec2(560.0, 420.0));
+        let texts = drawn(&out);
+        let line = texts.iter().find(|t| t.starts_with("41% · 1,204 of 2,930")).unwrap_or_else(|| panic!("the progress line: {texts:?}"));
+        assert!(line.len() < whole.len() && whole.starts_with(line.as_str()) && whole[line.len()..].starts_with(" · "), "whole groups dropped: {line:?}");
+        // A first run has no estimate.
         let mut first = active;
         first.expected_files = None;
         first.bytes_copied = 0;
@@ -1264,6 +1306,15 @@ mod tests {
         let (_, plain) = pass(&ctx, &mut room, LARGE);
         let (_, composed) = pass_composing(&ctx, &mut room, LARGE, Vec::new(), "かな");
         assert!(composed.caret.expect("a caret").x > plain.caret.expect("a caret").x + 8.0, "the composition stands before the caret");
+        // A click that hands the keys to another field still has a caret to
+        // return, so the input method stays on; one that hands them to a
+        // choice has none, at once.
+        let shown = click_id(&ctx, &mut room, LARGE, id.with("excludes"));
+        assert_eq!(form(&room).focused(), Field::Excludes);
+        assert!(shown.caret.is_some(), "the keys went from one field to another");
+        let shown = click_id(&ctx, &mut room, LARGE, id.with("trigger").with(1));
+        assert_eq!(form(&room).focused(), Field::Trigger);
+        assert!(shown.caret.is_none(), "the keys went to the trigger, which is no field");
         // The hour woke with the daily trigger: a click focuses it.
         let _ = click_id(&ctx, &mut room, LARGE, id.with("number").with(2));
         assert_eq!(form(&room).focused(), Field::Hour);
@@ -1367,6 +1418,68 @@ mod tests {
             let _ = click_id(&ctx, &mut room, LARGE, close);
             assert_eq!(form(&room).dest.value(), "/Volumes", "back in the form, its draft kept");
         }
+    }
+
+    /// The wheel takes the folder list well down, its cursor left on the
+    /// first row, as a person looking for a folder leaves it.
+    fn wheel_down(ctx: &egui::Context, room: &mut Room, out: &egui::FullOutput, over: &str) -> egui::FullOutput {
+        let at = find(out, over).center();
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -2000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        };
+        let _ = pass_composing(ctx, room, LARGE, vec![egui::Event::PointerMoved(at), wheel], "");
+        // egui spreads a wheel's travel over the passes after it.
+        let mut last = pass(ctx, room, LARGE).0;
+        for _ in 0..90 {
+            last = pass(ctx, room, LARGE).0;
+        }
+        last
+    }
+
+    #[test]
+    fn a_new_listing_opens_on_its_cursor_and_not_where_the_wheel_left_the_last() {
+        let _en = english();
+        let ctx = context();
+        let mut room = idle();
+        press(&mut room, KeyCode::Char('a'));
+        let listing = |path: &str, stem: &str| {
+            Done::Browsed(Ok(DirListing {
+                path: path.into(),
+                directories: (0..30).map(|i| DirEntry { name: format!("{stem}{i:02}") }).collect(),
+                files: Vec::new(),
+            }))
+        };
+        ctrl(&mut room, 'b');
+        room.queued = None;
+        room.apply(listing("/Volumes", "disk"));
+        let (out, _) = pass(&ctx, &mut room, LARGE);
+        let out = wheel_down(&ctx, &mut room, &out, "disk05");
+        let texts = drawn(&out);
+        assert!(!texts.iter().any(|t| t == "disk00") && texts.iter().any(|t| t == "disk29"), "the wheel took the list down: {texts:?}");
+
+        // Up to the parent, its cursor still on the first row: the parent's
+        // listing opens there.
+        let _ = click_id(&ctx, &mut room, LARGE, Id::new("backups-browser").with("button").with(0));
+        assert_eq!(room.queued, Some(Op::Browse("/".into())), "Act::BrowseUp");
+        room.queued = None;
+        room.apply(listing("/", "root"));
+        let (out, _) = pass(&ctx, &mut room, LARGE);
+        assert_drew(&out, &["root00"]);
+
+        // The same listing again, the browser closed and opened between: it
+        // opens on its cursor too.
+        let out = wheel_down(&ctx, &mut room, &out, "root05");
+        assert!(!drawn(&out).iter().any(|t| t == "root00"), "the wheel took the list down");
+        let _ = click_id(&ctx, &mut room, LARGE, Id::new("backups-browser").with("button").with(3));
+        assert!(matches!(room.modal, Modal::Form(_)), "Act::BrowseCancel");
+        ctrl(&mut room, 'b');
+        room.queued = None;
+        room.apply(listing("/", "root"));
+        let (out, _) = pass(&ctx, &mut room, LARGE);
+        assert_drew(&out, &["root00"]);
     }
 
     #[test]
