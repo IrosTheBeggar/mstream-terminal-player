@@ -32,7 +32,9 @@
 //! log: the webapp's verbs under its songs' header), the tab's table down
 //! to the room's last row. The seeds modal and the window's list draw
 //! last, from [`draw_modals`], so they win the pointer; the save prompt is
-//! the sonic room's (`sonic::draw_modals`).
+//! the sonic room's (`sonic::draw_modals`). The header and those two
+//! modals are the taste bar's ([`taste_bar`]), which the Peer recs room
+//! wears too; Discover lends it its state through [`Room`].
 //!
 //! Since 2026-10-19 the Connected servers tab carries the plug-ins
 //! (clauses 100–141): a copy's mark on a row's LEAD and a tile's artist
@@ -49,23 +51,23 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
-use crate::api::types::{SeedSource, TasteOutcome, Track};
+use crate::api::types::{SeedSource, Track};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{ListView, dim, frame_at, modal_close, modal_frame_on, scroll_list, width};
+use crate::kit::{ListView, Surface, dim, frame_at, scroll_list, width};
 use crate::tui::app::keep::{JobsIndicator, KeepPin, KeepTarget};
-use crate::tui::app::taste::{TASTE_STRIP_MAX, TastePeerAlbum};
-use crate::tui::app::{App, Capture, Origin, TasteLatch, TastePinRefusal, TasteRow, TasteSlot, TasteTab, TasteVerb};
+use crate::tui::app::taste::{TASTE_STRIP_MAX, TastePeerAlbum, TasteState};
+use crate::tui::app::{
+    App, Capture, Effect, Origin, TasteLatch, TastePinRefusal, TasteRow, TasteSlot, TasteTab, TasteVerb,
+};
 
 use super::cover::{Pace, Slot};
 use super::keep::{CopiesUi, KeepAct, KeepUi, LinksUi, mark_glyph, mark_style, mark_word};
-use super::{Act, Gui, List, RowVerb, Screen, accent, bright_bold, bullet_glyph, check_glyphs, put, sel};
+use super::{Act, Gui, List, RowVerb, Screen, accent, bright_bold, put, sel};
 
-/// The window dropdown's choices, in days (0 = all time) — clause 15.
-use crate::tui::app::taste::TASTE_WINDOWS as WINDOWS;
-
-/// The window the header shows before any was chosen or answered: the
-/// server's own default (plan §2.2).
-use crate::tui::app::taste::TASTE_WINDOW_DEFAULT as WINDOW_DEFAULT;
+/// The header, the window's list and the seeds modal, which the Peer recs room wears too
+/// (peer-recs contract §1.4).
+pub(crate) mod taste_bar;
+use taste_bar::{BarAct, BarRoom, BarUi, HeadFacts};
 
 /// The kit table's column gap.
 const GAP: u16 = 2;
@@ -80,7 +82,7 @@ const FLEX_MIN: u16 = 8;
 /// ON's cap: a server's name.
 const ON_MAX: u16 = 16;
 /// The tabs' spacing — the kit's Tabs, the admin rooms' value.
-const TAB_GAP: u16 = 2;
+pub(crate) const TAB_GAP: u16 = 2;
 /// The fallback card's widest, and its two heights: whole, and with its
 /// body sentence and blank given up in a room shorter than the GUI's
 /// floor (clause 90).
@@ -114,21 +116,21 @@ const STRIP_SLACK: usize = 2 * TASTE_STRIP_MAX;
 
 // ── State ───────────────────────────────────────────────────────────────────
 
-/// The room's own state: the table's cursor and wheel, the window's list or
-/// the seeds modal while one is up, and where the window control stood last
-/// frame. Everything the room shows lives on the shared App.
+/// The room's own state: the table's cursor and wheel, and the bar's (the
+/// window's list or the seeds modal while one is up, and where the window
+/// control stood last frame). Everything the room shows lives on the shared
+/// App.
 pub(crate) struct DiscoverUi {
     /// The keyboard cursor, an index into [`lines`] of the tab in front.
     /// None is the kit's resting state — ↓ picks it up, Esc stows it
     /// (clause 57).
     pub cursor: Option<usize>,
     pub view: ListView,
-    pub menu: Option<Menu>,
-    pub seeds: Option<SeedsModal>,
-    /// The header's window control as last drawn: its list hangs from it.
-    window_at: Rect,
-    /// The local zone for "today" and "yesterday", read once.
-    zone: Option<Option<crate::admin::tz::Zone>>,
+    /// The header's modals and anchor ([`taste_bar`]).
+    pub bar: BarUi,
+    /// A test room's bar, beside Discover's own (the bar's seam tests).
+    #[cfg(test)]
+    pub other_bar: BarUi,
     /// The album strip's view and keyboard hand (clauses 45–49).
     pub strip: StripUi,
     /// The room's content as last drawn: whether the strip stands is the
@@ -216,10 +218,9 @@ impl DiscoverUi {
         DiscoverUi {
             cursor: None,
             view: ListView::default(),
-            menu: None,
-            seeds: None,
-            window_at: Rect::default(),
-            zone: None,
+            bar: BarUi::default(),
+            #[cfg(test)]
+            other_bar: BarUi::default(),
             strip: StripUi::default(),
             content: Rect::default(),
             strip_at: None,
@@ -253,26 +254,6 @@ impl DiscoverUi {
     }
 }
 
-/// A list hanging from a control (the kit's Dropdown grammar), with its
-/// keyboard cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Menu {
-    /// The header's window list; the cursor indexes [`WINDOWS`].
-    Window(usize),
-}
-
-/// The seeds modal's own state (clause 13): which rows were toggled, and
-/// whether a pin came or went. Nothing is sent until it closes.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct SeedsModal {
-    pub cursor: Option<usize>,
-    /// Hashes whose box was flipped: a history seed unchecked (dropped), a
-    /// dropped one checked (restored).
-    pub flipped: Vec<String>,
-    pub pins_changed: bool,
-    pub view: ListView,
-}
-
 /// What a pointer or key did in the room — one [`Act`] variant, the admin
 /// rooms' habit, so the shell's enum stays readable.
 #[derive(Debug, Clone, PartialEq)]
@@ -288,22 +269,11 @@ pub(crate) enum DiscAct {
     /// A song's `[⋯]` (the track-actions sheet), and a right click — a
     /// library song's, or a connected server's with its peer origin.
     More(usize),
-    /// The header's window control, and a pick from its list.
-    Window,
-    WindowPick(u32),
-    /// A click outside the open list closes and keeps (the Dropdown law).
-    MenuClose,
-    /// The header's "more options" (and `e`): the seeds modal.
-    Seeds,
-    /// The header's "↻ new seeds": ask again now, the visit's window, pins
-    /// and drops kept — `G` with the room up (clause 3).
-    NewSeeds,
-    /// A modal row, clicked: toggle it, or do what it says.
-    SeedRow(usize),
-    /// A pin's `[X]` in the modal, by its index in the pins.
-    SeedUnpin(usize),
-    /// Done, Esc or the modal's `[X]`: the changes apply (clause 13).
-    SeedsDone,
+    /// The header's controls and its two modals ([`taste_bar`]): the
+    /// window control and its list, "more options" and the seeds modal, and
+    /// "↻ new seeds" — ask again now, the visit's window, pins and drops
+    /// kept, `G` with the room up (clause 3).
+    Bar(BarAct),
     /// The card's two ways forward (clauses 21, 14).
     Another,
     Choose,
@@ -594,7 +564,7 @@ fn verb_glyphs() -> [&'static str; 4] {
     if legacy_conhost() { ["[>]", "[^]", "[+]", "[.]"] } else { ["[▸]", "[»]", "[+]", "[⋯]"] }
 }
 
-fn bold() -> Style {
+pub(crate) fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
 }
 
@@ -603,7 +573,7 @@ pub(crate) fn dash() -> &'static str {
     if legacy_conhost() { "-" } else { "—" }
 }
 
-fn chevron() -> &'static str {
+pub(crate) fn chevron() -> &'static str {
     if legacy_conhost() { "v" } else { "▾" }
 }
 
@@ -635,7 +605,7 @@ fn widened(app: &App) -> Option<String> {
 
 /// The refresh's glyph, gated like the kit's others: none on the legacy
 /// console, where its words always stand.
-fn refresh_glyph() -> Option<&'static str> {
+pub(crate) fn refresh_glyph() -> Option<&'static str> {
     (!legacy_conhost()).then_some("↻")
 }
 
@@ -800,7 +770,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let lay = layout(laid(gui, content), gui.app.taste.no_history, fill.is_some());
     // The header keeps the room's top row, the mood strip the row under it
     // (clause 33); the rest stands below.
-    draw_header(frame, gui, content, content.y);
+    taste_bar::draw_header::<Room>(frame, gui, content, content.y);
     super::moods::draw_strip(frame, gui, content, content.y + 1);
     if let Some((rect, compact)) = lay.card {
         draw_card(frame, gui, rect, compact);
@@ -891,7 +861,7 @@ fn settle(gui: &mut Gui) {
     }
 }
 
-fn word_refusal(gui: &mut Gui, refusal: TastePinRefusal) {
+pub(crate) fn word_refusal(gui: &mut Gui, refusal: TastePinRefusal) {
     match refusal {
         TastePinRefusal::Full => gui.note = Some((t!("gui.discover.pins_full").to_string(), true)),
         TastePinRefusal::OtherServer(server) => {
@@ -902,44 +872,6 @@ fn word_refusal(gui: &mut Gui, refusal: TastePinRefusal) {
     }
 }
 
-/// One way the header's controls can stand (clause 17), the widest first:
-/// the refresh with its words, "more options" long, the widened window's
-/// mark ("Last 30 days → All time") and the room's name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HeadStep {
-    words: bool,
-    long: bool,
-    mark: bool,
-    name: bool,
-    /// "options" drawn at all.
-    more: bool,
-}
-
-/// The header's steps, in the drop order (clause 17): the refresh's words
-/// (its glyph stays; the legacy console has none, so its words always
-/// stand), then "more options" shortens to "options", then a widened
-/// window's mark gives way to the window the answer came from, then the
-/// room's name — the nav row already names the room — so the controls
-/// stand whole at the queue's 47 cells in every locale. With the mood
-/// opener in the header (clause 33) the legacy console, whose refresh keeps
-/// its words, can still be short: last, "options" gives way (its modal is
-/// `e`).
-fn head_steps(glyph: bool, filters: bool) -> Vec<HeadStep> {
-    let whole = HeadStep { words: true, long: true, mark: true, name: true, more: true };
-    let mut steps = vec![whole];
-    if glyph {
-        steps.push(HeadStep { words: false, ..whole });
-    }
-    for (mark, name) in [(true, true), (false, true), (false, false)] {
-        steps.push(HeadStep { words: !glyph, long: false, mark, name, ..whole });
-    }
-    if filters && !glyph {
-        let last = steps[steps.len() - 1];
-        steps.push(HeadStep { more: false, ..last });
-    }
-    steps
-}
-
 fn window_label_in(days: u32, locale: &str) -> String {
     if days == 0 {
         t!("gui.discover.window_all", locale = locale).to_string()
@@ -948,178 +880,84 @@ fn window_label_in(days: u32, locale: &str) -> String {
     }
 }
 
-fn widen_arrow() -> &'static str {
-    if legacy_conhost() { "->" } else { "→" }
-}
+/// Discover's side of the taste bar: its `BarUi` on `gui.discover`, the
+/// shared `App.taste`, and its verbs — the visit's ask again on "↻ new
+/// seeds", the window remembered in `[gui] discover_window` (clause 15).
+pub(crate) struct Room;
 
-/// The header's words in one language: what [`head_plan`] lays out.
-#[derive(Debug, Clone)]
-struct HeadWords {
-    name: String,
-    /// The window dropdown's value (clauses 11, 15) with a widened
-    /// answer's mark and without it: the window asked, or — where the
-    /// server widened it to all time — the asked window and where it went,
-    /// "Last 30 days → All time"; without the mark, the window the answer
-    /// came from, "All time". Never a window the answer did not use.
-    window: (String, String),
-    /// The widest of the four windows: the dropdown's slot.
-    widest: u16,
-    /// "more options" and its short "options".
-    more: (String, String),
-    /// "new seeds" and "asking…".
-    refresh: (String, String),
-    /// The mood opener's cells (clause 33), where the room offers the
-    /// filters; none elsewhere, and the header is as it was.
-    filters: Option<u16>,
-}
+impl BarRoom for Room {
+    const NAV: usize = super::DISCOVER_NAV;
 
-impl HeadWords {
-    fn of(app: &App, locale: &str) -> Self {
-        let asked = app.taste.shown_window().unwrap_or(WINDOW_DEFAULT);
-        let window = match app.taste.widened_shown() {
-            Some(from) => (
-                format!("{} {} {}", window_label_in(from, locale), widen_arrow(), window_label_in(0, locale)),
-                window_label_in(0, locale),
-            ),
-            None => (window_label_in(asked, locale), window_label_in(asked, locale)),
-        };
-        HeadWords {
-            name: t!("gui.nav.discover", locale = locale).to_string(),
-            window,
-            widest: WINDOWS.iter().map(|w| width(&window_label_in(*w, locale))).max().unwrap_or(0) as u16,
-            more: (t!("gui.discover.more_options", locale = locale).to_string(), t!("gui.discover.options_short", locale = locale).to_string()),
-            refresh: (t!("gui.discover.new_seeds", locale = locale).to_string(), t!("gui.discover.asking", locale = locale).to_string()),
-            filters: (app.capabilities.taste_moods() && app.session.peer.is_none())
-                .then(|| width(&super::moods::opener_word(locale)) as u16),
-        }
+    fn bar(gui: &mut Gui) -> &mut BarUi {
+        &mut gui.discover.bar
+    }
+
+    fn bar_ref(gui: &Gui) -> &BarUi {
+        &gui.discover.bar
+    }
+
+    fn taste(app: &App) -> &TasteState {
+        &app.taste
+    }
+
+    fn facts(gui: &Gui) -> HeadFacts {
+        facts_in(&gui.app, &rust_i18n::locale())
+    }
+
+    fn wrap(act: BarAct) -> Act {
+        Act::Disc(DiscAct::Bar(act))
+    }
+
+    fn can_pin_playing(app: &App) -> bool {
+        app.taste_can_pin_playing()
+    }
+
+    fn pin_playing(app: &mut App) -> bool {
+        app.taste_pin_playing()
+    }
+
+    fn unpin(app: &mut App, path: &str) -> bool {
+        app.taste_unpin(path)
+    }
+
+    fn seeds_closed(app: &mut App, dropped: &[String], restored: &[String], pins_changed: bool) -> Vec<Effect> {
+        app.taste_seeds_closed(dropped, restored, pins_changed)
+    }
+
+    fn set_window(gui: &mut Gui, window: u32) {
+        pick_window(gui, window);
+    }
+
+    /// The pick is armed in the sonic room's grammar, over the Files room.
+    fn choose_song(gui: &mut Gui) {
+        let effects = gui.app.taste_choose_song();
+        gui.pend(effects);
+        gui.active = super::FILES_NAV;
+        gui.app.tab = crate::tui::app::Tab::Files;
+    }
+
+    fn new_seeds(gui: &mut Gui) {
+        enter(gui, true);
     }
 }
 
-/// Where the header's parts stand on its row: the step taken, and each
-/// control's x and width (the refresh's is its slot's).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HeadPlan {
-    step: HeadStep,
-    window: (u16, u16),
-    /// The mood opener, between the window and "more options".
-    filters: Option<(u16, u16)>,
-    more: (u16, u16),
-    refresh: (u16, u16),
-}
-
-/// The header's geometry (clause 17) in `content`'s width: the first of
-/// [`head_steps`] whose row fits, the controls right-aligned two cells
-/// apart. The refresh's slot is as wide as the wider of its words, or the
-/// glyph and the two cells it keeps for " …" while asking; the window's
-/// slot is the widest window's (or the widened value, when wider).
-fn head_plan(words: &HeadWords, content: Rect, glyph: Option<&str>) -> HeadPlan {
-    let words_w = width(&words.refresh.0).max(width(&words.refresh.1)) as u16;
-    let refresh_w = |with_words: bool| match glyph {
-        Some(g) if with_words => width(g) as u16 + 1 + words_w,
-        Some(g) => width(g) as u16 + 2,
-        None => words_w,
-    };
-    let window_w = |mark: bool| {
-        let value = if mark { &words.window.0 } else { &words.window.1 };
-        (width(value) as u16).max(words.widest) + 2
-    };
-    let more_w = |long: bool| width(if long { &words.more.0 } else { &words.more.1 }) as u16;
-    let need = |s: &HeadStep| {
-        let name = if s.name { width(&words.name) as u16 + HEAD_GAP } else { 0 };
-        let filters = words.filters.map_or(0, |w| w + HEAD_GAP);
-        let more = if s.more { more_w(s.long) + HEAD_GAP } else { 0 };
-        name + window_w(s.mark) + HEAD_GAP + filters + more + refresh_w(s.words)
-    };
-    let steps = head_steps(glyph.is_some(), words.filters.is_some());
-    let step = steps.iter().copied().find(|s| need(s) <= content.width).unwrap_or(steps[steps.len() - 1]);
-    let slot_w = refresh_w(step.words);
-    let slot_x = content.right().saturating_sub(slot_w);
-    // "options" given way: no width, at the refresh's slot.
-    let (more_x, more_w) = if step.more {
-        let w = more_w(step.long);
-        (slot_x.saturating_sub(HEAD_GAP + w), w)
-    } else {
-        (slot_x, 0)
-    };
-    let filters = words.filters.map(|w| (more_x.saturating_sub(HEAD_GAP + w), w));
-    let window_w = window_w(step.mark);
-    let window_x = filters.map_or(more_x, |(x, _)| x).saturating_sub(HEAD_GAP + window_w).max(content.x);
-    HeadPlan { step, window: (window_x, window_w), filters, more: (more_x, more_w), refresh: (slot_x, slot_w) }
-}
-
-/// The header (clauses 11, 15, 17, 91): the room's name BOLD, then, at the
-/// right, the controls: the window dropdown (the value in the row's own
-/// weight, the chevron dim, both BRIGHT + BOLD under the pointer — the
-/// kit's Dropdown — in a slot as wide as its widest window, so choosing one
-/// moves nothing), "more options" (a DIM text button: the seeds modal) and
-/// "↻ new seeds" (the accent's text button, the row's one primary: ask
-/// again). While an ask is out the refresh reads "asking…" in the
-/// getting-there colour — "↻ …" where its words dropped, never the colour
-/// alone — in a slot as wide as the wider of its words, so nothing moves.
-/// Short of width the steps of [`head_steps`] apply. What the answer is
-/// based on is the tabs row's tagline ([`draw_tagline`]).
-fn draw_header(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
-    let locale = rust_i18n::locale();
-    let words = HeadWords::of(&gui.app, &locale);
-    let glyph = refresh_glyph();
-    let plan = head_plan(&words, content, glyph);
-    let step = plan.step;
-    if step.name {
-        put(frame, content.x, y, &words.name, bold());
+/// The header's facts (clauses 11, 15, 17, 33) with the room's name in
+/// `locale`: the window shown and its widened mark, an ask out (either
+/// half, or a 403's probe — the state line's word before the line left,
+/// 2026-10-16, clause 32), the mood opener where the server takes moods
+/// and the session is the user's own, and the refresh's tooltip naming `G`.
+pub(crate) fn facts_in(app: &App, locale: &str) -> HeadFacts {
+    HeadFacts {
+        name: t!("gui.nav.discover", locale = locale).to_string(),
+        short: None,
+        window: app.taste.shown_window(),
+        widened_from: app.taste.widened_shown(),
+        widened: widened(app),
+        asking: app.taste.asking(),
+        moods: (app.capabilities.taste_moods() && app.session.peer.is_none())
+            .then_some(Act::Mood(super::moods::MoodAct::Open { key: false })),
+        refresh_tip: Some(t!("gui.discover.new_seeds_tip").to_string()),
     }
-
-    let (window_x, window_w) = plan.window;
-    let window = if step.mark { &words.window.0 } else { &words.window.1 };
-    let rect = Rect { x: window_x, y, width: window_w, height: 1 };
-    let hover = gui.ui.hovers(rect);
-    put(frame, rect.x, y, window, if hover { bright_bold() } else { Style::default() });
-    put(frame, rect.x + window_w - 1, y, chevron(), if hover { bright_bold() } else { dim() });
-    gui.ui.click(rect, Act::Disc(DiscAct::Window));
-    let tip = t!("gui.discover.window_tip").to_string();
-    // A widened answer's fact, in full, under the pointer (clause 11).
-    let tip = match widened(&gui.app) {
-        Some(fact) if gui.app.taste.widened_shown().is_some() => format!("{fact} · {tip}"),
-        _ => tip,
-    };
-    gui.ui.tip_keyed(rect, tip);
-    gui.discover.window_at = rect;
-
-    // The mood opener (clause 33): its modal opens over the room.
-    if let Some((x, _)) = plan.filters {
-        super::moods::draw_opener(frame, gui, x, y);
-    }
-
-    let (more_x, more_w) = plan.more;
-    if step.more {
-        let more = if step.long { &words.more.0 } else { &words.more.1 };
-        super::text_button(frame, gui, more_x, y, more, false, Act::Disc(DiscAct::Seeds));
-        gui.ui.tip_keyed(Rect { x: more_x, y, width: more_w, height: 1 }, t!("gui.discover.seeds_tip").to_string());
-    }
-
-    // An ask out (either half, or a 403's probe): the refresh says so —
-    // the state line's word before the line left (2026-10-16, clause 32).
-    let asking = gui.app.taste.asking();
-    let said = if asking { &words.refresh.1 } else { &words.refresh.0 };
-    let label = match glyph {
-        Some(g) if step.words => format!("{g} {said}"),
-        Some(g) if asking => format!("{g} …"),
-        Some(g) => g.to_string(),
-        None => said.clone(),
-    };
-    let label_w = width(&label) as u16;
-    // From its slot's left: the glyph stays put, under the pointer that
-    // clicked it, while the words turn to "asking…" and back.
-    let refresh = Rect { x: plan.refresh.0, y, width: label_w, height: 1 };
-    let style = if gui.ui.hovers(refresh) {
-        bright_bold()
-    } else if asking {
-        Style::default().fg(th().gold)
-    } else {
-        accent()
-    };
-    put(frame, refresh.x, y, &label, style);
-    gui.ui.click(refresh, Act::Disc(DiscAct::NewSeeds));
-    gui.ui.tip_keyed(refresh, t!("gui.discover.new_seeds_tip").to_string());
 }
 
 /// The tagline (clause 11), DIM at the tabs row's right: what the answer
@@ -1667,7 +1505,7 @@ fn draw_skeleton(frame: &mut Frame, list: Rect, cols: Cols) {
 }
 
 /// A DIM sentence wrapped into the pane; the rows it took.
-fn sentence_lines(frame: &mut Frame, list: Rect, sentence: &str, style: Style) -> u16 {
+pub(crate) fn sentence_lines(frame: &mut Frame, list: Rect, sentence: &str, style: Style) -> u16 {
     let lines = crate::kit::wrap_words(sentence, list.width as usize);
     let shown = lines.len().min(list.height as usize);
     for (i, line) in lines.into_iter().take(shown).enumerate() {
@@ -1753,7 +1591,7 @@ fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, table_y: u16, str
             let short = Rect { height: list.height.saturating_sub(1), ..list };
             let shown = sentence_lines(frame, short, &t!("gui.discover.scan_pending"), dim());
             let label = t!("gui.discover.check_again").to_string();
-            again_button(frame, gui, (list.x, list.y + shown), &label, DiscAct::Again);
+            again_button(frame, &mut gui.ui, (list.x, list.y + shown), &label, Act::Disc(DiscAct::Again));
             return;
         }
         Pane::Loading => {
@@ -1808,12 +1646,13 @@ fn draw_table(frame: &mut Frame, gui: &mut Gui, content: Rect, table_y: u16, str
 }
 
 /// Try again, Check again and the empty library's way out: the accent's text
-/// button, the room's one way forward where it stands.
-fn again_button(frame: &mut Frame, gui: &mut Gui, (x, y): (u16, u16), label: &str, act: DiscAct) {
+/// button, the room's one way forward where it stands — any room's, on its
+/// own surface.
+pub(crate) fn again_button(frame: &mut Frame, ui: &mut Surface<Act>, (x, y): (u16, u16), label: &str, act: Act) {
     let rect = Rect { x, y, width: width(label) as u16, height: 1 };
-    let hover = gui.ui.hovers(rect);
+    let hover = ui.hovers(rect);
     put(frame, x, y, label, if hover { bright_bold() } else { accent().add_modifier(Modifier::BOLD) });
-    gui.ui.click(rect, Act::Disc(act));
+    ui.click(rect, act);
 }
 
 /// "couldn't reach this source" in the warning colour, with Try again at
@@ -1827,7 +1666,7 @@ fn failure_line(frame: &mut Frame, gui: &mut Gui, at: Rect, err: &str) {
     let shown = super::bar::clip(&words, room).into_owned();
     put(frame, at.x, at.y, &shown, Style::default().fg(th().gold));
     gui.ui.tip(Rect { x: at.x, y: at.y, width: (width(&shown) as u16).max(1), height: 1 }, err.to_string());
-    again_button(frame, gui, (at.x + width(&shown) as u16 + 2, at.y), &retry, DiscAct::Again);
+    again_button(frame, &mut gui.ui, (at.x + width(&shown) as u16 + 2, at.y), &retry, Act::Disc(DiscAct::Again));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2077,56 +1916,6 @@ fn draw_indicator(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16, ind: 
 
 // ── The window's list and the modal ─────────────────────────────────────────
 
-/// The seeds modal's lines (clause 13).
-#[derive(Debug, Clone, PartialEq)]
-enum SeedLine {
-    Head(String),
-    Pin(usize),
-    Seed(String),
-    Dropped(String),
-    PinPlaying,
-    PinSong,
-}
-
-impl SeedLine {
-    fn is_row(&self) -> bool {
-        !matches!(self, SeedLine::Head(_))
-    }
-}
-
-fn seed_lines(app: &App) -> Vec<SeedLine> {
-    let taste = &app.taste;
-    let mut out = Vec::new();
-    if !taste.pins.is_empty() {
-        out.push(SeedLine::Head(t!("gui.discover.sec_pinned").to_uppercase()));
-        out.extend((0..taste.pins.len()).map(SeedLine::Pin));
-    }
-    if let Some(head) = &taste.head {
-        let history: Vec<_> = if head.seed_source == SeedSource::Random {
-            Vec::new()
-        } else {
-            head.seeds.iter().filter(|s| !s.pinned).map(|s| SeedLine::Seed(s.hash.clone())).collect()
-        };
-        if !history.is_empty() {
-            out.push(SeedLine::Head(t!("gui.discover.sec_seeds").to_uppercase()));
-            out.extend(history);
-        }
-        // This visit's drops the answer resolved (its `excluded`), never a
-        // random pick passed over with "another pick" (clause 21).
-        let dropped = taste.dropped_seeds();
-        if !dropped.is_empty() {
-            out.push(SeedLine::Head(t!("gui.discover.sec_dropped").to_uppercase()));
-            out.extend(dropped.iter().map(|e| SeedLine::Dropped(e.hash.clone())));
-        }
-    }
-    // Hidden, never grey, when it cannot be done (clause 14).
-    if app.taste_can_pin_playing() {
-        out.push(SeedLine::PinPlaying);
-    }
-    out.push(SeedLine::PinSong);
-    out
-}
-
 /// The window's list and the seeds modal, drawn (and registered) after the
 /// base screen so their rects win the pointer.
 pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
@@ -2143,16 +1932,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if window {
         gui.ui.pointer = None;
     }
-    if let Some(Menu::Window(cursor)) = gui.discover.menu {
-        let current = gui.app.taste.shown_window().unwrap_or(WINDOW_DEFAULT);
-        let rows: Vec<(String, bool, DiscAct)> =
-            WINDOWS.iter().map(|w| (window_label(*w), *w == current, DiscAct::WindowPick(*w))).collect();
-        let anchor = gui.discover.window_at;
-        draw_list(frame, gui, (area, anchor), rows, cursor);
-    }
-    if gui.discover.seeds.is_some() {
-        draw_seeds_modal(frame, gui, area);
-    }
+    taste_bar::draw_modals::<Room>(frame, gui, area);
     if gui.discover.tile_list.is_some() {
         draw_tile_list(frame, gui, area);
     }
@@ -2264,171 +2044,8 @@ fn draw_tile_list(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
 }
 
-/// A dropdown's list (the kit's Dropdown): hung under its control, the
-/// current value wearing `•`, the cursor the accent slab.
-fn draw_list(
-    frame: &mut Frame,
-    gui: &mut Gui,
-    (area, anchor): (Rect, Rect),
-    rows: Vec<(String, bool, DiscAct)>,
-    cursor: usize,
-) {
-    gui.ui.click(area, Act::Disc(DiscAct::MenuClose));
-    let widest = rows.iter().map(|(label, _, _)| width(label)).max().unwrap_or(10) as u16;
-    let w = (widest + 6).max(anchor.width + 4).min(area.width.saturating_sub(2));
-    let h = rows.len() as u16 + 2;
-    let x = anchor.x.saturating_sub(1).min(area.right().saturating_sub(w + 1));
-    let rect = Rect { x, y: anchor.bottom(), width: w, height: h };
-    gui.ui.overlay(rect);
-    let inner = frame_at(frame, rect, th().accent);
-    for (i, (label, current, act)) in rows.into_iter().enumerate() {
-        let row = Rect { x: inner.x, y: inner.y + i as u16, width: inner.width, height: 1 };
-        let on = i == cursor;
-        let hover = !on && gui.ui.hovers(row);
-        if on {
-            frame.render_widget(ratatui::widgets::Block::default().style(sel()), row);
-        }
-        let mark = if current { bullet_glyph() } else { " " };
-        put(frame, row.x + 1, row.y, mark, if on { sel() } else { accent() });
-        let style = match (on, hover) {
-            (true, _) => sel().add_modifier(Modifier::BOLD),
-            (false, true) => bright_bold(),
-            (false, false) => Style::default(),
-        };
-        let label = super::bar::clip(&label, inner.width.saturating_sub(4) as usize).into_owned();
-        put(frame, row.x + 3, row.y, &label, style);
-        gui.ui.click(row, Act::Disc(act));
-    }
-}
-
-/// The seeds modal (clause 13): "Based on", its sections, the pin rows and
-/// Done.
-fn draw_seeds_modal(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    gui.ui.click(area, Act::Guard);
-    let rows = seed_lines(&gui.app);
-    let w = 72.min(area.width.saturating_sub(4));
-    let h = (rows.len() as u16 + 7).min(area.height.saturating_sub(2));
-    let inner = modal_frame_on(frame, &mut gui.ui, area, w, h, th().accent);
-    put(frame, inner.x + 1, inner.y, &t!("gui.discover.seeds_title"), accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::Disc(DiscAct::SeedsDone));
-    let sub = t!("gui.discover.seeds_sub").to_string();
-    put(frame, inner.x + 1, inner.y + 1, &super::bar::clip(&sub, inner.width.saturating_sub(2) as usize), dim());
-    let list = Rect { y: inner.y + 3, height: inner.height.saturating_sub(5), ..inner };
-    let now = crate::admin::unix_now();
-    let zone = gui.discover.zone.get_or_insert_with(crate::admin::tz::local);
-    let offset = zone.as_ref().map_or(0, |z| z.offset_at(now));
-    let Some(modal) = gui.discover.seeds.clone() else { return };
-    let mut view = modal.view;
-    let shown = view.shown(modal.cursor);
-    let (first, visible) = view.window(rows.len(), modal.cursor, list.height as usize);
-    let (check_on, check_off) = check_glyphs();
-    for (row, index) in (first..(first + visible).min(rows.len())).enumerate() {
-        let y = list.y + row as u16;
-        let rect = Rect { x: list.x, y, width: list.width, height: 1 };
-        let line = &rows[index];
-        if !line.is_row() {
-            if let SeedLine::Head(text) = line {
-                put(frame, rect.x + 1, y, text, dim());
-            }
-            continue;
-        }
-        let is_sel = shown == Some(index);
-        let hover = !is_sel && gui.ui.hovers(rect);
-        if is_sel {
-            frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
-        }
-        let style = match (is_sel, hover) {
-            (true, _) => sel().add_modifier(Modifier::BOLD),
-            (false, true) => bright_bold(),
-            (false, false) => Style::default(),
-        };
-        let facts_style = if is_sel { sel() } else { dim() };
-        let taste = &gui.app.taste;
-        let room = rect.width.saturating_sub(2) as usize;
-        let (check, words, facts): (Option<bool>, String, String) = match line {
-            SeedLine::Pin(i) => {
-                let pin = &taste.pins[*i];
-                (None, track_words(&pin.track), t!("gui.discover.seed_pinned").to_string())
-            }
-            SeedLine::Seed(hash) => {
-                let Some(seed) = taste.seed(hash) else { continue };
-                let mut facts = Vec::new();
-                if let Some(then) = seed.last_played.as_deref().and_then(crate::admin::iso_unix) {
-                    facts.push(age_words(then, now, offset));
-                }
-                match seed.outcome {
-                    TasteOutcome::Completed => facts.push(t!("gui.discover.outcome_completed").to_string()),
-                    TasteOutcome::Stopped => facts.push(t!("gui.discover.outcome_stopped").to_string()),
-                    TasteOutcome::Other => {}
-                }
-                if !seed.analyzed {
-                    facts.push(t!("gui.discover.not_analyzed").to_string());
-                }
-                (Some(!modal.flipped.contains(hash)), track_words(&seed.to_track()), facts.join(" · "))
-            }
-            SeedLine::Dropped(hash) => {
-                let found = taste.head.as_ref().and_then(|h| h.excluded.iter().find(|e| &e.hash == hash));
-                let Some(excluded) = found else { continue };
-                let track = Track { filepath: excluded.filepath.clone(), metadata: excluded.metadata.clone() };
-                (Some(modal.flipped.contains(hash)), track_words(&track), String::new())
-            }
-            SeedLine::PinPlaying => (None, format!("+ {}", t!("gui.discover.pin_playing")), String::new()),
-            SeedLine::PinSong => (None, format!("+ {}", t!("gui.discover.pin_song")), String::new()),
-            SeedLine::Head(_) => continue,
-        };
-        let mut x = rect.x + 1;
-        if let Some(on) = check {
-            let (glyph, gstyle) = if on {
-                (check_on, if is_sel { sel() } else { Style::default().fg(th().ok) })
-            } else {
-                (check_off, facts_style)
-            };
-            put(frame, x, y, glyph, gstyle);
-            x += 4;
-        }
-        let unpin = matches!(line, SeedLine::Pin(_));
-        let tail = if unpin { 5 } else { 1 };
-        let avail = (rect.right().saturating_sub(x + tail)) as usize;
-        let words = super::bar::clip(&words, avail.min(room)).into_owned();
-        put(frame, x, y, &words, style);
-        let after = x + width(&words) as u16 + 2;
-        if !facts.is_empty() && after < rect.right().saturating_sub(tail) {
-            let room = rect.right().saturating_sub(after + tail) as usize;
-            put(frame, after, y, &super::bar::clip(&facts, room), facts_style);
-        }
-        gui.ui.click(rect, Act::Disc(DiscAct::SeedRow(index)));
-        if let SeedLine::Pin(i) = line {
-            let cell = Rect { x: rect.right().saturating_sub(4), y, width: 3, height: 1 };
-            let style = if gui.ui.hovers(cell) {
-                Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
-            } else {
-                facts_style
-            };
-            put(frame, cell.x, y, "[X]", style);
-            gui.ui.click(cell, Act::Disc(DiscAct::SeedUnpin(*i)));
-            gui.ui.tip_keyed(cell, t!("gui.discover.unpin_tip").to_string());
-        }
-    }
-    if let Some(modal) = gui.discover.seeds.as_mut() {
-        modal.view = view;
-    }
-    // The modal primary, the safe choice: Done applies (clause 13).
-    let done = t!("gui.discover.seeds_done").to_string();
-    let done_w = width(&done) as u16;
-    let rect = Rect {
-        x: inner.right().saturating_sub(done_w + 1),
-        y: inner.bottom().saturating_sub(1),
-        width: done_w,
-        height: 1,
-    };
-    let style = if gui.ui.hovers(rect) { bright_bold() } else { accent().add_modifier(Modifier::BOLD) };
-    put(frame, rect.x, rect.y, &done, style);
-    gui.ui.click(rect, Act::Disc(DiscAct::SeedsDone));
-}
-
 pub(crate) fn modal_open(gui: &Gui) -> bool {
-    gui.discover.menu.is_some()
-        || gui.discover.seeds.is_some()
+    taste_bar::modal_open(&gui.discover.bar)
         || gui.discover.tile_list.is_some()
         || gui.discover.copies.is_some()
         || gui.app.keep.flow.is_some()
@@ -2438,8 +2055,7 @@ pub(crate) fn modal_open(gui: &Gui) -> bool {
 /// the tile's list, the Keep a copy and Copies modals — a copy keeps
 /// running on the server.
 pub(crate) fn close_all(gui: &mut Gui) {
-    gui.discover.menu = None;
-    gui.discover.seeds = None;
+    taste_bar::close(&mut gui.discover.bar);
     gui.discover.tile_list = None;
     gui.discover.copies = None;
     gui.discover.keep.frozen = None;
@@ -2452,7 +2068,7 @@ pub(crate) fn close_all(gui: &mut Gui) {
 /// room is up, or the way back from a pick) keeps them. Either way the room
 /// opens with nothing hung, and the old answer stands until the new lands.
 pub(crate) fn enter(gui: &mut Gui, again: bool) {
-    gui.discover.menu = None;
+    gui.discover.bar.menu = None;
     gui.discover.tile_list = None;
     // The list stays where it was left (clause 61's way back); only the
     // keyboard's hand goes down.
@@ -2511,49 +2127,14 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             gui.discover.stow();
             more(gui, index);
         }
-        DiscAct::Window => {
-            gui.discover.menu = match gui.discover.menu {
-                Some(Menu::Window(_)) => None,
-                None => {
-                    let current = gui.app.taste.shown_window().unwrap_or(WINDOW_DEFAULT);
-                    Some(Menu::Window(WINDOWS.iter().position(|w| *w == current).unwrap_or(1)))
-                }
-            };
-        }
-        DiscAct::WindowPick(window) => {
-            gui.discover.menu = None;
-            pick_window(gui, window);
-        }
-        DiscAct::MenuClose => gui.discover.menu = None,
-        DiscAct::Seeds => {
-            gui.discover.menu = None;
-            gui.discover.seeds = Some(SeedsModal::default());
-        }
-        // `G`'s ask (clause 3): the window, the pins and the drops kept.
-        DiscAct::NewSeeds => enter(gui, true),
-        // A click, never a key (Space and Enter call `seed_row` and keep the
-        // cursor up): the modal's hand goes down (the list-cursor law).
-        DiscAct::SeedRow(index) => {
-            if let Some(modal) = gui.discover.seeds.as_mut() {
-                modal.view.stow();
-            }
-            seed_row(gui, index);
-        }
-        DiscAct::SeedUnpin(i) => {
-            let path = gui.app.taste.pins.get(i).map(|pin| pin.track.filepath.clone());
-            if let Some(path) = path
-                && gui.app.taste_unpin(&path)
-                && let Some(modal) = gui.discover.seeds.as_mut()
-            {
-                modal.pins_changed = true;
-            }
-        }
-        DiscAct::SeedsDone => close_seeds(gui),
+        // The header and its modals; "↻ new seeds" is `G`'s ask (clause 3):
+        // the window, the pins and the drops kept.
+        DiscAct::Bar(act) => taste_bar::act::<Room>(gui, &act),
         DiscAct::Another => {
             let effects = gui.app.taste_another_pick();
             gui.pend(effects);
         }
-        DiscAct::Choose => choose(gui),
+        DiscAct::Choose => taste_bar::choose::<Room>(gui),
         DiscAct::Again => {
             let effects = gui.app.taste_ask_again();
             gui.pend(effects);
@@ -2575,7 +2156,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         // one modal stands.
         DiscAct::SavePlaylist => {
             if gui.app.taste_save_playlist() {
-                gui.discover.menu = None;
+                gui.discover.bar.menu = None;
             }
         }
         DiscAct::TileList(index) => open_tile_list(gui, index, false),
@@ -2602,7 +2183,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
 fn open_tile_list(gui: &mut Gui, index: usize, by_key: bool) {
     let Some(Tile::Peer(album)) = tiles(&gui.app, gui.app.taste.tab).get(index).copied() else { return };
     let Some(pin) = gui.app.keep_pin(KeepTarget::Tile(album)) else { return };
-    gui.discover.menu = None;
+    gui.discover.bar.menu = None;
     gui.discover.tile_list = Some(TileList { pin, cursor: by_key.then_some(0) });
 }
 
@@ -2724,7 +2305,7 @@ fn pick_window(gui: &mut Gui, window: u32) {
 
 /// Switch tabs (clause 40): asks nothing; the tab is remembered.
 fn set_tab(gui: &mut Gui, tab: TasteTab) {
-    gui.discover.menu = None;
+    gui.discover.bar.menu = None;
     if gui.app.taste.tab == tab {
         return;
     }
@@ -2848,84 +2429,6 @@ fn more(gui: &mut Gui, index: usize) {
     super::actions::open_for(gui, origin, track, None, None);
 }
 
-/// A modal row, clicked or toggled by key (clause 13).
-fn seed_row(gui: &mut Gui, index: usize) {
-    let rows = seed_lines(&gui.app);
-    let Some(line) = rows.get(index).cloned() else { return };
-    match line {
-        SeedLine::Seed(hash) | SeedLine::Dropped(hash) => {
-            if let Some(modal) = gui.discover.seeds.as_mut() {
-                if let Some(at) = modal.flipped.iter().position(|h| *h == hash) {
-                    modal.flipped.remove(at);
-                } else {
-                    modal.flipped.push(hash);
-                }
-            }
-        }
-        SeedLine::Pin(i) => {
-            let path = gui.app.taste.pins.get(i).map(|pin| pin.track.filepath.clone());
-            if let Some(path) = path
-                && gui.app.taste_unpin(&path)
-                && let Some(modal) = gui.discover.seeds.as_mut()
-            {
-                modal.pins_changed = true;
-            }
-        }
-        SeedLine::PinPlaying => {
-            if gui.app.taste_pin_playing()
-                && let Some(modal) = gui.discover.seeds.as_mut()
-            {
-                modal.pins_changed = true;
-            } else if gui.app.taste.pins.len() >= crate::tui::app::TASTE_MAX_PINS {
-                word_refusal(gui, TastePinRefusal::Full);
-            }
-        }
-        SeedLine::PinSong => choose(gui),
-        SeedLine::Head(_) => {}
-    }
-    // Rows come and go (a pin left): the cursor stays on a row that exists.
-    let len = seed_lines(&gui.app).len();
-    if let Some(modal) = gui.discover.seeds.as_mut()
-        && let Some(cursor) = modal.cursor
-        && cursor >= len
-    {
-        modal.cursor = len.checked_sub(1);
-    }
-}
-
-/// The modal closes: the visit's drops (and "use again") change the
-/// `exclude` the asks carry, pins came or went — then one ask; nothing
-/// changed asks nothing (clause 13).
-fn close_seeds(gui: &mut Gui) {
-    let Some(modal) = gui.discover.seeds.take() else { return };
-    let (mut dropped, mut restored) = (Vec::new(), Vec::new());
-    if let Some(head) = &gui.app.taste.head {
-        for hash in &modal.flipped {
-            if head.seeds.iter().any(|s| &s.hash == hash && !s.pinned) {
-                dropped.push(hash.clone());
-            } else if head.excluded.iter().any(|e| &e.hash == hash) {
-                restored.push(hash.clone());
-            }
-        }
-    }
-    let effects = gui.app.taste_seeds_closed(&dropped, &restored, modal.pins_changed);
-    gui.pend(effects);
-}
-
-/// "Pin a song…" / "choose a song…" (clauses 14, 21): the modal's changes
-/// apply first, then the pick is armed in the sonic room's grammar — the
-/// banner over the library, the pick consumed, Esc back here.
-fn choose(gui: &mut Gui) {
-    if gui.discover.seeds.is_some() {
-        close_seeds(gui);
-    }
-    gui.discover.menu = None;
-    let effects = gui.app.taste_choose_song();
-    gui.pend(effects);
-    gui.active = super::FILES_NAV;
-    gui.app.tab = crate::tui::app::Tab::Files;
-}
-
 /// The room's wheel (clause 58): the list under the pointer — the seeds
 /// modal's rows while it is up, else the table. The window's four choices
 /// always show whole: over its list the wheel moves nothing, and not the
@@ -2941,11 +2444,7 @@ pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
     if gui.discover.tile_list.is_some() {
         return;
     }
-    if let Some(modal) = gui.discover.seeds.as_mut() {
-        modal.view.step(delta);
-        return;
-    }
-    if gui.discover.menu.is_some() {
+    if taste_bar::wheel::<Room>(gui, delta) {
         return;
     }
     // Over the strip, one tile a notch (clause 47).
@@ -2972,13 +2471,10 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         tile_list_key(gui, key, list);
         return Some(false);
     }
-    if gui.discover.seeds.is_some() {
-        seeds_key(gui, key);
-        return Some(false);
-    }
-    if let Some(menu) = gui.discover.menu {
-        menu_key(gui, key, menu);
-        return Some(false);
+    // The bar's modals own the keys while up; `w`, `e`, `[` and `]` are its
+    // own while connected.
+    if let Some(quit) = taste_bar::handle_key::<Room>(gui, key) {
+        return Some(quit);
     }
     if !gui.app.connected {
         return None;
@@ -3060,16 +2556,6 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
                 if key.code == KeyCode::Left { at.saturating_sub(1) } else { (at + 1).min(tabs.len() - 1) };
             set_tab(gui, tabs[next]);
         }
-        KeyCode::Char('w') => return Some(gui.act(Act::Disc(DiscAct::Window))),
-        KeyCode::Char(c @ ('[' | ']')) => {
-            let current = gui.app.taste.shown_window().unwrap_or(WINDOW_DEFAULT);
-            let at = WINDOWS.iter().position(|w| *w == current).unwrap_or(1);
-            let next = if c == '[' { at.saturating_sub(1) } else { (at + 1).min(WINDOWS.len() - 1) };
-            if next != at {
-                pick_window(gui, WINDOWS[next]);
-            }
-        }
-        KeyCode::Char('e') => return Some(gui.act(Act::Disc(DiscAct::Seeds))),
         // The mood Filters' modal, where the room offers it (clause 33).
         KeyCode::Char('o') if super::moods::offered_here(gui) => {
             return Some(gui.act(Act::Mood(super::moods::MoodAct::Open { key: true })));
@@ -3151,53 +2637,6 @@ fn walk(gui: &mut Gui, len: usize, delta: i32) {
     gui.discover.view.pick_up();
 }
 
-fn menu_key(gui: &mut Gui, key: KeyEvent, menu: Menu) {
-    let Menu::Window(cursor) = menu;
-    let set = |gui: &mut Gui, c: usize| gui.discover.menu = Some(Menu::Window(c));
-    match key.code {
-        // Esc, or the control's own key, closes and keeps (the Dropdown law).
-        KeyCode::Esc | KeyCode::Char('w') => gui.discover.menu = None,
-        KeyCode::Up => set(gui, cursor.saturating_sub(1)),
-        KeyCode::Down => set(gui, (cursor + 1).min(WINDOWS.len() - 1)),
-        KeyCode::Enter => {
-            gui.act(Act::Disc(DiscAct::WindowPick(WINDOWS[cursor.min(WINDOWS.len() - 1)])));
-        }
-        _ => {}
-    }
-}
-
-fn seeds_key(gui: &mut Gui, key: KeyEvent) {
-    let rows = seed_lines(&gui.app);
-    let picks: Vec<usize> = rows.iter().enumerate().filter(|(_, l)| l.is_row()).map(|(i, _)| i).collect();
-    let Some(modal) = gui.discover.seeds.as_mut() else { return };
-    let held = modal.view.held.then_some(modal.cursor).flatten();
-    match key.code {
-        KeyCode::Esc => close_seeds(gui),
-        KeyCode::Down | KeyCode::Up if !picks.is_empty() => {
-            let down = key.code == KeyCode::Down;
-            let next = match held.and_then(|c| picks.iter().position(|p| *p == c)) {
-                None if down => picks[0],
-                None => picks[picks.len() - 1],
-                Some(at) if down => picks[(at + 1).min(picks.len() - 1)],
-                Some(at) => picks[at.saturating_sub(1)],
-            };
-            modal.cursor = Some(next);
-            modal.view.pick_up();
-        }
-        KeyCode::Char(' ') | KeyCode::Enter => {
-            if let Some(index) = held {
-                seed_row(gui, index);
-            }
-        }
-        KeyCode::Char('x') => {
-            if let Some(SeedLine::Pin(i)) = held.and_then(|index| rows.get(index)) {
-                gui.act(Act::Disc(DiscAct::SeedUnpin(*i)));
-            }
-        }
-        _ => {}
-    }
-}
-
 // ── Tips ────────────────────────────────────────────────────────────────────
 
 /// The tips line for this room's states. Each names a key only where it
@@ -3213,11 +2652,8 @@ pub(crate) fn tips(gui: &Gui) -> String {
         let keep = tile_list_at(gui, list).is_some_and(|(_, album)| tile_verbs(gui, album).contains(&TileVerb::Keep));
         return if keep { t!("gui.tips.discover_tile_list_keep") } else { t!("gui.tips.discover_tile_list") }.to_string();
     }
-    if gui.discover.seeds.is_some() {
-        return t!("gui.tips.discover_seeds").to_string();
-    }
-    if gui.discover.menu.is_some() {
-        return t!("gui.tips.discover_menu").to_string();
+    if let Some(tips) = taste_bar::tips::<Room>(gui) {
+        return tips;
     }
     // The room's own lines end naming the mood Filters' `o` where the room
     // offers them and the line has the cells (clause 33).
@@ -3300,6 +2736,7 @@ mod tests {
     use serde_json::json;
 
     use super::super::{Act, DISCOVER_NAV, FILES_NAV, Gui, List, RowVerb, Screen, render};
+    use super::taste_bar::BarAct;
     use super::{DiscAct, Line, Wants, age_words, columns, layout, lines};
     use crate::api::types::{Capabilities, TasteResponse};
     use crate::config::Config;
@@ -4182,7 +3619,7 @@ mod tests {
         assert!(all.contains("[ ] Manor · ALM"), "Space drops it, in the modal only:\n{all}");
         assert!(gui.pending.is_empty(), "nothing goes out while it is open");
         key(&mut gui, KeyCode::Esc);
-        assert!(gui.discover.seeds.is_none());
+        assert!(gui.discover.bar.seeds.is_none());
         assert_eq!(asks(&gui).len(), 1, "one ask, the library's: {:?}", gui.pending);
         assert_eq!(main_body(&gui).exclude, vec!["h1".to_string()]);
         // The answer lists it under DROPPED; checked again ("use again") it
@@ -4198,9 +3635,9 @@ mod tests {
         key(&mut gui, KeyCode::Char('e'));
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("DROPPED") && all.contains("[ ] Manor · ALM"), "{all}");
-        let rows = super::seed_lines(&gui.app);
-        let at_row = rows.iter().position(|l| *l == super::SeedLine::Dropped("h1".into())).unwrap();
-        gui.act(Act::Disc(DiscAct::SeedRow(at_row)));
+        let rows = super::taste_bar::seed_lines::<super::Room>(&gui.app);
+        let at_row = rows.iter().position(|l| *l == super::taste_bar::SeedLine::Dropped("h1".into())).unwrap();
+        gui.act(Act::Disc(DiscAct::Bar(BarAct::SeedRow(at_row))));
         key(&mut gui, KeyCode::Esc);
         assert!(main_body(&gui).exclude.is_empty(), "{:?}", gui.pending);
         // A modal closed with nothing changed asks nothing.
@@ -4226,8 +3663,8 @@ mod tests {
         let all = rows.join("\n");
         assert!(all.contains("• Last 30 days") && all.contains("Last 7 days") && all.contains("All time"), "{all}");
         let pick = at(&rows, "All time");
-        assert_eq!(gui.ui.hit(pick), Some(Act::Disc(DiscAct::WindowPick(0))));
-        gui.act(Act::Disc(DiscAct::WindowPick(0)));
+        assert_eq!(gui.ui.hit(pick), Some(Act::Disc(DiscAct::Bar(BarAct::WindowPick(0)))));
+        gui.act(Act::Disc(DiscAct::Bar(BarAct::WindowPick(0))));
         assert_eq!(asks(&gui).iter().map(|a| a.2).collect::<Vec<_>>(), vec![Some(0)], "the library's part");
         assert_eq!(gui.config.gui.discover_window, Some(0), "remembered beside the tab");
         let mut answer = main_answer();
@@ -5328,26 +4765,26 @@ mod tests {
             if by_key {
                 key(&mut gui, KeyCode::Char('e'));
             } else {
-                assert_eq!(gui.ui.hit(more), Some(Act::Disc(DiscAct::Seeds)));
-                gui.act(Act::Disc(DiscAct::Seeds));
+                assert_eq!(gui.ui.hit(more), Some(Act::Disc(DiscAct::Bar(BarAct::Seeds))));
+                gui.act(Act::Disc(DiscAct::Bar(BarAct::Seeds)));
             }
             let all = draw(&mut gui).join("\n");
             assert!(all.contains("Based on") && all.contains("[✓] Manor · ALM") && all.contains("Pin a song…"), "{by_key}:\n{all}");
             assert!(gui.pending.is_empty(), "{by_key}: {:?}", gui.pending);
             key(&mut gui, KeyCode::Esc);
-            assert!(gui.discover.seeds.is_none() && gui.pending.is_empty(), "{by_key}: {:?}", gui.pending);
+            assert!(gui.discover.bar.seeds.is_none() && gui.pending.is_empty(), "{by_key}: {:?}", gui.pending);
         }
         // The window's list hangs from its control, by click and by `w`.
         draw(&mut gui);
-        assert_eq!(gui.ui.hit(window), Some(Act::Disc(DiscAct::Window)));
-        gui.act(Act::Disc(DiscAct::Window));
+        assert_eq!(gui.ui.hit(window), Some(Act::Disc(DiscAct::Bar(BarAct::Window))));
+        gui.act(Act::Disc(DiscAct::Bar(BarAct::Window)));
         assert!(draw(&mut gui).join("\n").contains("All time"));
         key(&mut gui, KeyCode::Char('w'));
-        assert!(gui.discover.menu.is_none());
+        assert!(gui.discover.bar.menu.is_none());
         // A visit with a window, a pin and a drop: new seeds asks again with
         // all three kept, by click as `G` does — and a fresh visit lets the
         // pin and the drop go.
-        gui.act(Act::Disc(DiscAct::WindowPick(90)));
+        gui.act(Act::Disc(DiscAct::Bar(BarAct::WindowPick(90))));
         key(&mut gui, KeyCode::Char('e'));
         key(&mut gui, KeyCode::Down);
         key(&mut gui, KeyCode::Char(' '));
@@ -5367,8 +4804,8 @@ mod tests {
             } else {
                 let rows = draw(&mut gui);
                 let refresh = at(&rows, "↻ new seeds");
-                assert_eq!(gui.ui.hit(refresh), Some(Act::Disc(DiscAct::NewSeeds)));
-                gui.act(Act::Disc(DiscAct::NewSeeds));
+                assert_eq!(gui.ui.hit(refresh), Some(Act::Disc(DiscAct::Bar(BarAct::NewSeeds))));
+                gui.act(Act::Disc(DiscAct::Bar(BarAct::NewSeeds)));
             }
             assert_eq!(gui.active, DISCOVER_NAV);
             assert_eq!(asks(&gui).len(), 1, "{by_key}: one ask, the library's: {:?}", gui.pending);
@@ -5434,7 +4871,7 @@ mod tests {
             gui.queue_open = true;
             let rows = draw(&mut gui);
             assert!(head_of(&gui, &rows).ends_with("Last 30 days v  options  new seeds"), "{}", rows[2]);
-            assert_eq!(gui.ui.hit(at(&rows, "new seeds")), Some(Act::Disc(DiscAct::NewSeeds)));
+            assert_eq!(gui.ui.hit(at(&rows, "new seeds")), Some(Act::Disc(DiscAct::Bar(BarAct::NewSeeds))));
         }
         drop(_en);
         // Every locale at the queue's 47 cells, both glyph tiers, a widened
@@ -5464,8 +4901,8 @@ mod tests {
                 let content = gui.discover.content;
                 assert_eq!(content.width, 47);
                 for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
-                    let words = super::HeadWords::of(&gui.app, code);
-                    let plan = super::head_plan(&words, content, glyph);
+                    let words = super::taste_bar::HeadWords::of(&super::facts_in(&gui.app, code), code);
+                    let plan = super::taste_bar::head_plan(&words, content, glyph);
                     let what = format!("{code}/legacy {legacy}/widened {widened}: {plan:?}");
                     let (wx, ww) = plan.window;
                     let (mx, mw) = plan.more;
@@ -5545,7 +4982,7 @@ mod tests {
         assert!(!head.contains("30 days"), "{head}");
         // A new choice is out: the dropdown shows it, no mark.
         gui.queue_open = false;
-        gui.act(Act::Disc(DiscAct::WindowPick(7)));
+        gui.act(Act::Disc(DiscAct::Bar(BarAct::WindowPick(7))));
         let rows = draw(&mut gui);
         assert!(head_of(&gui, &rows).contains("Last 7 days  ▾  more options"), "{}", rows[2]);
     }
@@ -6066,10 +5503,10 @@ mod tests {
         assert!(rows[17].contains("[>] [^] [+] [.]"), "the hover verbs:\n{}", rows[17]);
         assert!(rows[14].contains("> play · + queue all · shuffle · save as playlist"), "the verbs line's glyphs:\n{}", rows[14]);
         assert!(rows[19].contains(" - "), "the missing artist:\n{}", rows[19]);
-        gui.act(Act::Disc(DiscAct::Seeds));
+        gui.act(Act::Disc(DiscAct::Bar(BarAct::Seeds)));
         let modal = draw(&mut gui).join("\n");
         assert!(modal.contains("[x] Manor"), "the checkmark's stand-in:\n{modal}");
-        gui.act(Act::Disc(DiscAct::SeedsDone));
+        gui.act(Act::Disc(DiscAct::Bar(BarAct::SeedsDone)));
         for glyph in ['▾', '▸', '»', '⋯', '▇', '—', '–', '✓', '♪', '↻'] {
             assert!(!all.contains(glyph), "{glyph:?} on the legacy console:\n{all}");
         }
@@ -6087,13 +5524,13 @@ mod tests {
         assert_eq!(gui.discover.cursor, None, "a click acts on its row and stows (clause 57)");
         // The seeds modal: a row click stows its cursor, Space keeps it.
         let mut gui = answered_gui();
-        gui.act(Act::Disc(DiscAct::Seeds));
+        gui.act(Act::Disc(DiscAct::Bar(BarAct::Seeds)));
         key(&mut gui, KeyCode::Down);
-        assert!(gui.discover.seeds.as_ref().is_some_and(|m| m.view.held));
+        assert!(gui.discover.bar.seeds.as_ref().is_some_and(|m| m.view.held));
         key(&mut gui, KeyCode::Char(' '));
-        assert!(gui.discover.seeds.as_ref().is_some_and(|m| m.view.held), "Space keeps the hand up");
-        gui.act(Act::Disc(DiscAct::SeedRow(1)));
-        assert!(gui.discover.seeds.as_ref().is_some_and(|m| !m.view.held), "a click puts it down");
+        assert!(gui.discover.bar.seeds.as_ref().is_some_and(|m| m.view.held), "Space keeps the hand up");
+        gui.act(Act::Disc(DiscAct::Bar(BarAct::SeedRow(1))));
+        assert!(gui.discover.bar.seeds.as_ref().is_some_and(|m| !m.view.held), "a click puts it down");
     }
 
     #[test]
@@ -6153,8 +5590,8 @@ mod tests {
             let _tier = legacy.then(crate::kit::theme::legacy_glyphs_here);
             let glyph = super::refresh_glyph();
             for code in ["de", "en", "es", "fr", "it", "ja", "pl", "pt", "ru", "zh"] {
-                let words = super::HeadWords::of(&gui.app, code);
-                let plan = super::head_plan(&words, content, glyph);
+                let words = super::taste_bar::HeadWords::of(&super::facts_in(&gui.app, code), code);
+                let plan = super::taste_bar::head_plan(&words, content, glyph);
                 let what = format!("{code}/legacy {legacy} at {}: {plan:?}", content.width);
                 let (wx, ww) = plan.window;
                 let (fx, fw) = plan.filters.unwrap_or_else(|| panic!("no opener: {what}"));
@@ -6180,8 +5617,8 @@ mod tests {
         }
         // A generation-1 route: no opener, and the header as it was.
         gui.app.capabilities.discovery_taste = 1;
-        let words = super::HeadWords::of(&gui.app, "en");
-        assert!(super::head_plan(&words, narrow, super::refresh_glyph()).filters.is_none());
+        let words = super::taste_bar::HeadWords::of(&super::facts_in(&gui.app, "en"), "en");
+        assert!(super::taste_bar::head_plan(&words, narrow, super::refresh_glyph()).filters.is_none());
     }
 
     #[test]
@@ -6309,5 +5746,354 @@ mod tests {
         key(&mut gui, KeyCode::Char('o'));
         let rows = draw(&mut gui);
         assert_eq!(rows[29].trim(), t!("gui.tips.moods"));
+    }
+
+    // ── The taste bar (peer-recs contract §1.4) ───────────────────────────
+
+    use std::cell::RefCell;
+
+    use ratatui::style::Modifier;
+
+    use super::taste_bar::{self, BarRoom, BarUi, HeadFacts, HeadWords, head_plan, head_steps};
+    use crate::tui::app::taste::TasteState;
+
+    thread_local! {
+        /// The test room's own taste state, leaked once per test so the
+        /// room can lend it as the bar's `&TasteState`.
+        static OTHER_TASTE: RefCell<Option<&'static TasteState>> = const { RefCell::new(None) };
+        /// The test room's header facts.
+        static OTHER_FACTS: RefCell<HeadFacts> = RefCell::new(HeadFacts::default());
+        /// What the bar asked of the test room, in order.
+        static OTHER_CALLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// A second taste room, beside Discover on its nav row: its own bar
+    /// state (`gui.discover.other_bar`), its own taste state and facts,
+    /// and verbs that only record that they were called. Its acts wrap as
+    /// Discover's, so the tests drive it through `taste_bar::act` and the
+    /// keys that never route through the shell.
+    struct Other;
+
+    impl BarRoom for Other {
+        const NAV: usize = DISCOVER_NAV;
+
+        fn bar(gui: &mut Gui) -> &mut BarUi {
+            &mut gui.discover.other_bar
+        }
+
+        fn bar_ref(gui: &Gui) -> &BarUi {
+            &gui.discover.other_bar
+        }
+
+        fn taste(_app: &App) -> &TasteState {
+            OTHER_TASTE.with(|t| t.borrow().expect("the test room's taste state is set"))
+        }
+
+        fn facts(_gui: &Gui) -> HeadFacts {
+            OTHER_FACTS.with(|f| f.borrow().clone())
+        }
+
+        fn wrap(act: BarAct) -> Act {
+            Act::Disc(DiscAct::Bar(act))
+        }
+
+        fn can_pin_playing(_app: &App) -> bool {
+            false
+        }
+
+        fn pin_playing(_app: &mut App) -> bool {
+            false
+        }
+
+        fn unpin(_app: &mut App, path: &str) -> bool {
+            other_called(format!("unpin {path}"));
+            false
+        }
+
+        fn seeds_closed(_app: &mut App, dropped: &[String], restored: &[String], pins_changed: bool) -> Vec<Effect> {
+            other_called(format!("seeds_closed {dropped:?} {restored:?} {pins_changed}"));
+            Vec::new()
+        }
+
+        fn set_window(_gui: &mut Gui, window: u32) {
+            other_called(format!("set_window {window}"));
+        }
+
+        fn choose_song(_gui: &mut Gui) {
+            other_called("choose_song".into());
+        }
+
+        fn new_seeds(_gui: &mut Gui) {
+            other_called("new_seeds".into());
+        }
+
+        fn modal_opened(_gui: &mut Gui) {
+            other_called("modal_opened".into());
+        }
+    }
+
+    fn other_called(what: String) {
+        OTHER_CALLS.with(|c| c.borrow_mut().push(what));
+    }
+
+    fn other_calls() -> Vec<String> {
+        OTHER_CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+    }
+
+    /// The Peer recs header's facts at rest (DS §1.4): its name and short
+    /// name, the default window, no moods and no refresh tooltip.
+    fn peer_facts() -> HeadFacts {
+        HeadFacts {
+            name: "Peer Recommendations".into(),
+            short: Some("Peer recs".into()),
+            window: Some(30),
+            ..HeadFacts::default()
+        }
+    }
+
+    /// The test room, lent `taste` and `facts`, over an answered Discover.
+    fn other_gui(taste: TasteState, facts: HeadFacts) -> Gui {
+        OTHER_TASTE.with(|t| *t.borrow_mut() = Some(Box::leak(Box::new(taste))));
+        OTHER_FACTS.with(|f| *f.borrow_mut() = facts);
+        other_calls();
+        answered_gui()
+    }
+
+    /// The room's header row's content, as REG-HEADER's region mock is
+    /// cut: the cells x 17 to `17 + width`.
+    fn content_of(width: u16) -> Rect {
+        Rect { x: 17, y: 2, width, height: 1 }
+    }
+
+    /// The test room's header drawn alone on row 2, its tips and clicks
+    /// registered on the shell's surface.
+    fn other_header(gui: &mut Gui, content: Rect) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(100, 3)).unwrap();
+        gui.ui.tips.clear();
+        terminal.draw(|frame| taste_bar::draw_header::<Other>(frame, gui, content, 2)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// A drawn cell in DS §0.5's style codes: `T`/`t` text BOLD or not,
+    /// `d` dim, `a`/`A` accent, `g`/`G` gold, a blank cell ` `.
+    fn style_code(cell: &ratatui::buffer::Cell) -> char {
+        if cell.symbol() == " " {
+            return ' ';
+        }
+        let bold = cell.modifier.contains(Modifier::BOLD);
+        match cell.fg {
+            fg if fg == th().dim => 'd',
+            fg if fg == th().accent => if bold { 'A' } else { 'a' },
+            fg if fg == th().gold => if bold { 'G' } else { 'g' },
+            _ => if bold { 'T' } else { 't' },
+        }
+    }
+
+    /// Row 2's TEXT and STYLE across `content`.
+    fn header_cells(buffer: &ratatui::buffer::Buffer, content: Rect) -> (String, String) {
+        let cells = content.x..content.right();
+        let text = cells.clone().map(|x| buffer[(x, 2)].symbol().to_string()).collect();
+        let style = cells.map(|x| style_code(&buffer[(x, 2)])).collect();
+        (text, style)
+    }
+
+    #[test]
+    fn a_room_with_a_short_name_shortens_it_before_options() {
+        // The order (DS §1.4): the refresh's words, the short name, then
+        // "options", the mark and the name — and Discover's, with no short
+        // name, as it was.
+        let steps = head_steps(true, false, true);
+        let shape: Vec<(bool, bool, bool, bool, bool)> =
+            steps.iter().map(|s| (s.words, s.short, s.long, s.mark, s.name)).collect();
+        assert_eq!(
+            shape,
+            vec![
+                (true, false, true, true, true),
+                (false, false, true, true, true),
+                (false, true, true, true, true),
+                (false, true, false, true, true),
+                (false, true, false, false, true),
+                (false, true, false, false, false),
+            ]
+        );
+        assert!(head_steps(true, false, false).iter().all(|s| !s.short));
+        assert_eq!(head_steps(true, false, false).len(), 5, "Discover's steps, untouched");
+        let words = HeadWords::of(&peer_facts(), "en");
+        let glyph = Some("↻");
+        // REG-HEADER 01, 80 cells: the name at 17, the window 56–69 with
+        // its ▾ at 69, more options 72–83, the refresh's slot from 86.
+        let plan = head_plan(&words, content_of(80), glyph);
+        assert!(plan.step.words && !plan.step.short && plan.step.long && plan.step.name, "{plan:?}");
+        assert_eq!((plan.window, plan.more, plan.refresh), ((56, 14), (72, 12), (86, 11)));
+        assert_eq!(words.name_at(plan.step), "Peer Recommendations");
+        // 47 cells, the queue open: step 2 — Peer recs 17–25, the window
+        // 31–44, more options 47–58, ↻ at 61.
+        let plan = head_plan(&words, content_of(47), glyph);
+        assert!(!plan.step.words && plan.step.short && plan.step.long && plan.step.name, "{plan:?}");
+        assert_eq!((plan.window, plan.more, plan.refresh), ((31, 14), (47, 12), (61, 3)));
+        assert_eq!(words.name_at(plan.step), "Peer recs");
+        // Narrower still, "options" before the name goes.
+        let plan = head_plan(&words, content_of(40), glyph);
+        assert!(plan.step.short && !plan.step.long && plan.step.name, "{plan:?}");
+        // Without the short name the same room drops its name at 47.
+        let long_only = HeadWords::of(&HeadFacts { short: None, ..peer_facts() }, "en");
+        let plan = head_plan(&long_only, content_of(47), glyph);
+        assert!(!plan.step.long && !plan.step.short, "{plan:?}");
+    }
+
+    #[test]
+    fn the_header_draws_reg_header_for_a_room_with_a_short_name() {
+        let _en = english();
+        let mut gui = other_gui(TasteState::default(), peer_facts());
+        // REG-HEADER 01 and 02: at rest, and while an ask is out.
+        for (asking, text, style) in [
+            (
+                false,
+                "Peer Recommendations                   Last 30 days ▾  more options  ↻ new seeds",
+                "TTTT TTTTTTTTTTTTTTT                   tttt tt tttt d  dddd ddddddd  a aaa aaaaa",
+            ),
+            (
+                true,
+                "Peer Recommendations                   Last 30 days ▾  more options  ↻ asking…  ",
+                "TTTT TTTTTTTTTTTTTTT                   tttt tt tttt d  dddd ddddddd  g ggggggg  ",
+            ),
+        ] {
+            OTHER_FACTS.with(|f| f.borrow_mut().asking = asking);
+            let buffer = other_header(&mut gui, content_of(80));
+            assert_eq!(header_cells(&buffer, content_of(80)), (text.to_string(), style.to_string()), "asking {asking}");
+        }
+        // REG-HEADER's 47 cells, step 2.
+        OTHER_FACTS.with(|f| f.borrow_mut().asking = false);
+        let buffer = other_header(&mut gui, content_of(47));
+        assert_eq!(
+            header_cells(&buffer, content_of(47)),
+            (
+                "Peer recs     Last 30 days ▾  more options  ↻  ".to_string(),
+                "TTTT TTTT     tttt tt tttt d  dddd ddddddd  a  ".to_string()
+            )
+        );
+        // The controls are the room's own acts.
+        let hit = |gui: &Gui, x: u16| gui.ui.hit(Position { x, y: 2 });
+        assert_eq!(hit(&gui, 31), Some(Act::Disc(DiscAct::Bar(BarAct::Window))));
+        assert_eq!(hit(&gui, 47), Some(Act::Disc(DiscAct::Bar(BarAct::Seeds))));
+        assert_eq!(hit(&gui, 61), Some(Act::Disc(DiscAct::Bar(BarAct::NewSeeds))));
+    }
+
+    #[test]
+    fn the_refresh_tooltip_is_optional() {
+        let _en = english();
+        let mut gui = other_gui(TasteState::default(), peer_facts());
+        gui.set_key_hints(true);
+        let tip_at = |gui: &Gui, x: u16| {
+            gui.ui.tips.iter().rev().find(|(rect, _)| rect.contains(Position { x, y: 2 })).map(|(_, t)| t.clone())
+        };
+        // None: the refresh has no tooltip; the window and more options
+        // keep theirs.
+        other_header(&mut gui, content_of(80));
+        assert_eq!(tip_at(&gui, 86), None);
+        assert!(tip_at(&gui, 56).is_some_and(|t| t.ends_with("— w")) && tip_at(&gui, 72).is_some_and(|t| t.ends_with("— e")));
+        // Some: the room's own words.
+        OTHER_FACTS.with(|f| f.borrow_mut().refresh_tip = Some("Ask again — R".into()));
+        other_header(&mut gui, content_of(80));
+        assert_eq!(tip_at(&gui, 86).as_deref(), Some("Ask again — R"));
+        // Discover's names its `G`, as it did.
+        assert!(super::facts_in(&gui.app, "en").refresh_tip.is_some_and(|t| t.ends_with("— G")));
+    }
+
+    #[test]
+    fn a_room_without_moods_draws_no_mood_opener() {
+        let _en = english();
+        let mut gui = other_gui(TasteState::default(), peer_facts());
+        // A server that takes moods: Discover offers the opener, the test
+        // room (no moods act) does not.
+        gui.app.capabilities.discovery_taste = 2;
+        gui.app.capabilities.mood_filters = true;
+        assert!(super::facts_in(&gui.app, "en").moods.is_some());
+        // The test room's header first, on a surface nothing else drew on.
+        let buffer = other_header(&mut gui, content_of(80));
+        let (text, _) = header_cells(&buffer, content_of(80));
+        assert!(!text.contains("mood"), "{text}");
+        assert!(head_plan(&HeadWords::of(&peer_facts(), "en"), content_of(80), Some("↻")).filters.is_none());
+        for x in 17..97 {
+            assert!(!matches!(gui.ui.hit(Position { x, y: 2 }), Some(Act::Mood(_))), "a mood act at {x}");
+        }
+        let rows = draw(&mut gui);
+        assert!(rows[2].contains("mood"), "Discover's header:\n{}", rows[2]);
+    }
+
+    #[test]
+    fn the_bar_modals_draw_from_the_rooms_taste_state() {
+        let _en = english();
+        let mut taste = TasteState::default();
+        taste.head = Some(
+            serde_json::from_value(json!({
+                "seedSource": "history",
+                "seeds": [
+                    { "hash": "o1", "filepath": "music/kept.mp3", "metadata": { "title": "Kept Song", "artist": "Elsewhere" } },
+                    { "hash": "o2", "filepath": "music/other.mp3", "metadata": { "title": "Other Seed", "artist": "Elsewhere" } }
+                ]
+            }))
+            .unwrap(),
+        );
+        let mut gui = other_gui(taste, HeadFacts { window: Some(90), ..peer_facts() });
+        let modal_at = |gui: &mut Gui| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|frame| taste_bar::draw_modals::<Other>(frame, gui, frame.area())).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..30).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+        };
+        // The seeds modal opens on the room's own bar and reads the room's
+        // own seeds, never Discover's (Manor, Kite, Dune).
+        taste_bar::act::<Other>(&mut gui, &BarAct::Seeds);
+        assert!(gui.discover.other_bar.seeds.is_some() && gui.discover.bar.seeds.is_none());
+        let all = modal_at(&mut gui);
+        assert!(all.contains("[✓] Kept Song · Elsewhere") && all.contains("[✓] Other Seed · Elsewhere"), "{all}");
+        assert!(!all.contains("Manor") && !all.contains("Kite"), "{all}");
+        assert_eq!(taste_bar::tips::<Other>(&gui), Some(t!("gui.tips.discover_seeds").to_string()));
+        assert_eq!(taste_bar::tips::<super::Room>(&gui), None, "Discover's bar has nothing up");
+        // Drop the second seed by key, then close: the room's own
+        // seeds_closed hears it, and Discover asks nothing.
+        gui.pending.clear();
+        let press = |gui: &mut Gui, code: KeyCode| taste_bar::handle_key::<Other>(gui, KeyEvent::new(code, KeyModifiers::NONE));
+        assert_eq!(press(&mut gui, KeyCode::Down), Some(false));
+        assert_eq!(press(&mut gui, KeyCode::Down), Some(false));
+        assert_eq!(press(&mut gui, KeyCode::Char(' ')), Some(false));
+        assert!(modal_at(&mut gui).contains("[ ] Other Seed"), "Space drops it, in the modal only");
+        assert_eq!(press(&mut gui, KeyCode::Esc), Some(false));
+        assert!(gui.discover.other_bar.seeds.is_none());
+        let calls = other_calls();
+        assert!(calls.contains(&r#"seeds_closed ["o2"] [] false"#.to_string()), "{calls:?}");
+        assert!(gui.pending.is_empty() && gui.app.taste.dropped.is_empty(), "{:?}", gui.pending);
+        // The window's list hangs from the room's own anchor, marks the
+        // room's window, and a pick is the room's.
+        other_header(&mut gui, content_of(80));
+        taste_bar::act::<Other>(&mut gui, &BarAct::Window);
+        assert!(gui.discover.bar.menu.is_none());
+        let all = modal_at(&mut gui);
+        assert!(all.contains("• Last 90 days") && !all.contains("• Last 30 days"), "{all}");
+        assert_eq!(press(&mut gui, KeyCode::Up), Some(false));
+        let _ = press(&mut gui, KeyCode::Esc);
+        assert!(gui.discover.other_bar.menu.is_none());
+        taste_bar::act::<Other>(&mut gui, &BarAct::WindowPick(7));
+        taste_bar::act::<Other>(&mut gui, &BarAct::NewSeeds);
+        let calls = other_calls();
+        assert!(calls.ends_with(&["set_window 7".to_string(), "new_seeds".to_string()]), "{calls:?}");
+        assert_eq!(gui.config.gui.discover_window, None, "Discover's window is the room's own business");
+    }
+
+    #[test]
+    fn opening_a_bar_modal_tells_the_room() {
+        let _en = english();
+        let mut gui = other_gui(TasteState::default(), peer_facts());
+        taste_bar::act::<Other>(&mut gui, &BarAct::Window);
+        assert_eq!(other_calls(), vec!["modal_opened".to_string()], "the window's list opened");
+        taste_bar::act::<Other>(&mut gui, &BarAct::Window);
+        assert!(other_calls().is_empty(), "closing it is no opening");
+        taste_bar::act::<Other>(&mut gui, &BarAct::Seeds);
+        assert_eq!(other_calls(), vec!["modal_opened".to_string()], "the seeds modal opened");
+        assert!(taste_bar::modal_open(&gui.discover.other_bar));
+        taste_bar::close(&mut gui.discover.other_bar);
+        assert!(!taste_bar::modal_open(&gui.discover.other_bar));
+        assert!(other_calls().is_empty(), "a close asks nothing");
     }
 }
