@@ -4398,6 +4398,74 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn peer_recs_tips_fit_the_footer_in_every_locale() {
+        // The Peer recs room's tips are drawn from x 1 at the 100-column
+        // floor, as Discover's are (TIPS_MAX in src/gui/discover.rs), so
+        // each line must fit 99 cells on its own (peer-recs contract §1.13).
+        // The GUI's tips name only keys that work, so each line also keeps
+        // its own keys in every language: the stowed lines name R, never
+        // Discover's G, and the held row without a preview names neither l
+        // nor L (the plan's D21).
+        let tips: [(&str, &[&str], &[&str]); 6] = [
+            ("peer_recs", &["↓", "←", "w", "e", "R"], &["G"]),
+            ("peer_recs_empty", &["↓", "←", "w", "e", "R"], &["G"]),
+            ("peer_recs_tabs", &["←"], &["l", "L", "y"]),
+            ("peer_recs_row", &["l", "L", "y"], &["G"]),
+            ("peer_recs_row_plain", &["y"], &["l", "L"]),
+            ("peer_recs_clip", &["n", "x"], &["l", "L"]),
+        ];
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            for (key, named, never) in tips {
+                let line = locale_text(&parsed, code, &format!("gui.tips.{key}"));
+                let cells = crate::kit::width(&line);
+                assert!(cells <= 99, "{code}: gui.tips.{key} is {cells} cells: {line}");
+                // A part's key is its first word: `l preview`, `← → peers`.
+                let keys: Vec<&str> =
+                    line.split(" · ").filter_map(|part| part.split(' ').next()).collect();
+                for want in named {
+                    assert!(keys.contains(want), "{code}: gui.tips.{key} lost its {want}: {line}");
+                }
+                for gone in never {
+                    assert!(!keys.contains(gone), "{code}: gui.tips.{key} names {gone}: {line}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn peer_recs_labels_fit_in_every_locale() {
+        // The nav row's label stands in the nav's 12 cells (x 3 to 14), as
+        // every room's does, and is the header's narrow name too. The first
+        // tab's label holds to the tab labels' 12 cells (peer-recs contract
+        // §1.13), and the band's button, drawn `[ get it ]` in the kit's
+        // bracketed form, keeps to 16 cells (§1.8), so the band's text keeps
+        // its room.
+        for (code, body) in LOCALE_FILES {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            let text = |key: &str| locale_text(&parsed, code, key);
+            for key in ["gui.nav.peer_recs", "gui.peer_recs.all"] {
+                let label = text(key);
+                let cells = crate::kit::width(&label);
+                let fits = !label.trim().is_empty() && cells <= 12;
+                assert!(fits, "{code}: {key} is {cells} cells: {label}");
+            }
+            let button = format!("[ {} ]", text("gui.peer_recs.get_it_band"));
+            let cells = crate::kit::width(&button);
+            assert!(cells <= 16, "{code}: the band's {button} is {cells} cells");
+            // The tab states keep the peer's label in them, so a locale may
+            // put it anywhere and the try-again tab still splits at it.
+            for state in ["tab_adding", "tab_no_room", "tab_try_again"] {
+                let line = text(&format!("gui.peer_recs.{state}"));
+                let holes = line.matches("%{peer}").count();
+                assert_eq!(holes, 1, "{code}: gui.peer_recs.{state}: {line}");
+                let words = line.replace("%{peer}", "");
+                assert!(crate::kit::width(words.trim()) > 0, "{code}: gui.peer_recs.{state} has no words");
+            }
+        }
+    }
+
+    #[test]
     fn the_boot_language_prefers_env_then_system_then_english() {
         assert_eq!(detect_lang(None, None), 0);
         assert_eq!(detect_lang(None, Some("de-DE".into())), 1);
