@@ -52,6 +52,9 @@ use crate::kit::clipboard::Copied;
 /// The room in character cells: the terminal's room and the GUI player's
 /// Admin tab.
 mod cells;
+/// The same room drawn by egui, in the desktop window's panel.
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
 
 /// The page's own cadence: the mesh weaves in over a minute, and nobody
 /// should have to mash a refresh key to watch it.
