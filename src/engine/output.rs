@@ -1507,6 +1507,7 @@ mod tests {
         // as there.
         std::thread::sleep(Duration::from_millis(120));
         assert!(!pulse.answers(fresh), "the last pull is too long ago");
+        assert!(pulse.answers(Duration::from_secs(60)), "fresh is read to the millisecond");
         assert!(pulse.quiet_for() >= Duration::from_millis(100));
         assert!(pulse.has_started(), "it had been asking: this silence is a stop");
 
@@ -1671,6 +1672,20 @@ mod tests {
         assert_eq!(at_cd_rate(default, std::iter::empty()), default);
     }
 
+    /// Wait up to five seconds for `done`, and fail saying `what`, as
+    /// `feed`'s tests do. A staged stream pulls on a thread of its own, and
+    /// a loaded runner can hold that thread past any fixed sleep: a CI VM
+    /// whose vCPUs the host takes away stops every thread at once, and the
+    /// test's may run first when they come back. So what a stream does next
+    /// is waited for, not timed.
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < until, "{what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn a_stream_with_no_pause_to_give_is_asked_once_and_left_running() {
         let stage = stage::Stage::new("Speakers");
@@ -1679,16 +1694,22 @@ mod tests {
         let mut output = stage.backend().open(&bus, true).expect("the stage opens");
 
         // Asked, it says it cannot — and it is not asked again, tick after
-        // tick, for as long as the engine has nothing to play.
-        assert!(!output.suspend());
+        // tick, for as long as the engine has nothing to play. A pull in
+        // flight turns a suspend down before the stream is asked at all
+        // (`Output::suspend`), so the first ask is waited for.
+        wait_for("it was never asked to pause", || {
+            assert!(!output.suspend());
+            stage.pauses_asked() > 0
+        });
         assert!(!output.suspend());
         assert!(!output.suspend());
         assert_eq!(stage.pauses_asked(), 1);
         // It was never asleep, and is not taken for it: the callback runs
-        // on and the watch goes on watching it.
+        // on and the watch goes on watching it. Once the pulls from before
+        // have gone stale, only a pull since then can answer.
         assert!(output.is_awake());
-        std::thread::sleep(Duration::from_millis(60));
-        assert!(output.pulse().answers(Duration::from_millis(100)));
+        std::thread::sleep(Duration::from_millis(150));
+        wait_for("it stopped asking", || output.pulse().answers(Duration::from_millis(100)));
         assert!(!output.is_dead());
     }
 
@@ -1738,15 +1759,24 @@ mod tests {
         assert_eq!(output.name(), "Speakers");
         assert_eq!(output.default_it_is_on(), Some("Speakers"));
         assert!(output.is_awake());
-        assert!(output.pulse().answers(Duration::from_millis(200)));
+        wait_for("an open stream never asked", || {
+            output.pulse().answers(Duration::from_millis(200))
+        });
 
-        // Suspended, it stops asking; woken, it asks again.
-        assert!(output.suspend());
+        // Suspended, it stops asking; woken, it asks again. A pull in flight
+        // turns the suspend down, to be asked again (`Output::suspend`), as
+        // the engine's next tick does.
+        wait_for("it never suspended", || output.suspend());
+        assert!(!output.is_awake());
         std::thread::sleep(Duration::from_millis(150));
         assert!(!output.pulse().answers(Duration::from_millis(100)));
         output.wake();
-        std::thread::sleep(Duration::from_millis(60));
-        assert!(output.pulse().answers(Duration::from_millis(100)));
+        assert!(output.is_awake() && !output.is_dead());
+        // The last pull is stale now, so only a pull since the wake answers.
+        wait_for("woken, it never asked again", || {
+            let pulse = output.pulse();
+            pulse.has_started() && pulse.answers(Duration::from_millis(100))
+        });
 
         // Pulled: dead, and it says so.
         stage.unplug();
@@ -1756,11 +1786,7 @@ mod tests {
         // Buried: the stream closes, on a thread of its own, and the output
         // is still there to be asked about — with nothing left to wake.
         assert!(output.bury(), "there was a stream to close");
-        let until = Instant::now() + Duration::from_secs(5);
-        while !stage.open_on().is_empty() {
-            assert!(Instant::now() < until, "the dead stream is still open");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_for("the dead stream is still open", || stage.open_on().is_empty());
         assert!(!output.bury(), "and only the one");
         output.wake();
         assert!(output.is_dead());
@@ -1795,8 +1821,9 @@ mod tests {
         assert!(stalled.pulse().has_started());
         assert!(!stalled.pulse().answers(Duration::from_millis(100)), "it asked once");
         stage.speak_again();
-        std::thread::sleep(Duration::from_millis(60));
-        assert!(stalled.pulse().answers(Duration::from_millis(100)), "and asks on when told to");
+        wait_for("told to, it never asked again", || {
+            stalled.pulse().answers(Duration::from_millis(100))
+        });
     }
 }
 
