@@ -35,6 +35,7 @@ mod moods;
 mod mini;
 mod now;
 mod opener;
+pub(crate) mod peer_recs;
 mod playlists;
 mod queue;
 mod servers;
@@ -307,6 +308,11 @@ pub(crate) enum Act {
     /// The Discover room's own pointer ways: its tabs, rows and their
     /// verbs, the two dropdowns, a lead's menu, the seeds modal, the card.
     Disc(discover::DiscAct),
+    // ── Peer recs (see gui::peer_recs) ──────────────────────────────────
+    /// The Peer recs room's own pointer ways: its tabs, cells and slots,
+    /// the verbs line, the band, the panes' buttons and the taste bar's
+    /// header and modals (peer-recs contract §1.2).
+    Peer(peer_recs::PeerAct),
     // ── Add from YouTube (see gui::ytdl) ────────────────────────────────
     /// The room's controls, its list's, its sheets' and its windows'.
     Yt(ytdl::YtAct),
@@ -336,6 +342,9 @@ pub(crate) enum List {
     DjSheet,
     /// The Discover room's table: its rows live on the App (`App.taste`).
     Discover,
+    /// The Peer recs room's grid: its leads live on the App
+    /// (`App.peer_recs`), in blocks of two columns.
+    PeerRecs,
 }
 
 impl List {
@@ -346,7 +355,7 @@ impl List {
             List::Files => Some(Tab::Files),
             List::Search => Some(Tab::Search),
             List::Library | List::AlbumTracks | List::Playlists | List::PlaylistTracks => Some(Tab::Library),
-            List::Queue | List::Sonic | List::DjSheet | List::Discover => None,
+            List::Queue | List::Sonic | List::DjSheet | List::Discover | List::PeerRecs => None,
         }
     }
 }
@@ -423,13 +432,17 @@ enum NavId {
     Rated,
     /// The Add a torrent room (add-torrent contract, entry point 1) and
     /// Add from YouTube's (its contract, entry point 1): drawn last in
-    /// TOOLS, after Discover, and last in the array — no digit, no letter.
-    /// Add YouTube rides its room's gates, hidden, never greyed.
+    /// TOOLS, after Peer recs, past the digits in the array — no digit, no
+    /// letter. Add YouTube rides its room's gates, hidden, never greyed.
     Torrent,
     YouTube,
+    /// The Peer recs room (peer-recs contract §1.1): drawn in TOOLS under
+    /// Discover, last in the array — no digit, `R`. It rides its own gate
+    /// and hides for a peer, never greyed.
+    PeerRecs,
 }
 
-const NAV: [NavId; 16] = [
+const NAV: [NavId; 17] = [
     NavId::Files,
     NavId::Albums,
     NavId::Artists,
@@ -446,6 +459,7 @@ const NAV: [NavId; 16] = [
     NavId::Rated,
     NavId::Torrent,
     NavId::YouTube,
+    NavId::PeerRecs,
 ];
 
 impl NavId {
@@ -467,6 +481,7 @@ impl NavId {
             NavId::Rated => t!("gui.nav.rated").to_string(),
             NavId::Torrent => t!("gui.nav.add_torrent").to_string(),
             NavId::YouTube => t!("gui.nav.add_youtube").to_string(),
+            NavId::PeerRecs => t!("gui.nav.peer_recs").to_string(),
         }
     }
 }
@@ -487,6 +502,7 @@ const DISCOVER_NAV: usize = 12;
 const RATED_NAV: usize = 13;
 const TORRENT_NAV: usize = 14;
 const YOUTUBE_NAV: usize = 15;
+const PEER_RECS_NAV: usize = 16;
 
 /// A class's slot in [`SEARCH_CLASSES`] — the chip order.
 fn class_idx(class: SearchClass) -> usize {
@@ -624,6 +640,9 @@ pub(crate) struct Gui {
     mini_cover: Option<cover::Slot>,
     /// The Discover room: its cursor, wheel, hanging lists and seeds modal.
     discover: discover::DiscoverUi,
+    /// The Peer recs room: its cursor, tabs stop, grid scroll and the taste
+    /// bar's modals (the answers are the App's `peer_recs`).
+    peer_recs: peer_recs::PeerRecsUi,
     /// The mood Filters' choices, a room each, and the open modal's draft.
     moods: moods::MoodRooms,
     /// Keep a copy's ways in from the browse rooms: what their marks last
@@ -719,6 +738,7 @@ impl Gui {
             card: None,
             mini_cover: None,
             discover: discover::DiscoverUi::new(),
+            peer_recs: peer_recs::PeerRecsUi::default(),
             moods: moods::MoodRooms::default(),
             doors: keep_doors::DoorsUi::default(),
             last_qsel: None,
@@ -771,6 +791,9 @@ impl Gui {
     /// re-pushes its screen the same way).
     fn forward_capturing(&mut self, action: Action) {
         let armed = self.app.capture;
+        // Which room armed a seed pick is read before the answer lands: the
+        // landing lets it go (peer-recs build plan D32).
+        let room_pick = peer_recs::picking(&self.app);
         self.forward(action);
         if self.app.capture.is_none() {
             match armed {
@@ -778,6 +801,7 @@ impl Gui {
                     self.active = SONIC_NAV;
                     self.app.tab = Tab::SonicPath;
                 }
+                Some(crate::tui::app::Capture::TasteSeed) if room_pick => peer_recs::returned(self),
                 Some(crate::tui::app::Capture::TasteSeed) => discover::returned(self),
                 // Add song's pick: back to the Seeds sheet over the Auto DJ
                 // room (auto-dj clause 65).
@@ -950,6 +974,9 @@ impl Gui {
         if discover::act(self, &act) {
             return false;
         }
+        if peer_recs::act(self, &act) {
+            return false;
+        }
         if playlists::act(self, &act) {
             return false;
         }
@@ -968,6 +995,8 @@ impl Gui {
                 // the room that asked (sonic-path contract, clause 12).
                 let sonic = matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
                 let taste = self.app.capture == Some(crate::tui::app::Capture::TasteSeed);
+                // Whose seed pick it is, read before the Cancel lets it go.
+                let room_pick = peer_recs::picking(&self.app);
                 let seeds = match self.app.capture {
                     Some(crate::tui::app::Capture::Seeds(list)) => Some(list),
                     _ => None,
@@ -996,8 +1025,11 @@ impl Gui {
                     self.app.tab = Tab::SonicPath;
                 }
                 // The Discover room's pick goes home the same way
-                // (discovery-page clause 14).
-                if taste {
+                // (discovery-page clause 14), and the Peer recs room's to
+                // the Peer recs room (peer-recs build plan D32).
+                if taste && room_pick {
+                    peer_recs::returned(self);
+                } else if taste {
                     discover::returned(self);
                 }
             }
@@ -1015,6 +1047,11 @@ impl Gui {
                 if screen != Screen::Library {
                     self.cursor = None;
                     self.servers.drop_open = false;
+                    // The Peer recs room is not drawn under another screen:
+                    // its clip ends, its poll pauses (peer-recs contract
+                    // §1.8). Not for the Library itself: a pick's way home
+                    // comes back by this door and covers nothing.
+                    peer_recs::hidden(self);
                 }
                 // The Stats screen's page lives as long as the screen: built
                 // from the session on entry, dropped on leaving (stats-screen
@@ -1069,6 +1106,11 @@ impl Gui {
                 if i == DISCOVER_NAV && !discover::gate(&self.app) {
                     return false;
                 }
+                // The Peer recs room likewise (peer-recs contract §1.1): `R`
+                // is as dead as its row.
+                if i == PEER_RECS_NAV && !peer_recs::gate(&self.app) {
+                    return false;
+                }
                 // Add from YouTube rides its room's gates (add-from-youtube
                 // clause 1): no row, and no way in while it is absent.
                 if i == YOUTUBE_NAV && !ytdl::available(self) {
@@ -1118,6 +1160,13 @@ impl Gui {
                 // A copy keeps running on the server.
                 if i != DISCOVER_NAV {
                     discover::close_all(self);
+                }
+                // Leaving the Peer recs room ends its visit: the bar's modals
+                // close, the clip ends, the poll stops (peer-recs contract
+                // §1.8). Not while its seed pick stands: the pick's Files
+                // room covers the visit, it does not end it (plan D32).
+                if i != PEER_RECS_NAV && !peer_recs::picking(&self.app) {
+                    peer_recs::leave(self);
                 }
                 // Leaving for a section stows every servers surface; the
                 // room is a Settings sub-view, not a place to come back to.
@@ -1218,10 +1267,28 @@ impl Gui {
                 // new visit.
                 if i == DISCOVER_NAV {
                     let picking = self.app.capture == Some(crate::tui::app::Capture::TasteSeed);
+                    // A pick the Peer recs room armed is let go too, but it
+                    // was not Discover's way back: Discover opens afresh, and
+                    // the Peer recs visit the pick covered ends.
+                    let room_pick = peer_recs::picking(&self.app);
                     if picking {
                         self.forward(Action::Cancel);
                     }
-                    discover::enter(self, was == Some(DISCOVER_NAV) || picking);
+                    if room_pick {
+                        peer_recs::leave(self);
+                    }
+                    discover::enter(self, was == Some(DISCOVER_NAV) || (picking && !room_pick));
+                }
+                // The Peer recs room: a fresh visit, or with the room up (its
+                // row, `R`) new seeds; re-entering disarms its own pick left
+                // standing and comes back to the visit it covered (peer-recs
+                // contract §1.1, plan D32).
+                if i == PEER_RECS_NAV {
+                    let picking = peer_recs::picking(&self.app);
+                    if picking {
+                        self.forward(Action::Cancel);
+                    }
+                    peer_recs::enter(self, was == Some(PEER_RECS_NAV) || picking);
                 }
                 // Playlists: a fresh visit fetches the list; a return finds
                 // it (or a drilled playlist) standing — the albums pattern.
@@ -1679,15 +1746,29 @@ fn angle_glyphs() -> (&'static str, &'static str) {
 /// CELLS (ui-kit: widths are cells, not characters): a CJK label is two a
 /// character, and a char count would put the next button on top of it.
 fn text_button(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, lead: bool, act: Act) -> u16 {
+    text_button_in(frame, &mut gui.ui, x, y, label, lead, act)
+}
+
+/// [`text_button`] on the frame's surface alone, for a room part that draws with the surface
+/// and not the whole shell (the Peer recs room's tabs, grid and band; peer-recs build plan D2).
+pub(crate) fn text_button_in(
+    frame: &mut Frame,
+    ui: &mut Surface<Act>,
+    x: u16,
+    y: u16,
+    label: &str,
+    lead: bool,
+    act: Act,
+) -> u16 {
     let rect = Rect { x, y, width: crate::kit::width(label) as u16, height: 1 };
-    let hover = gui.ui.hovers(rect);
+    let hover = ui.hovers(rect);
     let style = match (hover, lead) {
         (true, _) => bright_bold(),
         (false, true) => accent(),
         (false, false) => dim(),
     };
     put(frame, x, y, label, style);
-    gui.ui.click(rect, act);
+    ui.click(rect, act);
     rect.width
 }
 
@@ -1757,9 +1838,13 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // Modal): the tabs, the nav, the room and the bar draw without the
     // pointer, so nothing of them lights or ripens a tooltip under it; the
     // modals get it back as they draw.
+    // The Peer recs room's taste-bar modals do the same, and so does the
+    // track-actions sheet over any room (peer-recs build plan D24).
     let pointer = gui.ui.pointer;
     let inert = gui.screen == Screen::Library
         && ((gui.active == DISCOVER_NAV && discover::modal_open(gui))
+            || (gui.active == PEER_RECS_NAV && peer_recs::modal_open(gui))
+            || actions::modal_open(gui)
             || moods::is_open(gui)
             || ytdl::window_open(gui)
             || keep_doors::window_open(gui));
@@ -1792,6 +1877,9 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     let mini = area.width < MIN_W || area.height < MIN_H;
     device::drawn_as_mini(gui, mini);
     if mini {
+        // The Peer recs room is not drawn as the mini player: its clip
+        // ends, its poll pauses (peer-recs contract §1.8).
+        peer_recs::hidden(gui);
         mini::draw(frame, gui, area);
         return;
     }
@@ -1834,6 +1922,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
                 NavId::Playlists => playlists::draw(frame, gui, content),
                 NavId::Dj => dj::draw_room(frame, gui, content),
                 NavId::Discover => discover::draw(frame, gui, content),
+                NavId::PeerRecs => peer_recs::draw(frame, gui, content),
                 NavId::Torrent => torrent::draw_room(frame, gui, content),
                 NavId::YouTube => ytdl::draw_room(frame, gui, content),
             }
@@ -1923,6 +2012,8 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
         std::borrow::Cow::from(keep_doors::tips(gui))
     } else if discover::modal_open(gui) && gui.screen == Screen::Library {
         std::borrow::Cow::from(discover::tips(gui))
+    } else if peer_recs::modal_open(gui) && gui.screen == Screen::Library {
+        std::borrow::Cow::from(peer_recs::tips(gui))
     } else if playlists::modal_open(gui) {
         std::borrow::Cow::from(playlists::tips(gui))
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
@@ -1977,6 +2068,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
             SEARCH_NAV => t!("gui.tips.search_stowed"),
             SONIC_NAV => std::borrow::Cow::from(sonic::tips(gui)),
             DISCOVER_NAV if gui.app.connected => std::borrow::Cow::from(discover::tips(gui)),
+            PEER_RECS_NAV if gui.app.connected => std::borrow::Cow::from(peer_recs::tips(gui)),
             PLAYLISTS_NAV if gui.app.connected => {
                 std::borrow::Cow::from(playlists::tips(gui))
             }
@@ -2030,6 +2122,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
     discover::draw_modals(frame, gui, area);
+    peer_recs::draw_modals(frame, gui, area);
     moods::draw_modal(frame, gui, area);
     // Keep a copy and the Copies list, over whichever room asked for them.
     keep_doors::draw_window(frame, gui, area);
@@ -2054,6 +2147,9 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
         gui.ui.overlay(footprint);
     }
 
+    // The Peer recs room says what this frame showed of it: Shown, Covered
+    // or Away (peer-recs contract §1.8).
+    peer_recs::frame_tick(gui);
 }
 
 /// Whether the pointer rests on something a click would press — where the
@@ -2123,6 +2219,7 @@ fn capture_banner(gui: &Gui) -> Option<String> {
         Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::End)) => {
             t!("gui.sonic.pick_banner_end").to_string()
         }
+        Some(crate::tui::app::Capture::TasteSeed) if peer_recs::picking(&gui.app) => peer_recs::banner(gui)?,
         Some(crate::tui::app::Capture::TasteSeed) => discover::banner(gui)?,
         _ => dj::banner(gui)?,
     };
@@ -2145,8 +2242,9 @@ fn draw_capture_banner(frame: &mut Frame, gui: &mut Gui, at: Rect, text: &str) {
 }
 
 /// The TOOLS group's rooms, top to bottom (not `NAV`'s order: the sonic
-/// room's index is below Auto DJ's).
-const TOOLS: [usize; 5] = [DJ_NAV, SONIC_NAV, DISCOVER_NAV, TORRENT_NAV, YOUTUBE_NAV];
+/// room's index is below Auto DJ's, and Peer recs is last in the array but
+/// drawn under Discover; peer-recs contract §1.1).
+const TOOLS: [usize; 6] = [DJ_NAV, SONIC_NAV, DISCOVER_NAV, PEER_RECS_NAV, TORRENT_NAV, YOUTUBE_NAV];
 
 /// Whether the nav draws room `i`: absent is absent, never greyed.
 fn nav_shown(gui: &Gui, i: usize) -> bool {
@@ -2157,6 +2255,11 @@ fn nav_shown(gui: &Gui, i: usize) -> bool {
         // The Discover room likewise, and not for a peer's guest, who has
         // no history there (discovery-page clause 1).
         DISCOVER_NAV => discover::gate(&gui.app),
+        // The Peer recs room rides the four flags and an own session, until
+        // a re-ping says the network is off (peer-recs contract §1.1). No
+        // `connected` term, as Discover has none: a short disconnect keeps
+        // the row (plan D31).
+        PEER_RECS_NAV => peer_recs::gate(&gui.app),
         // Add YouTube shows where its room can work (add-from-youtube
         // clause 1).
         YOUTUBE_NAV => ytdl::available(gui),
@@ -2171,24 +2274,29 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // Files and Search at the top; the LIBRARY group's eight rooms, each
     // on its own line (the rows a peer hides are its last four); then the
     // tools, the record's desktop-rail group: Auto DJ, the
-    // capability-gated sonic room, the Discover room, Add torrent and the
-    // gated Add YouTube, packed — a hidden room's line goes to the rooms
-    // under it, so the group never shows a hole. With all five, eighteen
-    // rows, to Add YouTube's 19. Where Settings, on the content's last
-    // row, would meet the last of them, the rooms rise a line at a time
-    // and only as far as they must: into the blank under Search, then over
-    // the TOOLS heading, then over the LIBRARY heading — so Settings keeps
-    // the last row alone (discovery-page clause 2).
+    // capability-gated sonic room, the Discover room, the Peer recs room,
+    // Add torrent and the gated Add YouTube, packed — a hidden room's line
+    // goes to the rooms under it, so the group never shows a hole. With all
+    // six, nineteen rows, to Add YouTube's 20. Where Settings, on the
+    // content's last row, would meet the last of them, the rooms rise a
+    // line at a time and only as far as they must: into the blank under
+    // Search, then over the TOOLS heading, then over the LIBRARY heading,
+    // and last, with all six tools at the 100 × 24 floor with key hints on,
+    // into the blank row under the top tabs, Files and Search with them —
+    // so Settings keeps the last row alone (discovery-page clause 2,
+    // peer-recs contract §1.1).
     let forward = forward_glyph();
     // The Settings row sits on the content's last row, above the bar.
     let set_y = content_rect(area.width, area.height, gui.queue_open, gui.footer()).bottom() - 1;
     let tools: Vec<usize> = TOOLS.into_iter().filter(|&i| nav_shown(gui, i)).collect();
     // How many lines the rooms rise: the last tool, on 14 + its count
-    // (Add YouTube's 19 with all five), ends above Settings. The LIBRARY
+    // (Add YouTube's 20 with all six), ends above Settings. The LIBRARY
     // group rises past the blank and, on the third line, its heading; the
-    // tools past the TOOLS heading as well.
-    let rise = (15 + tools.len() as u16).saturating_sub(set_y).min(3);
-    let lift = rise.min(1) + u16::from(rise == 3);
+    // tools past the TOOLS heading as well; on the fourth, everything from
+    // Files down moves into row 1. The rule `│` still starts on row 2.
+    let rise = (15 + tools.len() as u16).saturating_sub(set_y).min(4);
+    let lift = rise.min(1) + u16::from(rise >= 3) + u16::from(rise == 4);
+    let top = u16::from(rise == 4);
     if rise < 3 {
         put(frame, 1, 5 - lift, &t!("gui.nav.library"), dim());
     }
@@ -2203,8 +2311,8 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let tool = tools.iter().position(|&t| t == i);
         let y = match (i, tool) {
             (_, Some(n)) => 15 - rise + n as u16,
-            (FILES_NAV, _) => 2,
-            (SEARCH_NAV, _) => 3,
+            (FILES_NAV, _) => 2 - top,
+            (SEARCH_NAV, _) => 3 - top,
             (ALBUMS_NAV..=RECENT_NAV, _) => 5 + i as u16 - lift,
             (RATED_NAV, _) => 10 - lift,
             (PLAYLISTS_NAV, _) => 11 - lift,
@@ -3117,11 +3225,19 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             _ => {}
         }
     }
+    // A taste room's window list or seeds modal drawn over a standing pick
+    // takes Esc first: the modal closes, and the next Esc lets the pick go
+    // (one Esc, one layer). Its room's keys come below, and the bar's own
+    // keys own every key while a modal is up.
+    let bar_modal = gui.screen == Screen::Library
+        && ((gui.active == DISCOVER_NAV && discover::taste_bar::modal_open(&gui.discover.bar))
+            || peer_recs::modal_open(gui));
     // An armed pick is the loudest thing on screen after the filter: Esc
     // stops picking before it stows a cursor or climbs a level, and goes
     // home to the room that asked — the App's own Cancel contract,
     // followed on this surface too.
     if key.code == KeyCode::Esc
+        && !bar_modal
         && matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_)))
     {
         gui.forward(Action::Cancel);
@@ -3131,15 +3247,26 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     }
     // The Discover room's pick likewise goes home (discovery-page clause
     // 14).
-    if key.code == KeyCode::Esc && gui.app.capture == Some(crate::tui::app::Capture::TasteSeed) {
+    if key.code == KeyCode::Esc
+        && !bar_modal
+        && gui.app.capture == Some(crate::tui::app::Capture::TasteSeed)
+    {
+        // The Peer recs room's pick goes home to it (peer-recs build plan
+        // D32), read before the Cancel lets it go.
+        let room_pick = peer_recs::picking(&gui.app);
         gui.forward(Action::Cancel);
-        discover::returned(gui);
+        if room_pick {
+            peer_recs::returned(gui);
+        } else {
+            discover::returned(gui);
+        }
         return false;
     }
     // Auto DJ's seed pick goes home to the Seeds sheet (auto-dj clause 65)
     // — once it is gone: a Cancel a Search query edit took only ended that
     // edit, and the pick still stands (one Esc, one layer).
     if key.code == KeyCode::Esc
+        && !bar_modal
         && let Some(crate::tui::app::Capture::Seeds(list)) = gui.app.capture
     {
         gui.forward(Action::Cancel);
@@ -3161,6 +3288,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         return quit;
     }
     if let Some(quit) = discover::handle_key(gui, key) {
+        return quit;
+    }
+    if let Some(quit) = peer_recs::handle_key(gui, key) {
         return quit;
     }
     if let Some(quit) = playlists::handle_key(gui, key) {
@@ -3216,6 +3346,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         // Nor the Discover room: `G` opens it, and asks again while it is
         // up (discovery-page clause 3); dead while the row is absent.
         KeyCode::Char('G') => return gui.act(Act::Nav(DISCOVER_NAV)),
+        // Nor the Peer recs room: `R` opens it, and asks for new seeds while
+        // it is up (peer-recs contract §1.1); dead while the row is absent.
+        KeyCode::Char('R') => return gui.act(Act::Nav(PEER_RECS_NAV)),
         // `/` is the search key everywhere, the TUI's own habit: land on
         // Search with the query box open.
         KeyCode::Char('/') => {
@@ -3503,6 +3636,13 @@ where
             dj::reopen(gui);
         }
     }
+    // The Peer recs room settles what the fold changed under it, before
+    // anything is drawn: a gate gone mid-visit yields to Files in this
+    // frame, and a room pick's refusal is worded once (peer-recs build plan
+    // D31, D32). What it asks goes out in this pass's dispatch.
+    let settled = (gui.active, gui.note.clone());
+    peer_recs::settle(gui);
+    ctx.dirty |= settled != (gui.active, gui.note.clone());
     ctx.dirty |= servers::poll(gui);
     ctx.dirty |= torrent::poll(gui);
     // Add from YouTube's lookups and folder checks, and its job tracker's
@@ -3892,7 +4032,9 @@ fn next_wait(gui: &Gui) -> Duration {
 ///
 /// The Admin and MP3 Player screens and the Discover room do per-frame
 /// work inside their render (the server log's tail, the port watch, the
-/// copies' poll beat), so while one is up every pass draws, as before. So
+/// copies' poll beat), so while one is up every pass draws, as before. The
+/// Peer recs room too: the first frame drawn without it ends its clip, and
+/// its band's bar moves while one sounds (peer-recs contract §1.8). So
 /// does a quit that waits for a sync's next save: its footer counts the
 /// seconds (mp3-player-screen contract, clause 57).
 fn moving(gui: &mut Gui) -> bool {
@@ -3902,6 +4044,7 @@ fn moving(gui: &mut Gui) -> bool {
         || stats::stale(gui)
         || matches!(gui.screen, Screen::Admin | Screen::Device)
         || (gui.screen == Screen::Library && (gui.active == DISCOVER_NAV || keep_doors::window_open(gui)))
+        || peer_recs::moving(gui)
         || device::quit_waiting(gui)
 }
 
@@ -3926,6 +4069,7 @@ impl Gui {
             List::Sonic => &mut self.sonic.results,
             List::DjSheet => &mut self.dj.list,
             List::Discover => &mut self.discover.view,
+            List::PeerRecs => peer_recs::list_mut(self),
         }
     }
 
@@ -3957,6 +4101,7 @@ impl Gui {
             List::Sonic => &self.sonic.results,
             List::DjSheet => &self.dj.list,
             List::Discover => &self.discover.view,
+            List::PeerRecs => &self.peer_recs.list,
         }
     }
 
@@ -4063,6 +4208,12 @@ impl Gui {
             discover::reopen(self);
             return;
         }
+        // The Peer recs room likewise: a fresh visit on the new session, or
+        // Files when the row went (peer-recs contract §1.1).
+        if self.active == PEER_RECS_NAV {
+            peer_recs::reopen(self);
+            return;
+        }
         if let Some(root) = library::root_of(self.active) {
             library::open(self, root);
         } else if self.active == ALBUMS_NAV {
@@ -4107,6 +4258,7 @@ impl Gui {
             || dj::modal_open(self)
             || sonic::modal_open(self)
             || discover::modal_open(self)
+            || peer_recs::modal_open(self)
             || moods::is_open(self)
             || playlists::modal_open(self)
             || self.servers.modal_open()
@@ -4196,6 +4348,11 @@ impl Gui {
             discover::wheel(self, delta);
             return;
         }
+        // The Peer recs room's taste-bar modals likewise.
+        if self.screen == Screen::Library && self.active == PEER_RECS_NAV && peer_recs::modal_open(self) {
+            peer_recs::wheel(self, delta);
+            return;
+        }
         // Add from YouTube's Choose a folder scrolls its own rows under
         // the wheel.
         if ytdl::wheels(self) {
@@ -4251,6 +4408,7 @@ impl Gui {
             | NavId::LastPlayed
             | NavId::MostPlayed => library::wheel(self, delta),
             NavId::Discover => discover::wheel(self, delta),
+            NavId::PeerRecs => peer_recs::wheel(self, delta),
         }
     }
 }
@@ -6504,45 +6662,59 @@ mod tests {
         gui
     }
 
+    /// [`every_room_gui`] with the Peer recs room's four flags as well: all
+    /// six tools show (peer-recs contract §1.1).
+    fn six_tools_gui() -> Gui {
+        let mut gui = every_room_gui();
+        gui.app.capabilities.discovery_p2p = true;
+        gui.app.capabilities.discovery_taste = 3;
+        gui.app.capabilities.discovery_p2p_peers = 1;
+        gui
+    }
+
     fn draw_sized(gui: &mut Gui, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, gui)).unwrap();
         rows(&terminal)
     }
 
-    /// The two Add rooms close the TOOLS group, after Discover — with all
-    /// five tools, Add torrent on 18 and Add YouTube on 19. The tools pack:
-    /// a hidden room's line goes to the rooms under it, so the group never
-    /// shows a hole. Where Settings, on the content's last row, would meet
-    /// the last of them, the rooms rise only as far as they must: into the
-    /// blank under Search first, then over the TOOLS heading, then over the
-    /// LIBRARY heading — Settings alone below them at every size from the
-    /// 100 × 24 floor, the footer on or off, whichever rooms show.
+    /// The two Add rooms close the TOOLS group, after Discover and Peer
+    /// recs — with all six tools, Add torrent on 19 and Add YouTube on 20.
+    /// The tools pack: a hidden room's line goes to the rooms under it, so
+    /// the group never shows a hole. Where Settings, on the content's last
+    /// row, would meet the last of them, the rooms rise only as far as they
+    /// must: into the blank under Search first, then over the TOOLS heading,
+    /// then over the LIBRARY heading, and with six tools at the floor into
+    /// row 1, Files and Search with them (peer-recs contract §1.1) —
+    /// Settings alone below them at every size from the 100 × 24 floor, the
+    /// footer on or off, whichever rooms show.
     #[test]
     fn the_add_rooms_close_tools_and_rise_clear_of_settings() {
         let _en = crate::setup::tests::in_locale("en");
-        // The tools each case shows: all five; a server with no sonic path
-        // and no Discover; Auto DJ with Add torrent alone; and Discover
-        // without the sonic path, risen into its line.
-        let kinds: [&[&str]; 4] = [
+        // The tools each case shows: the five before Peer recs; a server
+        // with no sonic path and no Discover; Auto DJ with Add torrent
+        // alone; Discover without the sonic path, risen into its line; and
+        // all six.
+        let kinds: [&[&str]; 5] = [
             &["Auto DJ", "Sonic path", "Discover", "Add torrent", "Add YouTube"],
             &["Auto DJ", "Add torrent", "Add YouTube"],
             &["Auto DJ", "Add torrent"],
             &["Auto DJ", "Discover", "Add torrent", "Add YouTube"],
+            &["Auto DJ", "Sonic path", "Discover", "Peer recs", "Add torrent", "Add YouTube"],
         ];
         // Height, footer → Settings' row, and the lines the rooms rise for
         // each kind: only where the last tool would reach Settings.
-        let sizes: [(u16, bool, u16, [u16; 4]); 10] = [
-            (24, true, 17, [3, 1, 0, 2]),
-            (24, false, 18, [2, 0, 0, 1]),
-            (25, true, 18, [2, 0, 0, 1]),
-            (25, false, 19, [1, 0, 0, 0]),
-            (26, true, 19, [1, 0, 0, 0]),
-            (26, false, 20, [0, 0, 0, 0]),
-            (27, true, 20, [0, 0, 0, 0]),
-            (27, false, 21, [0, 0, 0, 0]),
-            (30, true, 23, [0, 0, 0, 0]),
-            (30, false, 24, [0, 0, 0, 0]),
+        let sizes: [(u16, bool, u16, [u16; 5]); 10] = [
+            (24, true, 17, [3, 1, 0, 2, 4]),
+            (24, false, 18, [2, 0, 0, 1, 3]),
+            (25, true, 18, [2, 0, 0, 1, 3]),
+            (25, false, 19, [1, 0, 0, 0, 2]),
+            (26, true, 19, [1, 0, 0, 0, 2]),
+            (26, false, 20, [0, 0, 0, 0, 1]),
+            (27, true, 20, [0, 0, 0, 0, 1]),
+            (27, false, 21, [0, 0, 0, 0, 0]),
+            (30, true, 23, [0, 0, 0, 0, 0]),
+            (30, false, 24, [0, 0, 0, 0, 0]),
         ];
         // LIBRARY, Albums, Most played, TOOLS and the first tool's line —
         // by the lines risen. The other tools follow on the next lines.
@@ -6551,10 +6723,11 @@ mod tests {
                 0 => [Some(5), Some(6), Some(13), Some(14), Some(15)],
                 1 => [Some(4), Some(5), Some(12), Some(13), Some(14)],
                 2 => [Some(4), Some(5), Some(12), None, Some(13)],
-                _ => [None, Some(4), Some(11), None, Some(12)],
+                3 => [None, Some(4), Some(11), None, Some(12)],
+                _ => [None, Some(3), Some(10), None, Some(11)],
             }
         };
-        let every = ["Auto DJ", "Sonic path", "Discover", "Add torrent", "Add YouTube"];
+        let every = ["Auto DJ", "Sonic path", "Discover", "Peer recs", "Add torrent", "Add YouTube"];
         for (k, tools) in kinds.into_iter().enumerate() {
             for (height, footer, settings, rises) in sizes {
                 let rise = rises[k];
@@ -6568,13 +6741,22 @@ mod tests {
                 if !tools.contains(&"Add YouTube") {
                     gui.app.libraries.clear();
                 }
+                if tools.contains(&"Peer recs") {
+                    gui.app.capabilities.discovery_p2p = true;
+                    gui.app.capabilities.discovery_taste = 3;
+                    gui.app.capabilities.discovery_p2p_peers = 1;
+                }
                 gui.config.gui.key_hints = footer;
                 gui.ui.key_hints = footer;
                 let rows = draw_sized(&mut gui, 100, height);
                 let all = rows.join("\n");
                 let nav = |y: u16| rows[y as usize].chars().take(15).collect::<String>().replace('▸', "").trim().to_string();
                 let size = format!("100×{height}, footer {footer}, tools {tools:?}");
-                assert_eq!((nav(2).as_str(), nav(3).as_str()), ("Files", "Search"), "{size}:\n{all}");
+                // Files and Search on 2 and 3, or on 1 and 2 at the fourth
+                // line risen.
+                let top = u16::from(rise == 4);
+                assert_eq!((nav(2 - top).as_str(), nav(3 - top).as_str()), ("Files", "Search"), "{size}:\n{all}");
+                assert_eq!(nav(1).is_empty(), rise < 4, "{size}: row 1 is the last to give way:\n{all}");
                 assert_eq!(nav(4).is_empty(), rise == 0, "{size}: the blank under Search gives way first:\n{all}");
                 let [library, albums, most, heading, first] = lines(rise);
                 for (label, want) in [("LIBRARY", library), ("Albums", albums), ("Most played", most), ("TOOLS", heading)] {
@@ -6604,18 +6786,27 @@ mod tests {
                 if tools.contains(&"Add YouTube") {
                     assert_eq!(hit(at("Add YouTube")), Some(Act::Nav(YOUTUBE_NAV)), "{size}");
                 }
+                if tools.contains(&"Peer recs") {
+                    assert_eq!(hit(at("Peer recs")), Some(Act::Nav(PEER_RECS_NAV)), "{size}");
+                }
             }
         }
     }
 
-    /// The Add rows are the last of the array: the rooms with digits keep
-    /// them, and neither Add room has a digit or a letter of its own. Each
-    /// key is pressed from a fresh Settings: Search's query box, open after
-    /// `7`, would take the next as text.
+    /// The rooms past the digits are the pointer's and their letters': the
+    /// rooms with digits keep them, neither Add room has a digit or a
+    /// letter of its own, and the Peer recs room, last in the array,
+    /// answers `R` alone (peer-recs contract §1.1). Each key is pressed
+    /// from a fresh Settings: Search's query box, open after `7`, would
+    /// take the next as text.
     #[test]
-    fn the_add_rooms_come_last_and_take_no_key() {
-        assert_eq!((NAV[TORRENT_NAV], NAV[YOUTUBE_NAV]), (NavId::Torrent, NavId::YouTube));
-        assert_eq!(NAV.len(), YOUTUBE_NAV + 1);
+    fn the_rooms_past_the_digits_take_no_digit() {
+        assert_eq!(
+            (NAV[TORRENT_NAV], NAV[YOUTUBE_NAV], NAV[PEER_RECS_NAV]),
+            (NavId::Torrent, NavId::YouTube, NavId::PeerRecs)
+        );
+        assert_eq!(NAV.len(), PEER_RECS_NAV + 1);
+        assert!(TOOLS.iter().position(|&i| i == PEER_RECS_NAV) == Some(3), "drawn under Discover");
         assert_eq!(NAV[..9], [
             NavId::Files,
             NavId::Albums,
@@ -6628,23 +6819,27 @@ mod tests {
             NavId::Sonic,
         ], "the digits' rooms");
         for (i, c) in ('1'..='9').enumerate() {
-            let mut gui = every_room_gui();
+            let mut gui = six_tools_gui();
             handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
             assert_eq!((gui.screen, gui.active), (Screen::Library, i), "{c} opens {:?}", NAV[i]);
         }
         // The shell's letters and signs, each still the room or the act it
-        // was: none opens an Add room.
-        for c in "DGAy/pnsrmhaNPt0 -+=".chars() {
-            let mut gui = every_room_gui();
+        // was: none opens an Add room, and only `R` the Peer recs room.
+        for c in "DGRAy/pnsrmhaNPt0 -+=".chars() {
+            let mut gui = six_tools_gui();
             handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
             assert!(!matches!(gui.active, TORRENT_NAV | YOUTUBE_NAV), "{c:?} opened {:?}", NAV[gui.active]);
+            assert_eq!(gui.active == PEER_RECS_NAV, c == 'R', "{c:?} opened {:?}", NAV[gui.active]);
         }
-        let mut gui = every_room_gui();
+        let mut gui = six_tools_gui();
         handle_key(&mut gui, KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
         assert_eq!(gui.active, DJ_NAV, "D is still Auto DJ's");
-        let mut gui = every_room_gui();
+        let mut gui = six_tools_gui();
         handle_key(&mut gui, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
         assert_eq!(gui.active, DISCOVER_NAV, "G is still Discover's");
+        let mut gui = six_tools_gui();
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert_eq!(gui.active, PEER_RECS_NAV, "R is the Peer recs room's");
     }
 
     /// Clicking each Add row opens its room as the active nav room — from
@@ -6688,6 +6883,599 @@ mod tests {
                 assert!(!bare, "{code}: {key} is the bare source {label:?}");
             }
         }
+    }
+
+    // ── The Peer recs room in the shell (peer-recs contract §1.1, §1.8) ─
+
+    /// The sixth tool at every floor, as DS §1.1's table draws it: with all
+    /// six at 100 × 24 and key hints on, the rooms rise a fourth line, into
+    /// row 1 under the top tabs — Files there, Search on 2, the rule `│`
+    /// still from row 2 — and everywhere else as before.
+    #[test]
+    fn the_nav_column_at_every_floor_with_six_tools() {
+        let _en = crate::setup::tests::in_locale("en");
+        let tools = ["Auto DJ", "Sonic path", "Discover", "Peer recs", "Add torrent", "Add YouTube"];
+        let library =
+            ["Albums", "Artists", "Genres", "Recent", "Rated", "Playlists", "Last played", "Most played"];
+        // Height, footer → the lines risen and Settings' row.
+        let sizes: [(u16, bool, u16, u16); 10] = [
+            (24, true, 4, 17),
+            (24, false, 3, 18),
+            (25, true, 3, 18),
+            (25, false, 2, 19),
+            (26, true, 2, 19),
+            (26, false, 1, 20),
+            (27, true, 1, 20),
+            (27, false, 0, 21),
+            (30, true, 0, 23),
+            (30, false, 0, 24),
+        ];
+        // By the lines risen: Files' row, the LIBRARY heading, Albums' row,
+        // the TOOLS heading and Auto DJ's row (DS §1.1's table).
+        let rows_at = |rise: u16| -> (u16, Option<u16>, u16, Option<u16>, u16) {
+            match rise {
+                0 => (2, Some(5), 6, Some(14), 15),
+                1 => (2, Some(4), 5, Some(13), 14),
+                2 => (2, Some(4), 5, None, 13),
+                3 => (2, None, 4, None, 12),
+                _ => (1, None, 3, None, 11),
+            }
+        };
+        let rises: Vec<u16> = sizes.iter().map(|size| size.2).collect();
+        assert_eq!(rises, [4, 3, 3, 2, 2, 1, 1, 0, 0, 0], "the rise only at the floor with hints on");
+        for (height, footer, rise, settings) in sizes {
+            let mut gui = six_tools_gui();
+            gui.config.gui.key_hints = footer;
+            gui.ui.key_hints = footer;
+            let rows = draw_sized(&mut gui, 100, height);
+            let all = rows.join("\n");
+            let nav = |y: u16| rows[y as usize].chars().take(15).collect::<String>().replace('▸', "").trim().to_string();
+            let size = format!("100×{height}, footer {footer}");
+            let (files, library_y, albums, tools_y, first) = rows_at(rise);
+            assert_eq!((nav(files).as_str(), nav(files + 1).as_str()), ("Files", "Search"), "{size}:\n{all}");
+            for (n, label) in library.iter().enumerate() {
+                assert_eq!(nav(albums + n as u16), *label, "{size}: {label}:\n{all}");
+            }
+            for (label, want) in [("LIBRARY", library_y), ("TOOLS", tools_y)] {
+                assert_eq!((0..height).find(|&y| nav(y) == label), want, "{size}: {label}:\n{all}");
+            }
+            for (n, label) in tools.iter().enumerate() {
+                assert_eq!(nav(first + n as u16), *label, "{size}: {label}:\n{all}");
+            }
+            let last = first + tools.len() as u16 - 1;
+            assert!((last + 1..settings).all(|y| nav(y).is_empty()), "{size}: nothing above Settings:\n{all}");
+            assert_eq!(nav(settings), "Settings", "{size}:\n{all}");
+            // The rule runs from row 2 at every rise: row 1 has none.
+            assert_ne!(rows[1].chars().nth(15), Some('│'), "{size}: no rule on row 1:\n{all}");
+            assert_eq!(rows[2].chars().nth(15), Some('│'), "{size}: the rule from row 2:\n{all}");
+            // Files is its row's click target where it stands, row 1 at the
+            // fourth rise, and so is Peer recs.
+            let hit = |y: u16| gui.ui.hit(Position { x: 3, y });
+            assert_eq!(hit(files), Some(Act::Nav(FILES_NAV)), "{size}");
+            assert_eq!(hit(first + 3), Some(Act::Nav(PEER_RECS_NAV)), "{size}");
+            if rise < 4 {
+                assert_eq!(hit(1), None, "{size}: row 1 holds nothing below the fourth rise");
+            }
+        }
+    }
+
+    /// The room's door commands among `effects`.
+    fn door(effects: &[Effect]) -> Vec<crate::api::peer_recs_door::PeerRecsCmd> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Api(worker::ApiCmd::PeerRecs { cmd, .. }) => Some(cmd.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The clip stops among `effects`.
+    fn aside_stops(effects: &[Effect]) -> Vec<AudioCmd> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Audio(stop @ AudioCmd::AsideStop { .. }) => Some(stop.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The room's answer through the App's own event path, as the worker
+    /// delivers it.
+    fn land(gui: &mut Gui, event: crate::api::peer_recs_door::PeerRecsEvent) {
+        let generation = gui.app.session_gen();
+        let effects = gui.app.apply_event(Event::PeerRecs { generation, event: Box::new(event) });
+        gui.pend(effects);
+    }
+
+    /// The opening asks answered from the stage's fixtures: the plug-in gate
+    /// with its Deezer preview and All's twelve leads. The poll is left out
+    /// (its number comes back), so a test can answer it as it needs.
+    fn answer_opening(gui: &mut Gui) -> Option<u64> {
+        use crate::api::peer_recs_door::{PeerRecsCmd, PeerRecsEvent};
+        let mut poll = None;
+        for cmd in door(&std::mem::take(&mut gui.pending)) {
+            match cmd {
+                PeerRecsCmd::Gate { seq } => {
+                    let plugins = Ok(Box::new(peer_recs::kit::plugins()));
+                    land(gui, PeerRecsEvent::Gate { seq, plugins, destination: None });
+                }
+                PeerRecsCmd::Taste { seq, .. } => {
+                    let answer = Ok(Box::new(crate::api::types::fixtures::taste("taste_all")));
+                    land(gui, PeerRecsEvent::Taste { seq, answer });
+                }
+                PeerRecsCmd::Peers { poll: n } => poll = Some(n),
+                _ => {}
+            }
+        }
+        gui.pending.clear();
+        poll
+    }
+
+    /// The Peer recs room up on the stage's answers, drawn once; and the
+    /// first poll's number, still out.
+    fn peer_room() -> (Gui, u64) {
+        let mut gui = peer_recs::kit::peer_gui();
+        gui.act(Act::Nav(PEER_RECS_NAV));
+        assert_eq!(gui.active, PEER_RECS_NAV, "the gate lets the room in");
+        let poll = answer_opening(&mut gui).expect("a visit polls the peers");
+        assert!(!gui.app.peer_recs_leads().is_empty(), "the leads landed");
+        draw(&mut gui);
+        (gui, poll)
+    }
+
+    /// [`peer_room`] with a clip sounding: the first lead's slot pressed,
+    /// its clip found and the engine playing it.
+    fn clip_room() -> Gui {
+        use crate::api::peer_recs_door::{PeerRecsCmd, PeerRecsEvent};
+        let (mut gui, _) = peer_room();
+        gui.act(Act::Peer(peer_recs::PeerAct::Slot(0)));
+        let ticket = door(&gui.pending)
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                PeerRecsCmd::Preview { ticket, .. } => Some(ticket),
+                _ => None,
+            })
+            .expect("a press resolves the lead");
+        gui.pending.clear();
+        let found = crate::api::types::PluginPreview {
+            provider: "deezer".into(),
+            url: "https://cdn.example/clip.mp3".into(),
+            seconds: 30,
+            title: None,
+            artist: None,
+            album: None,
+            attribution: None,
+            link: None,
+            match_score: None,
+        };
+        land(&mut gui, PeerRecsEvent::Preview { ticket, answer: Ok(Some(Box::new(found))) });
+        let played = gui.pending.iter().find_map(|e| match e {
+            Effect::Audio(AudioCmd::AsidePlay { ticket, .. }) => Some(*ticket),
+            _ => None,
+        });
+        let ticket = played.expect("the clip goes to the engine");
+        let status = crate::player::AsideStatus {
+            ticket,
+            phase: crate::player::AsidePhase::Playing,
+            position: 4.0,
+            duration: 30.0,
+        };
+        let effects = gui.app.apply_event(Event::Aside(Some(status)));
+        gui.pend(effects);
+        draw(&mut gui);
+        assert!(gui.app.peer_recs_clip_live(), "a clip sounds");
+        assert!(aside_stops(&gui.pending).is_empty(), "nothing ended it yet: {:?}", gui.pending);
+        gui.pending.clear();
+        gui
+    }
+
+    /// One pass of the loop's frame half with `events` in from the workers,
+    /// as their answers come: the frame it drew.
+    fn frame_with(gui: &mut Gui, events: Vec<Event>) -> Vec<String> {
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (audio_tx, _audio_rx) = std::sync::mpsc::channel();
+        let (api_tx, _api_rx) = std::sync::mpsc::channel();
+        for event in events {
+            event_tx.send(event).unwrap();
+        }
+        let mut ctx = Ctx::new(&gui.app, Channels { event_rx, audio_tx, api_tx, event_tx, control: None });
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
+        frame(&mut terminal, gui, &mut ctx, &mut NoHost).unwrap();
+        let buffer = terminal.backend().0.buffer();
+        (0..30).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect()
+    }
+
+    fn nav_lists(rows: &[String], label: &str) -> bool {
+        rows.iter().any(|r| r.chars().take(15).collect::<String>().replace('▸', "").trim() == label)
+    }
+
+    /// Absent is absent, never greyed (peer-recs contract §1.1): without
+    /// any one of the four flags, or for a peer's guest, the row is not
+    /// drawn and `R` and the row's act are as dead as it.
+    #[test]
+    fn the_peer_recs_row_and_r_are_absent_without_the_gate_or_for_a_peer() {
+        let _en = crate::setup::tests::in_locale("en");
+        let mut gui = six_tools_gui();
+        assert!(nav_lists(&draw(&mut gui), "Peer recs"), "the four flags and an own session show it");
+        let cases: [(&str, fn(&mut Gui)); 5] = [
+            ("discovery off", |gui| gui.app.capabilities.discovery = false),
+            ("p2p off", |gui| gui.app.capabilities.discovery_p2p = false),
+            ("taste generation 2", |gui| gui.app.capabilities.discovery_taste = 2),
+            ("no peers route", |gui| gui.app.capabilities.discovery_p2p_peers = 0),
+            ("a peer's guest", |gui| gui.app.session.peer = Some(("http://host:3000".into(), 7))),
+        ];
+        for (case, off) in cases {
+            let mut gui = six_tools_gui();
+            off(&mut gui);
+            let rows = draw(&mut gui);
+            assert!(!nav_lists(&rows, "Peer recs"), "{case}: no row:\n{}", rows.join("\n"));
+            gui.pending.clear();
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+            assert_eq!(gui.active, SETTINGS_NAV, "{case}: R goes nowhere");
+            gui.act(Act::Nav(PEER_RECS_NAV));
+            assert_eq!(gui.active, SETTINGS_NAV, "{case}: nor does the row's act");
+            assert!(door(&gui.pending).is_empty(), "{case}: and nothing is asked: {:?}", gui.pending);
+        }
+        // The room up when a session moves to a server without it: it
+        // yields to Files.
+        let (mut gui, _) = peer_room();
+        gui.app.capabilities.discovery_p2p = false;
+        gui.reopen_room();
+        assert_eq!(gui.active, FILES_NAV, "the room yields with the row gone");
+    }
+
+    /// `R` opens the room — R1, the first poll and the plug-in gate
+    /// together — and, with the room up, asks for new seeds in the same
+    /// visit (peer-recs contract §1.1, as `G` is Discover's).
+    #[test]
+    fn r_opens_the_room_and_asks_again_while_up() {
+        use crate::api::peer_recs_door::PeerRecsCmd;
+        let _en = peer_recs::kit::english();
+        let mut gui = peer_recs::kit::peer_gui();
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert_eq!((gui.screen, gui.active), (Screen::Library, PEER_RECS_NAV));
+        let count = |cmds: &[PeerRecsCmd], pick: fn(&PeerRecsCmd) -> bool| cmds.iter().filter(|c| pick(c)).count();
+        let taste = |c: &PeerRecsCmd| matches!(c, PeerRecsCmd::Taste { .. });
+        let peers = |c: &PeerRecsCmd| matches!(c, PeerRecsCmd::Peers { .. });
+        let gate = |c: &PeerRecsCmd| matches!(c, PeerRecsCmd::Gate { .. });
+        let asks = door(&gui.pending);
+        assert_eq!((count(&asks, taste), count(&asks, peers), count(&asks, gate)), (1, 1, 1), "{asks:?}");
+        let visit = gui.app.peer_recs_visit();
+        answer_opening(&mut gui);
+        draw(&mut gui);
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert_eq!(gui.active, PEER_RECS_NAV, "the room stays up");
+        let asks = door(&gui.pending);
+        assert_eq!((count(&asks, taste), count(&asks, peers), count(&asks, gate)), (1, 0, 0), "new seeds only: {asks:?}");
+        assert_eq!(gui.app.peer_recs_visit(), visit, "the same visit");
+    }
+
+    /// R7's re-ping says the network is off in the middle of a visit — a
+    /// poll's 403, then the ping's "off" — with no `Connected` at all: the
+    /// room yields to Files in the frame that folds the answer, and its
+    /// row is gone (build plan D31).
+    #[test]
+    fn the_room_yields_to_files_when_the_gate_goes() {
+        use crate::api::peer_recs_door::{PeerRecsEvent, PeersFailure};
+        let _en = peer_recs::kit::english();
+        let (mut gui, poll) = peer_room();
+        let generation = gui.app.session_gen();
+        let event = |event: PeerRecsEvent| Event::PeerRecs { generation, event: Box::new(event) };
+        let forbidden = event(PeerRecsEvent::Peers { poll, answer: Err(PeersFailure::Forbidden) });
+        let rows = frame_with(&mut gui, vec![forbidden]);
+        assert_eq!(gui.active, PEER_RECS_NAV, "a 403 asks the ping first:\n{}", rows.join("\n"));
+        assert!(nav_lists(&rows, "Peer recs"), "{}", rows.join("\n"));
+        let rows = frame_with(&mut gui, vec![event(PeerRecsEvent::Probed { on: false })]);
+        let all = rows.join("\n");
+        assert_eq!(gui.active, FILES_NAV, "off: the room yields\n{all}");
+        assert!(!nav_lists(&rows, "Peer recs"), "and its row is gone, in the same frame:\n{all}");
+        assert!(rows[2].starts_with(&format!(" {} Files", forward_glyph())), "Files is drawn:\n{all}");
+        assert!(!all.contains(&*t!("gui.peer_recs.name")), "nothing of the room is left:\n{all}");
+        assert_eq!(gui.app.peer_recs.watch, crate::tui::app::peer_recs::PeerRecsWatch::Away);
+    }
+
+    /// The gate has no `connected` term, as Discover's has none: a short
+    /// disconnect keeps the row, and the room draws its name and the
+    /// shell's disconnected words; the visit stands for the reconnect
+    /// (build plan D31).
+    #[test]
+    fn a_short_disconnect_keeps_the_row_and_draws_disconnected() {
+        let _en = peer_recs::kit::english();
+        let (mut gui, _) = peer_room();
+        let visit = gui.app.peer_recs_visit();
+        gui.app.connected = false;
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(nav_lists(&rows, "Peer recs"), "the row stays:\n{all}");
+        assert_eq!(gui.active, PEER_RECS_NAV);
+        let room = |y: usize| rows[y].chars().skip(17).collect::<String>();
+        assert!(room(2).starts_with("Peer recs"), "the room's name:\n{all}");
+        let retry = t!("gui.srv.retry").to_string();
+        assert!((2..25).any(|y| room(y).contains(&retry)), "the disconnected words and their way back:\n{all}");
+        assert_ne!(gui.app.peer_recs.watch, crate::tui::app::peer_recs::PeerRecsWatch::Away, "the visit stands");
+        gui.app.connected = true;
+        let rows = draw(&mut gui);
+        assert!(rows[2].contains(&*t!("gui.peer_recs.name")), "connected, the header:\n{}", rows.join("\n"));
+        assert_eq!(gui.app.peer_recs_visit(), visit, "the same visit");
+    }
+
+    /// The track-actions sheet makes the room beneath inert, over every
+    /// room (build plan D24): the nav, the room and the bar draw without
+    /// the pointer, so nothing under the sheet lights.
+    #[test]
+    fn a_sheet_makes_every_room_inert() {
+        let _en = crate::setup::tests::in_locale("en");
+        let rooms = [FILES_NAV, ALBUMS_NAV, SETTINGS_NAV, DJ_NAV, DISCOVER_NAV, PEER_RECS_NAV, TORRENT_NAV];
+        for room in rooms {
+            let mut gui = six_tools_gui();
+            gui.app.files.set(vec![
+                Entry::Parent,
+                Entry::Track { label: "Night Drive".into(), track: Box::new(track("music/a.mp3", "Night Drive", 252.0)) },
+            ]);
+            gui.active = room;
+            // Search's row (x 3–8, row 3 at 100 × 30) under the pointer
+            // lights at rest.
+            gui.ui.pointer = Some(Position { x: 4, y: 3 });
+            let lit = |gui: &mut Gui| {
+                let buffer = draw_buffer(gui);
+                let cell = &buffer[(3, 3)];
+                assert_eq!(cell.symbol(), "S", "{:?}: the probe is on Search", NAV[room]);
+                cell.fg == th().bright && cell.modifier.contains(Modifier::BOLD)
+            };
+            assert!(lit(&mut gui), "{:?}: the row lights under the pointer", NAV[room]);
+            gui.act(Act::More(Tab::Files, 1));
+            assert!(actions::modal_open(&gui), "{:?}: the sheet is up", NAV[room]);
+            gui.ui.pointer = Some(Position { x: 4, y: 3 });
+            assert!(!lit(&mut gui), "{:?}: under the sheet it does not", NAV[room]);
+            assert_eq!(gui.ui.pointer, Some(Position { x: 4, y: 3 }), "the sheet gets the pointer back");
+        }
+    }
+
+    /// Under the mini player the room is not drawn, so no press starts a
+    /// clip there — `l`, `L` or a slot's act — and Space stays main's
+    /// (peer-recs contract §1.8, the mini-player contract).
+    #[test]
+    fn the_mini_player_starts_no_clip() {
+        use crate::api::peer_recs_door::PeerRecsCmd;
+        let _en = peer_recs::kit::english();
+        let (mut gui, _) = peer_room();
+        // A lead held while the room was drawn.
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        draw_sized(&mut gui, 80, 20);
+        draw_sized(&mut gui, 80, 20);
+        gui.pending.clear();
+        for c in ['l', 'L'] {
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        gui.act(Act::Peer(peer_recs::PeerAct::Slot(0)));
+        gui.act(Act::Peer(peer_recs::PeerAct::PreviewAll));
+        let resolve = |c: &PeerRecsCmd| matches!(c, PeerRecsCmd::Preview { .. });
+        let resolves = door(&gui.pending).iter().filter(|c| resolve(c)).count();
+        assert_eq!(resolves, 0, "nothing resolves: {:?}", gui.pending);
+        let plays = gui.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::AsidePlay { .. })));
+        assert!(!plays, "nothing plays: {:?}", gui.pending);
+        assert!(!gui.app.peer_recs_clip_live(), "no clip session");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!gui.app.peer_recs_clip_live(), "Space is main's");
+        // Drawn again, the same keys play (the slot's act stowed the hand).
+        draw(&mut gui);
+        gui.pending.clear();
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let resolve = |c: &PeerRecsCmd| matches!(c, PeerRecsCmd::Preview { .. });
+        let resolves = door(&gui.pending).iter().filter(|c| resolve(c)).count();
+        assert_eq!(resolves, 1, "drawn, `l` resolves its lead: {:?}", gui.pending);
+    }
+
+    /// A server switch whose `Connected` lands while another screen is up
+    /// closes the visit and reopens nothing there: back on the Library the
+    /// drawn room opens a fresh visit on the new server, and its controls
+    /// work (peer-recs contract §1.1.8).
+    #[test]
+    fn a_switch_landed_off_the_library_reopens_the_room_on_return() {
+        use crate::api::peer_recs_door::PeerRecsCmd;
+        let _en = peer_recs::kit::english();
+        let (mut gui, _) = peer_room();
+        let visit = gui.app.peer_recs_visit();
+        gui.act(Act::Screen(Screen::NowPlaying));
+        draw(&mut gui);
+        gui.app.shed_server_state();
+        gui.reopen_room();
+        gui.pending.clear();
+        gui.act(Act::Screen(Screen::Library));
+        draw(&mut gui);
+        let asks = door(&gui.pending);
+        assert!(asks.iter().any(|c| matches!(c, PeerRecsCmd::Taste { .. })), "a taste ask: {asks:?}");
+        assert!(asks.iter().any(|c| matches!(c, PeerRecsCmd::Peers { .. })), "a poll: {asks:?}");
+        assert!(gui.app.peer_recs_visit() > visit, "a fresh visit");
+        answer_opening(&mut gui);
+        draw(&mut gui);
+        assert!(!gui.app.peer_recs_leads().is_empty(), "the new server's leads land");
+        gui.pending.clear();
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        let asks = door(&gui.pending);
+        assert!(asks.iter().any(|c| matches!(c, PeerRecsCmd::Taste { .. })), "R asks: {asks:?}");
+        // A kept visit, another screen and back on the same session, is not
+        // reopened.
+        let visit = gui.app.peer_recs_visit();
+        gui.act(Act::Screen(Screen::NowPlaying));
+        draw(&mut gui);
+        gui.act(Act::Screen(Screen::Library));
+        draw(&mut gui);
+        assert_eq!(gui.app.peer_recs_visit(), visit, "the visit is kept");
+    }
+
+    /// Esc with the room's window list or seeds modal up over a standing
+    /// Sonic pick closes the modal first; the next Esc lets the pick go,
+    /// and no stale modal of the room is left to hold the pointer
+    /// elsewhere (one Esc, one layer).
+    #[test]
+    fn esc_closes_the_rooms_modal_before_a_standing_pick() {
+        let _en = peer_recs::kit::english();
+        for open in ['e', 'w'] {
+            let (mut gui, _) = peer_room();
+            gui.app.capture = Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::Start));
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(open), KeyModifiers::NONE));
+            assert!(peer_recs::modal_open(&gui), "{open}: the modal is up");
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(!peer_recs::modal_open(&gui), "{open}: Esc closed the modal");
+            assert!(gui.peer_recs.bar.seeds.is_none() && gui.peer_recs.bar.menu.is_none(), "{open}");
+            let sonic = matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
+            assert!(sonic, "{open}: the pick stands");
+            assert_eq!(gui.active, PEER_RECS_NAV, "{open}");
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert_eq!((gui.app.capture, gui.active), (None, SONIC_NAV), "{open}: the pick goes home");
+            assert!(!gui.modal_open(), "{open}: nothing holds the pointer");
+        }
+        // A modal left standing by a room change that skipped the nav
+        // holds nothing off the room.
+        let (mut gui, _) = peer_room();
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(gui.peer_recs.bar.seeds.is_some());
+        gui.active = SONIC_NAV;
+        assert!(!peer_recs::modal_open(&gui), "off the room, no modal of the room's");
+        assert!(!gui.modal_open());
+    }
+
+    /// The room is not drawn — another screen, the mini player, a nav move
+    /// away — and its clip ends with main restored, once each (peer-recs
+    /// contract §1.8).
+    #[test]
+    fn the_room_not_drawn_ends_the_clip() {
+        let _en = peer_recs::kit::english();
+        let restore = vec![AudioCmd::AsideStop { ticket: None, restore: true }];
+        // Another screen.
+        let mut gui = clip_room();
+        gui.act(Act::Screen(Screen::NowPlaying));
+        draw(&mut gui);
+        draw(&mut gui);
+        assert_eq!(aside_stops(&gui.pending), restore, "a screen switch");
+        assert!(!gui.app.peer_recs_clip_live());
+        // The mini player.
+        let mut gui = clip_room();
+        draw_sized(&mut gui, 80, 20);
+        draw_sized(&mut gui, 80, 20);
+        assert_eq!(aside_stops(&gui.pending), restore, "the mini player");
+        // A nav move away.
+        let mut gui = clip_room();
+        gui.act(Act::Nav(FILES_NAV));
+        draw(&mut gui);
+        draw(&mut gui);
+        assert_eq!(aside_stops(&gui.pending), restore, "a nav leave");
+    }
+
+    /// A pick's way home acts `Screen(Library)` from the Library (Discover's
+    /// `returned` does, and the room's): that is no cover, and the clip it
+    /// finds sounding plays on.
+    #[test]
+    fn a_return_to_the_library_by_returned_is_not_a_cover() {
+        let _en = peer_recs::kit::english();
+        let mut gui = clip_room();
+        gui.act(Act::Screen(Screen::Library));
+        peer_recs::returned(&mut gui);
+        draw(&mut gui);
+        assert!(aside_stops(&gui.pending).is_empty(), "nothing ended: {:?}", gui.pending);
+        assert!(gui.app.peer_recs_clip_live(), "the clip plays on");
+        assert_eq!(gui.app.peer_recs.watch, crate::tui::app::peer_recs::PeerRecsWatch::Shown);
+    }
+
+    /// A seeds-modal pick armed from the room goes home to the room — when
+    /// it lands, when Esc lets it go and by the banner's [X] — and
+    /// Discover's own pick still goes home to Discover (build plan D32).
+    #[test]
+    fn a_seed_pick_returns_to_the_room_that_armed_it() {
+        use discover::taste_bar::BarRoom;
+        let _en = peer_recs::kit::english();
+        let (mut gui, _) = peer_room();
+        let arm = |gui: &mut Gui| {
+            gui.app.files.set(vec![Entry::Track {
+                label: "Night Drive".into(),
+                track: Box::new(track("music/a.mp3", "Night Drive", 252.0)),
+            }]);
+            <peer_recs::Room as BarRoom>::choose_song(gui);
+            assert!(peer_recs::picking(&gui.app), "the room's pick is out");
+            assert_eq!(gui.active, FILES_NAV, "over the Files room");
+        };
+        arm(&mut gui);
+        let banner = peer_recs::banner(&gui).expect("the room's banner");
+        let shown = capture_banner(&gui).expect("a banner over the pick");
+        assert!(banner.starts_with(&shown), "the shell draws the room's banner: {shown:?}");
+        draw(&mut gui);
+        assert_eq!(gui.app.peer_recs.watch, crate::tui::app::peer_recs::PeerRecsWatch::Covered, "a cover");
+        // It lands.
+        gui.act(Act::PaneRow(List::Files, 0, RowVerb::Open));
+        assert_eq!(gui.app.capture, None, "the pick landed");
+        assert_eq!((gui.screen, gui.active), (Screen::Library, PEER_RECS_NAV), "home to the room");
+        // Esc lets it go.
+        arm(&mut gui);
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!((gui.app.capture, gui.active), (None, PEER_RECS_NAV), "Esc");
+        // The banner's [X].
+        arm(&mut gui);
+        gui.act(Act::CaptureCancel);
+        assert_eq!((gui.app.capture, gui.active), (None, PEER_RECS_NAV), "[X]");
+        // Discover's own pick goes home to Discover.
+        gui.act(Act::Nav(DISCOVER_NAV));
+        <discover::Room as BarRoom>::choose_song(&mut gui);
+        assert!(!peer_recs::picking(&gui.app), "not the room's");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!((gui.app.capture, gui.active), (None, DISCOVER_NAV), "Discover's pick, home to Discover");
+    }
+
+    /// The room's row (or `R`) while its pick stands lets the pick go and
+    /// comes back to the visit the pick covered, asking new seeds; another
+    /// room meanwhile covers the visit, it does not end it. Discover's row
+    /// lets the pick go too, and that visit ends (build plan D32).
+    #[test]
+    fn the_nav_back_to_the_room_while_picking_cancels_the_pick() {
+        use crate::api::peer_recs_door::PeerRecsCmd;
+        use crate::tui::app::peer_recs::PeerRecsWatch;
+        use discover::taste_bar::BarRoom;
+        let _en = peer_recs::kit::english();
+        let (mut gui, _) = peer_room();
+        let visit = gui.app.peer_recs_visit();
+        <peer_recs::Room as BarRoom>::choose_song(&mut gui);
+        gui.act(Act::Nav(ALBUMS_NAV));
+        draw(&mut gui);
+        assert!(peer_recs::picking(&gui.app), "the pick stands in another room");
+        assert_eq!(gui.app.peer_recs.watch, PeerRecsWatch::Covered, "the visit is covered, not ended");
+        gui.pending.clear();
+        gui.act(Act::Nav(PEER_RECS_NAV));
+        assert_eq!(gui.app.capture, None, "the pick let go");
+        assert_eq!((gui.screen, gui.active), (Screen::Library, PEER_RECS_NAV));
+        assert_eq!(gui.app.peer_recs_visit(), visit, "the visit it covered");
+        assert!(door(&gui.pending).iter().any(|c| matches!(c, PeerRecsCmd::Taste { .. })), "new seeds: {:?}", gui.pending);
+        draw(&mut gui);
+        assert_eq!(gui.app.peer_recs.watch, PeerRecsWatch::Shown);
+        // `R` from the pick's Files room does the same.
+        <peer_recs::Room as BarRoom>::choose_song(&mut gui);
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert_eq!((gui.app.capture, gui.active), (None, PEER_RECS_NAV), "R");
+        assert_eq!(gui.app.peer_recs_visit(), visit);
+        // Discover's row: the pick goes, and the visit it covered ends.
+        <peer_recs::Room as BarRoom>::choose_song(&mut gui);
+        gui.act(Act::Nav(DISCOVER_NAV));
+        assert_eq!((gui.app.capture, gui.active), (None, DISCOVER_NAV));
+        assert_eq!(gui.app.peer_recs.watch, PeerRecsWatch::Away, "the visit ended");
+    }
+
+    /// While the room is up every pass draws (`moving`): its band's bar
+    /// moves and its poll ticks, and the first frame without it ends a clip
+    /// (peer-recs contract §1.8). Off the room, the loop rests as before.
+    #[test]
+    fn the_room_keeps_frames_coming_while_up() {
+        let _en = peer_recs::kit::english();
+        let mut gui = peer_recs::kit::peer_gui();
+        draw(&mut gui);
+        assert!(!moving(&mut gui), "Files at rest");
+        gui.act(Act::Nav(PEER_RECS_NAV));
+        draw(&mut gui);
+        assert!(moving(&mut gui), "the room up");
+        gui.act(Act::Nav(FILES_NAV));
+        draw(&mut gui);
+        assert!(!moving(&mut gui), "left");
     }
 
     #[test]

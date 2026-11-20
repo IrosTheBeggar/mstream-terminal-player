@@ -2,6 +2,13 @@
 //! one sheet for a song wherever it is met, its rating on the badge row,
 //! the add-to-playlist picker, Song info, and the queue panel's grip drag
 //! and keyboard reach. The verbs themselves are the shared App's.
+//!
+//! The same sheet takes a Peer recs lead in its lead form (peer-recs
+//! contract §1.9): a lead has no file and is never "own", so it draws no
+//! cover and no stars, and its rows are Preview, Get it (one per acquire
+//! plug-in), Open elsewhere… and Copy title, each hidden when its gate
+//! fails. The sheet holds its lead by key and finds it again in the room's
+//! list on every draw, key and act (build plan D30).
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent};
@@ -11,10 +18,13 @@ use rust_i18n::t;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-use crate::api::types::{Track, TrackMetadata};
-use crate::kit::theme::{legacy_conhost, th};
+use crate::api::types::{JobMark, JobOutcome, TasteLead, Track, TrackMetadata};
+use crate::kit::clipboard::Copied;
+use crate::kit::theme::{busy_glyph, legacy_conhost, th};
 use crate::kit::{Surface, dim, modal_close, modal_frame_on, table_view};
 use crate::tui::app::keep::{KeepPin, KeepTarget};
+use crate::tui::app::peer_recs::previews::Slot as Clip;
+use crate::tui::app::peer_recs::rules;
 use crate::tui::app::{Action, App, Entry, Focus, Origin, PlaylistNames, Tab};
 
 use super::cover::{Pace, Slot};
@@ -72,6 +82,16 @@ pub(crate) struct Sheet {
     pub item: Option<KeepTarget>,
     /// Open elsewhere's list hangs from its row (clause 140).
     pub links: bool,
+    /// A Peer recs lead the sheet is for (peer-recs contract §1.9): its
+    /// index in the room's shown list and its key. The key is the truth:
+    /// [`refind`] follows the lead to its new index, or closes the sheet
+    /// once it left the list (build plan D30). `track` is then a stand-in
+    /// built from the lead's words, with no file, and every track path
+    /// skips it.
+    pub lead: Option<(usize, String)>,
+    /// The action a lead sheet's cursor is on: the truth `row` is found from again when the
+    /// gated rows come or go under it ([`refind`], build plan D30). `None` on a track's sheet.
+    pub on: Option<SheetAction>,
 }
 
 /// The add-to-playlist picker: its cursor, and the name being typed for a
@@ -96,6 +116,12 @@ pub(crate) enum SheetAction {
     Info,
     OpenElsewhere,
     Remove,
+    /// A lead's rows (peer-recs contract §1.9): its preview clip, Get it
+    /// through the acquire plug-in at its place in the room's Get it rows,
+    /// and the lead's `Artist - Title` copied.
+    Preview,
+    GetIt(usize),
+    CopyTitle,
 }
 
 impl SheetAction {
@@ -109,6 +135,11 @@ impl SheetAction {
             SheetAction::Info => t!("gui.act.info").to_string(),
             SheetAction::OpenElsewhere => super::keep::ell(&t!("gui.act.open_elsewhere")),
             SheetAction::Remove => t!("gui.act.remove").to_string(),
+            SheetAction::Preview => t!("gui.peer_recs.preview").to_string(),
+            // No ellipsis: the row starts the job at once (peer-recs
+            // contract §1.9).
+            SheetAction::GetIt(_) => t!("gui.peer_recs.get_it").to_string(),
+            SheetAction::CopyTitle => t!("gui.peer_recs.copy").to_string(),
         }
     }
 }
@@ -170,6 +201,10 @@ pub(crate) fn modal_open(gui: &Gui) -> bool {
 /// one asked of its server (clause 8). `from` is the pane the row is drawn
 /// in — `None` for a queue item and the playing card.
 pub(crate) fn open_for(gui: &mut Gui, origin: Origin, track: Track, queue_row: Option<usize>, from: Option<Tab>) {
+    // A lead's sheet it replaces lets the room's sheet state go.
+    if gui.actions.sheet.as_ref().is_some_and(|s| s.lead.is_some()) {
+        close(gui);
+    }
     let effects = gui.app.fetch_track_info(&origin, &track.filepath);
     gui.pend(effects);
     gui.actions.picker = None;
@@ -184,7 +219,174 @@ pub(crate) fn open_for(gui: &mut Gui, origin: Origin, track: Track, queue_row: O
     let asked = gui.app.keep_ask_owner(&origin);
     gui.pend(asked);
     let item = gui.app.keep_track(&origin, &track, from).filter(|target| !gui.app.keep_choices(target.clone()).is_empty());
-    gui.actions.sheet = Some(Sheet { origin, track, queue_row, row: 0, keep: None, item, links: false });
+    let sheet = Sheet { origin, track, queue_row, row: 0, keep: None, item, links: false, lead: None, on: None };
+    gui.actions.sheet = Some(sheet);
+}
+
+// ── The lead form (peer-recs contract §1.9) ─────────────────────────────────
+
+/// The sheet on the Peer recs lead at `index` in the room's shown list:
+/// Enter or `m` on a held row, a row's click or right click
+/// (`on_get_it` false), and the band's `[ get it ]` (true). Both start on
+/// Get it, else Open elsewhere…, else Copy title, so Enter never plays; the
+/// band draws `[ get it ]` only with Get it's gate, so its press lands on
+/// Get it by that same rule. The room's sheet state (the job lookup) is
+/// asked now, keyed by the lead's key.
+pub(crate) fn open_lead(gui: &mut Gui, index: usize, on_get_it: bool) {
+    let Some(lead) = gui.app.peer_recs_leads().get(index) else { return };
+    let key = rules::lead_key(lead);
+    let track = stand_in(lead);
+    let same = gui.actions.sheet.as_ref().and_then(|s| s.lead.as_ref()).is_some_and(|(_, open)| *open == key);
+    if gui.actions.sheet.is_some() && !same {
+        close(gui);
+    }
+    let effects = gui.app.peer_recs_sheet_open(index);
+    gui.pend(effects);
+    gui.actions.picker = None;
+    gui.actions.info = false;
+    let rows = lead_rows(&gui.app, false);
+    let row = start_row(&rows, on_get_it);
+    if same {
+        if let Some(sheet) = gui.actions.sheet.as_mut() {
+            sheet.lead = Some((index, key));
+            if !sheet.links {
+                sheet.row = row;
+                sheet.on = rows.get(row).copied();
+            }
+        }
+        return;
+    }
+    let origin = gui.app.origin();
+    let lead = Some((index, key));
+    let on = rows.get(row).copied();
+    gui.actions.sheet =
+        Some(Sheet { origin, track, queue_row: None, row, keep: None, item: None, links: false, lead, on });
+}
+
+/// The lead the open sheet is for, as its index in the room's shown list
+/// now: found again by its key, so a reshuffle under the sheet is read
+/// where the lead went. `None` for a track's sheet, no sheet, a lead that
+/// has left the list, or a room no longer in front (see [`refind`]).
+pub(crate) fn lead_open(gui: &Gui) -> Option<usize> {
+    let (_, key) = gui.actions.sheet.as_ref()?.lead.as_ref()?;
+    if gui.active != super::PEER_RECS_NAV {
+        return None;
+    }
+    gui.app.peer_recs_lead_index(key)
+}
+
+/// A lead's words as a track, for the sheet's `track`: no file, no cover,
+/// no rating. Nothing plays, rates, adds or asks the server about it.
+fn stand_in(lead: &TasteLead) -> Track {
+    Track {
+        filepath: String::new(),
+        metadata: TrackMetadata {
+            title: lead.title.clone(),
+            artist: lead.artist.clone(),
+            album: lead.album.clone(),
+            duration: lead.duration,
+            ..TrackMetadata::default()
+        },
+    }
+}
+
+/// A lead's rows (peer-recs contract §1.9), each only while its gate holds,
+/// hidden, never grey: Preview with an audio device and a preview plug-in,
+/// one Get it per acquire plug-in (the copy plug-in's excepted) with jobs
+/// allowed and a destination, Open elsewhere… with a links plug-in (or
+/// while its list already hangs), and Copy title always.
+fn lead_rows(app: &App, links: bool) -> Vec<SheetAction> {
+    let mut rows = Vec::new();
+    if app.peer_recs_preview_offered() {
+        rows.push(SheetAction::Preview);
+    }
+    rows.extend((0..app.peer_recs_get_it_rows().len()).map(SheetAction::GetIt));
+    if links || app.peer_recs_links_on() {
+        rows.push(SheetAction::OpenElsewhere);
+    }
+    rows.push(SheetAction::CopyTitle);
+    rows
+}
+
+/// Where a lead's cursor starts: Get it, else Open elsewhere…, else Copy
+/// title (peer-recs contract §1.9). The band's `[ get it ]` asks for Get it
+/// itself, which is the same row whenever the band could draw its button.
+fn start_row(rows: &[SheetAction], on_get_it: bool) -> usize {
+    let _ = on_get_it;
+    let find = |want: SheetAction| rows.iter().position(|a| *a == want);
+    rows.iter()
+        .position(|a| matches!(a, SheetAction::GetIt(_)))
+        .or_else(|| find(SheetAction::OpenElsewhere))
+        .or_else(|| find(SheetAction::CopyTitle))
+        .unwrap_or(0)
+}
+
+/// A row the cursor can rest on: every lead row but a muted Preview, whose
+/// lead has no preview this visit (it reads `No preview`, inert).
+fn takes_cursor(app: &App, index: usize, action: SheetAction) -> bool {
+    !(action == SheetAction::Preview && app.peer_recs_slot(index) == Clip::Muted)
+}
+
+/// The next row from `row` the cursor can rest on, `dir` up or down; the
+/// cursor stays where there is none that way.
+fn lead_step(app: &App, index: usize, rows: &[SheetAction], row: usize, dir: i64) -> usize {
+    let mut at = row as i64 + dir;
+    while (0..rows.len() as i64).contains(&at) {
+        if takes_cursor(app, index, rows[at as usize]) {
+            return at as usize;
+        }
+        at += dir;
+    }
+    row
+}
+
+/// The lead sheet's lead found again by its key (build plan D30), at the
+/// start of every draw, key and act on it. Found at another index, the
+/// sheet follows it, and the room's sheet state (keyed by the same key)
+/// stands. Gone from the list, the sheet closes, and so it does once the
+/// room is no longer the room in front (its yield to Files when the gate
+/// goes, build plan D31): the visit and its list are over then, though the
+/// last answer still stands in the App. The cursor stays on its action as
+/// the gated rows come and go under it; when its own row went, it lands by
+/// the start rule (never on Preview). It is held on a row that takes it: a
+/// muted Preview passes it on. False once the sheet closed; true for a
+/// track's sheet.
+fn refind(gui: &mut Gui) -> bool {
+    let Some((_, key)) = gui.actions.sheet.as_ref().and_then(|s| s.lead.clone()) else { return true };
+    let found = (gui.active == super::PEER_RECS_NAV).then(|| gui.app.peer_recs_lead_index(&key)).flatten();
+    let Some(index) = found else {
+        close(gui);
+        return false;
+    };
+    let links = gui.actions.sheet.as_ref().is_some_and(|s| s.links);
+    let rows = lead_rows(&gui.app, links);
+    let Some(sheet) = gui.actions.sheet.as_mut() else { return false };
+    sheet.lead = Some((index, key));
+    let found = sheet.on.and_then(|on| rows.iter().position(|a| *a == on));
+    let mut row = found.unwrap_or_else(|| start_row(&rows, false));
+    if !takes_cursor(&gui.app, index, rows[row]) {
+        row = lead_step(&gui.app, index, &rows, row, 1);
+    }
+    sheet.row = row;
+    sheet.on = Some(rows[row]);
+    true
+}
+
+/// The lead index of the open sheet, as [`refind`] last placed it.
+fn lead_index(gui: &Gui) -> Option<usize> {
+    gui.actions.sheet.as_ref()?.lead.as_ref().map(|(index, _)| *index)
+}
+
+/// Copy `text` through the kit's clipboard and say so at the bar's note,
+/// dim (peer-recs contract §1.13): `Copied` for the clipboard and for OSC
+/// 52, which nothing confirms, `Couldn't copy` when no route took it.
+fn copy_noted(gui: &mut Gui, text: Option<String>) {
+    let Some(text) = text else { return };
+    let words = match crate::kit::clipboard::copy(&text) {
+        Copied::Clipboard | Copied::Terminal => t!("gui.peer_recs.copied"),
+        Copied::Failed => t!("gui.peer_recs.copy_failed"),
+    };
+    gui.note = Some((words.to_string(), false));
 }
 
 /// A browse row's `[⋯]`, `m` or right click: the pane's track at `index`.
@@ -243,6 +445,9 @@ fn open_by_key(gui: &mut Gui) {
 /// The track the sheet shows: the server's full block once it landed, the
 /// row's own until then.
 fn current_track<'a>(app: &'a App, sheet: &'a Sheet) -> &'a Track {
+    if sheet.lead.is_some() {
+        return &sheet.track;
+    }
     match &app.track_info {
         Some(info) if info.filepath == sheet.track.filepath => info,
         _ => &sheet.track,
@@ -360,16 +565,24 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // The sheet's cover goes on record while the sheet stands, so the
     // cache keeps it (performance audit #91); a comparison per frame, and
     // a name only when the sheet opens, changes track or closes.
-    let cover = gui.actions.sheet.as_ref().and_then(|sheet| current_track(&gui.app, sheet).metadata.album_art.as_deref());
+    let cover = gui
+        .actions
+        .sheet
+        .as_ref()
+        .filter(|sheet| sheet.lead.is_none())
+        .and_then(|sheet| current_track(&gui.app, sheet).metadata.album_art.as_deref());
     if !gui.app.sheet_on_view_is(cover) {
         let cover = cover.map(str::to_string);
         gui.app.set_sheet_on_view(cover);
     }
     gui.discover.links.anchor = None;
-    if gui.actions.sheet.is_none() {
+    if gui.actions.sheet.is_none() || !refind(gui) {
         return;
     }
-    draw_sheet(frame, gui, area);
+    match lead_index(gui) {
+        Some(index) => draw_lead(frame, gui, area, index),
+        None => draw_sheet(frame, gui, area),
+    }
     if gui.actions.picker.is_some() {
         draw_picker(frame, gui, area);
     } else if gui.actions.info {
@@ -545,6 +758,148 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
 }
 
+/// The sheet's lead form (peer-recs contract §1.9; DS M3 and L1–L4): the
+/// track sheet's frame, `[X]` and rows, with a lead's head and rows. No
+/// cover (a lead has no art) and no stars (a lead is never "own"): the
+/// title BOLD, the byline and the length dim, then `from {peer}` and, only
+/// while the peers poll says so, `• online`.
+fn draw_lead(frame: &mut Frame, gui: &mut Gui, area: Rect, index: usize) {
+    let Gui { app, actions, ui, discover, .. } = &mut *gui;
+    let Some(sheet) = actions.sheet.as_ref() else { return };
+    let Some(lead) = app.peer_recs_leads().get(index) else { return };
+    ui.click(area, Act::SheetClose);
+    let rows = lead_rows(app, sheet.links);
+    let width: u16 = 66.min(area.width.saturating_sub(2)).max(44);
+    let height = (3 + 1 + 1 + rows.len() + 1) as u16 + 2;
+    let inner = modal_frame_on(frame, ui, area, width, height, th().accent);
+    guard_frame(ui, inner);
+    modal_close(frame, ui, inner, Act::SheetClose);
+
+    let tx = inner.x + 1;
+    let text_w = inner.right().saturating_sub(tx + 4) as usize;
+    let words = |v: &Option<String>| v.as_deref().map(str::trim).filter(|w| !w.is_empty()).map(str::to_string);
+    let title = words(&lead.title).unwrap_or_default();
+    put(frame, tx, inner.y, &super::bar::clip(&title, text_w), Style::default().add_modifier(Modifier::BOLD));
+    let byline = [words(&lead.artist), words(&lead.album)].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+    if !byline.is_empty() {
+        put(frame, tx, inner.y + 1, &super::bar::clip(&byline, text_w), dim());
+    }
+    // The spec line is the length alone: a lead has no format.
+    if let Some(seconds) = lead.duration.filter(|d| d.is_finite() && *d > 0.0) {
+        put(frame, tx, inner.y + 2, &super::bar::fmt_time(seconds), dim());
+    }
+    // The badge row: the peer that has it, then, 3 cells on, `• online`
+    // while the latest poll says the peer is online, one cell short of the
+    // frame. A peer's label is a stranger's, of any length: it is clipped
+    // to what the row has left once the mark's cells are kept, so both
+    // always stand.
+    let by = inner.y + 3;
+    if let Some(peer) = words(&lead.peer.label).or_else(|| words(&lead.peer.name)) {
+        let online = lead.peer.endpoint_id.as_deref().is_some_and(|id| app.peer_recs_online(id));
+        let online_word = t!("gui.act.online");
+        let mark_w = 1 + if online { 3 + 2 + crate::kit::width(&online_word) } else { 0 };
+        let row_w = usize::from(inner.right().saturating_sub(tx));
+        let frame_w = crate::kit::width(&t!("gui.act.from_server", server = ""));
+        let label_w = row_w.saturating_sub(mark_w + frame_w);
+        let from = t!("gui.act.from_server", server = super::bar::clip(&peer, label_w)).to_string();
+        let from_w = crate::kit::width(&from) as u16;
+        if label_w > 0 && tx + from_w < inner.right() {
+            put(frame, tx, by, &from, dim());
+            let ox = tx + from_w + 3;
+            if online && ox + 2 + (crate::kit::width(&online_word) as u16) < inner.right() {
+                put(frame, ox, by, super::bullet_glyph(), Style::default().fg(th().ok));
+                put(frame, ox + 2, by, &online_word, dim());
+            }
+        }
+    }
+
+    let get_its = app.peer_recs_get_it_rows();
+    for (i, action) in rows.iter().enumerate() {
+        let y = inner.y + 5 + i as u16;
+        let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        let open_list = *action == SheetAction::OpenElsewhere && sheet.links;
+        let live = takes_cursor(app, index, *action);
+        let is_sel = sheet.row == i && !open_list && live;
+        let hover = live && ui.hovers(rect);
+        if is_sel {
+            frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
+        }
+        let on = sel().add_modifier(Modifier::BOLD);
+        let style = match (is_sel, hover, *action) {
+            (true, _, _) => on,
+            (false, true, _) => bright_bold(),
+            (false, false, _) if open_list => accent().add_modifier(Modifier::BOLD),
+            // Get it stands out in the accent at rest, as Keep a copy… does.
+            (false, false, SheetAction::GetIt(_)) => accent(),
+            (false, false, _) => Style::default(),
+        };
+        match *action {
+            SheetAction::Preview => {
+                // The glyph follows the clip, at the row's first cell; the
+                // word 3 cells on. Muted, the row reads `▸ No preview` dim.
+                let (glyph, token) = match app.peer_recs_slot(index) {
+                    Clip::Idle => (super::forward_glyph(), accent()),
+                    Clip::Muted => (super::forward_glyph(), dim()),
+                    Clip::Busy => (busy_glyph(), Style::default().fg(th().gold)),
+                    Clip::Playing => (super::bar::play_glyphs(false).1, accent().add_modifier(Modifier::BOLD)),
+                    Clip::Paused => (super::forward_glyph(), accent().add_modifier(Modifier::BOLD)),
+                };
+                let (word, word_style) = if live {
+                    (action.label(), style)
+                } else {
+                    (t!("gui.peer_recs.no_preview").to_string(), dim())
+                };
+                put(frame, inner.x + 1, y, glyph, if is_sel { on } else { token });
+                let room = inner.width.saturating_sub(5) as usize;
+                put(frame, inner.x + 4, y, &super::bar::clip(&word, room), word_style);
+            }
+            SheetAction::GetIt(n) => {
+                let label = action.label();
+                put(frame, inner.x + 1, y, &label, style);
+                let row = get_its.get(n);
+                // With several acquire plug-ins, each row names its own, dim
+                // 2 cells after the word (DS §8.6).
+                if let Some(name) = row.and_then(|r| r.title.as_deref()) {
+                    let x = inner.x + 1 + crate::kit::width(&label) as u16 + 2;
+                    let room = inner.right().saturating_sub(x + 16) as usize;
+                    put(frame, x, y, &super::bar::clip(name, room), if is_sel { on } else { dim() });
+                }
+                // The job's word stands at the right, ending 2 cells before
+                // the border: `downloading…` for a running job (Get it is
+                // never a federation copy), every other mark in its own
+                // word and token. Not while Open elsewhere's list hangs,
+                // which would cut it. A finished job whose result is the
+                // plug-in's own reads kept: a Get it lands in the
+                // collection destination (the web's "done").
+                let mark = row.and_then(|r| r.mark.as_ref()).and_then(|outcome| match outcome {
+                    JobOutcome::Done => Some(JobMark::Kept),
+                    other => other.mark(),
+                });
+                if let Some(mark) = mark.filter(|_| !sheet.links) {
+                    let word = match mark {
+                        JobMark::Copying => super::keep::ell(&t!("gui.peer_recs.downloading")),
+                        other => super::keep::mark_word(other),
+                    };
+                    let x = inner.right().saturating_sub(1 + crate::kit::width(&word) as u16);
+                    put(frame, x, y, &word, if is_sel { on } else { super::keep::mark_style(mark) });
+                }
+            }
+            _ => {
+                let label = action.label();
+                put(frame, inner.x + 1, y, &super::bar::clip(&label, inner.width.saturating_sub(2) as usize), style);
+                // Where Open elsewhere's list hangs from (clause 140).
+                if open_list {
+                    discover.links.anchor = Some((inner, y, inner.x + 1 + crate::kit::width(&label) as u16));
+                }
+            }
+        }
+        // A muted Preview takes no press: the frame's guard holds its cells.
+        if live {
+            ui.click(rect, Act::SheetVerb(*action));
+        }
+    }
+}
+
 fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let Gui { app, actions, ui, .. } = &mut *gui;
     let Some(sheet) = actions.sheet.as_ref() else { return };
@@ -649,12 +1004,25 @@ fn close(gui: &mut Gui) {
     if gui.actions.sheet.as_ref().is_some_and(|s| s.links) {
         gui.app.links_close();
     }
+    // A lead's sheet: the room's sheet state goes, and a re-ask the sheet
+    // held runs now (peer-recommendations plan §3.5 R4).
+    if gui.actions.sheet.as_ref().is_some_and(|s| s.lead.is_some()) {
+        let effects = gui.app.peer_recs_sheet_close();
+        gui.pend(effects);
+    }
     gui.actions.sheet = None;
     gui.actions.picker = None;
     gui.actions.info = false;
 }
 
 fn run(gui: &mut Gui, action: SheetAction) {
+    if !refind(gui) {
+        return;
+    }
+    if let Some(index) = lead_index(gui) {
+        run_lead(gui, action, index);
+        return;
+    }
     let Some(sheet) = gui.actions.sheet.clone() else { return };
     let track = current_track(&gui.app, &sheet).clone();
     match action {
@@ -714,11 +1082,57 @@ fn run(gui: &mut Gui, action: SheetAction) {
             }
             close(gui);
         }
+        // A lead's rows: never on a track's sheet.
+        SheetAction::Preview | SheetAction::GetIt(_) | SheetAction::CopyTitle => {}
+    }
+}
+
+/// A lead's row, its lead at `index` as [`refind`] just found it. Preview
+/// toggles the clip and Get it starts its job, the sheet staying; Open
+/// elsewhere… hangs Keep's list fed the raw lead (build plan D7); Copy
+/// title copies and closes. A track's verbs do nothing here.
+fn run_lead(gui: &mut Gui, action: SheetAction, index: usize) {
+    match action {
+        SheetAction::Preview => {
+            // Only while the room is drawn under the sheet (peer-recs contract §1.8).
+            let effects = super::peer_recs::press(gui, index, crate::clock::Instant::now());
+            gui.pend(effects);
+        }
+        SheetAction::GetIt(row) => {
+            let effects = gui.app.peer_recs_get_it(row);
+            gui.pend(effects);
+        }
+        SheetAction::OpenElsewhere => {
+            let effects = gui.app.peer_recs_open_elsewhere(index);
+            if effects.is_empty() {
+                return;
+            }
+            gui.pend(effects);
+            // Opened by the pointer: nothing held (the keys hold the
+            // first link, `lead_key`).
+            gui.discover.links.reset();
+            if let Some(sheet) = gui.actions.sheet.as_mut() {
+                sheet.links = true;
+            }
+        }
+        SheetAction::CopyTitle => {
+            let text = gui.app.peer_recs_copy_text(index);
+            copy_noted(gui, text);
+            close(gui);
+        }
+        SheetAction::PlayNow
+        | SheetAction::AddNext
+        | SheetAction::AddEnd
+        | SheetAction::AddPlaylist
+        | SheetAction::KeepCopy
+        | SheetAction::Info
+        | SheetAction::Remove => {}
     }
 }
 
 fn rate(gui: &mut Gui, rating: u32) {
-    let Some(sheet) = gui.actions.sheet.clone() else { return };
+    // A lead is never "own": it has no file to rate.
+    let Some(sheet) = gui.actions.sheet.clone().filter(|s| s.lead.is_none()) else { return };
     let rating = (rating > 0).then_some(rating.min(10));
     // No copy of its own: the App's is what the sheet shows, so a refused
     // write's revert reaches the stars too (clause 11).
@@ -737,7 +1151,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::Rate(rating) => rate(gui, rating),
         Act::SheetClose => close(gui),
         Act::PickPlaylist(name) => {
-            if let Some(sheet) = gui.actions.sheet.clone() {
+            if let Some(sheet) = gui.actions.sheet.clone().filter(|s| s.lead.is_none()) {
                 let effects = gui.app.add_to_playlist(&sheet.origin, &sheet.track.filepath, &name);
                 gui.pend(effects);
             }
@@ -843,6 +1257,12 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         }
         return Some(false);
     }
+    if !refind(gui) {
+        return Some(false);
+    }
+    if let Some(index) = lead_index(gui) {
+        return lead_key(gui, key, index);
+    }
     let own = gui.actions.sheet.as_ref()?.origin.peer.is_none();
     let actions = actions_for(&gui.app, gui.actions.sheet.as_ref()?, own);
     let sheet = gui.actions.sheet.as_mut()?;
@@ -889,6 +1309,50 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     Some(false)
 }
 
+/// A lead sheet's keys (peer-recs contract §1.9): the track sheet's, less
+/// the stars and Keep a copy's `c` — a lead is never "own", so ← → and
+/// 0–5 rate nothing. ↑ ↓ pass over a muted Preview. Open elsewhere's list
+/// goes first while it hangs, as on a track's sheet. The room's own keys
+/// do nothing here: the Preview row is the clip's control.
+fn lead_key(gui: &mut Gui, key: KeyEvent, index: usize) -> Option<bool> {
+    let links = gui.actions.sheet.as_ref()?.links;
+    let rows = lead_rows(&gui.app, links);
+    let row = gui.actions.sheet.as_ref()?.row.min(rows.len() - 1);
+    let on_links_row = rows.get(row) == Some(&SheetAction::OpenElsewhere);
+    match key.code {
+        KeyCode::Esc | KeyCode::Left if links => {
+            if let Some(sheet) = gui.actions.sheet.as_mut() {
+                sheet.links = false;
+            }
+            gui.app.links_close();
+        }
+        KeyCode::Up if links => super::keep::links_walk(gui, -1),
+        KeyCode::Down if links => super::keep::links_walk(gui, 1),
+        KeyCode::Enter if links => super::keep::links_enter(gui),
+        // Enter or → on Open elsewhere… opens its list, the first link
+        // held.
+        KeyCode::Enter | KeyCode::Right if on_links_row => {
+            let quit = gui.act(Act::SheetVerb(SheetAction::OpenElsewhere));
+            if gui.actions.sheet.as_ref().is_some_and(|s| s.links) {
+                gui.discover.links.held = Some(0);
+            }
+            return Some(quit);
+        }
+        KeyCode::Esc => close(gui),
+        KeyCode::Up | KeyCode::Down => {
+            let dir = if key.code == KeyCode::Up { -1 } else { 1 };
+            let next = lead_step(&gui.app, index, &rows, row, dir);
+            if let Some(sheet) = gui.actions.sheet.as_mut() {
+                sheet.row = next;
+                sheet.on = Some(rows[next]);
+            }
+        }
+        KeyCode::Enter => return Some(gui.act(Act::SheetVerb(rows[row]))),
+        _ => {}
+    }
+    Some(false)
+}
+
 /// The queue panel's keys while it has the keyboard (clause 19).
 pub(crate) fn queue_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if !(gui.queue_open && gui.app.focus == Focus::Queue) {
@@ -901,6 +1365,9 @@ pub(crate) fn queue_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if super::playlists::modal_open(gui)
         || super::sonic::modal_open(gui)
         || (gui.screen == super::Screen::Library && gui.active == super::DISCOVER_NAV && super::discover::modal_open(gui))
+        || (gui.screen == super::Screen::Library
+            && gui.active == super::PEER_RECS_NAV
+            && super::peer_recs::modal_open(gui))
         || super::ytdl::modal_open(gui)
     {
         return None;
@@ -968,6 +1435,9 @@ pub(crate) fn tips(gui: &Gui) -> Option<String> {
         } else if gui.actions.sheet.as_ref().is_some_and(|s| s.links) {
             // Open elsewhere's list (clause 140).
             return Some(super::keep::links_tips(gui));
+        } else if gui.actions.sheet.as_ref().is_some_and(|s| s.lead.is_some()) {
+            // A lead's sheet (peer-recs contract §1.9): rows, choose, close.
+            t!("gui.tips.discover_sheet")
         } else if let Some(sheet) = keep {
             // A connected server's song: no rating keys; `c` while Keep a
             // copy stands (clause 119).
@@ -1384,5 +1854,735 @@ mod tests {
         assert_eq!(gui.app.queue.current, Some(1), "the playing row moved with its track");
         super::drop(&mut gui);
         assert!(gui.actions.drag.is_none());
+    }
+
+    // ── The lead form (peer-recs contract §1.9; DS M3, L1–L4) ───────────
+
+    use super::super::PEER_RECS_NAV;
+    use super::super::discover::taste_bar::{BarAct, Menu};
+    use super::super::peer_recs::PeerAct;
+    use super::super::peer_recs::kit as room;
+    use crate::api::peer_recs_door::{PeerRecsCmd, PeerRecsEvent};
+    use crate::api::types::fixtures::{BASEMENT, KITCHEN};
+    use crate::api::types::{JobStarted, P2pPeersAnswer, PluginLink};
+    use crate::kit::boards::{Area, assert_frame};
+    use crate::kit::clipboard::{Copied, catch, caught};
+    use crate::kit::theme::th;
+
+    /// The stage's leads in All's rank order (TERM-DECISIONS §2).
+    const LONG_EXPOSURE: usize = 6;
+    const ARCADE_RAIN: usize = 7;
+    const PAPER_MOONS: usize = 8;
+
+    /// The sheet's cells at 100 × 30: x 17–82, y 9–20 (DS §1.9).
+    fn sheet_rect() -> Area {
+        Area::rect(17, 82, 9, 20)
+    }
+
+    /// ALL PEERS · IDLE's room drawn once, nothing pended.
+    fn lead_room() -> Gui {
+        let mut gui = room::admin_room();
+        room::frame(&mut gui, 100, 30);
+        gui.pending.clear();
+        gui
+    }
+
+    /// The sheet on the lead at `index`, its one-row lookup answered with
+    /// no jobs.
+    fn open_on(gui: &mut Gui, index: usize) {
+        super::open_lead(gui, index, false);
+        for cmd in room::door(&std::mem::take(&mut gui.pending)) {
+            if let PeerRecsCmd::Lookup { seq, .. } = cmd {
+                room::land(gui, PeerRecsEvent::Lookup { seq, answer: Ok(Box::default()) });
+            }
+        }
+    }
+
+    fn lead_sheet(index: usize) -> Gui {
+        let mut gui = lead_room();
+        open_on(&mut gui, index);
+        gui
+    }
+
+    fn lead_key(gui: &mut Gui, code: KeyCode) {
+        room::key(gui, code);
+    }
+
+    /// Get it's start, answered with a job of `state` (`running` reads
+    /// `downloading…`).
+    fn started(gui: &mut Gui, state: &str) {
+        let seq = room::door(&gui.pending)
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                PeerRecsCmd::Start { seq, .. } => Some(seq),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Get it starts a job: {:?}", gui.pending));
+        gui.pending.clear();
+        let job: JobStarted = serde_json::from_value(serde_json::json!({
+            "job": { "id": 9, "plugin": "noop-acquire", "state": state },
+            "created": true
+        }))
+        .unwrap();
+        room::land(gui, PeerRecsEvent::Started { seq, answer: Ok(Box::new(job)) });
+    }
+
+    /// The press's resolve out, answered `preview: null`: the lead is muted
+    /// for the visit.
+    fn no_preview(gui: &mut Gui) {
+        let ticket = room::door(&gui.pending)
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                PeerRecsCmd::Preview { ticket, .. } => Some(ticket),
+                _ => None,
+            })
+            .expect("a press resolves the lead");
+        gui.pending.clear();
+        room::land(gui, PeerRecsEvent::Preview { ticket, answer: Ok(None) });
+    }
+
+    /// L2's links: one canonical, six searches (nine lines, seven shown).
+    fn l2_links() -> Vec<PluginLink> {
+        let link = |label: &str, url: &str, kind: &str| PluginLink {
+            id: label.to_lowercase().replace(' ', "-"),
+            label: label.into(),
+            url: url.into(),
+            kind: kind.into(),
+        };
+        vec![
+            link("MusicBrainz ISRC", "https://musicbrainz.org/isrc/USX9P1800001", "canonical"),
+            link("Search MusicBrainz", "https://musicbrainz.org/search?q=x", "search"),
+            link("Search Deezer", "https://www.deezer.com/search/x", "search"),
+            link("Search Apple Music", "https://music.apple.com/search?term=x", "search"),
+            link("Search YouTube", "https://www.youtube.com/results?search_query=x", "search"),
+            link("Search Bandcamp", "https://bandcamp.com/search?q=x", "search"),
+            link("Search Discogs", "https://www.discogs.com/search?q=x", "search"),
+        ]
+    }
+
+    /// Open elsewhere's ask answered.
+    fn land_links(gui: &mut Gui, links: Vec<PluginLink>) {
+        let (seq, generation) = gui
+            .pending
+            .iter()
+            .find_map(|e| match e {
+                Effect::Api(ApiCmd::PluginLinks { seq, generation, plugin, .. }) if plugin == "links" => {
+                    Some((*seq, *generation))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Open elsewhere asks the links plug-in: {:?}", gui.pending));
+        gui.pending.clear();
+        let effects = gui.app.apply_event(Event::PluginLinks { seq, generation, answer: Ok(links) });
+        gui.pend(effects);
+    }
+
+    fn sheet_row(gui: &Gui) -> usize {
+        gui.actions.sheet.as_ref().expect("the sheet is open").row
+    }
+
+    /// The text of row `y`'s cells `x0..=x1`.
+    fn cells(rows: &[String], y: usize, x0: usize, x1: usize) -> String {
+        rows[y].chars().skip(x0).take(x1 + 1 - x0).collect()
+    }
+
+    #[test]
+    fn m3_lead_sheet_rows_9_to_20() {
+        let _en = room::english();
+        // Enter on Long Exposure: the cursor on Get it, Preview idle, the
+        // last row Copy title.
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        let buf = room::frame(&mut gui, 100, 30);
+        assert_frame(&buf, "M3", "", sheet_rect());
+    }
+
+    #[test]
+    fn l1_get_it_downloading() {
+        let _en = room::english();
+        // Enter on Get it, then ↓: `downloading…` accent at x 69–80, the
+        // cursor on Open elsewhere….
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        lead_key(&mut gui, KeyCode::Enter);
+        started(&mut gui, "running");
+        lead_key(&mut gui, KeyCode::Down);
+        let buf = room::frame(&mut gui, 100, 30);
+        assert_frame(&buf, "L1", "", sheet_rect());
+    }
+
+    #[test]
+    fn l2_open_elsewhere() {
+        let _en = room::english();
+        // Enter on Open elsewhere…: its list hangs from the row, the first
+        // link held, and the job's word is not drawn while it does.
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        lead_key(&mut gui, KeyCode::Enter);
+        started(&mut gui, "running");
+        lead_key(&mut gui, KeyCode::Down);
+        lead_key(&mut gui, KeyCode::Enter);
+        land_links(&mut gui, l2_links());
+        let buf = room::frame(&mut gui, 100, 30);
+        assert_frame(&buf, "L2", "", sheet_rect());
+    }
+
+    #[test]
+    fn l3_offline_asking() {
+        let _en = room::english();
+        // `l` on Paper Moons, its resolve still out, then its row clicked:
+        // the Preview row's `◌` gold, no `• online` for an offline peer.
+        let mut gui = lead_room();
+        gui.act(Act::Peer(PeerAct::Slot(PAPER_MOONS)));
+        assert!(room::door(&gui.pending).iter().any(|c| matches!(c, PeerRecsCmd::Preview { .. })), "the press resolves");
+        gui.pending.clear();
+        open_on(&mut gui, PAPER_MOONS);
+        let buf = room::frame(&mut gui, 100, 30);
+        assert_frame(&buf, "L3", "", sheet_rect());
+    }
+
+    #[test]
+    fn l4_no_preview() {
+        let _en = room::english();
+        // Arcade Rain answered no preview this visit: `▸ No preview` dim,
+        // inert, the cursor on Get it.
+        let mut gui = lead_room();
+        gui.act(Act::Peer(PeerAct::Slot(ARCADE_RAIN)));
+        no_preview(&mut gui);
+        open_on(&mut gui, ARCADE_RAIN);
+        let buf = room::frame(&mut gui, 100, 30);
+        assert_frame(&buf, "L4", "", sheet_rect());
+    }
+
+    #[test]
+    fn the_sheet_follows_its_lead_when_the_list_moves_and_closes_when_it_leaves() {
+        let _en = room::english();
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        lead_key(&mut gui, KeyCode::Enter);
+        started(&mut gui, "running");
+        // The Kitchen Radio tab: Long Exposure moves to index 2.
+        let effects = gui.app.peer_recs_select(Some(KITCHEN.into()));
+        gui.pend(effects);
+        room::answer(&mut gui, "peers_admin", "taste_kitchen");
+        assert_eq!(gui.app.peer_recs_leads()[2].title.as_deref(), Some("Long Exposure"));
+        assert_eq!(super::lead_open(&gui), Some(2), "read where the lead went, before any draw");
+        let buf = room::frame(&mut gui, 100, 30);
+        let rows = room::rows(&buf);
+        assert!(rows[10].contains("Long Exposure"), "{}", rows.join("\n"));
+        assert_eq!(gui.actions.sheet.as_ref().and_then(|s| s.lead.as_ref()).map(|(i, _)| *i), Some(2), "the sheet followed");
+        assert!(rows[16].contains("downloading…"), "the room's sheet state stood: {}", rows[16]);
+        assert!(
+            !room::door(&gui.pending).iter().any(|c| matches!(c, PeerRecsCmd::Lookup { .. })),
+            "a follow asks nothing again"
+        );
+        // A key acts on the lead where it now stands: Copy title copies it.
+        let _ = caught();
+        for _ in 0..2 {
+            lead_key(&mut gui, KeyCode::Down);
+        }
+        assert_eq!(sheet_row(&gui), 3);
+        gui.act(Act::SheetVerb(SheetAction::CopyTitle));
+        assert_eq!(caught(), ["Marlowe Fields - Long Exposure"]);
+        // Re-opened, then the Basement Hi-Fi tab, which has no Long
+        // Exposure: the sheet closes, and the room's sheet state with it.
+        open_on(&mut gui, 2);
+        let effects = gui.app.peer_recs_select(Some(BASEMENT.into()));
+        gui.pend(effects);
+        room::answer(&mut gui, "peers_admin", "taste_basement");
+        assert_eq!(super::lead_open(&gui), None);
+        room::frame(&mut gui, 100, 30);
+        assert!(gui.actions.sheet.is_none(), "the lead left the list: the sheet closed");
+        assert!(gui.app.peer_recs_get_it_rows().is_empty(), "through peer_recs_sheet_close");
+    }
+
+    #[test]
+    fn a_lead_sheet_closes_when_the_room_is_left() {
+        let _en = room::english();
+        // The room's yield to Files when its gate goes (build plan D31)
+        // leaves the App's last answer standing; the sheet goes with the
+        // room all the same.
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        gui.act(Act::Nav(FILES_NAV));
+        assert!(!gui.app.peer_recs_leads().is_empty(), "the last answer still stands");
+        assert_eq!(super::lead_open(&gui), None);
+        let rows = room::rows(&room::frame(&mut gui, 100, 30));
+        assert!(gui.actions.sheet.is_none(), "{}", rows.join("\n"));
+        assert!(!rows.iter().any(|r| r.contains("Long Exposure")), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn the_queue_panel_leaves_the_rooms_modals_their_keys() {
+        let _en = room::english();
+        let mut gui = lead_room();
+        gui.app.queue.items = vec![queued("q/a.flac", "First"), queued("q/b.flac", "Second")];
+        gui.queue_open = true;
+        gui.app.focus = Focus::Queue;
+        gui.act(Act::Peer(PeerAct::Bar(BarAct::Window)));
+        let Some(Menu::Window(at)) = gui.peer_recs.bar.menu else { panic!("the window list opens") };
+        lead_key(&mut gui, KeyCode::Down);
+        assert_eq!(gui.peer_recs.bar.menu, Some(Menu::Window(at + 1)), "↓ walks the window list");
+        assert!(!gui.queue_view.held, "and not the queue");
+        lead_key(&mut gui, KeyCode::Esc);
+        assert!(gui.peer_recs.bar.menu.is_none(), "Esc closes the list");
+        assert_eq!(gui.app.focus, Focus::Queue, "the panel keeps the keys it was handed");
+        // With the list gone the panel has its keys again.
+        lead_key(&mut gui, KeyCode::Down);
+        assert!(gui.queue_view.held);
+    }
+
+    #[test]
+    fn the_lead_sheet_starts_on_get_it_and_never_plays() {
+        let _en = room::english();
+        let mut gui = lead_room();
+        super::open_lead(&mut gui, LONG_EXPOSURE, false);
+        let opened = std::mem::take(&mut gui.pending);
+        let asked = room::door(&opened);
+        assert!(matches!(asked[..], [PeerRecsCmd::Lookup { .. }]), "one lookup, nothing played: {asked:?}");
+        assert!(!opened.iter().any(|e| matches!(e, Effect::Audio(_))), "{opened:?}");
+        // Every track path skips a lead (clause 31): no Song info, no Keep a copy owner ask
+        // and no cover for the stand-in's empty file. The room's own asks are all it sends.
+        let track_path = |e: &Effect| {
+            matches!(e, Effect::Api(ApiCmd::TrackInfo { .. } | ApiCmd::KeepGate { .. } | ApiCmd::AlbumArt { .. }))
+        };
+        assert!(!opened.iter().any(track_path), "no track path on open: {opened:?}");
+        assert!(opened.iter().all(|e| matches!(e, Effect::Api(ApiCmd::PeerRecs { .. }))), "{opened:?}");
+        let rows = super::lead_rows(&gui.app, false);
+        assert_eq!(rows, [SheetAction::Preview, SheetAction::GetIt(0), SheetAction::OpenElsewhere, SheetAction::CopyTitle]);
+        assert_eq!(sheet_row(&gui), 1, "the cursor on Get it");
+        lead_key(&mut gui, KeyCode::Enter);
+        let pressed = std::mem::take(&mut gui.pending);
+        assert!(room::door(&pressed).iter().any(|c| matches!(c, PeerRecsCmd::Start { plugin, .. } if plugin == "noop-acquire")));
+        assert!(!room::door(&pressed).iter().any(|c| matches!(c, PeerRecsCmd::Preview { .. })), "Enter never previews");
+        assert!(!pressed.iter().any(|e| matches!(e, Effect::Audio(_))), "nor plays: {pressed:?}");
+        assert!(gui.app.queue.items.is_empty() && gui.actions.sheet.is_some(), "no queue add; the sheet stays");
+        // The band's `[ get it ]` opens on Get it too.
+        gui.act(Act::SheetClose);
+        super::open_lead(&mut gui, 0, true);
+        assert_eq!(sheet_row(&gui), 1);
+        // Without Get it: Open elsewhere…; without that too: Copy title.
+        gui.act(Act::SheetClose);
+        let seq = room::door(&gui.app.peer_recs_regate())
+            .into_iter()
+            .find_map(|c| match c {
+                PeerRecsCmd::Gate { seq } => Some(seq),
+                _ => None,
+            })
+            .unwrap();
+        let mut links_only = room::plugins();
+        links_only.plugins.retain(|p| p.name != "noop-acquire");
+        room::land(&mut gui, PeerRecsEvent::Gate { seq, plugins: Ok(Box::new(links_only.clone())), destination: None });
+        super::open_lead(&mut gui, 0, false);
+        assert_eq!(super::lead_rows(&gui.app, false)[sheet_row(&gui)], SheetAction::OpenElsewhere);
+        gui.act(Act::SheetClose);
+        let seq = room::door(&gui.app.peer_recs_regate())
+            .into_iter()
+            .find_map(|c| match c {
+                PeerRecsCmd::Gate { seq } => Some(seq),
+                _ => None,
+            })
+            .unwrap();
+        links_only.plugins.retain(|p| p.name != "links");
+        room::land(&mut gui, PeerRecsEvent::Gate { seq, plugins: Ok(Box::new(links_only)), destination: None });
+        super::open_lead(&mut gui, 0, false);
+        assert_eq!(super::lead_rows(&gui.app, false), [SheetAction::Preview, SheetAction::CopyTitle]);
+        assert_eq!(sheet_row(&gui), 1, "Copy title");
+    }
+
+    #[test]
+    fn the_cursor_skips_a_muted_preview() {
+        let _en = room::english();
+        let mut gui = lead_room();
+        gui.act(Act::Peer(PeerAct::Slot(ARCADE_RAIN)));
+        no_preview(&mut gui);
+        open_on(&mut gui, ARCADE_RAIN);
+        assert_eq!(sheet_row(&gui), 1, "on Get it");
+        lead_key(&mut gui, KeyCode::Up);
+        assert_eq!(sheet_row(&gui), 1, "↑ passes over the muted Preview: nothing above takes the cursor");
+        lead_key(&mut gui, KeyCode::Down);
+        assert_eq!(sheet_row(&gui), 2);
+        lead_key(&mut gui, KeyCode::Up);
+        assert_eq!(sheet_row(&gui), 1);
+        let rows = room::rows(&room::frame(&mut gui, 100, 30));
+        assert!(rows[15].contains("▸  No preview"), "{}", rows[15]);
+        assert_eq!(gui.ui.hit(Position { x: 30, y: 15 }), Some(Act::Guard), "a muted Preview takes no press");
+        // A Preview that turns muted under the cursor passes it on.
+        gui.act(Act::SheetClose);
+        open_on(&mut gui, LONG_EXPOSURE);
+        lead_key(&mut gui, KeyCode::Up);
+        assert_eq!(sheet_row(&gui), 0, "an idle Preview takes the cursor");
+        lead_key(&mut gui, KeyCode::Enter);
+        no_preview(&mut gui);
+        room::frame(&mut gui, 100, 30);
+        assert_eq!(sheet_row(&gui), 1, "the muted row gave the cursor to Get it");
+    }
+
+    /// The sheet stays open under the mini player, but the room is not
+    /// drawn: its Preview row starts no clip there (peer-recs contract
+    /// §1.8), and does once the room is drawn again.
+    #[test]
+    fn the_sheets_preview_starts_no_clip_under_the_mini_player() {
+        let _en = room::english();
+        let mut gui = lead_room();
+        open_on(&mut gui, LONG_EXPOSURE);
+        lead_key(&mut gui, KeyCode::Up);
+        assert_eq!(sheet_row(&gui), 0, "on Preview");
+        room::frame(&mut gui, 80, 20);
+        room::frame(&mut gui, 80, 20);
+        gui.pending.clear();
+        lead_key(&mut gui, KeyCode::Enter);
+        let resolve = |c: &PeerRecsCmd| matches!(c, PeerRecsCmd::Preview { .. });
+        let resolves = room::door(&gui.pending).iter().filter(|c| resolve(c)).count();
+        assert_eq!(resolves, 0, "nothing resolves: {:?}", gui.pending);
+        assert!(!gui.app.peer_recs_clip_live(), "no clip session");
+        room::frame(&mut gui, 100, 30);
+        gui.pending.clear();
+        lead_key(&mut gui, KeyCode::Enter);
+        let resolve = |c: &PeerRecsCmd| matches!(c, PeerRecsCmd::Preview { .. });
+        let resolves = room::door(&gui.pending).iter().filter(|c| resolve(c)).count();
+        assert_eq!(resolves, 1, "drawn, Preview resolves its lead: {:?}", gui.pending);
+    }
+
+    #[test]
+    fn a_lead_sheet_draws_no_stars_and_sends_no_rating() {
+        let _en = room::english();
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        let rows = room::rows(&room::frame(&mut gui, 100, 30));
+        let sheet: String = rows[9..21].iter().map(|r| r.chars().skip(17).take(66).collect::<String>() + "\n").collect();
+        assert!(!sheet.contains('★') && !sheet.contains('☆') && !sheet.contains("Rate"), "{sheet}");
+        for code in [KeyCode::Left, KeyCode::Right, KeyCode::Char('0'), KeyCode::Char('3'), KeyCode::Char('5')] {
+            lead_key(&mut gui, code);
+        }
+        gui.act(Act::Rate(10));
+        gui.act(Act::PickPlaylist("Mix".into()));
+        assert!(
+            !gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::RateSong { .. } | ApiCmd::AddToPlaylist { .. }))),
+            "{:?}",
+            gui.pending
+        );
+        // The open's own effects are held in `the_lead_sheet_starts_on_get_it_and_never_plays`.
+        let info = |e: &Effect| matches!(e, Effect::Api(ApiCmd::TrackInfo { .. }));
+        assert!(!gui.pending.iter().any(info), "no Song info asked by the sheet's keys");
+    }
+
+    /// ALL PEERS · IDLE's room drawn once, `taste` its answer, and its plug-in gate still out:
+    /// the gate's seq.
+    fn lead_room_with(taste: &crate::api::types::TasteResponse, gate: bool) -> (Gui, Option<u64>) {
+        let mut gui = room::peer_gui();
+        gui.act(Act::Nav(PEER_RECS_NAV));
+        let seq = room::answer_with(&mut gui, "peers_admin", taste, gate);
+        gui.pending.clear();
+        room::frame(&mut gui, 100, 30);
+        gui.pending.clear();
+        (gui, seq)
+    }
+
+    fn ungated_room() -> (Gui, u64) {
+        let (gui, seq) = lead_room_with(&crate::api::types::fixtures::taste("taste_all"), false);
+        (gui, seq.expect("the gate is asked"))
+    }
+
+    /// The gate's answer: the stage's plug-ins and destination.
+    fn land_gate(gui: &mut Gui, seq: u64) {
+        let plugins = Ok(Box::new(room::plugins()));
+        let destination = Some(Ok(Box::new(room::destination())));
+        room::land(gui, PeerRecsEvent::Gate { seq, plugins, destination });
+    }
+
+    /// The action under the sheet's cursor.
+    fn sheet_at(gui: &Gui) -> SheetAction {
+        let links = gui.actions.sheet.as_ref().is_some_and(|s| s.links);
+        super::lead_rows(&gui.app, links)[sheet_row(gui)]
+    }
+
+    /// The cursor stays on its action when the gated rows come or go under it, and lands by
+    /// the start rule, never on Preview, when its own row goes (build plan D30).
+    #[test]
+    fn the_lead_cursor_keeps_its_action_when_the_rows_change() {
+        let _en = room::english();
+        let (mut gui, seq) = ungated_room();
+        super::open_lead(&mut gui, LONG_EXPOSURE, false);
+        assert_eq!(super::lead_rows(&gui.app, false), [SheetAction::CopyTitle], "the gate is out");
+        assert_eq!(sheet_at(&gui), SheetAction::CopyTitle);
+        gui.pending.clear();
+        land_gate(&mut gui, seq);
+        gui.pending.clear();
+        room::frame(&mut gui, 100, 30);
+        let rows = super::lead_rows(&gui.app, false);
+        assert_eq!(rows, [SheetAction::Preview, SheetAction::GetIt(0), SheetAction::OpenElsewhere, SheetAction::CopyTitle]);
+        assert_eq!(sheet_at(&gui), SheetAction::CopyTitle, "the gate landing keeps the cursor on Copy title");
+        // A short disconnect hides Get it and Open elsewhere…, and the reconnect brings them back.
+        for connected in [false, true] {
+            gui.app.connected = connected;
+            assert!(super::refind(&mut gui));
+            assert_eq!(sheet_at(&gui), SheetAction::CopyTitle, "connected {connected}");
+        }
+        // On Get it, which the disconnect takes away: the start rule's Copy title, not Preview.
+        lead_key(&mut gui, KeyCode::Up);
+        lead_key(&mut gui, KeyCode::Up);
+        assert_eq!(sheet_at(&gui), SheetAction::GetIt(0));
+        gui.app.connected = false;
+        assert!(super::refind(&mut gui));
+        assert_eq!(sheet_at(&gui), SheetAction::CopyTitle, "Get it gone: never Preview");
+        gui.app.connected = true;
+        assert!(super::refind(&mut gui));
+        assert_eq!(sheet_at(&gui), SheetAction::CopyTitle, "and it stays where it went");
+    }
+
+    /// A sheet opened before Get it's gate held asks its one-row lookup once the gate lands, so a
+    /// song already being got reads so, and Get it starts no second job (peer-recs contract
+    /// §1.9).
+    #[test]
+    fn a_sheet_opened_before_the_gate_looks_its_jobs_up_when_get_it_comes() {
+        let _en = room::english();
+        let (mut gui, seq) = ungated_room();
+        super::open_lead(&mut gui, LONG_EXPOSURE, false);
+        let lookup = |gui: &Gui| {
+            room::door(&gui.pending)
+                .into_iter()
+                .filter_map(|c| match c {
+                    PeerRecsCmd::Lookup { seq, .. } => Some(seq),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(lookup(&gui).is_empty(), "no lookup without Get it: {:?}", gui.pending);
+        gui.pending.clear();
+        land_gate(&mut gui, seq);
+        let asked = lookup(&gui);
+        assert_eq!(asked.len(), 1, "the gate landing asks the sheet's lookup: {:?}", gui.pending);
+        gui.pending.clear();
+        let jobs: crate::api::types::JobLookup = serde_json::from_value(serde_json::json!({
+            "jobs": [ { "id": 5, "plugin": "noop-acquire", "state": "running" } ]
+        }))
+        .unwrap();
+        room::land(&mut gui, PeerRecsEvent::Lookup { seq: asked[0], answer: Ok(Box::new(jobs)) });
+        let mark = gui.app.peer_recs_get_it_rows().first().and_then(|row| row.mark.clone());
+        assert!(matches!(mark, Some(crate::api::types::JobOutcome::Running { .. })), "{mark:?}");
+        gui.pending.clear();
+        let pressed = gui.app.peer_recs_get_it(0);
+        assert!(!room::door(&pressed).iter().any(|c| matches!(c, PeerRecsCmd::Start { .. })), "{pressed:?}");
+        // A later gate read asks no second lookup.
+        let seq = room::door(&gui.app.peer_recs_regate())
+            .into_iter()
+            .find_map(|c| match c {
+                PeerRecsCmd::Gate { seq } => Some(seq),
+                _ => None,
+            })
+            .unwrap();
+        land_gate(&mut gui, seq);
+        assert!(lookup(&gui).is_empty(), "one lookup per sheet: {:?}", gui.pending);
+    }
+
+    /// A peer's label is a stranger's, of any length: it is clipped, and the badge row keeps
+    /// `from …` and `• online` inside the frame (peer-recs contract §1.9.3).
+    #[test]
+    fn a_long_peer_label_is_clipped_and_keeps_the_online_mark() {
+        let _en = room::english();
+        let latin = format!("Kitchen Radio {}", "x".repeat(56));
+        for label in [latin.as_str(), &"東京".repeat(18)] {
+            let taste = room::taste_edited("taste_all", |results| {
+                results[LONG_EXPOSURE]["peer"]["label"] = label.into();
+            });
+            let (mut gui, _) = lead_room_with(&taste, true);
+            open_on(&mut gui, LONG_EXPOSURE);
+            let rows = room::rows(&room::frame(&mut gui, 100, 30));
+            let badge = cells(&rows, 13, 17, 82);
+            // A wide character's second cell reads as a space here.
+            let head: String = label.chars().take(4).collect();
+            assert!(badge.replace(' ', "").contains(&format!("from{head}")), "{badge:?}");
+            let end = badge.trim_end_matches('│');
+            assert!(end.trim_end().ends_with("• online") && end.ends_with(' '), "inside the frame: {badge:?}");
+            assert_eq!(badge.chars().last(), cells(&rows, 12, 17, 82).chars().last(), "the frame stands: {badge:?}");
+        }
+    }
+
+    #[test]
+    fn the_badge_says_online_only_while_the_poll_does() {
+        let _en = room::english();
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        let rows = room::rows(&room::frame(&mut gui, 100, 30));
+        assert!(rows[13].contains("from Kitchen Radio   • online"), "{}", rows[13]);
+        // The next poll says Kitchen Radio went offline.
+        let t0 = crate::clock::Instant::now();
+        let effects = gui.app.tick_at(t0);
+        gui.pend(effects);
+        let effects = gui.app.tick_at(t0 + std::time::Duration::from_secs(16));
+        gui.pend(effects);
+        let poll = room::door(&gui.pending)
+            .into_iter()
+            .find_map(|c| match c {
+                PeerRecsCmd::Peers { poll } => Some(poll),
+                _ => None,
+            })
+            .expect("the poll's beat");
+        gui.pending.clear();
+        let mut offline = crate::api::types::fixtures::json("peers_admin");
+        for peer in offline["peers"].as_array_mut().unwrap() {
+            if peer["endpointId"] == KITCHEN {
+                peer["online"] = false.into();
+            }
+        }
+        let view = P2pPeersAnswer::from_value(&offline);
+        room::land(&mut gui, PeerRecsEvent::Peers { poll, answer: Ok(Box::new(view)) });
+        let rows = room::rows(&room::frame(&mut gui, 100, 30));
+        assert!(rows[13].contains("from Kitchen Radio") && !rows[13].contains("online"), "{}", rows[13]);
+    }
+
+    #[test]
+    fn copy_title_copies_artist_dash_title_and_closes() {
+        let _en = room::english();
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        let _ = caught();
+        lead_key(&mut gui, KeyCode::Down);
+        lead_key(&mut gui, KeyCode::Down);
+        assert_eq!(super::lead_rows(&gui.app, false)[sheet_row(&gui)], SheetAction::CopyTitle);
+        lead_key(&mut gui, KeyCode::Enter);
+        assert_eq!(caught(), ["Marlowe Fields - Long Exposure"]);
+        assert!(gui.actions.sheet.is_none(), "the sheet closes");
+        assert!(gui.app.peer_recs_get_it_rows().is_empty(), "and the room's sheet state with it");
+        assert_eq!(gui.note, Some(("Copied".to_string(), false)));
+    }
+
+    #[test]
+    fn couldnt_copy_notes_dim() {
+        let _en = room::english();
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        catch(Copied::Failed);
+        gui.act(Act::SheetVerb(SheetAction::CopyTitle));
+        assert_eq!(gui.note, Some(("Couldn't copy".to_string(), false)));
+        assert!(gui.actions.sheet.is_none());
+        let buf = room::frame(&mut gui, 100, 30);
+        let rows = room::rows(&buf);
+        let y = rows.iter().position(|r| r.contains("Couldn't copy")).expect("the note is drawn");
+        let x = rows[y].find("Couldn't copy").map(|at| rows[y][..at].chars().count()).unwrap() as u16;
+        assert_eq!(x, 24, "at the bar's note");
+        assert_eq!(buf[(x, y as u16)].fg, th().dim, "dim, not the gold error note");
+        catch(Copied::Clipboard);
+    }
+
+    #[test]
+    fn right_opens_the_links_list_and_left_folds_it() {
+        let _en = room::english();
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        lead_key(&mut gui, KeyCode::Down);
+        lead_key(&mut gui, KeyCode::Right);
+        let asked = gui.pending.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::PluginLinks { rec, .. }) => Some((**rec).clone()),
+            _ => None,
+        });
+        assert_eq!(asked.as_ref(), Some(&gui.app.peer_recs_leads()[LONG_EXPOSURE].raw), "the raw lead, as it came");
+        assert!(gui.actions.sheet.as_ref().is_some_and(|s| s.links));
+        assert_eq!(gui.discover.links.held, Some(0), "the keys hold the first link");
+        land_links(&mut gui, l2_links());
+        let rows = room::rows(&room::frame(&mut gui, 100, 30));
+        assert!(rows[12].contains("MusicBrainz ISRC"), "{}", rows.join("\n"));
+        assert_eq!(super::tips(&gui).as_deref(), Some("↑ ↓ rows · Enter open · Esc back"));
+        lead_key(&mut gui, KeyCode::Left);
+        assert!(gui.actions.sheet.as_ref().is_some_and(|s| !s.links), "← folds it, the sheet stays");
+        assert!(gui.app.keep.links.is_none());
+        // ← and → elsewhere in the sheet do nothing: no stars to move.
+        lead_key(&mut gui, KeyCode::Up);
+        lead_key(&mut gui, KeyCode::Right);
+        assert!(gui.actions.sheet.as_ref().is_some_and(|s| !s.links));
+    }
+
+    #[test]
+    fn the_job_word_hides_while_the_links_list_hangs() {
+        let _en = room::english();
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        lead_key(&mut gui, KeyCode::Enter);
+        started(&mut gui, "running");
+        lead_key(&mut gui, KeyCode::Down);
+        let buf = room::frame(&mut gui, 100, 30);
+        let rows = room::rows(&buf);
+        assert_eq!(cells(&rows, 16, 19, 82), format!("Get it{}downloading… │", " ".repeat(44)), "{}", rows[16]);
+        assert_eq!(buf[(69, 16)].fg, th().accent, "in its mark's token, the cursor elsewhere");
+        lead_key(&mut gui, KeyCode::Enter);
+        land_links(&mut gui, l2_links());
+        let buf = room::frame(&mut gui, 100, 30);
+        let rows = room::rows(&buf);
+        assert!(!cells(&rows, 16, 17, 82).contains("downloading"), "{}", rows[16]);
+        assert_eq!((buf[(79, 16)].symbol(), buf[(80, 16)].symbol()), (" ", " "));
+        lead_key(&mut gui, KeyCode::Esc);
+        let rows = room::rows(&room::frame(&mut gui, 100, 30));
+        assert_eq!(cells(&rows, 16, 69, 80), "downloading…", "back once the list folds: {}", rows[16]);
+        // Other marks take their own words: a finished job reads `✓ kept`
+        // (noop-acquire's result is its own, which no copy word reads).
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        lead_key(&mut gui, KeyCode::Enter);
+        let seq = room::door(&gui.pending).into_iter().find_map(|c| match c {
+            PeerRecsCmd::Start { seq, .. } => Some(seq),
+            _ => None,
+        });
+        gui.pending.clear();
+        let job: JobStarted = serde_json::from_value(serde_json::json!({
+            "job": {
+                "id": 9, "plugin": "noop-acquire", "state": "done",
+                "result": { "echoed": "Long Exposure", "steps": 3, "scope": "song" }
+            },
+            "created": true
+        }))
+        .unwrap();
+        room::land(&mut gui, PeerRecsEvent::Started { seq: seq.unwrap(), answer: Ok(Box::new(job)) });
+        let buf = room::frame(&mut gui, 100, 30);
+        assert_eq!(cells(&room::rows(&buf), 16, 75, 82), "✓ kept │");
+        assert_eq!(buf[(75, 16)].bg, th().accent, "on the cursor's slab");
+        lead_key(&mut gui, KeyCode::Down);
+        let buf = room::frame(&mut gui, 100, 30);
+        assert_eq!(buf[(75, 16)].fg, th().ok, "ok at rest");
+        // A kept song is inert: Get it again starts nothing.
+        lead_key(&mut gui, KeyCode::Up);
+        lead_key(&mut gui, KeyCode::Enter);
+        assert!(!room::door(&gui.pending).iter().any(|c| matches!(c, PeerRecsCmd::Start { .. })));
+    }
+
+    #[test]
+    fn several_acquire_plugins_get_a_row_each_with_their_title() {
+        let _en = room::english();
+        let mut gui = lead_room();
+        let seq = room::door(&gui.app.peer_recs_regate())
+            .into_iter()
+            .find_map(|c| match c {
+                PeerRecsCmd::Gate { seq } => Some(seq),
+                _ => None,
+            })
+            .unwrap();
+        let mut two = room::plugins();
+        two.plugins.push(
+            serde_json::from_value(serde_json::json!({
+                "name": "lan-fetch", "title": "LAN fetch", "available": true, "capabilities": ["acquire"]
+            }))
+            .unwrap(),
+        );
+        let destination = Some(Ok(Box::new(room::destination())));
+        room::land(&mut gui, PeerRecsEvent::Gate { seq, plugins: Ok(Box::new(two)), destination });
+        open_on(&mut gui, LONG_EXPOSURE);
+        assert_eq!(super::lead_rows(&gui.app, false), [
+            SheetAction::Preview,
+            SheetAction::GetIt(0),
+            SheetAction::GetIt(1),
+            SheetAction::OpenElsewhere,
+            SheetAction::CopyTitle
+        ]);
+        let buf = room::frame(&mut gui, 100, 30);
+        let rows = room::rows(&buf);
+        let y = rows.iter().position(|r| r.contains("Get it  Noop acquire")).unwrap_or_else(|| panic!("{}", rows.join("\n")));
+        assert_eq!(cells(&rows, y, 19, 38).trim_end(), "Get it  Noop acquire");
+        assert_eq!(cells(&rows, y + 1, 19, 38).trim_end(), "Get it  LAN fetch", "{}", rows.join("\n"));
+        assert_eq!(buf[(27, y as u16 + 1)].fg, th().dim, "the plug-in's title dim, 2 cells after the word");
+        assert_eq!(buf[(19, y as u16 + 1)].fg, th().accent, "Get it accent at rest");
+        let at = Position { x: 30, y: y as u16 + 1 };
+        assert_eq!(gui.ui.hit(at), Some(Act::SheetVerb(SheetAction::GetIt(1))));
+        gui.act(Act::SheetVerb(SheetAction::GetIt(1)));
+        assert!(room::door(&gui.pending).iter().any(|c| matches!(c, PeerRecsCmd::Start { plugin, .. } if plugin == "lan-fetch")));
+    }
+
+    #[test]
+    fn a_lead_sheets_tips_are_discover_sheets() {
+        let _en = room::english();
+        let mut gui = lead_sheet(LONG_EXPOSURE);
+        assert_eq!(super::tips(&gui).as_deref(), Some("↑ ↓ rows · Enter choose · Esc close"));
+        gui.config.gui.key_hints = true;
+        gui.ui.key_hints = true;
+        let rows = room::rows(&room::frame(&mut gui, 100, 30));
+        assert!(rows.iter().any(|r| r.contains("↑ ↓ rows · Enter choose · Esc close")), "{}", rows.join("\n"));
+        assert_eq!(gui.active, PEER_RECS_NAV);
     }
 }

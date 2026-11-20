@@ -1782,3 +1782,32 @@ fn the_now_playing_cover_is_not_painted_over_its_pickers() {
         assert!(cover_px(&after.0, cover) > 0, "{row:?}: the mosaic beside the box");
     }
 }
+
+/// The Peer recs room in the window (peer-recs contract §1.12, §1.15): the window draws the
+/// room's cells, a lead's swatch `▌` reads its hue's colour (truecolor is the window's tier;
+/// on another tier the swatch is the dim token, and the cell reads that), and the board places
+/// no picture on a lead's row: leads never get a cover.
+#[test]
+fn the_room_draws_in_the_window_with_no_lead_texture() {
+    use crate::gui::peer_recs::kit::{admin_room, english};
+
+    let _gpu = one_at_a_time();
+    let _en = english();
+    let gui = admin_room();
+    let Some(frames) = frame_or_skip(gui_in_the_window(gui, 2, |_, _| {})) else { return };
+    let (frame, placed, under) = &frames[1];
+    assert!(frame.text.contains("Salt Road") && frame.text.contains("Peer Recommendations"), "{}", frame.text);
+    // Salt Road's swatch, x 17 on the grid's first row (y 9), hue 203.
+    let want = match crate::kit::theme::swatch(Some(203)) {
+        Color::Rgb(r, g, b) => Some([r, g, b]),
+        _ => None,
+    };
+    assert!(frame.inked(17, 9), "the swatch is drawn");
+    if let Some(want) = want {
+        assert!(frame.cell(17, 9).contains(&want), "the swatch reads {want:02x?}");
+    }
+    // The leads' rows, y 9–14 across the room: no picture placed there, none under an overlay.
+    let leads = Rect { x: 17, y: 9, width: 80, height: 6 };
+    assert!(placed.iter().all(|rect| rect.intersection(leads).is_empty()), "a picture on a lead's row: {placed:?}");
+    assert_eq!(*under, 0);
+}

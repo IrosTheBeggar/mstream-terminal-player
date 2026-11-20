@@ -4863,13 +4863,52 @@ pub(crate) fn open_link(gui: &mut Gui, index: usize) {
     if !link.is_web() {
         return;
     }
+    hand_off(gui, link.label, link.url);
+}
+
+/// Hand an https URL to the system's opener, as a link of the list is
+/// (clause 141): the Peer recs band's attribution, which opens its preview's
+/// `link` (peer-recs contract §1.8). Named by its host: "opening
+/// deezer.com…" now, its answer on the status line once it lands, and under
+/// `MSTREAM_NO_OPEN` the link itself. Anything but https opens nothing.
+pub(crate) fn open_url(gui: &mut Gui, url: &str) {
+    let url = url.trim();
+    let web = crate::api::types::PluginLink { url: url.to_string(), ..Default::default() };
+    if !web.is_web() {
+        return;
+    }
+    let Some(host) = url_host(url) else { return };
+    hand_off(gui, host, url.to_string());
+}
+
+/// An https URL's host, its `www.` dropped, for the note: `None` when it
+/// has none, or when a browser could read another host than the one named.
+/// Openers disagree on where the authority ends (WHATWG ends it at a `\`,
+/// NSURL does not), so one holding a `\`, userinfo (`@`), whitespace or a
+/// control character names nothing and opens nothing: the host noted is
+/// always the one opened.
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.get("https://".len()..)?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let odd = |c: char| matches!(c, '@' | '\\') || c.is_whitespace() || c.is_control();
+    if authority.chars().any(odd) {
+        return None;
+    }
+    let host = authority.split(':').next().unwrap_or_default();
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// The opener's thread for one link: "opening {label}…" (BUSY) now, and
+/// the answer back through the list's channel to [`links_landed`].
+fn hand_off(gui: &mut Gui, label: String, url: String) {
     let room = note_room(gui);
-    let words = ell(&t!("gui.discover.links.opening", label = link.label));
+    let words = ell(&t!("gui.discover.links.opening", label = label));
     set_note(gui, (fit_note(&words, None, room), MessageKind::Busy));
     let tx = gui.discover.links.tx.clone();
     std::thread::spawn(move || {
-        let answer = open_target(&link.url);
-        let _ = tx.send((link.label, link.url, answer));
+        let answer = open_target(&url);
+        let _ = tx.send((label, url, answer));
     });
 }
 
@@ -11622,6 +11661,63 @@ pub(crate) mod tests {
         assert_eq!(gui.app.message.as_ref().map(|m| m.text.as_str()), Some("Deezer: no app took it"));
         // Only https reaches the opener: the javascript: link never shows.
         assert!(super::web_links(&gui.app).iter().all(|l| l.url.starts_with("https://")));
+    }
+
+    #[test]
+    fn the_attribution_opens_an_https_link_or_notes_it() {
+        let _en = english();
+        // The Peer recs band's attribution (peer-recs contract §1.8): an
+        // https link goes to the opener as a list's link does, named by its
+        // host; under `MSTREAM_NO_OPEN` (always, under test) nothing opens
+        // and the note carries the link instead.
+        let mut gui = canvas_gui(&canvas_jobs());
+        draw(&mut gui, 100, 30);
+        let link = "https://www.deezer.com/track/3135556";
+        super::open_url(&mut gui, link);
+        let busy = gui.app.message.clone().expect("a note at once");
+        assert_eq!((busy.text.as_str(), busy.kind), ("opening deezer.com…", crate::tui::app::MessageKind::Busy));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gui.app.message.as_ref().is_some_and(|m| m.kind == crate::tui::app::MessageKind::Busy)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            draw(&mut gui, 100, 30);
+        }
+        let landed = gui.app.message.clone().expect("the hand-off's answer");
+        assert_eq!(landed.kind, crate::tui::app::MessageKind::Plain);
+        assert!(landed.text.starts_with("deezer.com · https://www.deez"), "the link, fitted to the note: {}", landed.text);
+        // Anything but https opens nothing and says nothing.
+        // Nor does a link whose host an opener could read otherwise than the
+        // note names (a `\` ends a WHATWG authority, userinfo hides the host).
+        for other in [
+            "http://www.deezer.com/track/1",
+            "javascript:alert(1)",
+            "https://",
+            "  ",
+            "https://evil.example\\@deezer.com/track/1",
+            "https://evil.example@deezer.com/track/1",
+        ] {
+            super::open_url(&mut gui, other);
+            let now = gui.app.message.as_ref().map(|m| (m.text.clone(), m.kind));
+            assert_eq!(now, Some((landed.text.clone(), landed.kind)), "{other:?} was handed on");
+        }
+        assert_eq!(super::url_host("https://Music.Example.org:8443/x?y#z").as_deref(), Some("Music.Example.org"));
+        // Userinfo, a `\`, whitespace or a control character in the
+        // authority, or no host past the port: nothing to name, nothing opens.
+        for spoof in [
+            "https://user@Music.Example.org:8443/x?y#z",
+            "https://evil.example\\@deezer.com/x",
+            "https://evil.example\\deezer.com/x",
+            "https://evil.example@deezer.com/x",
+            "https://@deezer.com/x",
+            "https://evil.example\t@deezer.com/x",
+            "https://deezer.com .evil.example/x",
+            "https://deezer.com\u{7}/x",
+            "https://:8443/x",
+        ] {
+            assert_eq!(super::url_host(spoof), None, "{spoof:?} was named");
+        }
+        assert_eq!(super::url_host("HTTPS://www.deezer.com").as_deref(), Some("deezer.com"));
     }
 
     #[test]
