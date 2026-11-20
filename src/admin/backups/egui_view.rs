@@ -34,7 +34,7 @@ use crate::gui::window::studio::{
 const PAD_X: f32 = 24.0;
 const PAD_TOP: f32 = 10.0;
 const PAD_FOOT: f32 = 14.0;
-/// The canvas's room between the room's blocks.
+/// The canvas's room between the room's blocks, the note line's among them.
 const GAP: f32 = 18.0;
 /// The note line along the room's foot.
 const NOTE_H: f32 = 18.0;
@@ -66,7 +66,7 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
     let full = ui.max_rect();
     let column = Rect::from_min_max(pos2(full.min.x + PAD_X, full.min.y + PAD_TOP), pos2(full.max.x - PAD_X, full.max.y - PAD_FOOT));
     let note_rect = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
-    let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, note_rect.min.y - 10.0));
+    let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, note_rect.min.y - GAP));
 
     let mut acts: Vec<Act> = Vec::new();
     let mut base = ui.new_child(UiBuilder::new().id_salt("backups-body").max_rect(body_rect).layout(Layout::top_down(Align::Min)));
@@ -141,6 +141,8 @@ fn state(ui: &mut Ui, room: &Room, pal: &Pal) {
         return;
     }
     let now = unix_now();
+    // The word in the semibold face and its colour while something runs or
+    // waits, as the cells set it bold; idle, plain and dim.
     let (word, detail, tone, lamp, polls) = match &room.status.active {
         Some(a) => {
             let elapsed = a.started_at.as_deref().and_then(iso_unix).map(|t| elapsed_text(now - t)).unwrap_or_default();
@@ -166,8 +168,9 @@ fn state(ui: &mut Ui, room: &Room, pal: &Pal) {
         }
     };
     let (word, detail) = (unbullet(&word), detail.trim_start());
+    let font = if room.status.active.is_some() || room.status.queue_length > 0 { strong(14.0) } else { body(14.0) };
     let x = row.min.x + 16.0;
-    let state_w = 16.0 + width_of(ui, word, strong(14.0)) + 10.0 + width_of(ui, detail, body(14.0));
+    let state_w = 16.0 + width_of(ui, word, font.clone()) + 10.0 + width_of(ui, detail, body(14.0));
     let mut right = beta.min.x - 16.0;
     // The cadence only where the whole state fits beside it, as the cells
     // show it.
@@ -177,7 +180,7 @@ fn state(ui: &mut Ui, room: &Room, pal: &Pal) {
         right -= polls_w + 16.0;
     }
     led(ui, pos2(row.min.x + 3.0, y), lamp);
-    let said = text(ui, pos2(x, y), word, strong(14.0), tone, (right - x).max(1.0), Align2::LEFT_CENTER);
+    let said = text(ui, pos2(x, y), word, font, tone, (right - x).max(1.0), Align2::LEFT_CENTER);
     let from = said.max.x + 10.0;
     if from < right {
         text(ui, pos2(from, y), detail, body(14.0), pal.text, right - from, Align2::LEFT_CENTER);
@@ -424,6 +427,39 @@ fn tick(ui: &Ui, at: Pos2, color: Color32) {
     ui.painter().add(Shape::line(points, Stroke::new(1.7, color)));
 }
 
+/// The canvas's folder in its 12-point box, centred on `at`: the browse
+/// button's icon.
+fn folder_icon(ui: &Ui, at: Pos2, color: Color32) {
+    let o = at - vec2(6.0, 6.0);
+    let points = vec![o + vec2(1.5, 2.5), o + vec2(4.7, 2.5), o + vec2(5.8, 3.7), o + vec2(10.5, 3.7), o + vec2(10.5, 9.5), o + vec2(1.5, 9.5)];
+    ui.painter().add(Shape::closed_line(points, Stroke::new(1.3, color)));
+}
+
+/// The browse button's size of capitals, and its room either side and
+/// beside its icon, as the canvas draws it.
+const BROWSE_SIZE: f32 = 11.0;
+const BROWSE_PAD: f32 = 12.0;
+const BROWSE_ICON_GAP: f32 = 8.0;
+
+/// How wide [`browse_button`] wants to be for `label`.
+fn browse_button_width(ui: &Ui, label: &str) -> f32 {
+    BROWSE_PAD + 12.0 + BROWSE_ICON_GAP + studio::caps_width(ui, label, BROWSE_SIZE) + BROWSE_PAD
+}
+
+/// The destination's browse button at `rect`: the kit's secondary form
+/// button (its hairline, its raise and its hand under the pointer) with the
+/// canvas's folder before its capitals, both dim and brightened under the
+/// pointer as the kit's are.
+fn browse_button(ui: &Ui, id: Id, rect: Rect, label: &str, pal: &Pal) -> egui::Response {
+    let response = form_button(ui, id, rect, "", false, pal);
+    let color = if response.hovered() { pal.text } else { pal.dim };
+    let icon = pos2(rect.min.x + BROWSE_PAD + 6.0, rect.center().y);
+    folder_icon(ui, icon, color);
+    let from = icon.x + 6.0 + BROWSE_ICON_GAP;
+    studio::caps(ui, pos2(from, rect.center().y), label, BROWSE_SIZE, color, (rect.max.x - BROWSE_PAD - from).max(1.0), Align2::LEFT_CENTER);
+    response
+}
+
 /// A small solid triangle pointing right, centred on `at`: a folder's mark.
 fn folder_mark(ui: &Ui, at: Pos2, color: Color32) {
     let points = vec![at + vec2(-2.5, -4.0), at + vec2(3.5, 0.0), at + vec2(-2.5, 4.0)];
@@ -617,7 +653,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         let w = ui.available_width();
         let (line, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
         let browse = t!("bak.browse_button").to_string();
-        let bw = form_button_width(ui, &browse).min(w * 0.5);
+        let bw = browse_button_width(ui, &browse).min(w * 0.5);
         let boxed = Rect::from_min_max(line.min, pos2(line.max.x - bw - 8.0, line.max.y));
         let input = studio::Input::new(f.dest.value(), f.dest.cursor()).mono().focused(focused == Field::Dest, composing(Field::Dest));
         let typed = field_box(ui, id.with("dest"), boxed, &input, pal);
@@ -631,7 +667,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
             }
         }
         let at = Rect::from_min_max(pos2(line.max.x - bw, line.min.y), line.max);
-        if form_button(ui, id.with("browse"), at, &browse, false, pal).clicked() {
+        if browse_button(ui, id.with("browse"), at, &browse, pal).clicked() {
             acts.push(Act::FormBrowse);
         }
         ui.add_space(LABEL_GAP);
@@ -884,14 +920,22 @@ fn history(ui: &Ui, dest: &BackupDestination, runs: &[BackupRun], loaded: bool, 
     }
 }
 
-/// The remove gate, gold because it is destructive: the consequences, then
-/// Keep, the safe choice and the primary, and Remove after it. Its close is
-/// the Esc that keeps, sent as the key.
+/// The kit modal's padding and title row (studio.rs), where the gate puts
+/// its own gold title.
+const MODAL_PAD: f32 = 24.0;
+const TITLE_H: f32 = 20.0;
+
+/// The remove gate, gold because it is destructive, as the cells draw it:
+/// its edge and its title, then the consequences, then Keep, the safe
+/// choice and the primary, and Remove after it. Its close is the Esc that
+/// keeps, sent as the key.
 fn gate(ui: &Ui, room: &Room, id: i64, over: Rect, pal: &Pal, acts: &mut Vec<Act>, keys: &mut Vec<KeyCode>) {
     let (library, path) = room.dest(id).map(|d| (printable(&d.library_name, 64), d.dest_path.clone())).unwrap_or_default();
     let title = t!("bak.remove_title", library = library, path = path);
     let gate_id = Id::new("backups-remove");
-    let shown = modal(ui, gate_id, over, GATE_W, &title, pal, |ui| {
+    // The kit's title is in the text colour: the gate's goes on after, in
+    // gold, where the kit would have put it.
+    let shown = modal(ui, gate_id, over, GATE_W, "", pal, |ui| {
         for key in ["bak.remove_1", "bak.remove_2"] {
             prose(ui, &t!(key), body(14.0), pal.gold, usize::MAX);
             ui.add_space(6.0);
@@ -912,9 +956,18 @@ fn gate(ui: &Ui, room: &Room, id: i64, over: Rect, pal: &Pal, acts: &mut Vec<Act
             acts.push(Act::RemoveConfirm);
         }
     });
-    // The warning's gold edge over the kit's hairline, in the window's own layer.
-    let edge = ui.ctx().layer_painter(LayerId::new(Order::Foreground, gate_id));
-    edge.rect_stroke(shown.window, square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
+    // The warning's gold edge over the kit's hairline, and its gold title,
+    // in the window's own layer.
+    let layer = ui.ctx().layer_painter(LayerId::new(Order::Foreground, gate_id));
+    layer.rect_stroke(shown.window, square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
+    let inner = shown.window.shrink(MODAL_PAD);
+    let row = Rect::from_min_size(inner.min, vec2(inner.width(), TITLE_H));
+    let format = TextFormat { font_id: strong(16.0), color: pal.gold, ..Default::default() };
+    let mut job = LayoutJob::single_section(title.to_string(), format);
+    job.wrap = TextWrapping::truncate_at_width((inner.width() - 40.0).max(1.0));
+    let galley = layer.layout_job(job);
+    let at = Align2::LEFT_CENTER.anchor_size(row.left_center(), galley.size());
+    layer.galley(at.min, galley, pal.gold);
     if shown.closed {
         keys.push(KeyCode::Esc);
     }
@@ -1381,6 +1434,16 @@ mod tests {
             "◂ KEEP",
             "REMOVE",
         ]);
+        let title = "Remove music → /Volumes/Backup/music?";
+        let inks: Vec<Color32> = out
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                Shape::Text(text) if text.galley.text() == title => Some(text.galley.job.sections[0].format.color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inks, vec![Pal::now().gold], "the title once, in gold, as the cells' gate");
         let id = Id::new("backups-remove");
         let _ = click_id(&ctx, &mut room, LARGE, id.with("keep"));
         assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "Act::RemoveCancel");
