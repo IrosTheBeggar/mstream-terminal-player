@@ -15,19 +15,19 @@
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
+use egui::epaint::{Shadow, StrokeKind};
 use egui::style::ScrollAnimation;
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Align, Align2, Color32, CursorIcon, FontId, Id, Layout, Pos2, Rect, ScrollArea, Sense, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Align2, Color32, CursorIcon, FontId, Id, Layout, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
 use crate::admin::EguiShown;
 use crate::gui::window::studio::{
-    self, Col, FIELD_H, FORM_BUTTON_H, Icon, Pal, Table, add_card, body, cell, checkbox, field_box, form_button,
+    self, Col, FIELD_H, FORM_BUTTON_H, Icon, Pal, SCRIM, Table, add_card, body, checkbox, field_box, form_button,
     form_button_width, icon_button, ink, led, modal, mono, note_line, ring, small_caps, square, strong, style_once, text,
     width_of,
 };
-use crate::input::KeyModifiers;
 
 /// The room's margins inside its area, as the canvas pads the room.
 const PAD_X: f32 = 24.0;
@@ -60,6 +60,11 @@ const NAME_BOX_W: f32 = 264.0;
 /// The most rows a modal list shows: the cells' browser and suggestions.
 const BROWSE_ROWS: usize = 11;
 const SUGGEST_ROWS: usize = 6;
+/// The kit's window, which the gate's copies: its padding, the room under
+/// its title, and the title's row.
+const MODAL_PAD: f32 = 24.0;
+const MODAL_GAP: f32 = 20.0;
+const TITLE_H: f32 = 20.0;
 
 /// One pass of the room over the whole of `ui`, the room's area less its
 /// first row, with `composition` the input method's uncommitted text for
@@ -88,23 +93,17 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
         acts.clear();
     }
     let mut caret = None;
-    let mut keep = false;
     match &room.modal {
         Modal::None => {}
         Modal::Browser(browse) => browser(ui, full, browse, &pal, &mut acts),
         Modal::PathEntry(draft) => caret = path_entry(ui, full, draft, composition, &pal, &mut acts),
         Modal::Name(draft) => caret = name(ui, full, draft, composition, &pal, &mut acts),
-        Modal::Remove(i) => keep = remove(ui, full, room, *i, &pal, &mut acts),
+        Modal::Remove(i) => remove(ui, full, room, *i, &pal, &mut acts),
     }
 
     let mut outcome = None;
     for act in acts {
         outcome = outcome.or(room.act(act));
-    }
-    // The gate's close is Esc, its tips' "Esc keep": the cells draw no
-    // close on a gate, the kit's window always has one.
-    if keep {
-        outcome = outcome.or(room.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
     }
     // A click that closed the field's modal took the keyboard with it.
     if !matches!(room.modal, Modal::Name(_) | Modal::PathEntry(_)) {
@@ -132,7 +131,9 @@ fn libraries(ui: &mut Ui, room: &mut Room, pal: &Pal, acts: &mut Vec<Act>) {
     ];
     let top = ui.cursor().min;
     // A fresh add's row is brought into view, not selected; the cells view
-    // takes the same note when it draws.
+    // takes the same note when it draws. egui moves the table on the pass
+    // after this one and shows the move on the pass after that, and asks
+    // its host for both.
     let reveal = room.reveal.take();
     let mut revealed = false;
     let libs = &room.libs;
@@ -148,9 +149,10 @@ fn libraries(ui: &mut Ui, room: &mut Room, pal: &Pal, acts: &mut Vec<Act>) {
         let lib = &libs[i];
         let y = row.rect.center().y;
         // The vpath, plain: the server has no rename, so nothing here
-        // offers one.
+        // offers one. A long one is cut at its column with no ellipsis, as
+        // the canvas and the cells cut it.
         let font = if row.selected { strong(14.0) } else { body(14.0) };
-        cell(ui, row, 0, &lib.name, font, ink(row, pal.text, pal), false);
+        clipped(ui, row.cell(0), &lib.name, font, ink(row, pal.text, pal));
         // The folder keeps its leaf; the whole path rides a tip when cut.
         let (x, w) = row.cells[1];
         let (shown, cut) = cut_start(ui, &lib.root, mono(12.5), w);
@@ -243,8 +245,9 @@ fn path_entry(ui: &Ui, over: Rect, draft: &PathDraft, composition: &str, pal: &P
                     from = i;
                     window = draft.suggestions().skip(i).take(4 * SUGGEST_ROWS).collect();
                 }
+                // Dim, the pointer's brighter, as the cells draw them.
                 if let Some(entry) = window.get(i - from) {
-                    folder_row(ui, rect, entry, on, if hovered { pal.text } else { pal.soft }, pal);
+                    folder_row(ui, rect, entry, on, if hovered { pal.text } else { pal.dim }, pal);
                 }
             });
         }
@@ -316,17 +319,17 @@ fn name(ui: &Ui, over: Rect, draft: &NameDraft, composition: &str, pal: &Pal, ac
     caret
 }
 
-/// The warning gate before a remove: what stays and what goes, then Keep
-/// (the safe choice, lit) and Remove. Returns whether its close was
-/// clicked, which the room hears as Esc.
-fn remove(ui: &Ui, over: Rect, room: &Room, i: usize, pal: &Pal, acts: &mut Vec<Act>) -> bool {
+/// The warning gate before a remove, in its gold window with no close (a
+/// gate is answered, as the cells draw it): what stays and what goes, then
+/// Keep (the safe choice, lit) and Remove.
+fn remove(ui: &Ui, over: Rect, room: &Room, i: usize, pal: &Pal, acts: &mut Vec<Act>) {
     let id = Id::new("libraries-gate");
     let name = room.libs.get(i).map(|l| l.name.clone()).unwrap_or_default();
-    let shown = modal(ui, id, over, NARROW, &t!("admin.remove_title", name = name), pal, |ui| {
-        para(ui, &t!("admin.remove_files_stay"), 13.5, pal.ok);
+    let picked = gate(ui, id, over, NARROW, &t!("admin.remove_title", name = name), pal, |ui| {
+        para(ui, &t!("admin.remove_files_stay"), 13.0, pal.ok);
         ui.add_space(6.0);
-        para(ui, &t!("admin.remove_users", name = name), 13.5, pal.gold);
-        para(ui, &t!("admin.remove_tracks"), 13.5, pal.gold);
+        para(ui, &t!("admin.remove_users", name = name), 13.0, pal.gold);
+        para(ui, &t!("admin.remove_tracks"), 13.0, pal.gold);
         ui.add_space(20.0);
         let end = [(t!("admin.remove_keep").to_string(), true), (t!("admin.remove_confirm").to_string(), false)];
         match foot(ui, id.with("foot"), &[], &end, pal) {
@@ -335,8 +338,46 @@ fn remove(ui: &Ui, over: Rect, room: &Room, i: usize, pal: &Pal, acts: &mut Vec<
             None => None,
         }
     });
-    acts.extend(shown.inner);
-    shown.closed
+    acts.extend(picked);
+}
+
+/// The kit's [`modal`] as a warning gate draws it: the same scrim
+/// swallowing presses beside the window, the same window sized to its
+/// body, but no close (the cells draw a gate no [X]: it forces an explicit
+/// choice, its keys and its two buttons), and its title and frame in the
+/// warning's gold, as the cells frame it. What the body returned.
+fn gate<R>(ui: &Ui, id: Id, over: Rect, width: f32, title: &str, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> R {
+    let ctx = ui.ctx().clone();
+    let width = width.min(over.width() - 32.0).max(over.width().min(160.0));
+    let max_h = (over.height() - 32.0).max(2.0 * MODAL_PAD + TITLE_H);
+    let size_key = id.with("height");
+    let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
+    let window = Rect::from_center_size(over.center(), vec2(width, known.unwrap_or(max_h).min(max_h)));
+    let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false);
+    let shown = area.show(&ctx, |ui| {
+        let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
+        ui.painter().rect_filled(over, 0.0, SCRIM);
+        let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
+        ui.painter().add(shadow.as_shape(window, square()));
+        ui.painter().rect_filled(window, square(), pal.panel);
+        ui.painter().rect_stroke(window, square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
+        let inner = window.shrink(MODAL_PAD);
+        let title_row = Rect::from_min_size(inner.min, vec2(inner.width(), TITLE_H));
+        text(ui, title_row.left_center(), title, strong(16.0), pal.gold, inner.width(), Align2::LEFT_CENTER);
+        let budget = (max_h - 2.0 * MODAL_PAD - TITLE_H - MODAL_GAP).max(0.0);
+        let body_rect = Rect::from_min_size(pos2(inner.min.x, title_row.max.y + MODAL_GAP), vec2(inner.width(), budget));
+        let mut child =
+            ui.new_child(UiBuilder::new().id_salt(id.with("body")).max_rect(body_rect).layout(Layout::top_down(Align::Min)));
+        let out = ScrollArea::vertical().id_salt(id.with("scroll")).max_height(budget).auto_shrink([false, true]).show(&mut child, body);
+        let wanted = 2.0 * MODAL_PAD + TITLE_H + MODAL_GAP + out.content_size.y.min(budget);
+        (out.inner, wanted.min(max_h))
+    });
+    let (inner, wanted) = shown.inner;
+    if known.is_none_or(|h| (h - wanted).abs() > 0.5) {
+        ctx.data_mut(|d| d.insert_temp(size_key, wanted));
+        ctx.request_discard("a gate took its body's height");
+    }
+    inner
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────
@@ -358,6 +399,14 @@ fn para(ui: &mut Ui, s: &str, size: f32, color: Color32) {
     let galley = ui.painter().layout_job(job);
     let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
     ui.painter().galley(rect.min, galley, color);
+}
+
+/// `s` in one line from `rect`'s left, its middle on `rect`'s, cut plainly
+/// at the rect's right edge: no ellipsis, as the canvas clips a long name.
+fn clipped(ui: &Ui, rect: Rect, s: &str, font: FontId, color: Color32) {
+    let galley = ui.painter().layout_no_wrap(s.to_string(), font, color);
+    let at = pos2(rect.min.x, rect.center().y - galley.size().y / 2.0);
+    ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(at, galley, color);
 }
 
 /// A folder in a modal list: an LED, lit on the keyboard's row as the
@@ -653,10 +702,33 @@ mod tests {
         assert!(row.max.y <= SIZE.y, "and on screen: {row:?}");
         let words = drawn(&out);
         assert!(words.iter().any(|w| w.starts_with('…') && w.ends_with("leaf30")), "the folder keeps its leaf: {words:?}");
+
+        // A fresh add's row is brought into view and not taken by the cursor.
+        for _ in 0..31 {
+            room.key(key(KeyCode::Up));
+        }
+        assert_eq!(room.sel, Some(0));
+        let _ = settle(&ctx, &mut room);
+        room.key(key(KeyCode::Esc));
+        let _ = settle(&ctx, &mut room);
+        let tick = nth(Id::new("libraries-symlinks"), 36);
+        assert!(ctx.read_response(tick).is_none(), "row 36 is off screen with the cursor gone home");
+        // egui moves the table on the pass after the ask and shows it on
+        // the pass after that, and asks the host for both.
+        room.reveal = Some(36);
+        for _ in 0..2 {
+            let (out, _) = pass(&ctx, &mut room, Vec::new(), "");
+            let again = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+            assert_eq!(again, Some(std::time::Duration::ZERO), "egui asks for the next pass");
+        }
+        let _ = pass(&ctx, &mut room, Vec::new(), "");
+        let row = ctx.read_response(tick).expect("the revealed row is drawn").rect;
+        assert!(row.max.y <= SIZE.y, "and on screen: {row:?}");
+        assert_eq!((room.sel, room.reveal), (None, None), "revealed, not selected, and only once");
     }
 
     #[test]
-    fn the_remove_gate_draws_its_facts_and_keeps_removes_or_closes() {
+    fn the_remove_gate_draws_its_facts_has_no_close_and_keeps_or_removes() {
         let _en = english();
         let ctx = context();
         let mut room = seeded();
@@ -669,6 +741,8 @@ mod tests {
             assert!(has(&words, w), "{w} drawn: {words:?}");
         }
         assert!(shown.caret.is_none(), "a gate has no field");
+        let gate = Id::new("libraries-gate");
+        assert!(ctx.read_response(gate.with("close")).is_none(), "a gate has no close: it is answered");
 
         // The room beneath is inert: a press where the card stands does nothing.
         for pressed in [true, false] {
@@ -677,13 +751,8 @@ mod tests {
         }
         assert!(room.queued.is_none() && matches!(room.modal, Modal::Remove(1)), "the scrim swallowed it");
 
-        let gate = Id::new("libraries-gate");
         click(&ctx, &mut room, nth(gate.with("foot"), 0));
         assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "Keep keeps");
-        room.act(Act::RemoveAt(1));
-        let _ = settle(&ctx, &mut room);
-        click(&ctx, &mut room, gate.with("close"));
-        assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "the close is Esc, which keeps");
         room.act(Act::RemoveAt(1));
         let _ = settle(&ctx, &mut room);
         click(&ctx, &mut room, nth(gate.with("foot"), 1));
