@@ -96,6 +96,18 @@ impl Screen for Room {
     fn claim(&self) -> Claim {
         Room::claim(self)
     }
+
+    #[cfg(feature = "window")]
+    fn has_egui(&self) -> bool {
+        true
+    }
+
+    #[cfg(feature = "window")]
+    fn egui(&mut self, ui: &mut egui::Ui) -> Option<super::super::EguiShown> {
+        // The input method's composition, where the host put it.
+        let composition = self.cells.ui.composition().to_string();
+        Some(super::egui_view::show(ui, self, &composition))
+    }
 }
 
 // ── The chips' glyphs and colours ────────────────────────────────────────────

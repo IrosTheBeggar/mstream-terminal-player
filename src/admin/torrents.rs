@@ -53,6 +53,9 @@ use crate::setup::picker::{self, Pick};
 
 /// The room in character cells: the terminal's room and the GUI's grid.
 mod cells;
+/// The same room drawn by egui, in the desktop window's panel.
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
 
 /// The daemon's list, while the Torrents tab shows it moving.
 const POLL_LIST: Duration = Duration::from_secs(5);
