@@ -20,6 +20,7 @@
 //! Built only with the window: the terminal build has no panel to draw in.
 
 use egui::epaint::{CornerRadius, StrokeKind};
+use egui::style::ScrollAnimation;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align, Align2, Color32, CursorIcon, FontId, Id, LayerId, Layout, Order, Pos2, Rect, Response, ScrollArea, Sense, Shape,
@@ -1029,6 +1030,30 @@ fn pick_row(ui: &mut Ui, id: Id, h: f32, on: bool, pal: &Pal) -> (Rect, Response
     (rect, response)
 }
 
+/// Brings `rect`, where a modal's keyboard cursor stands (a list's row, or
+/// the field that has the keys), into view in the modal's scrolled body on
+/// the pass the cursor moved to `at` or the modal came up, and never on the
+/// passes after, so the wheel keeps the body where it puts it. In a short
+/// room the body scrolls: the window's opening size hides most of a sheet's
+/// actions under its facts. `id` names the modal; what it last revealed,
+/// on which pass, and whether that pass moved the body stay in egui's
+/// memory under it.
+fn reveal(ui: &Ui, id: Id, at: usize, rect: Rect) {
+    let memory = id.with("revealed");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let last: Option<(usize, u64, bool)> = ui.ctx().data(|d| d.get_temp(memory));
+    // A pass skipped is a modal that was down in between: a new one.
+    let moved = last.is_none_or(|(was, seen, _)| was != at || seen + 1 < pass);
+    if moved {
+        ui.scroll_to_rect_animation(rect, None, ScrollAnimation::none());
+    } else if last.is_some_and(|(_, _, moved)| moved) {
+        // egui lands the jump as this pass's scroll area begins, after it
+        // has placed the body: one more pass draws the body where it went.
+        ui.ctx().request_repaint();
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(memory, (at, pass, moved)));
+}
+
 /// A form's foot, a row the body's width: `error` in gold at its left, if
 /// there is one, and its buttons at its right in order, each `(label,
 /// primary)`. Returns the one clicked.
@@ -1168,6 +1193,9 @@ fn sheet(ui: &Ui, room: &Room, over: Rect, id: &str, sel: usize, pal: &Pal, key_
         for (i, (key, label, _)) in menu.iter().enumerate() {
             let on = i == sel;
             let (rect, mut response) = pick_row(ui, Id::new("disc-sheet-act").with(i), 38.0, on, pal);
+            if on {
+                reveal(ui, Id::new("disc-sheet"), i, rect);
+            }
             let lit = on || response.hovered();
             act_icon(ui, pos2(rect.min.x + 19.0, rect.center().y), *key, if lit { pal.text } else { pal.dim });
             let font = if on { strong(14.0) } else { body(14.0) };
@@ -1212,6 +1240,10 @@ fn compose(ui: &Ui, over: Rect, c: &Compose, pal: &Pal, composition: &str, pass:
         if typed.response.clicked() {
             does.push(Act::ComposeFocusMessage);
         }
+        // The message is the keys' stop after the last library.
+        if focused {
+            reveal(ui, Id::new("disc-compose"), usize::MAX, typed.response.rect);
+        }
         let caret = if focused { typed.caret } else { None };
         ui.add_space(18.0);
         label_row(ui, 14.0, &t!("p2p.compose_libraries"), pal);
@@ -1231,6 +1263,7 @@ fn compose(ui: &Ui, over: Rect, c: &Compose, pal: &Pal, composition: &str, pass:
                 let response = check_line(&mut one, Id::new("disc-compose-lib").with(i), *on, name, "", pal);
                 if c.focus == Some(i) {
                     ring(ui, response.rect.expand2(vec2(5.0, 1.0)), pal);
+                    reveal(ui, Id::new("disc-compose"), i, row);
                 }
                 if response.clicked() {
                     does.push(Act::ComposeToggle(i));
@@ -1288,6 +1321,7 @@ fn identity(ui: &Ui, over: Rect, d: &IdentityDraft, pal: &Pal, composition: &str
             }
             if focused {
                 caret = typed.caret;
+                reveal(ui, Id::new("disc-identity"), usize::from(description), typed.response.rect);
             }
             ui.add_space(4.0);
             line(ui, 18.0, &hint, body(12.5), pal.dim);
@@ -1388,6 +1422,9 @@ fn blocked(ui: &Ui, room: &Room, over: Rect, sel: usize, pal: &Pal, pass: &mut P
         for (i, id) in ids.iter().enumerate() {
             let on = i == sel;
             let (rect, response) = pick_row(ui, Id::new("disc-blocked-row").with(i), 34.0, on, pal);
+            if on {
+                reveal(ui, Id::new("disc-blocked"), i, rect);
+            }
             let at = pos2(rect.min.x + 12.0, rect.center().y);
             text(ui, at, &printable(id, 64), mono(12.5), pal.text, rect.width() - 24.0, Align2::LEFT_CENTER);
             if response.clicked() {
@@ -1485,6 +1522,27 @@ mod tests {
         out.shapes.iter().find_map(|clipped| match &clipped.shape {
             Shape::Text(text) if text.galley.text() == words => Some(text.visual_bounding_rect()),
             _ => None,
+        })
+    }
+
+    /// The frames after the keys moved a modal's cursor, as the panel runs
+    /// them: egui scrolls the body on the first, lands the jump as the
+    /// second begins (which must ask for the third), and draws the body
+    /// where it went on the third. The third's output.
+    fn walked(ctx: &egui::Context, room: &mut Room, size: Vec2) -> egui::FullOutput {
+        let _ = frame(ctx, room, size, Vec::new(), "");
+        let (landed, _) = frame(ctx, room, size, Vec::new(), "");
+        let due = landed.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay.is_zero());
+        assert!(due, "the pass that lands the jump asks for the one that draws it");
+        frame(ctx, room, size, Vec::new(), "").0
+    }
+
+    /// Whether the frame drew `words` whole inside the clip they were drawn
+    /// under: on screen, not scrolled out of their area.
+    fn in_view(out: &egui::FullOutput, words: &str) -> bool {
+        out.shapes.iter().any(|clipped| match &clipped.shape {
+            Shape::Text(text) if text.galley.text() == words => clipped.clip_rect.contains_rect(text.visual_bounding_rect()),
+            _ => false,
         })
     }
 
@@ -1693,9 +1751,52 @@ mod tests {
         assert_eq!(room.queued, Some(Op::Peer { action: PeerAction::Forget, id: hex("7e11aa93b0"), name: "jazz-corner".into() }));
         // A server that leaves the catalog takes its sheet with it.
         room.act(Act::OpenSheet(4));
+        assert!(matches!(&room.modal, Modal::Sheet { id, .. } if *id == hex("05d6e8f2ac")), "{:?}", room.modal);
         room.catalog.peers.pop();
         let _ = settle(&ctx, &mut room, LARGE);
         assert!(matches!(room.modal, Modal::None));
+    }
+
+    #[test]
+    fn a_modals_keyboard_cursor_comes_into_view_where_its_body_scrolls() {
+        let _en = english();
+        let ctx = context();
+        let mut room = on();
+        // jazz-corner's sheet at the window's opening size: its facts leave
+        // the body room for its first action, the last under the fold until
+        // the keys walk the cursor down to it.
+        let jazz = room.rows().iter().position(|p| p.payload.name == "jazz-corner").expect("jazz-corner's row");
+        room.act(Act::OpenSheet(jazz));
+        let out = settle(&ctx, &mut room, SMALL).0;
+        assert!(in_view(&out, "Download the snapshot"), "the cursor's row, the first, in view");
+        assert!(found(&out, "Block this server").is_some() && !in_view(&out, "Block this server"), "the last drawn under the fold");
+        for _ in 0..3 {
+            handle_key(&mut room, key(KeyCode::Down));
+        }
+        assert!(matches!(room.modal, Modal::Sheet { sel: 3, .. }), "{:?}", room.modal);
+        let out = walked(&ctx, &mut room, SMALL);
+        assert!(in_view(&out, "Block this server"), "the cursor's row brought into view");
+        room.act(Act::SheetClose);
+
+        // The blocked list, longer than the body: down to its last row and
+        // back up to its first, each in view in its turn.
+        let mut s = status_on();
+        s.blocked_peers = (0..12).map(|i| hex(&format!("b{i:02}c0d0e0"))).collect();
+        let (first, last) = (s.blocked_peers[0].clone(), s.blocked_peers[11].clone());
+        room.apply(loaded(s));
+        room.act(Act::BlockedOpen);
+        let out = settle(&ctx, &mut room, SMALL).0;
+        assert!(in_view(&out, &first) && !in_view(&out, &last), "the list opens at its top");
+        for _ in 0..11 {
+            handle_key(&mut room, key(KeyCode::Down));
+        }
+        let out = walked(&ctx, &mut room, SMALL);
+        assert!(in_view(&out, &last) && !in_view(&out, &first), "the cursor on the last row: in view");
+        for _ in 0..11 {
+            handle_key(&mut room, key(KeyCode::Up));
+        }
+        let out = walked(&ctx, &mut room, SMALL);
+        assert!(in_view(&out, &first) && !in_view(&out, &last), "and back on the first");
     }
 
     #[test]
