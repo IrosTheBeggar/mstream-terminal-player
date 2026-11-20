@@ -4685,6 +4685,18 @@ test failed 10 times in 288; with the tests waiting for the sleep
 the next tick is what a refused suspend is for, and a device's callback is not a thread that
 waits its turn.
 
+**Found in the stage's own tests later (2026-11-20).** The macOS runner failed
+`a_staged_stream_plays_the_bus_until_it_is_told_to_stop` three times, on main and on two pull
+requests that do not touch the path. Twice it was the test's one ask for a suspend, refused
+mid-pull as above; once it was 60 ms after `wake()`, when the stream had not pulled yet. Every
+core kept busy beside it did not reproduce either here, with CPU hogs or with the whole suite
+(none in 200). Freezing the test's process over and over, every thread at once, did: a model of
+a CI host taking a VM's vCPUs away. The test's sleep and the puller's both run out during a
+freeze, and nothing says which thread runs first after it. So run, the test failed 23 times in
+400, at the wake, at the stalled stream's `speak_again` (the same shape) and at the suspend; the
+pauseless test beside it failed 15 times in 400. With the tests waiting for what the stream does
+next (`wait_for`), neither failed in 400. Nothing in the engine changed.
+
 ## Appendix — Decoding off the device callback (2026-11-16)
 
 **Why.** After the device-switch fix, a read-through of the threading (main `c012d72`) found one
