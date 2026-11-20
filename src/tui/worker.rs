@@ -61,6 +61,22 @@ const SETTLED_TICK: Duration = crate::engine::DEVICE_POLL;
 #[cfg(not(target_arch = "wasm32"))]
 const ASIDE_POLL: Duration = Duration::from_millis(20);
 
+/// The audio thread's wait before its next tick, given whether the player
+/// is settled and the clip status it last sent: a settled player's long
+/// wait, an opening clip's brisk one, else the ordinary tick. The engine
+/// is never settled while a clip opens (`State::at_rest`), so the brisk
+/// wait is the one an opening clip gets.
+#[cfg(not(target_arch = "wasm32"))]
+fn tick_wait(settled: bool, clip: Option<&crate::player::AsideStatus>) -> Duration {
+    if settled {
+        SETTLED_TICK
+    } else if clip.is_some_and(|c| c.phase == crate::player::AsidePhase::Loading) {
+        ASIDE_POLL
+    } else {
+        TICK
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioCmd {
     Play { url: String, duration_hint: Option<f64> },
@@ -1313,14 +1329,7 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
 
     'listening: loop {
         let (batch, dropped) = if backlog.is_empty() {
-            let wait = if player.settled() {
-                SETTLED_TICK
-            } else if clip.as_ref().is_some_and(|c| c.phase == crate::player::AsidePhase::Loading) {
-                ASIDE_POLL
-            } else {
-                TICK
-            };
-            match rx.recv_timeout(wait) {
+            match rx.recv_timeout(tick_wait(player.settled(), clip.as_ref())) {
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => (Vec::new(), Vec::new()),
                 Ok(first) => {
@@ -4769,31 +4778,51 @@ mod tests {
         listener.join().expect("the thread ended on its own terms");
     }
 
+    /// The wait itself, with no clock to race: an opening clip shortens it,
+    /// and nothing else does.
+    #[test]
+    fn only_an_opening_clip_shortens_the_wait() {
+        use crate::player::AsidePhase::{Held, Loading, Paused, Playing};
+        assert_eq!(tick_wait(false, Some(&clip_status(1, Loading))), ASIDE_POLL);
+        for phase in [Playing, Paused, Held] {
+            assert_eq!(tick_wait(false, Some(&clip_status(1, phase))), TICK, "{phase:?}");
+        }
+        assert_eq!(tick_wait(false, None), TICK);
+        assert_eq!(tick_wait(true, None), SETTLED_TICK);
+    }
+
+    /// And the loop keeps to it. A loaded runner can stretch every gap in a
+    /// stretch of time (macOS CI: none under 119 ms in 600), so each phase
+    /// is watched for up to ten seconds instead: one gap shorter than the
+    /// ordinary wait allows shows the brisk wait, and no gap is shorter
+    /// than the ordinary one once the clip sounds, as a loaded machine
+    /// only lengthens a gap. The fake's clip keeps the last status given.
     #[test]
     fn a_loading_clip_ticks_briskly() {
         use crate::player::AsidePhase::{Loading, Playing};
         let player = AsideFake::default();
         let (cmds, events, listener) = aside_thread(&player);
-        // Each gap measured from the tick that published the phase: a
-        // loaded machine only ever lengthens a gap, so the shortest says
-        // which wait the loop is on.
-        let gaps = |phase: crate::player::AsidePhase| {
-            for _ in 0..12 {
-                player.step(Some(clip_status(1, phase)), vec![]);
-            }
+        // The ticks since the phase was published, once `done` says so.
+        let ticks_until = |phase: crate::player::AsidePhase, done: &dyn Fn(&[Duration]) -> bool| {
+            player.step(Some(clip_status(1, phase)), vec![]);
             events_until(&events, |e| matches!(e, Event::Aside(Some(s)) if s.phase == phase));
             player.ticked_at.lock().unwrap().clear();
-            std::thread::sleep(Duration::from_millis(600));
-            let ticked = std::mem::take(&mut *player.ticked_at.lock().unwrap());
-            ticked.windows(2).map(|pair| pair[1] - pair[0]).min()
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                std::thread::sleep(Duration::from_millis(50));
+                let ticked = player.ticked_at.lock().unwrap().clone();
+                let gaps: Vec<Duration> = ticked.windows(2).map(|pair| pair[1] - pair[0]).collect();
+                if done(&gaps) {
+                    return gaps;
+                }
+                assert!(std::time::Instant::now() < until, "{phase:?}: {gaps:?}");
+            }
         };
-        let opening = gaps(Loading);
-        assert!(opening.is_some_and(|gap| gap < Duration::from_millis(60)), "opening: {opening:?}");
-        // Once it sounds, the ordinary tick.
-        player.script.lock().unwrap().clear();
-        let sounding = gaps(Playing);
-        player.script.lock().unwrap().clear();
-        assert!(sounding.is_some_and(|gap| gap >= Duration::from_millis(100)), "sounding: {sounding:?}");
+        let brisk = |gap: &Duration| *gap < Duration::from_millis(60);
+        ticks_until(Loading, &|gaps: &[Duration]| gaps.iter().any(brisk));
+        let sounding = ticks_until(Playing, &|gaps: &[Duration]| gaps.len() >= 4);
+        let ordinary = |gap: &Duration| *gap >= Duration::from_millis(100);
+        assert!(sounding.iter().all(ordinary), "sounding: {sounding:?}");
         cmds.send(AudioCmd::Shutdown).unwrap();
         listener.join().expect("the thread ended on its own terms");
     }
