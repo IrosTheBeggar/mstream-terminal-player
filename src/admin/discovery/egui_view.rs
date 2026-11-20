@@ -35,8 +35,9 @@ use crate::gui::window::studio::{
 };
 use crate::input::KeyModifiers;
 
-/// The note line's height along the room's foot.
-const NOTE_H: f32 = 20.0;
+/// The note line's height along the room's foot: the canvas's 18 points,
+/// a full gap under the servers you follow.
+const NOTE_H: f32 = 18.0;
 /// Where a line's words start after the LED that leads it.
 const LED_W: f32 = 14.0;
 /// The table's headings and the room under them, as the kit draws them.
@@ -191,7 +192,7 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str, key_hints: b
     let column =
         Rect::from_min_max(pos2(full.min.x + look.side, full.min.y + look.top), pos2(full.max.x - look.side, full.max.y - look.bottom));
     let foot = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
-    let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, foot.min.y - look.gap / 2.0));
+    let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, foot.min.y - look.gap));
 
     // The sheet of a server that left the catalog closes, as the cells'
     // draw closes it.
@@ -478,8 +479,11 @@ fn stats_pane(ui: &Ui, pane: Rect, room: &Room, s: &DiscoveryStatus, look: &Look
         );
         ui.painter().rect_filled(rect, CornerRadius::same(2), pal.panel);
         let inner = rect.shrink2(vec2(14.0, look.tile_pad));
-        let head = caps(ui, inner.min, label, look.label, pal.dim, inner.width(), Align2::LEFT_TOP);
-        let figure = text(ui, pos2(inner.min.x, head.max.y + 2.0), value, mono(look.figure), pal.text, inner.width(), Align2::LEFT_TOP);
+        caps(ui, inner.min, label, look.label, pal.dim, inner.width(), Align2::LEFT_TOP);
+        // The canvas's label line and the 3 points under it, where the Stats
+        // page sets its figure (17 points down at the label's 11.5).
+        let figure_y = inner.min.y + look.label + 5.5;
+        let figure = text(ui, pos2(inner.min.x, figure_y), value, mono(look.figure), pal.text, inner.width(), Align2::LEFT_TOP);
         text(ui, pos2(inner.min.x, figure.max.y + 1.0), detail, mono(look.detail), pal.dim, inner.width(), Align2::LEFT_TOP);
     }
 }
@@ -1047,8 +1051,8 @@ fn form_foot(ui: &mut Ui, id: Id, error: Option<&str>, buttons: &[(String, bool)
 }
 
 /// One of the sheet's facts: its label in the canvas's column, and its
-/// value in `tone`, after an LED when it has one.
-fn fact(ui: &mut Ui, label: &str, value: &str, tone: Color32, lamp: Option<Color32>, pal: &Pal) {
+/// value's runs, after an LED when it has one, cut to the row.
+fn fact(ui: &mut Ui, label: &str, value: &[Run], lamp: Option<Color32>, pal: &Pal) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
     small_caps(ui, row.left_center(), label, pal.dim, FACT_COL - 12.0, Align2::LEFT_CENTER);
@@ -1057,7 +1061,7 @@ fn fact(ui: &mut Ui, label: &str, value: &str, tone: Color32, lamp: Option<Color
         led(ui, pos2(x + 3.0, row.center().y), color);
         x += LED_W;
     }
-    text(ui, pos2(x, row.center().y), value, body(13.5), tone, row.max.x - x, Align2::LEFT_CENTER);
+    runs(ui, pos2(x, row.center().y), value, row.max.x - x, Align2::LEFT_CENTER);
     ui.add_space(8.0);
 }
 
@@ -1120,16 +1124,18 @@ fn sheet(ui: &Ui, room: &Room, over: Rect, id: &str, sel: usize, pal: &Pal, key_
         let description = printable(&peer.payload.description, DESCRIPTION_MAX);
         if !description.trim().is_empty() {
             para(ui, w, &[(description, body(13.5), pal.soft)]);
-            ui.add_space(16.0);
+            ui.add_space(20.0);
         }
+        // The canvas's id in the figures' face; its words after it soft.
         let seen = iso_unix(&peer.updated_at).map(|t| t!("p2p.sheet_seen", age = age_text(now - t)).to_string()).unwrap_or_default();
-        fact(ui, &t!("p2p.sheet_endpoint"), &format!("{}{seen}", short_id(&peer.from)), pal.soft, None, pal);
-        let online = format!(
-            "{} · {}",
-            if peer.online { t!("p2p.online") } else { t!("p2p.offline") },
-            t!("p2p.sheet_tracks", tracks = fmt_count(peer.payload.row_count), seeders = peer.seeders)
-        );
-        fact(ui, &t!("p2p.sheet_online"), &online, pal.soft, Some(if peer.online { pal.ok } else { pal.unlit }), pal);
+        let endpoint = [(short_id(&peer.from), mono(12.5), pal.text), (seen, body(13.5), pal.soft)];
+        fact(ui, &t!("p2p.sheet_endpoint"), &endpoint, None, pal);
+        // Online or offline in its tone (an offline server's dim, as its
+        // row's), then its counts.
+        let (word, tone) = if peer.online { (t!("p2p.online"), pal.soft) } else { (t!("p2p.offline"), pal.dim) };
+        let counts = t!("p2p.sheet_tracks", tracks = fmt_count(peer.payload.row_count), seeders = peer.seeders);
+        let online = [(word.to_string(), body(13.5), tone), (format!(" · {counts}"), body(13.5), pal.soft)];
+        fact(ui, &t!("p2p.sheet_online"), &online, Some(if peer.online { pal.ok } else { pal.unlit }), pal);
         let snapshot = match &peer.fetched {
             None => t!("p2p.sheet_snapshot_none").to_string(),
             Some(h) => {
@@ -1144,15 +1150,17 @@ fn sheet(ui: &Ui, room: &Room, over: Rect, id: &str, sel: usize, pal: &Pal, key_
                 words
             }
         };
-        fact(ui, &t!("p2p.sheet_snapshot"), &snapshot, pal.soft, None, pal);
+        fact(ui, &t!("p2p.sheet_snapshot"), &[(snapshot, body(13.5), pal.soft)], None, pal);
         let (federation, tone) = match room.relation(&peer.from) {
             Relation::None => ("—".to_string(), pal.dim),
             Relation::Federated => (t!("p2p.sheet_fed_federated").to_string(), pal.ok),
             Relation::Theirs => (t!("p2p.sheet_fed_theirs").to_string(), pal.gold),
             Relation::Sent => (t!("p2p.sheet_fed_sent").to_string(), pal.soft),
         };
-        fact(ui, &t!("p2p.sheet_federation"), &federation, tone, None, pal);
-        ui.add_space(6.0);
+        fact(ui, &t!("p2p.sheet_federation"), &[(federation, body(13.5), tone)], None, pal);
+        // The canvas's 20 points under the facts (the last one's 8 and 12
+        // more), then the hairline over the actions.
+        ui.add_space(12.0);
         let (rule, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
         ui.painter().rect_filled(rule, 0.0, pal.edge);
         ui.add_space(14.0);
