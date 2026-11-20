@@ -96,6 +96,21 @@ impl Screen for Room {
             self.tscroll = if up { self.tscroll.saturating_sub(1) } else { self.tscroll.saturating_add(1) };
         }
     }
+
+    /// The room has an egui face (egui_view.rs), drawn in the desktop
+    /// window's panel when its host has one.
+    #[cfg(feature = "window")]
+    fn has_egui(&self) -> bool {
+        true
+    }
+
+    /// One pass of the egui face, the input method's composition the one
+    /// the host handed this surface.
+    #[cfg(feature = "window")]
+    fn egui(&mut self, ui: &mut egui::Ui) -> Option<crate::admin::EguiShown> {
+        let composition = self.cells.ui.composition().to_string();
+        Some(super::egui_view::show(ui, self, &composition))
+    }
 }
 
 // ── Drawing ──────────────────────────────────────────────────────────────────

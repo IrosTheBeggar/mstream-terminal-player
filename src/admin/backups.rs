@@ -42,6 +42,9 @@ use crate::setup::{Browse, join_server_path, parent_server_path, picker};
 
 /// The room in character cells: the terminal's room and the GUI's grid.
 pub(crate) mod cells;
+/// The same room drawn by egui, in the desktop window's panel.
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
 
 /// The page's cadences: two seconds with a run in flight, five otherwise.
 const POLL_ACTIVE: Duration = Duration::from_secs(2);
