@@ -223,6 +223,14 @@ fn execute(gui: &mut Gui, cmd: Command) -> Answer {
         // App: only flip when the state is the other one, so a repeated
         // /pause never resumes. Resume on an idle player is a no-op like
         // the engine's (a stopped jukebox starts through /play).
+        // Under a preview clip main reads paused, because the clip paused
+        // it, so the toggle would drop the remote's pause and main would
+        // come back when the clip ends. The engine's own pause ends the
+        // clip as taken and keeps main paused (peer-recs contract §1.8).
+        Command::Pause if gui.app.peer_recs_clip_live() => {
+            gui.pend(vec![Effect::Audio(AudioCmd::Pause)]);
+            Answer::ok()
+        }
         Command::Pause => {
             if !gui.app.status.is_idle() && !gui.app.status.paused {
                 gui.forward(Action::PlayPause);
@@ -682,6 +690,138 @@ mod tests {
 
     /// The listener over a real loopback socket: the token gate, the
     /// version probe that needs none, and the 503 when nobody answers.
+    // ── A preview clip over main (peer-recs contract §1.8) ────────────────
+
+    /// A Peer recs clip sounding over a playing main, as the engine
+    /// reports it: main reads paused, because the clip paused it. Returns
+    /// the clip's ticket.
+    fn under_a_clip(g: &mut Gui) -> u64 {
+        use crate::api::peer_recs_door::{PeerRecsCmd, PeerRecsEvent};
+        use crate::api::types::{Capabilities, DiscoveryPluginsResponse, PreviewResolveResponse, fixtures};
+        use crate::player::{AsidePhase, AsideStatus};
+        g.app.capabilities = Capabilities {
+            discovery: true,
+            discovery_p2p: true,
+            discovery_taste: 3,
+            discovery_p2p_peers: 1,
+            discovery_plugins: true,
+            ..Capabilities::default()
+        };
+        execute(g, Command::Play("Music/a.mp3".into()));
+        g.app.status.playing = true;
+        let door = |effects: &[Effect]| -> Vec<(u64, PeerRecsCmd)> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::Api(ApiCmd::PeerRecs { generation, cmd }) => Some((*generation, cmd.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let opened = g.app.peer_recs_open(None);
+        for (generation, cmd) in door(&opened) {
+            let event = match cmd {
+                PeerRecsCmd::Taste { seq, .. } => {
+                    PeerRecsEvent::Taste { seq, answer: Ok(Box::new(fixtures::taste("taste_all"))) }
+                }
+                PeerRecsCmd::Gate { seq } => {
+                    let listing: DiscoveryPluginsResponse = serde_json::from_value(serde_json::json!({
+                        "plugins": [{ "name": "deezer", "capabilities": ["preview"] }],
+                        "jobs": { "allowed": false }
+                    }))
+                    .unwrap();
+                    PeerRecsEvent::Gate { seq, plugins: Ok(Box::new(listing)), destination: None }
+                }
+                _ => continue,
+            };
+            g.app.apply_event(Event::PeerRecs { generation, event: Box::new(event) });
+        }
+        let pressed = g.app.peer_recs_press(0, crate::clock::Instant::now());
+        let (generation, ticket) = door(&pressed)
+            .into_iter()
+            .find_map(|(generation, cmd)| match cmd {
+                PeerRecsCmd::Preview { ticket, .. } => Some((generation, ticket)),
+                _ => None,
+            })
+            .expect("the press resolves its lead");
+        let deezer: PreviewResolveResponse = serde_json::from_value(fixtures::preview("preview_deezer")).unwrap();
+        let answer = Ok(deezer.into_preview().map(Box::new));
+        let answered = g.app.apply_event(Event::PeerRecs {
+            generation,
+            event: Box::new(PeerRecsEvent::Preview { ticket, answer }),
+        });
+        let clip = answered
+            .iter()
+            .find_map(|e| match e {
+                Effect::Audio(AudioCmd::AsidePlay { ticket, .. }) => Some(*ticket),
+                _ => None,
+            })
+            .expect("the clip is played");
+        let status = AsideStatus { ticket: clip, phase: AsidePhase::Playing, position: 3.0, duration: 30.0 };
+        g.app.apply_event(Event::Aside(Some(status)));
+        // Main, as the engine reports it under the clip.
+        g.app.status.paused = true;
+        assert!(g.app.peer_recs_clip_live(), "the clip is live");
+        g.pending.clear();
+        clip
+    }
+
+    fn sent(g: &Gui) -> Vec<&AudioCmd> {
+        g.pending
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Audio(cmd) => Some(cmd),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_remote_pause_during_a_clip_reaches_the_engine() {
+        let mut g = session();
+        under_a_clip(&mut g);
+        // Main reads paused, so the toggle would have dropped it: the
+        // engine's pause ends the clip, and main stays where it is.
+        assert_eq!(execute(&mut g, Command::Pause).code, 200);
+        assert_eq!(sent(&g), [&AudioCmd::Pause], "{:?}", g.pending);
+        // Without a clip, a paused main's /pause is still a no-op.
+        let mut g = session();
+        execute(&mut g, Command::Play("Music/a.mp3".into()));
+        g.app.status.playing = true;
+        g.app.status.paused = true;
+        g.pending.clear();
+        assert_eq!(execute(&mut g, Command::Pause).code, 200);
+        assert!(sent(&g).is_empty(), "{:?}", g.pending);
+    }
+
+    #[test]
+    fn a_remote_play_during_a_clip_ends_it_once() {
+        use crate::player::{AsideEnd, AsideEnded};
+        let mut g = session();
+        let clip = under_a_clip(&mut g);
+        assert_eq!(execute(&mut g, Command::Play("Music/c.mp3".into())).code, 200);
+        // Main's play alone: the engine ends the clip with it, and the room
+        // sends no stop of its own beside it.
+        let sent = sent(&g);
+        assert_eq!(sent.iter().filter(|cmd| matches!(cmd, AudioCmd::Play { .. })).count(), 1, "{sent:?}");
+        let clip_cmd = |cmd: &&AudioCmd| {
+            matches!(
+                cmd,
+                AudioCmd::AsidePlay { .. }
+                    | AudioCmd::AsidePause { .. }
+                    | AudioCmd::AsideResume { .. }
+                    | AudioCmd::AsideStop { .. }
+                    | AudioCmd::AsideHold { .. }
+            )
+        };
+        assert!(!sent.iter().any(clip_cmd), "{sent:?}");
+        // The engine's word: taken. Nothing is restored for it, and the
+        // remote's next pause is main's own again.
+        let effects = g.app.apply_event(Event::AsideEnded(AsideEnded { ticket: clip, end: AsideEnd::Taken }));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(_))), "{effects:?}");
+        assert!(!g.app.peer_recs_clip_live());
+    }
+
     #[test]
     fn the_listener_answers_over_loopback() {
         use std::io::{Read, Write};

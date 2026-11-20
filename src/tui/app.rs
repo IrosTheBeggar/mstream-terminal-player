@@ -705,6 +705,22 @@ fn file_answer<'p, T>(
     evicted
 }
 
+/// A batch's main transport commands, in order: what cancels a preview
+/// press still finding its clip (peer-recs build plan D19).
+fn main_commands(effects: &[Effect]) -> Vec<AudioCmd> {
+    let main = |effect: &Effect| match effect {
+        Effect::Audio(
+            cmd @ (AudioCmd::Play { .. }
+            | AudioCmd::Pause
+            | AudioCmd::Resume
+            | AudioCmd::Stop
+            | AudioCmd::Seek(_)),
+        ) => Some(cmd.clone()),
+        _ => None,
+    };
+    effects.iter().filter_map(main).collect()
+}
+
 /// Whether `name`'s last ask went unanswered too recently for a caller
 /// that asks every frame to ask again: the tunnels' rungs, five seconds
 /// doubling to a minute. Without it a failing cover was re-asked every
@@ -1489,6 +1505,9 @@ mod session;
 mod sonic;
 pub(crate) mod taste;
 pub(crate) mod keep;
+// The GUI's Peer recs room lives under Discover's state (peer-recs build
+// plan D9), and is named from here.
+pub(crate) use taste::peer_recs;
 
 // The row builders moved out whole (audit #61); the app and its tests
 // go on naming them exactly as they did.
@@ -2201,6 +2220,9 @@ pub struct App {
     /// The GUI's Discover room: its own row model (docs/ux-contracts/
     /// discovery-page.md), apart from the TUI's Discover tab above.
     pub taste: taste::TasteState,
+    /// The GUI's Peer recs room (docs/ux-contracts/peer-recommendations.md):
+    /// its visit, its asks and its preview clip, apart from Discover's.
+    pub peer_recs: peer_recs::PeerRecsState,
     /// Keep a copy's state for the user's own server in front — its gate,
     /// its jobs, the marks, the open window (discovery-page clauses
     /// 100–149; the keep-a-copy-from-browsing spec §3.2) — kept across
@@ -2339,6 +2361,13 @@ pub struct App {
     /// (see `tui::graphics`).
     pub graphics: crate::tui::graphics::Graphics,
     pub audio_available: bool,
+    /// The main commands the App's own advance just sent (a track's end, a
+    /// handover's fallback, a failed row's skip or retry, an Auto DJ top-up;
+    /// never an opener, see `apply_event`): not the listener's, so they
+    /// leave a preview press alone (peer-recs build plan D19). Kept until
+    /// the next event or action, since a shell notes a batch once more on
+    /// its way out (`Gui::pend`).
+    own_advance: Vec<AudioCmd>,
     /// A copy of the audio coming out of the engine, for the visualiser to
     /// draw. Read-only from here and `None` off the real audio thread, so a
     /// test or a replay run without one draws the same as silence.
@@ -2486,6 +2515,7 @@ impl App {
             sonic_stack: Drill::new(SonicNode::Root),
             capture: None,
             taste: taste::TasteState::default(),
+            peer_recs: peer_recs::PeerRecsState::default(),
             keep: keep::KeepState::default(),
             keep_shelf: keep::KeepShelf::default(),
             sonic_playlist_name: None,
@@ -2524,6 +2554,7 @@ impl App {
             waveform_retry: HashMap::new(),
             graphics: crate::tui::graphics::Graphics::disabled(),
             audio_available: true,
+            own_advance: Vec::new(),
             tap: None,
             pointer: None,
             viz: Default::default(),
@@ -2773,6 +2804,16 @@ impl App {
     /// Tagging by the command means a reply for a tab you have since left
     /// still clears the right spinner.
     pub(crate) fn note_pending(&mut self, effects: &[Effect]) {
+        // A main transport command cancels a preview press that only
+        // resolves or waits (peer-recs build plan D19): every effect
+        // passes here, whoever made it. The App's own advance (a track's
+        // end, a failed row walked past, a DJ top-up: `apply_event`) is not
+        // the listener's command, and passes by.
+        let main = main_commands(effects);
+        if !main.is_empty() && main != self.own_advance {
+            self.own_advance.clear();
+            self.peer_recs_main_command();
+        }
         for effect in effects {
             // Playback is answered by the audio thread rather than a pane, so
             // it gets recorded here rather than lighting a spinner.
@@ -2887,6 +2928,9 @@ impl App {
         // and its plug-ins' asks.
         self.clear_taste_waits();
         self.clear_keep_waits();
+        // The Peer recs room's asking flags only: a door ask with no
+        // session answers here, never on its own event.
+        self.clear_peer_recs_waits();
         // So does the full-screen Discover panel. Its wait is only ever
         // cleared by a matching reply, and `refresh_now_discover` will not
         // re-ask while an entry for this seed exists — so an error left it
@@ -2972,6 +3016,7 @@ impl App {
     // ── Actions ─────────────────────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Vec<Effect> {
+        self.own_advance.clear();
         let effects = self.act(action);
         self.settle(effects)
     }
@@ -5255,6 +5300,8 @@ impl App {
         // The Discover room's copies, polled while one is live and shown
         // (discovery-page clause 112).
         effects.extend(self.keep_tick(now));
+        // The Peer recs room's cadences and its preview's pacing.
+        effects.extend(self.peer_recs_tick(now));
         // A Less like row past its life goes between frames, so the Seeds
         // sheet never shows one (auto-dj clause 23).
         self.seeds.prune(now);
@@ -6279,7 +6326,22 @@ impl App {
         if matches!(event, Event::Error(_) | Event::Unauthorized) {
             self.clear_pending();
         }
+        // The queue moving on by itself: what it plays or stops is the App's
+        // own advance, which leaves a preview press alone (`note_pending`):
+        // a track's end or handover, a row that would not open walked past
+        // or tried again once its server answers, the DJ's top-up. An
+        // opener is the listener's "Surprise me" landing late, their own
+        // start as a Listing's play-all is, and still cancels.
+        let advance = match &event {
+            Event::TrackEnded { .. }
+            | Event::HandedOver { .. }
+            | Event::PlaybackFailed { .. }
+            | Event::Reachable { .. } => true,
+            Event::AutoDjPick { .. } => !self.lane.opener,
+            _ => false,
+        };
         let effects = self.consume(event);
+        self.own_advance = if advance { main_commands(&effects) } else { Vec::new() };
         self.settle(effects)
     }
 
@@ -6430,6 +6492,9 @@ impl App {
             }
             Event::AudioFailed(e) => {
                 self.audio_available = false;
+                // The thread answers no clip ticket again: the room's clip
+                // session ends here, with nothing sent to it.
+                self.peer_recs_audio_lost();
                 self.error(format!("audio unavailable: {e}"));
                 Vec::new()
             }
@@ -6480,6 +6545,8 @@ impl App {
                     self.stats.retry_at = None;
                     self.stats.flush_wanted = true;
                     self.taste_reconnected();
+                    // Peer recs' off latch is let go, as Discover's is.
+                    self.peer_recs_reconnected();
                     // Keep a copy: an own server's flags kept, the gate asked
                     // of the own server — here, or through a connected one's
                     // parent (keep-a-copy spec §3.2) — once the waits a
@@ -6682,6 +6749,18 @@ impl App {
             // The GUI's Discover room keeps its own replies (clause 31's
             // guards live there).
             event @ (Event::Taste { .. } | Event::TasteAlbum { .. }) => self.consume_taste(event),
+            // The Peer recs room's door and its preview clip (peer-recs
+            // contract §1.4, §1.8).
+            Event::PeerRecs { generation, mut event } => {
+                // A peer's words are bounded once, here, not on every frame.
+                use crate::api::peer_recs_door::PeerRecsEvent;
+                if let PeerRecsEvent::Taste { answer: Ok(answer), .. } = &mut *event {
+                    peer_recs::rules::bound_answer(answer);
+                }
+                self.consume_peer_recs(generation, *event)
+            }
+            Event::Aside(status) => self.consume_peer_recs_aside(status),
+            Event::AsideEnded(ended) => self.consume_peer_recs_aside_ended(ended),
             // Its plug-ins too (clauses 100–149): never an `Event::Error`.
             event @ (Event::KeepGate { .. }
             | Event::JobsLookup { .. }
@@ -6911,6 +6990,158 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
     DEFAULTS.get_or_init(Keymap::default).action(key, mode)
 }
 
+
+/// The App's hooks into the Peer recs room (peer-recs build plan §2.C):
+/// each one reaches the room, and the room's answers never take the error
+/// path.
+#[cfg(test)]
+mod peer_recs_wiring {
+    use super::*;
+    use crate::api::peer_recs_door::{PeerRecsCmd, PeerRecsEvent, RecsFailure};
+    use crate::api::types::{Capabilities, DiscoveryPluginsResponse, PreviewResolveResponse, fixtures};
+    use crate::clock::Instant;
+    use peer_recs::previews::Slot;
+
+    /// A connected session on a generation-3 server, with the room's visit
+    /// open: the effects are its first asks.
+    fn room() -> (App, Vec<Effect>) {
+        let mut app = App::new(Some("http://localhost:3000".into()), None, None);
+        app.connected = true;
+        app.capabilities = Capabilities {
+            discovery: true,
+            discovery_p2p: true,
+            discovery_taste: 3,
+            discovery_p2p_peers: 1,
+            discovery_plugins: true,
+            ..Capabilities::default()
+        };
+        let effects = app.peer_recs_open(None);
+        (app, effects)
+    }
+
+    /// The room's door asks among `effects`, with their generations.
+    fn door(effects: &[Effect]) -> Vec<(u64, PeerRecsCmd)> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Api(ApiCmd::PeerRecs { generation, cmd }) => Some((*generation, cmd.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn land(app: &mut App, generation: u64, event: PeerRecsEvent) -> Vec<Effect> {
+        app.apply_event(Event::PeerRecs { generation, event: Box::new(event) })
+    }
+
+    /// The batch's answer, landed on the ask R1 sent.
+    fn batch(app: &mut App, opened: &[Effect]) -> (u64, PeerRecsEvent) {
+        let (generation, seq) = door(opened)
+            .into_iter()
+            .find_map(|(generation, cmd)| match cmd {
+                PeerRecsCmd::Taste { seq, .. } => Some((generation, seq)),
+                _ => None,
+            })
+            .expect("the visit asks R1");
+        let answer = PeerRecsEvent::Taste { seq, answer: Ok(Box::new(fixtures::taste("taste_all"))) };
+        land(app, generation, answer.clone());
+        (generation, answer)
+    }
+
+    /// The gate's answer: Deezer resolves previews.
+    fn gate(app: &mut App, opened: &[Effect]) {
+        let (generation, seq) = door(opened)
+            .into_iter()
+            .find_map(|(generation, cmd)| match cmd {
+                PeerRecsCmd::Gate { seq } => Some((generation, seq)),
+                _ => None,
+            })
+            .expect("the visit reads the gate");
+        let listing: DiscoveryPluginsResponse = serde_json::from_value(serde_json::json!({
+            "plugins": [{ "name": "deezer", "capabilities": ["preview"] }],
+            "jobs": { "allowed": false }
+        }))
+        .unwrap();
+        land(app, generation, PeerRecsEvent::Gate { seq, plugins: Ok(Box::new(listing)), destination: None });
+    }
+
+    #[test]
+    fn a_server_switch_resets_the_room() {
+        let (mut app, opened) = room();
+        assert!(door(&opened).iter().all(|(generation, _)| *generation == app.session_gen));
+        let (generation, answer) = batch(&mut app, &opened);
+        assert_eq!(app.peer_recs_leads().len(), 12, "the batch is drawn");
+        let visit = app.peer_recs_visit();
+        app.shed_server_state();
+        assert!(app.peer_recs_leads().is_empty(), "the old server's leads went with it");
+        assert_ne!(app.peer_recs_visit(), visit, "a fresh visit");
+        // The old server's answer, late, fills nothing.
+        land(&mut app, generation, answer);
+        assert!(app.peer_recs_leads().is_empty());
+    }
+
+    #[test]
+    fn a_main_play_reaches_the_rooms_main_command_hook() {
+        let (mut app, opened) = room();
+        gate(&mut app, &opened);
+        batch(&mut app, &opened);
+        let pressed = app.peer_recs_press(0, Instant::now());
+        let (generation, ticket) = door(&pressed)
+            .into_iter()
+            .find_map(|(generation, cmd)| match cmd {
+                PeerRecsCmd::Preview { ticket, .. } => Some((generation, ticket)),
+                _ => None,
+            })
+            .expect("the press resolves its lead");
+        assert_eq!(app.peer_recs_slot(0), Slot::Busy);
+        // Not every effect is a main command: the volume leaves the press.
+        app.note_pending(&[Effect::Audio(AudioCmd::SetVolume(0.4))]);
+        assert_eq!(app.peer_recs_slot(0), Slot::Busy);
+        // Main's play, through the funnel every shell sends its effects by.
+        let url = "http://localhost:3000/media/Music/a.mp3".to_string();
+        app.note_pending(&[Effect::Audio(AudioCmd::Play { url, duration_hint: None })]);
+        assert_eq!(app.peer_recs_slot(0), Slot::Idle, "the press only resolving is cancelled");
+        // Its answer still lands, and plays nothing.
+        let deezer: PreviewResolveResponse = serde_json::from_value(fixtures::preview("preview_deezer")).unwrap();
+        let answer = Ok(deezer.into_preview().map(Box::new));
+        let answered = land(&mut app, generation, PeerRecsEvent::Preview { ticket, answer });
+        assert!(
+            !answered.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::AsidePlay { .. }))),
+            "{answered:?}"
+        );
+    }
+
+    #[test]
+    fn a_peer_recs_event_reaches_the_room_not_the_error_path() {
+        let (mut app, opened) = room();
+        let (generation, poll) = door(&opened)
+            .into_iter()
+            .find_map(|(generation, cmd)| match cmd {
+                PeerRecsCmd::Peers { poll } => Some((generation, poll)),
+                _ => None,
+            })
+            .expect("the visit polls the shelf");
+        // Another pane's wait, which an `Event::Error` would end.
+        app.files.loading = true;
+        land(&mut app, generation, PeerRecsEvent::Peers { poll, answer: Ok(Box::new(fixtures::peers("peers_admin"))) });
+        assert!(app.peer_recs_strip().drawn, "the room took its strip");
+        assert!(app.files.loading, "no other wait was let go");
+        // A failure stays in the room too: its own pane, nothing else.
+        let seq = door(&opened)
+            .into_iter()
+            .find_map(|(_, cmd)| match cmd {
+                PeerRecsCmd::Taste { seq, .. } => Some(seq),
+                _ => None,
+            })
+            .expect("R1");
+        land(&mut app, generation, PeerRecsEvent::Taste { seq, answer: Err(RecsFailure::Failed) });
+        assert_eq!(app.peer_recs_pane(), peer_recs::rules::RecsPane::TryAgain);
+        assert!(app.files.loading, "the room's failure is not an error");
+        // Whereas an error is everyone's.
+        app.apply_event(Event::Error("boom".into()));
+        assert!(!app.files.loading);
+    }
+}
 
 #[cfg(test)]
 mod tests;

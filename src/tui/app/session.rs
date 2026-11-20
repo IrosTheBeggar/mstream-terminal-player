@@ -409,6 +409,8 @@ impl App {
         // The Discover room's answer, pins and prefs were the old server's
         // (discovery-page clause 31).
         self.reset_taste();
+        // So were the Peer recs room's visit and its preview answers.
+        self.reset_peer_recs();
         // Keep a copy's window and page marks were too; its state follows
         // the session's own server (keep-a-copy spec §3.2).
         self.keep_session_moved();
