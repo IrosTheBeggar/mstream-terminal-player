@@ -460,13 +460,15 @@ fn grant(ui: &Ui, d: &LibsDraft, over: Rect, pal: &Pal, steps: &mut Vec<Step>) {
         }
         let jump = moved(ui, Id::new(KEYS_AT[1]), d.cursor);
         for (i, (name, on)) in d.libraries.iter().enumerate() {
+            // Every row takes its room, but only the rows in view are drawn:
+            // a long list costs the pass its height, not each row's words.
+            let (_, rect) = ui.allocate_space(vec2(w, GRANT_ROW_H));
             let cursor = i == d.cursor;
-            let response = grant_row(ui, Id::new("users-libs-row").with(i), *on, &printable(name, NAME_MAX), cursor, pal);
-            if response.clicked() {
-                steps.push(Step::Act(Act::LibsRow(i)));
-            }
             if cursor && jump {
-                response.scroll_to_me(None);
+                ui.scroll_to_rect(rect, None);
+            }
+            if ui.is_rect_visible(rect) && grant_row(ui, Id::new("users-libs-row").with(i), rect, *on, &printable(name, NAME_MAX), cursor, pal).clicked() {
+                steps.push(Step::Act(Act::LibsRow(i)));
             }
         }
         ui.add_space(16.0);
@@ -641,13 +643,11 @@ fn inline_tick(ui: &Ui, id: Id, rect: Rect, on: bool, label: &str, focused: bool
     response
 }
 
-/// A row of the grant's list, the layout's width: a tick box on the
-/// ground's fill and the library's name, the keyboard's cursor raised and
-/// ringed as a table's row is. The whole row takes the click; as in the
-/// cells, it has no look of its own under the pointer.
-fn grant_row(ui: &mut Ui, id: Id, on: bool, name: &str, cursor: bool, pal: &Pal) -> Response {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, GRANT_ROW_H), Sense::hover());
+/// A row of the grant's list at `rect`: a tick box on the ground's fill
+/// and the library's name, the keyboard's cursor raised and ringed as a
+/// table's row is. The whole row takes the click; as in the cells, it has
+/// no look of its own under the pointer.
+fn grant_row(ui: &Ui, id: Id, rect: Rect, on: bool, name: &str, cursor: bool, pal: &Pal) -> Response {
     let response = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
     if cursor {
         ui.painter().rect_filled(rect, square(), pal.raised);
@@ -827,6 +827,13 @@ mod tests {
         let _ = click(&ctx, &mut r, SMALL, at);
         assert_eq!(r.sel, Some(1));
         assert!(r.queued.is_none(), "nothing sent");
+        // guest's trail right of its cross: the row's own target (its hand
+        // shows), but outside the selection, as the cells' remove column is.
+        let cross = ctx.read_response(Id::new("users-remove").with(2)).expect("guest's cross").rect;
+        let shown = click(&ctx, &mut r, SMALL, pos2(cross.max.x + 9.0, cross.center().y));
+        assert_eq!(shown.out.platform_output.cursor_icon, egui::CursorIcon::PointingHand, "on the row");
+        assert_eq!(r.sel, Some(1), "the trail selects nothing");
+        assert!(matches!(r.modal, Modal::None), "nor removes");
         let _ = click_on(&ctx, &mut r, SMALL, Id::new("users-remove").with(0));
         assert!(matches!(&r.modal, Modal::Remove(name) if name == "anna"), "{:?}", r.modal);
         assert_eq!(r.sel, Some(1), "the cross moves no cursor");
@@ -1095,5 +1102,95 @@ mod tests {
             let _ = pass(&ctx, &mut r, SMALL);
         }
         assert!((field(&ctx).min.y - top).abs() < 1.0, "the form opens on its field and the field's label: {} for {top}", field(&ctx).min.y);
+    }
+
+    /// A wheel's turn of `dy` points over `at` (up the list for a positive
+    /// one), and the passes egui eases the scroll over.
+    fn wheel(ctx: &egui::Context, room: &mut Room, size: Vec2, at: Pos2, dy: f32) {
+        let turn = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::default(),
+        };
+        let _ = pass_with(ctx, room, size, vec![Event::PointerMoved(at), turn], "");
+        for _ in 0..40 {
+            let _ = pass(ctx, room, size);
+        }
+    }
+
+    #[test]
+    fn a_press_the_room_took_before_a_modal_came_up_selects_nothing_at_its_release() {
+        let _en = english();
+        let ctx = context();
+        let mut r = loaded();
+        let guest = text_at(&settle(&ctx, &mut r, LARGE).out, "guest").center();
+        let button = |pressed| Event::PointerButton { pos: guest, button: PointerButton::Primary, pressed, modifiers: Modifiers::default() };
+        // egui owes the row the click it was pressed on, under the scrim or
+        // not: the room beneath drops it, on the form's first pass and on a
+        // later one alike.
+        for passes_between in [0, 2] {
+            let _ = pass_with(&ctx, &mut r, LARGE, vec![Event::PointerMoved(guest)], "");
+            let _ = pass_with(&ctx, &mut r, LARGE, vec![button(true)], "");
+            press(&mut r, KeyCode::Char('a'));
+            for _ in 0..passes_between {
+                let _ = pass(&ctx, &mut r, LARGE);
+            }
+            let shown = pass_with(&ctx, &mut r, LARGE, vec![button(false)], "");
+            assert_eq!(r.sel, None, "a release under the form, {passes_between} passes after it came up");
+            assert!(matches!(r.modal, Modal::Add(_)) && shown.outcome.is_none(), "the form stays");
+            press(&mut r, KeyCode::Esc);
+            let _ = settle(&ctx, &mut r, LARGE);
+        }
+    }
+
+    #[test]
+    fn a_long_tables_cursor_scrolls_in_when_a_key_moves_it_and_the_wheel_has_the_list_otherwise() {
+        let _en = english();
+        let ctx = context();
+        let mut r = loaded();
+        for i in 0..40 {
+            r.users.insert(format!("user-{i:02}"), super::super::tests::user(false, &["music"], false, false, false, false));
+        }
+        let shows = |out: &FullOutput, name: &str| drawn(out).iter().any(|w| w == name);
+        let out = settle(&ctx, &mut r, SMALL).out;
+        assert!(shows(&out, "anna") && !shows(&out, "user-39"), "the list's head, its rows in view alone: {:?}", drawn(&out));
+        // Up with no cursor takes it to the last row, and the table follows.
+        press(&mut r, KeyCode::Up);
+        let _ = pass(&ctx, &mut r, SMALL);
+        let out = pass(&ctx, &mut r, SMALL).out;
+        assert!(shows(&out, "user-39") && !shows(&out, "anna"), "{:?}", drawn(&out));
+        // The wheel takes the list back to its head, and the cursor, resting,
+        // is left out of view: the table follows it only when it moves.
+        wheel(&ctx, &mut r, SMALL, pos2(SMALL.x / 2.0, SMALL.y / 2.0), 4000.0);
+        let out = pass(&ctx, &mut r, SMALL).out;
+        assert_eq!(r.selected_name().as_deref(), Some("user-39"));
+        assert!(shows(&out, "anna") && !shows(&out, "user-39"), "{:?}", drawn(&out));
+        press(&mut r, KeyCode::Up);
+        let _ = pass(&ctx, &mut r, SMALL);
+        let out = pass(&ctx, &mut r, SMALL).out;
+        assert!(shows(&out, "user-38") && !shows(&out, "anna"), "the key brings it back: {:?}", drawn(&out));
+    }
+
+    #[test]
+    fn the_grants_long_list_draws_its_rows_in_view_alone_and_scrolls_its_cursor_in_on_a_key() {
+        let _en = english();
+        let ctx = context();
+        let mut r = loaded();
+        r.libraries = (0..60).map(|i| format!("lib-{i:02}")).collect();
+        r.act(Act::Libraries("ben".into()));
+        let rows = |out: &FullOutput| drawn(out).into_iter().filter(|w| w.starts_with("lib-")).collect::<Vec<_>>();
+        let shown = rows(&settle(&ctx, &mut r, SMALL).out);
+        assert!(shown.first().is_some_and(|w| w == "lib-00") && shown.len() < 20, "the list's head, and only what is in view: {shown:?}");
+        // Up wraps the cursor to the last library, which scrolls in.
+        press(&mut r, KeyCode::Up);
+        for _ in 0..40 {
+            let _ = pass(&ctx, &mut r, SMALL);
+        }
+        let shown = rows(&pass(&ctx, &mut r, SMALL).out);
+        assert!(shown.iter().any(|w| w == "lib-59") && !shown.iter().any(|w| w == "lib-00"), "{shown:?}");
+        let _ = click_on(&ctx, &mut r, SMALL, Id::new("users-libs-row").with(59));
+        let Modal::Libraries(d) = &r.modal else { panic!("the grant") };
+        assert!(d.libraries[59].1 && d.cursor == 59, "a row in view takes its click");
     }
 }
