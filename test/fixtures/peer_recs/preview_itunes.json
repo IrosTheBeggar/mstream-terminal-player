@@ -1,0 +1,41 @@
+{
+  "plugin": "itunes",
+  "capabilities": [
+    "preview"
+  ],
+  "key": "text:7b48fea87cb6809ce514c52f5f12ae56",
+  "recommendation": {
+    "artist": "Paper Lantern",
+    "title": "Signal Fires",
+    "album": "Night Ferry",
+    "year": null,
+    "isrc": "QZPRS2600003",
+    "releaseGroupMbid": null,
+    "duration": 198,
+    "recordingMbid": null,
+    "exportId": "anon:Signal Fires",
+    "peer": {
+      "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+      "name": "Kitchen Radio",
+      "label": "Kitchen Radio",
+      "id": null
+    },
+    "source": "p2p",
+    "albumArtist": null,
+    "filepath": null
+  },
+  "result": {
+    "preview": {
+      "provider": "itunes",
+      "url": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview/stage/signal-fires.m4a",
+      "seconds": 30,
+      "title": "Signal Fires",
+      "artist": "Paper Lantern",
+      "album": "Night Ferry",
+      "link": "https://music.apple.com/us/album/night-ferry/3995003?i=3995003",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/stage/100x100bb.jpg",
+      "attribution": "Provided courtesy of iTunes",
+      "match": 0.94
+    }
+  }
+}

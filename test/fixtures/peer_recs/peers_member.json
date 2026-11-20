@@ -1,0 +1,58 @@
+{
+  "canAdd": false,
+  "shelf": {
+    "held": 4,
+    "searchable": 4,
+    "running": false
+  },
+  "peers": [
+    {
+      "endpointId": "ba5eaa206eb20c70adb0cf0ad30db63b8920232f5da363f97a63e83de67cbfa0",
+      "name": "Basement Hi-Fi",
+      "label": "Basement Hi-Fi",
+      "monogram": "BH",
+      "hue": 210,
+      "online": true,
+      "onShelf": true,
+      "pinned": true,
+      "rowCount": 5,
+      "add": null
+    },
+    {
+      "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+      "name": "Kitchen Radio",
+      "label": "Kitchen Radio",
+      "monogram": "KR",
+      "hue": 25,
+      "online": true,
+      "onShelf": true,
+      "pinned": true,
+      "rowCount": 5,
+      "add": null
+    },
+    {
+      "endpointId": "a771c019b58e7329697be5d4bc8d2b14ddd82e4738bb019bca19ae733f53d2a7",
+      "name": "Attic Tapes",
+      "label": "Attic Tapes",
+      "monogram": "AT",
+      "hue": 112,
+      "online": false,
+      "onShelf": true,
+      "pinned": false,
+      "rowCount": 2,
+      "add": null
+    },
+    {
+      "endpointId": "3f9a1c7cbd00116d0312b285b279e969ca58077702b933169bdb017e0180a4c8",
+      "name": "mStream",
+      "label": "mStream · 3f9a",
+      "monogram": "mS",
+      "hue": 140,
+      "online": false,
+      "onShelf": true,
+      "pinned": true,
+      "rowCount": 2,
+      "add": null
+    }
+  ]
+}

@@ -3241,6 +3241,7 @@ mod tests {
             federation_direct: false,
             stats: true,
             discovery_taste: 0,
+            discovery_p2p_peers: 0,
             discovery_plugins: false,
             uploads: false,
             mood_filters: false,

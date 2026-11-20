@@ -17,6 +17,10 @@ pub use plugins::*;
 // The mood filters on Albums, Artists and Discover (mStream #1092).
 mod moods;
 pub use moods::*;
+// The Peer recs room's wire (peer-recommendations plan §3.1–3.6): the
+// network taste body, the peers and add answers, the preview resolve.
+mod peer_recs;
+pub use peer_recs::*;
 
 /// Accept an explicit JSON `null` where the server documents a nullable object,
 /// yielding `T::default()` instead of failing the whole response.
@@ -209,6 +213,11 @@ pub struct Ping {
     /// table here; an older server omits it (0).
     #[serde(rename = "discoveryTaste", deserialize_with = "null_default")]
     pub discovery_taste: u32,
+    /// The peers route's generation (peer-recommendations plan §3.1): 1 =
+    /// `GET /api/v1/discovery/p2p/peers` and the async add. A version fact,
+    /// always 1 on a server that has the route; an older one omits it (0).
+    #[serde(rename = "discoveryP2pPeers", default, deserialize_with = "generation")]
+    pub discovery_p2p_peers: u32,
     /// At least one discovery plug-in is switched on, so a recommendation
     /// row has actions (`GET /api/v1/discovery/plugins` lists them).
     #[serde(rename = "discoveryPlugins", deserialize_with = "null_default")]
@@ -276,6 +285,9 @@ pub struct LayeredFeatures {
     /// As [`Ping::discovery_taste`]: `/api/` carries it under `features`.
     #[serde(rename = "discoveryTaste", deserialize_with = "null_default")]
     pub discovery_taste: u32,
+    /// As [`Ping::discovery_p2p_peers`].
+    #[serde(rename = "discoveryP2pPeers", default, deserialize_with = "generation")]
+    pub discovery_p2p_peers: u32,
     #[serde(rename = "discoveryPlugins", deserialize_with = "null_default")]
     pub discovery_plugins: bool,
     /// As [`Ping::mood_filters`].
@@ -366,6 +378,7 @@ impl From<LayeredInfo> for Ping {
             federation_direct: info.user.federation_direct,
             stats: info.features.stats,
             discovery_taste: info.features.discovery_taste,
+            discovery_p2p_peers: info.features.discovery_p2p_peers,
             discovery_plugins: info.features.discovery_plugins,
             mood_filters: info.features.mood_filters,
         }
@@ -461,6 +474,9 @@ pub struct Capabilities {
     /// the room asks `>= 1` (discovery-page contract, clause 1), a later
     /// body key a higher floor.
     pub discovery_taste: u32,
+    /// The peers route's generation (the ping's `discoveryP2pPeers`): the
+    /// Peer recs room asks `>= 1` (peer-recs contract §1.1).
+    pub discovery_p2p_peers: u32,
     /// Recommendation rows have plug-in actions: the Discover room's Keep a
     /// copy and Open elsewhere (discovery-page clause 101).
     pub discovery_plugins: bool,
@@ -489,6 +505,17 @@ impl Capabilities {
     pub fn taste_moods(&self) -> bool {
         self.taste() && self.discovery_taste >= 2 && self.mood_filters
     }
+
+    /// The Peer recs room's server half (peer-recommendations plan §2
+    /// item 2): the index, p2p on, taste generation 3 and the peers route.
+    /// A peer session is the room's own rule, not the server's, so it is
+    /// not read here.
+    pub fn peer_recs(&self) -> bool {
+        self.discovery
+            && self.discovery_p2p
+            && self.discovery_taste >= 3
+            && self.discovery_p2p_peers >= 1
+    }
 }
 
 impl From<&Ping> for Capabilities {
@@ -502,6 +529,7 @@ impl From<&Ping> for Capabilities {
             federation_direct: ping.federation_direct,
             stats: ping.stats.is_some(),
             discovery_taste: ping.discovery_taste,
+            discovery_p2p_peers: ping.discovery_p2p_peers,
             discovery_plugins: ping.discovery_plugins,
             uploads: ping.no_upload == Some(false),
             mood_filters: ping.mood_filters,
@@ -1875,6 +1903,10 @@ pub struct LeadPeer {
     pub id: Option<i64>,
     pub endpoint_id: Option<String>,
     pub name: Option<String>,
+    /// The peer's label as the peers route draws it (taste generation 3,
+    /// peer-recommendations plan §3.4): what a lead's "from …" badge reads,
+    /// else `name`. `None` when absent or blank.
+    pub label: Option<String>,
 }
 
 /// One row from another server: a p2p lead (the answer's `network` half,
@@ -1917,7 +1949,59 @@ pub struct TasteLead {
     /// ([`peer_art_name`]).
     pub album_art: Option<String>,
     pub peer: LeadPeer,
+    /// The row's id in its peer's export (`exportId`, taste generation 3):
+    /// half of the lead's key (peer-recommendations plan §5.3). A string as
+    /// it came, a whole number as its decimal; anything else `None`.
+    pub export_id: Option<String>,
+    /// The server-stamped generated tile (peer-recommendations plan §5.1).
+    pub tile: Option<LeadTile>,
     pub raw: serde_json::Value,
+}
+
+/// A lead's generated tile, as the server stamps it on a network row
+/// (mStream's `leadTile`). The terminal draws the `▌` swatch from `hue`
+/// alone (peer-recs contract §1.12); `key` and `letter` are kept as they
+/// came, never computed here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeadTile {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub key: String,
+    /// Degrees, 0–359.
+    pub hue: u16,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub letter: String,
+}
+
+impl LeadTile {
+    /// The tile off a lead's `tile` value: an object whose `hue` is a
+    /// finite number, rounded half up and folded into 0–359. Anything else
+    /// is no tile, which draws the swatch dim rather than a false red.
+    pub fn from_value(value: &serde_json::Value) -> Option<LeadTile> {
+        let hue = value.get("hue")?.as_f64().filter(|h| h.is_finite())?;
+        let hue = ((hue + 0.5).floor() as i64).rem_euclid(360) as u16;
+        let text = |key: &str| {
+            value.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_string()
+        };
+        Some(LeadTile { key: text("key"), hue, letter: text("letter") })
+    }
+}
+
+/// A row's `exportId`: a non-empty string as it is, a finite whole number
+/// as its decimal, anything else `None`.
+fn export_id_of(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(|n| n.to_string())
+            .or_else(|| n.as_u64().map(|n| n.to_string()))
+            .or_else(|| {
+                n.as_f64()
+                    .filter(|f| f.is_finite() && f.fract() == 0.0 && f.abs() < 9.0e15)
+                    .map(|f| format!("{}", f as i64))
+            }),
+        _ => None,
+    }
 }
 
 /// A peer's cover file name as the client takes it: the server's own
@@ -1953,7 +2037,14 @@ impl TasteLead {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             name: peer.and_then(|p| p.get("name")).and_then(serde_json::Value::as_str).map(str::to_string),
+            label: peer
+                .and_then(|p| p.get("label"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|l| !l.trim().is_empty())
+                .map(str::to_string),
         };
+        let export_id = export_id_of(raw.get("exportId"));
+        let tile = raw.get("tile").and_then(LeadTile::from_value);
         TasteLead {
             artist: text("artist"),
             title: text("title"),
@@ -1973,6 +2064,8 @@ impl TasteLead {
                 .iter()
                 .find_map(|key| raw.get(*key).and_then(peer_art_name)),
             peer,
+            export_id,
+            tile,
             raw,
         }
     }
@@ -2022,6 +2115,27 @@ pub struct TasteNetwork {
     pub results: Vec<TasteLead>,
     #[serde(deserialize_with = "null_default")]
     pub searched: NetworkSearched,
+    /// Why the section has no rows (taste generation 3): `None` when rows
+    /// came back, on an older server, or for a value that is not a word.
+    #[serde(deserialize_with = "soft")]
+    pub reason: Option<NetworkReason>,
+}
+
+/// `network.reason` (peer-recommendations plan §3.3): the server names the
+/// empty state, so a client never guesses it from the counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkReason {
+    EmptyShelf,
+    NotOnShelf,
+    NoCompatible,
+    NothingNew,
+    ScanPending,
+    Error,
+    /// A word a newer server added. Rows always win over any reason
+    /// (peer-recs contract §1.10), so it matters only for an empty answer.
+    #[serde(other)]
+    Other,
 }
 
 /// One federated peer's part of the answer (contract clause 70).
@@ -2744,6 +2858,7 @@ mod tests {
                 federation_direct: false,
                 stats: false,
                 discovery_taste: 0,
+                discovery_p2p_peers: 0,
                 discovery_plugins: false,
                 uploads: false,
                 mood_filters: false,
@@ -2957,6 +3072,151 @@ mod tests {
             serde_json::to_value(&peers).unwrap(),
             serde_json::json!({ "pin": ["a.mp3", "b.mp3"], "limit": { "seeds": 2 } })
         );
+    }
+
+    #[test]
+    fn ping_reads_discovery_p2p_peers_flat_and_layered() {
+        let flat = |raw: &str| serde_json::from_str::<Ping>(raw).unwrap().discovery_p2p_peers;
+        assert_eq!(flat(r#"{"discoveryP2pPeers":1}"#), 1);
+        assert_eq!(flat(r#"{"discoveryP2pPeers":"1"}"#), 1);
+        for zero in [r#"{}"#, r#"{"discoveryP2pPeers":null}"#, r#"{"discoveryP2pPeers":"x"}"#] {
+            assert_eq!(flat(zero), 0, "{zero}");
+        }
+        let layered = |raw: &str| Ping::from(serde_json::from_str::<LayeredInfo>(raw).unwrap()).discovery_p2p_peers;
+        assert_eq!(layered(r#"{"features":{"discoveryP2pPeers":1},"user":{}}"#), 1);
+        assert_eq!(layered(r#"{"features":{},"user":{}}"#), 0);
+        assert_eq!(layered(r#"{"features":{"discoveryP2pPeers":null},"user":{}}"#), 0);
+        let caps = Capabilities::from(&serde_json::from_str::<Ping>(r#"{"discoveryP2pPeers":2}"#).unwrap());
+        assert_eq!(caps.discovery_p2p_peers, 2);
+    }
+
+    #[test]
+    fn the_peer_recs_gate_needs_all_four_flags() {
+        let on = serde_json::json!({
+            "discovery": true, "discoveryP2p": true, "discoveryTaste": 3, "discoveryP2pPeers": 1
+        });
+        let gate = |ping: &serde_json::Value| {
+            Capabilities::from(&serde_json::from_value::<Ping>(ping.clone()).unwrap()).peer_recs()
+        };
+        assert!(gate(&on));
+        for flag in ["discovery", "discoveryP2p", "discoveryTaste", "discoveryP2pPeers"] {
+            let mut off = on.clone();
+            off.as_object_mut().unwrap().remove(flag);
+            assert!(!gate(&off), "without {flag}");
+        }
+        let mut older = on.clone();
+        older["discoveryTaste"] = serde_json::json!(2);
+        assert!(!gate(&older));
+        // The stage's own ping (taste 3, peers 1, p2p on) opens it; a
+        // Discover-only server does not.
+        assert!(Capabilities { discovery: true, discovery_taste: 3, ..Capabilities::default() }.taste());
+        assert!(!Capabilities { discovery: true, discovery_taste: 3, ..Capabilities::default() }.peer_recs());
+    }
+
+    #[test]
+    fn network_reason_parses_every_word_and_tolerates_new_ones() {
+        let reason = |value: serde_json::Value| {
+            serde_json::from_value::<TasteNetwork>(serde_json::json!({ "results": [], "reason": value }))
+                .unwrap()
+                .reason
+        };
+        for (word, want) in [
+            ("empty-shelf", NetworkReason::EmptyShelf),
+            ("not-on-shelf", NetworkReason::NotOnShelf),
+            ("no-compatible", NetworkReason::NoCompatible),
+            ("nothing-new", NetworkReason::NothingNew),
+            ("scan-pending", NetworkReason::ScanPending),
+            ("error", NetworkReason::Error),
+            ("someday", NetworkReason::Other),
+        ] {
+            assert_eq!(reason(serde_json::json!(word)), Some(want), "{word}");
+        }
+        assert_eq!(reason(serde_json::Value::Null), None);
+        assert_eq!(reason(serde_json::json!(4)), None);
+        let older: TasteNetwork = serde_json::from_value(serde_json::json!({ "results": [] })).unwrap();
+        assert_eq!(older.reason, None);
+    }
+
+    #[test]
+    fn a_lead_reads_its_peer_label_tile_and_export_id_and_keeps_raw_verbatim() {
+        let raw = serde_json::json!({
+            "artist": "Paper Lantern", "title": "Signal Fires", "album": "Night Ferry", "duration": 198,
+            "exportId": "anon:Signal Fires", "source": "p2p", "isrc": "QZPRS2600003",
+            "peer": { "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+                      "name": "Kitchen Radio", "label": "Kitchen Radio" },
+            "tile": { "key": "paper lantern|night ferry", "hue": 39, "letter": "P" },
+            "someNewerKey": [1, 2]
+        });
+        let lead: TasteLead = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(lead.raw, raw);
+        assert_eq!(serde_json::to_value(&lead.raw).unwrap(), raw);
+        assert_eq!(lead.peer.label.as_deref(), Some("Kitchen Radio"));
+        assert_eq!(lead.export_id.as_deref(), Some("anon:Signal Fires"));
+        assert_eq!(
+            lead.tile,
+            Some(LeadTile { key: "paper lantern|night ferry".into(), hue: 39, letter: "P".into() })
+        );
+        let with = |over: serde_json::Value| {
+            let mut row = raw.clone();
+            for (k, v) in over.as_object().unwrap() {
+                row[k] = v.clone();
+            }
+            TasteLead::from_raw(row)
+        };
+        // A blank label is none (the badge reads the name).
+        let blank = with(serde_json::json!({ "peer": { "endpointId": "x", "name": "Kitchen Radio", "label": "  " } }));
+        assert_eq!((blank.peer.label, blank.peer.name.as_deref()), (None, Some("Kitchen Radio")));
+        // A hue rounds half up and folds into 0–359; a word is no tile.
+        let hue = |h: serde_json::Value| with(serde_json::json!({ "tile": { "key": "k", "hue": h, "letter": "" } })).tile;
+        assert_eq!(hue(serde_json::json!(359.5)).map(|t| t.hue), Some(0));
+        assert_eq!(hue(serde_json::json!(-1)).map(|t| t.hue), Some(359));
+        assert_eq!(hue(serde_json::json!(720.4)).map(|t| t.hue), Some(0));
+        assert_eq!(hue(serde_json::json!(39.49)).map(|t| t.hue), Some(39));
+        assert_eq!(hue(serde_json::json!("x")), None);
+        assert_eq!(with(serde_json::json!({ "tile": null })).tile, None);
+        // A numeric export id reads as its decimal; anything else is none.
+        assert_eq!(with(serde_json::json!({ "exportId": 4021 })).export_id.as_deref(), Some("4021"));
+        assert_eq!(with(serde_json::json!({ "exportId": 7.0 })).export_id.as_deref(), Some("7"));
+        for odd in [serde_json::json!(7.5), serde_json::json!(""), serde_json::json!(null), serde_json::json!([1])] {
+            assert_eq!(with(serde_json::json!({ "exportId": odd.clone() })).export_id, None, "{odd}");
+        }
+        // A Discover lead from a connected server carries none of it.
+        let federation = TasteLead::from_raw(serde_json::json!({ "title": "t", "peer": { "id": 3, "name": "Sam" } }));
+        assert_eq!((federation.peer.label, federation.export_id, federation.tile), (None, None, None));
+    }
+
+    #[test]
+    fn discover_taste_bodies_carry_no_generation_3_key() {
+        // Discover's two asks, as `taste_request` builds them: the network
+        // keys belong to the Peer recs room's own body alone.
+        let main = TasteRequest {
+            window: Some(30),
+            sources: vec!["library".into()],
+            new_artists_only: Some(false),
+            ..TasteRequest::default()
+        };
+        let peers = TasteRequest {
+            window: Some(30),
+            pin: vec!["music/seed1.mp3".into(), "music/seed2.mp3".into()],
+            sources: vec!["peers".into()],
+            new_artists_only: Some(false),
+            limit: Some(TasteLimit { seeds: Some(2) }),
+            ..TasteRequest::default()
+        };
+        let main = serde_json::to_value(&main).unwrap();
+        let peers = serde_json::to_value(&peers).unwrap();
+        assert_eq!(main, serde_json::json!({ "window": 30, "sources": ["library"], "newArtistsOnly": false }));
+        assert_eq!(
+            peers,
+            serde_json::json!({
+                "window": 30, "pin": ["music/seed1.mp3", "music/seed2.mp3"], "sources": ["peers"],
+                "newArtistsOnly": false, "limit": { "seeds": 2 }
+            })
+        );
+        for body in [&main, &peers] {
+            assert!(body.get("networkPeers").is_none() && body.get("networkOnRandomSeed").is_none(), "{body}");
+            assert!(body.get("limit").and_then(|l| l.get("network")).is_none(), "{body}");
+        }
     }
 
     #[test]

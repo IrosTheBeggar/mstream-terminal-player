@@ -1,0 +1,41 @@
+{
+  "plugin": "deezer",
+  "capabilities": [
+    "preview"
+  ],
+  "key": "text:7b48fea87cb6809ce514c52f5f12ae56",
+  "recommendation": {
+    "artist": "Paper Lantern",
+    "title": "Signal Fires",
+    "album": "Night Ferry",
+    "year": null,
+    "isrc": "QZPRS2600003",
+    "releaseGroupMbid": null,
+    "duration": 198,
+    "recordingMbid": null,
+    "exportId": "anon:Signal Fires",
+    "peer": {
+      "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+      "name": "Kitchen Radio",
+      "label": "Kitchen Radio",
+      "id": null
+    },
+    "source": "p2p",
+    "albumArtist": null,
+    "filepath": null
+  },
+  "result": {
+    "preview": {
+      "provider": "deezer",
+      "url": "http://127.0.0.1:3996/preview/3.mp3",
+      "seconds": 30,
+      "title": "Signal Fires",
+      "artist": "Paper Lantern",
+      "album": "Night Ferry",
+      "link": "http://127.0.0.1:3996/track/3995003",
+      "artwork": "http://127.0.0.1:3996/cover/night-ferry.png",
+      "attribution": "Preview from Deezer",
+      "match": 1
+    }
+  }
+}

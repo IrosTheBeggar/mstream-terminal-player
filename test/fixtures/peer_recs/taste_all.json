@@ -1,0 +1,380 @@
+{
+  "window": 30,
+  "widenedFrom": null,
+  "seedSource": "history",
+  "fallback": false,
+  "seeds": [
+    {
+      "hash": "dbd0ae2c76e2117f94b7e34970912a7e",
+      "filepath": "testlib/Vosto/Night Drive/01 - Highway.mp3",
+      "metadata": {
+        "title": "Highway",
+        "artist": "Vosto",
+        "artist-display": "Vosto",
+        "artists": [
+          "Vosto"
+        ],
+        "album": "Night Drive",
+        "album-artist": "Vosto",
+        "album-art": null,
+        "year": 2018,
+        "track": 1,
+        "disk": 1,
+        "duration": 1.045,
+        "rating": null,
+        "bpm": null,
+        "musical-key": null,
+        "genres": [
+          "Ambient"
+        ],
+        "has-lyrics": false,
+        "has-synced-lyrics": false,
+        "replaygain-track": null
+      },
+      "outcome": "completed",
+      "lastPlayed": "2026-11-19T06:04:43.742Z",
+      "plays": 1,
+      "pinned": false,
+      "analyzed": true
+    },
+    {
+      "hash": "030634c3ec1922159213338203f3c54d",
+      "filepath": "testlib/Vosto/Night Drive/02 - Neon.mp3",
+      "metadata": {
+        "title": "Neon",
+        "artist": "Vosto",
+        "artist-display": "Vosto",
+        "artists": [
+          "Vosto"
+        ],
+        "album": "Night Drive",
+        "album-artist": "Vosto",
+        "album-art": null,
+        "year": 2018,
+        "track": 2,
+        "disk": 1,
+        "duration": 1.045,
+        "rating": null,
+        "bpm": null,
+        "musical-key": null,
+        "genres": [
+          "Ambient"
+        ],
+        "has-lyrics": false,
+        "has-synced-lyrics": false,
+        "replaygain-track": null
+      },
+      "outcome": "completed",
+      "lastPlayed": "2026-11-18T06:04:43.742Z",
+      "plays": 1,
+      "pinned": false,
+      "analyzed": true
+    }
+  ],
+  "excluded": [],
+  "dropped": 0,
+  "notAnalyzed": false,
+  "model": {
+    "id": "test-fake",
+    "version": "1"
+  },
+  "library": null,
+  "network": {
+    "results": [
+      {
+        "artist": "Hollow Coast",
+        "title": "Salt Road",
+        "album": "Low Tide Hymns",
+        "year": null,
+        "isrc": null,
+        "releaseGroupMbid": null,
+        "duration": 222,
+        "similarity": 0.8443778929771479,
+        "recordingMbid": null,
+        "exportId": "anon:Salt Road",
+        "peer": {
+          "endpointId": "ba5eaa206eb20c70adb0cf0ad30db63b8920232f5da363f97a63e83de67cbfa0",
+          "name": "Basement Hi-Fi",
+          "label": "Basement Hi-Fi"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "hollow coast|low tide hymns",
+          "hue": 203,
+          "letter": "H"
+        }
+      },
+      {
+        "artist": "Hollow Coast",
+        "title": "Breakwater",
+        "album": "Low Tide Hymns",
+        "year": null,
+        "isrc": null,
+        "releaseGroupMbid": null,
+        "duration": 245,
+        "similarity": 0.8357175945413573,
+        "recordingMbid": null,
+        "exportId": "anon:Breakwater",
+        "peer": {
+          "endpointId": "ba5eaa206eb20c70adb0cf0ad30db63b8920232f5da363f97a63e83de67cbfa0",
+          "name": "Basement Hi-Fi",
+          "label": "Basement Hi-Fi"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "hollow coast|low tide hymns",
+          "hue": 203,
+          "letter": "H"
+        }
+      },
+      {
+        "artist": "Paper Lantern",
+        "title": "Signal Fires",
+        "album": "Night Ferry",
+        "year": null,
+        "isrc": "QZPRS2600003",
+        "releaseGroupMbid": null,
+        "duration": 198,
+        "similarity": 0.8270572961055667,
+        "recordingMbid": null,
+        "exportId": "anon:Signal Fires",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "paper lantern|night ferry",
+          "hue": 39,
+          "letter": "P"
+        }
+      },
+      {
+        "artist": "Paper Lantern",
+        "title": "Harbor Lights",
+        "album": "Night Ferry",
+        "year": null,
+        "isrc": "QZPRS2600004",
+        "releaseGroupMbid": null,
+        "duration": 177,
+        "similarity": 0.8183970706705299,
+        "recordingMbid": null,
+        "exportId": "anon:Harbor Lights",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "paper lantern|night ferry",
+          "hue": 39,
+          "letter": "P"
+        }
+      },
+      {
+        "artist": "Tidewater",
+        "title": "Glass Season",
+        "album": "Undertow",
+        "year": null,
+        "isrc": null,
+        "releaseGroupMbid": null,
+        "duration": 261,
+        "similarity": 0.8097367722347393,
+        "recordingMbid": null,
+        "exportId": "anon:Glass Season",
+        "peer": {
+          "endpointId": "ba5eaa206eb20c70adb0cf0ad30db63b8920232f5da363f97a63e83de67cbfa0",
+          "name": "Basement Hi-Fi",
+          "label": "Basement Hi-Fi"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "tidewater|undertow",
+          "hue": 4,
+          "letter": "T"
+        }
+      },
+      {
+        "artist": "Tidewater",
+        "title": "Quiet Engine",
+        "album": "Undertow",
+        "year": null,
+        "isrc": null,
+        "releaseGroupMbid": null,
+        "duration": 213,
+        "similarity": 0.8010764737989486,
+        "recordingMbid": null,
+        "exportId": "anon:Quiet Engine",
+        "peer": {
+          "endpointId": "3f9a1c7cbd00116d0312b285b279e969ca58077702b933169bdb017e0180a4c8",
+          "name": "mStream",
+          "label": "mStream · 3f9a"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "tidewater|undertow",
+          "hue": 4,
+          "letter": "T"
+        }
+      },
+      {
+        "artist": "Marlowe Fields",
+        "title": "Long Exposure",
+        "album": "Daylight Savings",
+        "year": null,
+        "isrc": "QZPRS2600007",
+        "releaseGroupMbid": null,
+        "duration": 230,
+        "similarity": 0.792416175363158,
+        "recordingMbid": null,
+        "exportId": "anon:Long Exposure",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "marlowe fields|daylight savings",
+          "hue": 352,
+          "letter": "M"
+        }
+      },
+      {
+        "artist": "Juniper Static",
+        "title": "Arcade Rain",
+        "album": "Neon Psalms",
+        "year": null,
+        "isrc": null,
+        "releaseGroupMbid": null,
+        "duration": 164,
+        "similarity": 0.7837558769273674,
+        "recordingMbid": null,
+        "exportId": "anon:Arcade Rain",
+        "peer": {
+          "endpointId": "ba5eaa206eb20c70adb0cf0ad30db63b8920232f5da363f97a63e83de67cbfa0",
+          "name": "Basement Hi-Fi",
+          "label": "Basement Hi-Fi"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "juniper static|neon psalms",
+          "hue": 78,
+          "letter": "J"
+        }
+      },
+      {
+        "artist": "The Vesper Lines",
+        "title": "Paper Moons",
+        "album": "Small Hours",
+        "year": null,
+        "isrc": null,
+        "releaseGroupMbid": null,
+        "duration": 192,
+        "similarity": 0.7750955784915767,
+        "recordingMbid": null,
+        "exportId": "anon:Paper Moons",
+        "peer": {
+          "endpointId": "3f9a1c7cbd00116d0312b285b279e969ca58077702b933169bdb017e0180a4c8",
+          "name": "mStream",
+          "label": "mStream · 3f9a"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "the vesper lines|small hours",
+          "hue": 154,
+          "letter": "T"
+        }
+      },
+      {
+        "artist": "Okra Bloom",
+        "title": "Sunday Wire",
+        "album": "Porchlight",
+        "year": null,
+        "isrc": "QZPRS2600010",
+        "releaseGroupMbid": null,
+        "duration": 248,
+        "similarity": 0.76643535305654,
+        "recordingMbid": null,
+        "exportId": "anon:Sunday Wire",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "okra bloom|porchlight",
+          "hue": 353,
+          "letter": "O"
+        }
+      },
+      {
+        "artist": "Kestrel & Vine",
+        "title": "Copper Dawn",
+        "album": null,
+        "year": null,
+        "isrc": null,
+        "releaseGroupMbid": null,
+        "duration": 181,
+        "similarity": 0.7577750546207493,
+        "recordingMbid": null,
+        "exportId": "anon:Copper Dawn",
+        "peer": {
+          "endpointId": "ba5eaa206eb20c70adb0cf0ad30db63b8920232f5da363f97a63e83de67cbfa0",
+          "name": "Basement Hi-Fi",
+          "label": "Basement Hi-Fi"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "kestrel & vine",
+          "hue": 53,
+          "letter": "K"
+        }
+      },
+      {
+        "artist": "Ada Merrow",
+        "title": "Field Notes",
+        "album": "Cartography",
+        "year": null,
+        "isrc": "QZPRS2600012",
+        "releaseGroupMbid": null,
+        "duration": 207,
+        "similarity": 0.7491147561849587,
+        "recordingMbid": null,
+        "exportId": "anon:Field Notes",
+        "peer": {
+          "endpointId": "cafea9ed902dcc07c36cadfab1be6f48860e86c105e73497e890998d6305e2dc",
+          "name": "Kitchen Radio",
+          "label": "Kitchen Radio"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "ada merrow|cartography",
+          "hue": 81,
+          "letter": "A"
+        }
+      }
+    ],
+    "searched": {
+      "peers": 4,
+      "tracks": 14
+    },
+    "reason": null
+  },
+  "peers": null
+}

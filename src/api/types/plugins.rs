@@ -33,6 +33,12 @@ pub const COPY_PLUGIN: &str = "federation-copy";
 pub const ACQUIRE: &str = "acquire";
 /// The capability of a plug-in that builds "Open elsewhere" links.
 pub const LINKS: &str = "links";
+/// The capability of a plug-in that resolves a lead to a short preview clip
+/// (peer-recommendations plan §3.5): the Peer recs room's `l`.
+pub const PREVIEW: &str = "preview";
+/// The iTunes preview plug-in, whose 429 waits 60 s where every other
+/// provider's waits 5 s (peer-recommendations plan §5.5).
+pub const ITUNES_PLUGIN: &str = "itunes";
 /// `POST …/plugin-jobs/lookup/batch` takes at most this many
 /// recommendations a call (the webapp's `LOOKUP_BATCH_MAX`).
 pub const LOOKUP_BATCH_MAX: usize = 100;
@@ -169,6 +175,21 @@ impl DiscoveryPluginsResponse {
     /// caller — the listing's half of the Keep a copy gate (clause 101).
     pub fn copies(&self, scope: JobScope) -> bool {
         self.jobs.allowed && self.copy_plugin().is_some_and(|p| p.runs(scope))
+    }
+
+    /// The Peer recs room's preview provider: the first plug-in in listing
+    /// order that resolves previews and has a name (peer-recommendations
+    /// plan §5.5). No fall-through to a second one when it fails.
+    pub fn preview_plugin(&self) -> Option<&DiscoveryPlugin> {
+        self.plugins.iter().find(|p| p.has(PREVIEW) && !p.name.trim().is_empty())
+    }
+
+    /// The lead sheet's Get it plug-ins (peer-recs contract §1.9): every
+    /// plug-in that brings files in other than the copy plug-in, in listing
+    /// order, one row each. The listing's half only: the row also needs
+    /// `jobs.allowed` and a destination.
+    pub fn get_it_plugins(&self) -> Vec<&DiscoveryPlugin> {
+        self.plugins.iter().filter(|p| p.has(ACQUIRE) && p.name != COPY_PLUGIN).collect()
     }
 }
 
@@ -1067,6 +1088,15 @@ pub struct JobStarted {
 pub struct JobCancelled {
     pub job: Option<PluginJob>,
     pub outcome: Option<String>,
+}
+
+/// `GET /api/v1/discovery/plugin-jobs/{id}` — one of the caller's jobs as
+/// it stands (the Peer recs lead sheet's Get it poll, peer-recs contract
+/// §1.9).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SingleJob {
+    pub job: Option<PluginJob>,
 }
 
 /// A cancel's answer: the job as it now stands, or the server's 409 — it
@@ -2485,6 +2515,50 @@ pub fn into_landing(place: &CollectionDestination, vpath: Option<&str>, path: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_plugin_is_the_first_listed_with_preview() {
+        let listing = |plugins: serde_json::Value| -> DiscoveryPluginsResponse {
+            serde_json::from_value(serde_json::json!({ "plugins": plugins, "jobs": { "allowed": true } }))
+                .unwrap()
+        };
+        let links = serde_json::json!({ "name": "links", "capabilities": ["links"] });
+        let deezer = serde_json::json!({ "name": "deezer", "capabilities": ["preview"] });
+        let itunes = serde_json::json!({ "name": ITUNES_PLUGIN, "capabilities": ["preview"] });
+        let both = listing(serde_json::json!([links, deezer, itunes]));
+        assert_eq!(both.preview_plugin().map(|p| p.name.as_str()), Some("deezer"));
+        // Deezer listed but unable to run: the next one in order.
+        let mut off = deezer.clone();
+        off["available"] = serde_json::json!(false);
+        let fallback = listing(serde_json::json!([links, off, itunes]));
+        assert_eq!(fallback.preview_plugin().map(|p| p.name.as_str()), Some(ITUNES_PLUGIN));
+        // A preview plug-in with no name is never asked.
+        let blank = serde_json::json!({ "name": " ", "capabilities": ["preview"] });
+        assert_eq!(listing(serde_json::json!([links, blank])).preview_plugin(), None);
+        assert_eq!(listing(serde_json::json!([links])).preview_plugin(), None);
+    }
+
+    #[test]
+    fn get_it_plugins_skip_federation_copy_in_listing_order() {
+        let listing: DiscoveryPluginsResponse = serde_json::from_value(serde_json::json!({
+            "plugins": [
+                { "name": "federation-copy", "capabilities": ["acquire"] },
+                { "name": "noop-acquire", "capabilities": ["acquire"] },
+                { "name": "links", "capabilities": ["links"] },
+                { "name": "youtube", "capabilities": ["acquire", "lookup"], "available": false },
+                { "name": "slskd", "capabilities": ["acquire"] }
+            ],
+            "jobs": { "allowed": true }
+        }))
+        .unwrap();
+        let names: Vec<&str> = listing.get_it_plugins().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["noop-acquire", "slskd"]);
+        let only_copy: DiscoveryPluginsResponse = serde_json::from_value(serde_json::json!({
+            "plugins": [{ "name": "federation-copy", "capabilities": ["acquire"] }]
+        }))
+        .unwrap();
+        assert!(only_copy.get_it_plugins().is_empty());
+    }
 
     fn job(over: serde_json::Value) -> PluginJob {
         let mut base = serde_json::json!({

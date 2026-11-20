@@ -1,0 +1,140 @@
+{
+  "window": 30,
+  "widenedFrom": null,
+  "seedSource": "pinned",
+  "fallback": false,
+  "seeds": [
+    {
+      "hash": "dbd0ae2c76e2117f94b7e34970912a7e",
+      "filepath": "testlib/Vosto/Night Drive/01 - Highway.mp3",
+      "metadata": {
+        "title": "Highway",
+        "artist": "Vosto",
+        "artist-display": "Vosto",
+        "artists": [
+          "Vosto"
+        ],
+        "album": "Night Drive",
+        "album-artist": "Vosto",
+        "album-art": null,
+        "year": 2018,
+        "track": 1,
+        "disk": 1,
+        "duration": 1.045,
+        "rating": null,
+        "bpm": null,
+        "musical-key": null,
+        "genres": [
+          "Ambient"
+        ],
+        "has-lyrics": false,
+        "has-synced-lyrics": false,
+        "replaygain-track": null
+      },
+      "outcome": null,
+      "lastPlayed": "2026-11-19T06:04:43.742Z",
+      "plays": 1,
+      "pinned": true,
+      "analyzed": true
+    },
+    {
+      "hash": "030634c3ec1922159213338203f3c54d",
+      "filepath": "testlib/Vosto/Night Drive/02 - Neon.mp3",
+      "metadata": {
+        "title": "Neon",
+        "artist": "Vosto",
+        "artist-display": "Vosto",
+        "artists": [
+          "Vosto"
+        ],
+        "album": "Night Drive",
+        "album-artist": "Vosto",
+        "album-art": null,
+        "year": 2018,
+        "track": 2,
+        "disk": 1,
+        "duration": 1.045,
+        "rating": null,
+        "bpm": null,
+        "musical-key": null,
+        "genres": [
+          "Ambient"
+        ],
+        "has-lyrics": false,
+        "has-synced-lyrics": false,
+        "replaygain-track": null
+      },
+      "outcome": null,
+      "lastPlayed": "2026-11-18T06:04:43.742Z",
+      "plays": 1,
+      "pinned": true,
+      "analyzed": true
+    }
+  ],
+  "excluded": [],
+  "dropped": 0,
+  "notAnalyzed": false,
+  "model": {
+    "id": "test-fake",
+    "version": "1"
+  },
+  "library": null,
+  "network": {
+    "results": [
+      {
+        "artist": "Tidewater",
+        "title": "Quiet Engine",
+        "album": "Undertow",
+        "year": null,
+        "isrc": null,
+        "releaseGroupMbid": null,
+        "duration": 213,
+        "similarity": 0.8010764737989486,
+        "recordingMbid": null,
+        "exportId": "anon:Quiet Engine",
+        "peer": {
+          "endpointId": "3f9a1c7cbd00116d0312b285b279e969ca58077702b933169bdb017e0180a4c8",
+          "name": "mStream",
+          "label": "mStream · 3f9a"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "tidewater|undertow",
+          "hue": 4,
+          "letter": "T"
+        }
+      },
+      {
+        "artist": "The Vesper Lines",
+        "title": "Paper Moons",
+        "album": "Small Hours",
+        "year": null,
+        "isrc": null,
+        "releaseGroupMbid": null,
+        "duration": 192,
+        "similarity": 0.7750955784915767,
+        "recordingMbid": null,
+        "exportId": "anon:Paper Moons",
+        "peer": {
+          "endpointId": "3f9a1c7cbd00116d0312b285b279e969ca58077702b933169bdb017e0180a4c8",
+          "name": "mStream",
+          "label": "mStream · 3f9a"
+        },
+        "source": "p2p",
+        "seedHash": "030634c3ec1922159213338203f3c54d",
+        "tile": {
+          "key": "the vesper lines|small hours",
+          "hue": 154,
+          "letter": "T"
+        }
+      }
+    ],
+    "searched": {
+      "peers": 1,
+      "tracks": 2
+    },
+    "reason": null
+  },
+  "peers": null
+}

@@ -1,0 +1,30 @@
+{
+  "plugin": "deezer",
+  "capabilities": [
+    "preview"
+  ],
+  "key": "text:3e0e93941584cdb70f6797920adc0b47",
+  "recommendation": {
+    "artist": "Juniper Static",
+    "title": "Arcade Rain",
+    "album": "Neon Psalms",
+    "year": null,
+    "isrc": null,
+    "releaseGroupMbid": null,
+    "duration": 164,
+    "recordingMbid": null,
+    "exportId": "anon:Arcade Rain",
+    "peer": {
+      "endpointId": "ba5eaa206eb20c70adb0cf0ad30db63b8920232f5da363f97a63e83de67cbfa0",
+      "name": "Basement Hi-Fi",
+      "label": "Basement Hi-Fi",
+      "id": null
+    },
+    "source": "p2p",
+    "albumArtist": null,
+    "filepath": null
+  },
+  "result": {
+    "preview": null
+  }
+}

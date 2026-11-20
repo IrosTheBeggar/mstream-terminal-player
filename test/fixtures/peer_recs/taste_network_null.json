@@ -1,0 +1,84 @@
+{
+  "window": 30,
+  "widenedFrom": null,
+  "seedSource": "history",
+  "fallback": false,
+  "seeds": [
+    {
+      "hash": "030634c3ec1922159213338203f3c54d",
+      "filepath": "testlib/Vosto/Night Drive/02 - Neon.mp3",
+      "metadata": {
+        "title": "Neon",
+        "artist": "Vosto",
+        "artist-display": "Vosto",
+        "artists": [
+          "Vosto"
+        ],
+        "album": "Night Drive",
+        "album-artist": "Vosto",
+        "album-art": null,
+        "year": 2018,
+        "track": 2,
+        "disk": 1,
+        "duration": 1.045,
+        "rating": null,
+        "bpm": null,
+        "musical-key": null,
+        "genres": [
+          "Ambient"
+        ],
+        "has-lyrics": false,
+        "has-synced-lyrics": false,
+        "replaygain-track": null
+      },
+      "outcome": "completed",
+      "lastPlayed": "2026-11-18T06:04:43.742Z",
+      "plays": 1,
+      "pinned": false,
+      "analyzed": true
+    },
+    {
+      "hash": "dbd0ae2c76e2117f94b7e34970912a7e",
+      "filepath": "testlib/Vosto/Night Drive/01 - Highway.mp3",
+      "metadata": {
+        "title": "Highway",
+        "artist": "Vosto",
+        "artist-display": "Vosto",
+        "artists": [
+          "Vosto"
+        ],
+        "album": "Night Drive",
+        "album-artist": "Vosto",
+        "album-art": null,
+        "year": 2018,
+        "track": 1,
+        "disk": 1,
+        "duration": 1.045,
+        "rating": null,
+        "bpm": null,
+        "musical-key": null,
+        "genres": [
+          "Ambient"
+        ],
+        "has-lyrics": false,
+        "has-synced-lyrics": false,
+        "replaygain-track": null
+      },
+      "outcome": "completed",
+      "lastPlayed": "2026-11-19T06:04:43.742Z",
+      "plays": 1,
+      "pinned": false,
+      "analyzed": true
+    }
+  ],
+  "excluded": [],
+  "dropped": 0,
+  "notAnalyzed": false,
+  "model": {
+    "id": "test-fake",
+    "version": "1"
+  },
+  "library": null,
+  "network": null,
+  "peers": null
+}
