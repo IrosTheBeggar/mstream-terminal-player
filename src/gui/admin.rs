@@ -479,6 +479,13 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let composition = if gui.modal_open() { "" } else { gui.ui.composition() };
     #[cfg(feature = "window")]
     let panel = gui.panel.clone();
+    // A GUI modal or the server menu owns the pointer, and the room shows
+    // no hand under it, as `pointer` has its cells let go of the pointer.
+    // Over the room's region the panel stands down and egui hears no more
+    // of the pointer, so what egui last hovered would show the hand over
+    // the GUI's own for as long as it is up.
+    #[cfg(feature = "window")]
+    let gui_owns_pointer = gui.modal_open() || gui.servers.drop_open;
     let admin = &mut gui.admin;
     #[cfg(feature = "window")]
     {
@@ -497,7 +504,7 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         #[cfg(feature = "window")]
         let by_egui = match panel.filter(|_| room.egui_face()).and_then(|panel| egui_pass(&panel, room.as_mut(), below, frame.area())) {
             Some(pass) => {
-                admin.egui_hand = pass.hand;
+                admin.egui_hand = pass.hand && !gui_owns_pointer;
                 if let Some(at) = pass.caret {
                     gui.ui.note_caret(at);
                 }
@@ -589,7 +596,7 @@ fn egui_pass(panel: &super::window::panel::Panel, room: &mut dyn HostedRoom, reg
         caret = pass.as_ref().and_then(|p| p.caret);
         outcome = outcome.or(pass.and_then(|p| p.outcome));
     })?;
-    let caret = caret.map(|at| cell_under(at, points, region));
+    let caret = caret.map(|foot| caret_cell(foot, points, region));
     Some(Pass { hand: shown.hand, caret, outcome, pressed })
 }
 
@@ -608,6 +615,16 @@ fn cell_under(at: egui::Pos2, points: egui::Rect, cells: Rect) -> Position {
         x: cells.x + along(at.x, points.min.x, points.width(), cells.width),
         y: cells.y + along(at.y, points.min.y, points.height(), cells.height),
     }
+}
+
+/// The cell a caret stands in, by its foot as a room's egui pass reports
+/// it ([`crate::admin::EguiShown`]): the foot is the caret's bottom edge
+/// rather than a point of it, so the cell is the one under its last
+/// half-point. A foot on a cell's top edge is the cell above, and the
+/// candidates float right under the caret, not a row lower.
+#[cfg(feature = "window")]
+fn caret_cell(foot: egui::Pos2, points: egui::Rect, cells: Rect) -> Position {
+    cell_under(foot - egui::vec2(0.0, 0.5), points, cells)
 }
 
 /// The hallway: the groups dim at x 1, the rooms at x 3, the open row
@@ -1322,6 +1339,10 @@ mod tests {
         // A point on the region's far edge is in its last cell, never past.
         assert_eq!(cell_under(points.max, points, cells), Position { x: 99, y: 23 });
         assert_eq!(cell_under(egui::pos2(0.0, 0.0), points, cells), Position { x: 17, y: 2 }, "before it, its first");
+        // A caret whose foot is the top edge of row 8 stands in row 7.
+        let foot = egui::pos2(136.0 + 8.0 * 10.0 + 3.0, 32.0 + 16.0 * 6.0);
+        assert_eq!(caret_cell(foot, points, cells), Position { x: 27, y: 7 }, "the caret's own row, not the one under it");
+        assert_eq!(caret_cell(foot + egui::vec2(0.0, 1.0), points, cells), Position { x: 27, y: 8 });
     }
 
     #[test]

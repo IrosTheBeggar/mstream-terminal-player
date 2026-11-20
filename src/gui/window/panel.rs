@@ -136,6 +136,13 @@ impl Panel {
     pub(super) fn route(&self, raw: &Raw) -> bool {
         let on_screen = self.board.panel_on_screen();
         let mut live = self.lock();
+        // The pointer's place is kept while the panel stands down too (an
+        // overlay over it, or no panel up): a press that comes after with no
+        // move between, on the panel back on screen, lands where it is and
+        // not where the pointer stood before the stand-down.
+        if let Raw::Move { x, y } = raw {
+            live.cursor = Some((*x as f32, *y as f32));
+        }
         if !on_screen {
             live.captured = false;
             return false;
@@ -153,7 +160,6 @@ impl Panel {
         let modifiers = egui::Modifiers::default();
         let event = match raw {
             Raw::Move { x, y } => {
-                *cursor = Some((*x as f32, *y as f32));
                 input.events.push(egui::Event::PointerMoved(pos2(*x as f32, *y as f32) / ppp));
                 *pending = true;
                 return false;

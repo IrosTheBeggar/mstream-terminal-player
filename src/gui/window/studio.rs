@@ -1019,7 +1019,12 @@ impl<'a> Table<'a> {
                 let rect = Rect::from_min_max(full.min, pos2((full.max.x - trail).max(full.min.x), full.max.y));
                 let trail_rect = Rect::from_min_max(pos2(rect.max.x, full.min.y), full.max);
                 let selected = cursor == Some(i);
-                let hovered = clickable && !selected && response.hovered();
+                // A room's row stays raised while the pointer is on a
+                // control the page draws in it (a tick box, a remove), which
+                // egui hovers in its stead: the row would blink out under
+                // it. Nothing covers a Stats row.
+                let over = response.hovered() || (look == Look::Ring && response.contains_pointer());
+                let hovered = clickable && !selected && over;
                 match look {
                     Look::Lit => {
                         if selected {
@@ -1114,7 +1119,10 @@ pub(crate) fn modal<R>(ui: &Ui, id: Id, over: Rect, width: f32, title: &str, pal
     let size_key = id.with("height");
     let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
     let window = Rect::from_center_size(over.center(), vec2(width, known.unwrap_or(max_h).min(max_h)));
-    let shown = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(over.min).constrain(false).show(&ctx, |ui| {
+    // Up at once, as the canvas's and the cells' modals are: egui fades an
+    // area in by default, over frames the panel would have to run for it.
+    let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false);
+    let shown = area.show(&ctx, |ui| {
         let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
         ui.painter().rect_filled(over, 0.0, SCRIM);
         let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
@@ -1281,5 +1289,33 @@ mod tests {
             let _ = pass(&ctx, size, events, &mut run);
         }
         assert!(closed.get(), "the close button reports its click");
+    }
+
+    #[test]
+    fn a_rooms_row_stays_raised_while_the_pointer_is_on_a_control_in_it() {
+        let ctx = context();
+        let size = vec2(600.0, 300.0);
+        let cols = [Col::left("User", 0.0), Col::center("Admin", 60.0)];
+        let hovered = Cell::new(false);
+        let tick_at = Cell::new(Pos2::ZERO);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            Table::new(Id::new("probe-table"), &cols, 3).show(ui, &pal, |ui, i, row| {
+                let at = row.cell(1).center();
+                let _ = checkbox(ui, Id::new("probe-tick").with(i), at, false, &pal);
+                if i == 0 {
+                    hovered.set(row.hovered);
+                    tick_at.set(at);
+                }
+            });
+        };
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let at = tick_at.get();
+        let mut out = None;
+        for _ in 0..2 {
+            out = Some(pass(&ctx, size, vec![egui::Event::PointerMoved(at)], &mut run));
+        }
+        assert_eq!(out.map(|o| o.platform_output.cursor_icon), Some(CursorIcon::PointingHand), "the tick box has the pointer");
+        assert!(hovered.get(), "and its row stays raised under it");
     }
 }
