@@ -84,12 +84,16 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
     let note_rect = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
     let page_rect = Rect::from_min_max(column.min, pos2(column.max.x, note_rect.min.y - GAP));
     let modal_up = room.modal_open();
+    // The filter runs over the daemon's whole list once a pass, as the
+    // cells run it once a frame: the Torrents tab's rows and the note
+    // line's story share it.
+    let filtered = if room.phase() == Phase::Tabs && room.tab == Tab::Torrents { room.filtered() } else { Vec::new() };
     let mut out = Out::default();
     let mut page = ui.new_child(UiBuilder::new().id_salt("tor-page").max_rect(page_rect).layout(Layout::top_down(Align::Min)));
     // A radio row's hover reaches 8 points past the column, as the canvas's does.
     page.set_clip_rect(page_rect.expand2(vec2(9.0, 1.0)).intersect(ui.clip_rect()));
-    draw_page(&mut page, room, &pal, if modal_up { "" } else { composition }, &mut out);
-    foot(ui, note_rect, room, &pal);
+    draw_page(&mut page, room, &filtered, &pal, if modal_up { "" } else { composition }, &mut out);
+    foot(ui, note_rect, room, &filtered, &pal);
     if modal_up {
         // The room beneath a modal is inert, as the cells drop what it
         // registered: no click under it counts, and its field has not the
@@ -110,8 +114,9 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
 // ── The page ──────────────────────────────────────────────────────────────
 
 /// The page the room is on, top-down in `ui`: the state line, then the
-/// client choice, the connect form or the tabs.
-fn draw_page(ui: &mut Ui, room: &Room, pal: &Pal, composition: &str, out: &mut Out) {
+/// client choice, the connect form or the tabs. `filtered` is the
+/// Torrents tab's rows: the filter's pass over the list.
+fn draw_page(ui: &mut Ui, room: &Room, filtered: &[usize], pal: &Pal, composition: &str, out: &mut Out) {
     state_row(ui, room, pal);
     ui.add_space(GAP);
     match room.phase() {
@@ -122,7 +127,7 @@ fn draw_page(ui: &mut Ui, room: &Room, pal: &Pal, composition: &str, out: &mut O
                 connect(ui, c, pal, composition, out);
             }
         }
-        Phase::Tabs => tabs(ui, room, pal, composition, out),
+        Phase::Tabs => tabs(ui, room, filtered, pal, composition, out),
     }
 }
 
@@ -592,7 +597,7 @@ fn tab_caption(tab: Tab) -> String {
 
 /// Connected: the tab strip as one segmented group with the open tab's
 /// caption right of it where it fits, then the open tab.
-fn tabs(ui: &mut Ui, room: &Room, pal: &Pal, composition: &str, out: &mut Out) {
+fn tabs(ui: &mut Ui, room: &Room, filtered: &[usize], pal: &Pal, composition: &str, out: &mut Out) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, SEG_H), Sense::hover());
     let tabs = room.tabs();
@@ -609,7 +614,7 @@ fn tabs(ui: &mut Ui, room: &Room, pal: &Pal, composition: &str, out: &mut Out) {
     }
     ui.add_space(GAP);
     match room.tab {
-        Tab::Torrents => torrents(ui, room, pal, composition, out),
+        Tab::Torrents => torrents(ui, room, filtered, pal, composition, out),
         Tab::Libraries => libraries(ui, room, pal, out),
         Tab::Seeding => seeding(ui, room, pal, out),
         Tab::Access => access(ui, room, pal, out),
@@ -624,8 +629,9 @@ fn in_place_of_rows(ui: &Ui, top: Pos2, width: f32, words: &str, pal: &Pal) {
 
 // ── Torrents ──────────────────────────────────────────────────────────────
 
-/// Torrents: the filter and the count, then the daemon's list.
-fn torrents(ui: &mut Ui, room: &Room, pal: &Pal, composition: &str, out: &mut Out) {
+/// Torrents: the filter and the count, then the daemon's list, `filtered`
+/// the rows the filter lets through.
+fn torrents(ui: &mut Ui, room: &Room, filtered: &[usize], pal: &Pal, composition: &str, out: &mut Out) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
     let count_w = 144.0;
@@ -643,7 +649,6 @@ fn torrents(ui: &mut Ui, room: &Room, pal: &Pal, composition: &str, out: &mut Ou
     if focused {
         out.caret = typed.caret;
     }
-    let filtered = room.filtered();
     let listed = room.list_loaded && room.list_error.is_none();
     if listed {
         let count = if !room.filter.value().trim().is_empty() {
@@ -1062,8 +1067,8 @@ fn client(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
 
 /// The region's foot: what the room is busy with in the accent, else its
 /// note (an error in gold), else on the tabs the cursor row's story, as
-/// the cells tell it.
-fn foot(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
+/// the cells tell it (`filtered`, the Torrents tab's rows).
+fn foot(ui: &Ui, rect: Rect, room: &Room, filtered: &[usize], pal: &Pal) {
     if room.busy.is_some() || room.note.is_some() {
         note_line(ui, rect, room.busy.as_deref(), room.note.as_ref(), pal);
         return;
@@ -1072,7 +1077,7 @@ fn foot(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
         return;
     }
     let parts = match room.tab {
-        Tab::Torrents => torrent_story(room, pal),
+        Tab::Torrents => torrent_story(room, filtered, pal),
         Tab::Libraries => library_story(room, pal),
         Tab::Seeding => seed_story(room, pal),
         Tab::Access => user_story(room, pal),
@@ -1081,9 +1086,15 @@ fn foot(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
     run(ui, rect, &parts);
 }
 
-/// The cursor torrent's short hash, its error, who added it and when.
-fn torrent_story(room: &Room, pal: &Pal) -> Vec<Part> {
-    let Some(t) = room.sel.and_then(|s| room.filtered().get(s).copied()).and_then(|i| room.torrents.get(i)) else {
+/// The cursor torrent's short hash, its error, who added it and when —
+/// while the rows are drawn, as in the cells: a failed list read keeps the
+/// torrents and the cursor it had, but its error stands in place of the
+/// rows, and no row on screen has a story to tell.
+fn torrent_story(room: &Room, filtered: &[usize], pal: &Pal) -> Vec<Part> {
+    if !room.list_loaded || room.list_error.is_some() {
+        return Vec::new();
+    }
+    let Some(t) = room.sel.and_then(|s| filtered.get(s).copied()).and_then(|i| room.torrents.get(i)) else {
         return Vec::new();
     };
     let mut parts = vec![(short_id(&t.info_hash), mono(12.0), pal.dim)];
@@ -1611,6 +1622,24 @@ mod tests {
         room.act(Act::Tab(Tab::Access));
         room.act(Act::Select(1));
         assert_drawn(&settle(&ctx, &mut room).0, &["guest may not add torrents", " · s flips it, at once"]);
+    }
+
+    #[test]
+    fn a_failed_list_read_stands_in_place_of_the_rows_and_tells_no_rows_story() {
+        let _en = english();
+        let ctx = context();
+        let mut room = connected();
+        room.act(Act::Select(3));
+        assert_drawn(&settle(&ctx, &mut room).0, &["Radiohead - In Rainbows [MP3 V0]", "e5f6e5f6e5f6…"]);
+        // What a failed poll leaves (`Done::Listed`): the list and the
+        // cursor it had, and its error.
+        room.list_error = Some("could not reach server".into());
+        let (out, _) = settle(&ctx, &mut room);
+        assert_drawn(&out, &["couldn't fetch torrents: could not reach server"]);
+        let drawn = words(&out);
+        assert!(!drawn.iter().any(|w| w == "Radiohead - In Rainbows [MP3 V0]"), "the error stands in place of the rows: {drawn:?}");
+        assert!(!drawn.iter().any(|w| w == "e5f6e5f6e5f6…"), "no row's story rides the note line: {drawn:?}");
+        assert!(!drawn.iter().any(|w| w == "4 torrents"), "nor is the list counted: {drawn:?}");
     }
 
     #[test]
