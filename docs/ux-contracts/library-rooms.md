@@ -348,7 +348,8 @@ matches nothing keeps the bar contract's rule (the way back is one key).
     four); the TOOLS group packs the rooms it shows, so a hidden tool's
     line goes to the tools under it (discovery-page clause 2). Where that
     last row would meet the last tool shown, the rooms give way a line at
-    a time, each step only when needed (Files and Search never move) —
+    a time, each step only when needed (Files and Search never move,
+    but for the fourth step of 2026-11-20 in the log) —
     with all five tools:
     - Settings on 19 (100×25, or 100×26 with the footer on): the blank
       under Search goes — LIBRARY 4 … Rated 9 … Most played 12 · TOOLS 13
@@ -619,3 +620,14 @@ forms (ru 2, 5, 21; pl 1, 2, 5; ja one form).
   DJ's own (`[player.dj]` `mood_*`), session-wide, never a room's. Offered
   where the DJ's server said it has scores and is not a peer. The rows,
   the stops, the draft law and `[ Done ]` are this contract's, unchanged.
+- **2026-11-20 — Nineteen rows: Peer recs joins TOOLS under Discover, and
+  the floor takes a fourth step** (clause 37; peer-recommendations.md
+  §1.1, discovery-page clause 2). Where the server offers the room, TOOLS
+  holds six — Auto DJ 15 · Sonic path 16 · Discover 17 · Peer recs 18 ·
+  Add torrent 19 · Add YouTube 20 at 30 rows — and the steps come a row
+  sooner (Settings on 20, 19, 18). At 100×24 with the footer on, three
+  steps would leave Add YouTube on Settings' row, so the block takes a
+  fourth: Files and Search rise into rows 1 and 2 (row 1 is the blank
+  under the top tabs), and the LIBRARY rows with them (Albums 3 … Rated
+  7 … Most played 10, the tools 11–16, Settings 17). Only there, only
+  with all six; `NAV[16]` takes no digit.

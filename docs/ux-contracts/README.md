@@ -48,3 +48,31 @@ Rules of the road:
   what was ported. Re-extraction is a new commit touching the header.
 - **Contract before code.** The extraction is the review artifact; the
   implementation cites its clauses.
+
+## The contracts
+
+| Contract | Feature |
+|---|---|
+| [add-from-youtube.md](add-from-youtube.md) | Add from YouTube |
+| [add-torrent.md](add-torrent.md) | Add torrent |
+| [admin-screen.md](admin-screen.md) | The Admin screen |
+| [auto-dj.md](auto-dj.md) | Auto DJ |
+| [browser-top-bar.md](browser-top-bar.md) | The browser's top bar |
+| [discovery-page.md](discovery-page.md) | Discover, the history-seeded page |
+| [library-rooms.md](library-rooms.md) | The library rooms: Artists, Genres, Recent, Rated, Last played, Most played |
+| [mini-player.md](mini-player.md) | The mini player |
+| [mp3-player-screen.md](mp3-player-screen.md) | The MP3 Player screen |
+| [multi-server.md](multi-server.md) | Multi-server sessions and the queue |
+| [now-playing.md](now-playing.md) | Now Playing |
+| [peer-recommendations.md](peer-recommendations.md) | Peer Recommendations, the p2p network's leads (the Peer recs room) |
+| [play-reporting.md](play-reporting.md) | Play reporting |
+| [playlists.md](playlists.md) | Playlists |
+| [sonic-path.md](sonic-path.md) | The sonic path |
+| [stats-screen.md](stats-screen.md) | The Stats screen |
+| [track-actions.md](track-actions.md) | Track actions and the queue |
+| [visualizer-window.md](visualizer-window.md) | The visualizer window |
+
+Most contracts number their clauses straight through (discovery-page
+clause 47). peer-recommendations.md numbers its sections after its
+design spec's (§0.6, §0.7, §1.1–§1.14) and its clauses within them
+(§1.5.3), so code cites it as "peer-recs contract §1.5".

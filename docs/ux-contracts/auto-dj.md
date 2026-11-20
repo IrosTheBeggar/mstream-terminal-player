@@ -2449,3 +2449,10 @@ where this player differs, the build settled it so:
     one song", and the entry "The TUI drives the same mode", describe the
     builds before this round; each carries a note and stays as written.
   - **Not seen live** either: the tests pin round 3 and nothing else.
+- **2026-11-20 — TOOLS holds six rooms** (entry point 2): Peer recs joins
+  the group under Discover where the server offers it
+  (peer-recommendations.md §1.1; discovery-page clause 2). Auto DJ stays
+  on row 15; with all six it rises to 14, 13, 12 and 11 as Settings comes
+  up to 20, 19, 18 and 17 — the last only at 100×24 with the footer on,
+  where Files and Search rise into rows 1 and 2 for a fourth step. The
+  row keeps its `•` and its `D`.
