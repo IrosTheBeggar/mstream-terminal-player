@@ -25,12 +25,14 @@ use crate::gui::window::studio::{
     note_line, radio, ring, segmented, small_caps, small_caps_width, square, strong, text, width_of,
 };
 
-/// The room's margin inside its region, in points: the canvas's.
+/// The room's margin inside its region, in points: the canvas's sides and
+/// foot (above, the host's first row stands in for most of its top).
 const PAD: Vec2 = vec2(24.0, 14.0);
-/// The room between the page's parts.
-const GAP: f32 = 16.0;
-/// The note line along the region's foot.
-const NOTE_H: f32 = 22.0;
+/// The room between the page's rows, and between the page and its note
+/// line: the canvas's.
+const GAP: f32 = 18.0;
+/// The note line along the region's foot: the canvas's.
+const NOTE_H: f32 = 18.0;
 /// A line of prose.
 const LINE_H: f32 = 20.0;
 /// A table's headings and one row: with less room than this a table is
@@ -42,12 +44,14 @@ const FIRST_ROW: f32 = 54.0;
 /// The modals' widths: an entry's, a gate's.
 const ENTRY_W: f32 = 600.0;
 const GATE_W: f32 = 560.0;
-/// The connect form's width, its wide fields' and the port's, and the
-/// room between its rows (the canvas's).
+/// The connect form's width, its wide fields' and the port's, the room
+/// between its rows, and the few points more over its first row and over
+/// its verdict (the canvas's).
 const FORM_W: f32 = 632.0;
 const WIDE_W: f32 = 480.0;
 const PORT_W: f32 = 128.0;
-const FORM_GAP: f32 = 16.0;
+const FORM_GAP: f32 = 20.0;
+const FORM_NUDGE: f32 = 4.0;
 /// A labelled field's height: its label, the room under it, its box.
 const SLOT_H: f32 = 20.0 + FIELD_H;
 /// The key column of the Client tab's saved fields.
@@ -78,7 +82,7 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
     let full = ui.max_rect();
     let column = full.shrink2(PAD);
     let note_rect = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
-    let page_rect = Rect::from_min_max(column.min, pos2(column.max.x, note_rect.min.y - 8.0));
+    let page_rect = Rect::from_min_max(column.min, pos2(column.max.x, note_rect.min.y - GAP));
     let modal_up = room.modal_open();
     let mut out = Out::default();
     let mut page = ui.new_child(UiBuilder::new().id_salt("tor-page").max_rect(page_rect).layout(Layout::top_down(Align::Min)));
@@ -277,7 +281,8 @@ fn mark(ui: &Ui, at: Pos2, ok: bool, tone: Color32) {
 /// A verdict or an error: its mark when it has one, then its words wrapped
 /// beside the mark in up to two lines. Returns where it was drawn.
 fn verdict(ui: &Ui, at: Pos2, width: f32, words: &str, tone: Color32, marked: Option<bool>) -> Rect {
-    let indent = if marked.is_some() { 18.0 } else { 0.0 };
+    // The canvas's 12-point mark and the 8 points after it.
+    let indent = if marked.is_some() { 20.0 } else { 0.0 };
     let drawn = wrapped(ui, at + vec2(indent, 0.0), width - indent, words, body(13.5), tone, 2);
     if let Some(ok) = marked {
         mark(ui, pos2(at.x + 6.0, at.y + drawn.height().min(19.0) / 2.0), ok, tone);
@@ -300,6 +305,27 @@ fn tip_if_cut(ui: &Ui, id: Id, rect: Rect, shown: &str, font: FontId, tip: Strin
     if width_of(ui, shown, font) > rect.width() {
         let _ = ui.interact(rect, id, Sense::hover()).on_hover_text(tip);
     }
+}
+
+/// `s` cut at its start to fit `max_w` in `font`, an ellipsis where it was
+/// cut: a path keeps its leaf. The fewest characters are cut that let the
+/// rest fit, found by halving, as the rest only narrows the more is cut.
+fn clip_start(ui: &Ui, s: &str, font: &FontId, max_w: f32) -> String {
+    if width_of(ui, s, font.clone()) <= max_w {
+        return s.to_string();
+    }
+    let starts: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    let kept = |cut: usize| format!("…{}", starts.get(cut).map_or("", |&i| &s[i..]));
+    let (mut lo, mut hi) = (1, starts.len());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if width_of(ui, &kept(mid), font.clone()) <= max_w {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    kept(lo)
 }
 
 /// A cell that is a word behind its LED (a status, a confidence, an
@@ -411,7 +437,7 @@ fn connect(ui: &mut Ui, c: &Connect, pal: &Pal, composition: &str, out: &mut Out
     let half = ((form_w - 24.0) / 2.0).max(80.0);
     let fields = c.fields();
     let slot = |x: f32, y: f32, w: f32| Rect::from_min_size(pos2(x, y), vec2(w, SLOT_H));
-    let mut y = area.min.y;
+    let mut y = area.min.y + FORM_NUDGE;
     place(ui, c, CField::Host, slot(x, y, wide), &fields, composition, pal, out);
     place(ui, c, CField::Port, slot(x + wide + 24.0, y, PORT_W), &fields, composition, pal, out);
     y += SLOT_H + FORM_GAP;
@@ -451,11 +477,19 @@ fn connect(ui: &mut Ui, c: &Connect, pal: &Pal, composition: &str, out: &mut Out
             None => None,
         }
     };
-    if let Some((words, tone, marked)) = said {
-        y = verdict(ui, pos2(x, y), form_w, &words, tone, marked).max.y + FORM_GAP;
+    // Left off when the page has no room left for it, as in the cells.
+    if let Some((words, tone, marked)) = said
+        && y + FORM_NUDGE < area.max.y
+    {
+        y = verdict(ui, pos2(x, y + FORM_NUDGE), form_w, &words, tone, marked).max.y + FORM_GAP;
     }
 
+    // The page's last row, unless the form above leaves the buttons none:
+    // the cells leave them off rather than draw them past the body.
     let by = (area.max.y - FORM_BUTTON_H).max(y);
+    if by + FORM_BUTTON_H > area.max.y {
+        return;
+    }
     let connect = t!("tor.connect_button");
     let connect_w = form_button_width(ui, &connect);
     let connect_at = Rect::from_min_size(pos2(area.max.x - connect_w, by), vec2(connect_w, FORM_BUTTON_H));
@@ -512,15 +546,23 @@ fn place(ui: &Ui, c: &Connect, field: CField, slot: Rect, fields: &[CField], com
     }
 }
 
-/// The HTTPS tick in `at`, ringed while it has the keys: a click flips it.
+/// The HTTPS tick in `at`, its box lit while it has the keys: a click
+/// flips it.
 fn https(ui: &mut Ui, c: &Connect, at: Rect, pal: &Pal, out: &mut Out) {
     let mut row = ui.new_child(UiBuilder::new().id_salt("tor-https-row").max_rect(at).layout(Layout::top_down(Align::Min)));
     let response = check_line(&mut row, Id::new("tor-https"), c.https, &t!("tor.https"), "", pal);
     if response.clicked() {
         out.acts.push(Act::ConnectHttps);
     }
+    // With the keys its box is on-accent on the accent, as the canvas and
+    // the cells mark it: over the kit's box, at the head of its line.
     if c.focused() == CField::Https {
-        ring(ui, response.rect.expand2(vec2(6.0, 2.0)), pal);
+        let line = response.rect;
+        let tick = Rect::from_min_size(pos2(line.min.x, line.center().y - 8.0), vec2(16.0, 16.0));
+        ui.painter().rect_filled(tick, square(), pal.accent);
+        if c.https {
+            mark(ui, tick.center(), true, pal.on_accent);
+        }
     }
 }
 
@@ -731,8 +773,10 @@ fn library_row(ui: &Ui, room: &Room, i: usize, row: &RowCtx, pal: &Pal) {
     led_cell(ui, row, 1, &confidence_words(confidence), confidence_tone(confidence, pal), true);
     match access.and_then(|a| a.daemon_path.clone()).filter(|p| !p.is_empty()) {
         Some(path) if confidence != "pending" => {
+            // Cut at its start, so its leaf stays, as the canvas cuts paths.
             let path = printable(&path, 300);
-            cell(ui, row, 2, &path, mono(12.5), ink(row, pal.text, pal), false);
+            let shown = clip_start(ui, &path, &mono(12.5), row.cell(2).width());
+            cell(ui, row, 2, &shown, mono(12.5), ink(row, pal.text, pal), false);
             tip_if_cut(ui, Id::new("tor-tip-path").with(i), row.cell(2), &path, mono(12.5), path.clone());
         }
         _ if confidence == "pending" => {
@@ -1250,7 +1294,9 @@ impl Entry<'_> {
     fn show(self, ui: &Ui, over: Rect, composition: &str, pal: &Pal, out: &mut Out, lines: impl FnOnce(&mut Ui)) {
         let Entry { id, title, label, input, error, buttons } = self;
         let shown = modal(ui, id, over, ENTRY_W, title, pal, |ui| {
-            let drawn = Field::new(input.value(), input.cursor()).focused(true, composition);
+            // A path, a template of one: the figures' monospace, as the
+            // canvas sets a path's field and this room its paths.
+            let drawn = Field::new(input.value(), input.cursor()).focused(true, composition).mono();
             let typed = studio::field(ui, id.with("field"), label, &drawn, pal);
             ui.add_space(14.0);
             lines(ui);
@@ -1523,6 +1569,23 @@ mod tests {
                 "SWITCH CLIENT ▸",
             ],
         );
+    }
+
+    #[test]
+    fn a_long_daemon_path_is_cut_at_its_start_so_its_leaf_stays() {
+        let _en = english();
+        let ctx = context();
+        let mut room = connected();
+        let long = format!("/srv/{}/music/Boards of Canada", "deep".repeat(60));
+        if let Some(row) = room.access.get_mut("music") {
+            row.daemon_path = Some(long.clone());
+        }
+        room.act(Act::Tab(Tab::Libraries));
+        let (out, _) = settle(&ctx, &mut room);
+        let drawn = words(&out);
+        let cut = drawn.iter().find(|w| w.starts_with('…') && w.ends_with("/music/Boards of Canada")).unwrap_or_else(|| panic!("the leaf drawn: {drawn:?}"));
+        assert!(cut.chars().count() < long.chars().count(), "cut: {cut}");
+        assert!(!drawn.iter().any(|w| w == &long), "never drawn whole");
     }
 
     #[test]
