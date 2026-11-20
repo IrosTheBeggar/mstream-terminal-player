@@ -56,6 +56,9 @@ const HEAD_H: f32 = 34.0;
 /// half of what the flags leave where it has not, never under 72.
 const USER_W: f32 = 180.0;
 const USER_MIN: f32 = 72.0;
+/// The flag columns on the canvas, in the table's order: ADMIN, then
+/// FOLDERS, UPLOAD, AUDIO and MODIFY.
+const FLAG_W: [f32; 5] = [60.0, 72.0, 64.0, 56.0, 64.0];
 /// The kit's table spacing (studio.rs): the gap between columns, and a
 /// row's padding either side.
 const COL_GAP: f32 = 16.0;
@@ -71,6 +74,10 @@ const SMALL_W: f32 = 480.0;
 const GATE_W: f32 = 520.0;
 /// A row of the grant's list.
 const GRANT_ROW_H: f32 = 32.0;
+/// Where each modal keeps, from pass to pass, the control its keyboard
+/// was on ([`moved`]): the add form's focus, the grant's cursor, the
+/// password modal's field.
+const KEYS_AT: [&str; 3] = ["users-add-focus", "users-libs-cursor", "users-pw-focus"];
 
 /// What a click in the pass asks of the room, applied once it is drawn.
 enum Step {
@@ -100,7 +107,11 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
     note(ui, note_rect, room, &pal);
 
     let mut caret = None;
-    if !matches!(room.modal, Modal::None) {
+    if matches!(room.modal, Modal::None) {
+        // The next modal to open scrolls its keyboard's control into view,
+        // wherever its body stood when it last closed.
+        ui.ctx().data_mut(|d| KEYS_AT.iter().for_each(|at| d.remove::<usize>(Id::new(*at))));
+    } else {
         // A modal makes the room beneath inert: what was clicked under it
         // this pass is dropped, as the cells view drops what it registered.
         steps.clear();
@@ -186,20 +197,28 @@ fn state_line(ui: &mut Ui, room: &Room, pal: &Pal) {
 }
 
 /// The table's columns across `w`: USER, ADMIN, the libraries taking what
-/// is left, then the other four flags, each flag as wide as its heading
-/// (never narrower than its box's target), as the cells size them.
+/// is left, then the other four flags. A flag is as wide as its heading
+/// (never narrower than its box's target), as the cells size them, and
+/// takes the canvas's air round it only once USER and LIBRARIES each have
+/// the canvas's 180 points, so a large room is the board's and the GUI's
+/// default window still has room for the names.
 fn columns(ui: &Ui, w: f32) -> Vec<Col> {
-    let flag_w = |flag: Flag| small_caps_width(ui, &flag.header()).ceil().max(HIT);
-    let right = [Flag::Mkdir, Flag::Upload, Flag::Audio, Flag::Modify];
-    let fixed = flag_w(Flag::Admin) + right.iter().map(|f| flag_w(*f)).sum::<f32>() + 6.0 * COL_GAP;
-    let rest = w - 2.0 * CELL_PAD - TRAIL - fixed;
+    let flags = [Flag::Admin, Flag::Mkdir, Flag::Upload, Flag::Audio, Flag::Modify];
+    let least = flags.map(|flag| small_caps_width(ui, &flag.header()).ceil().max(HIT));
+    let board: Vec<f32> = least.iter().zip(FLAG_W).map(|(l, b)| l.max(b)).collect();
+    let shared = w - 2.0 * CELL_PAD - TRAIL - 6.0 * COL_GAP;
+    let air = board.iter().sum::<f32>() - least.iter().sum::<f32>();
+    let spare = shared - least.iter().sum::<f32>() - 2.0 * USER_W;
+    let share = if air > 0.0 { (spare / air).clamp(0.0, 1.0) } else { 1.0 };
+    let flag_w: Vec<f32> = least.iter().zip(&board).map(|(l, b)| (l + (b - l) * share).round()).collect();
+    let rest = shared - flag_w.iter().sum::<f32>();
     let user = (rest / 2.0).clamp(USER_MIN, USER_W);
     let mut cols = vec![
         Col::left(t!("usr.col_user"), user),
-        Col::center(Flag::Admin.header(), flag_w(Flag::Admin)),
+        Col::center(flags[0].header(), flag_w[0]),
         Col::left(t!("usr.col_libraries"), 0.0),
     ];
-    cols.extend(right.iter().map(|f| Col::center(f.header(), flag_w(*f))));
+    cols.extend(flags.iter().zip(&flag_w).skip(1).map(|(f, w)| Col::center(f.header(), *w)));
     cols
 }
 
@@ -253,16 +272,21 @@ fn table(ui: &mut Ui, room: &Room, pal: &Pal, steps: &mut Vec<Step>) {
 
 /// Public mode's sentences under the empty table: the empty list, the two
 /// warnings in gold, and what the player must do as well, since the
-/// session the room makes is its own.
+/// session the room makes is its own. Where the room is too short for
+/// them, the lines with no room left are left out, as in the cells.
 fn public(ui: &mut Ui, pal: &Pal) {
+    // The cells' rhythm (the empty line under the rule, two rows to the
+    // warnings, one to the last sentence) tight enough that all of it fits
+    // the GUI's default window, as it does in cells.
+    let floor = ui.clip_rect().max.y;
+    ui.add_space(6.0);
+    lines_above(ui, &t!("usr.empty_users"), body(14.0), pal.dim, floor);
+    ui.add_space(18.0);
+    lines_above(ui, &t!("usr.public_1"), body(14.0), pal.gold, floor);
+    ui.add_space(2.0);
+    lines_above(ui, &t!("usr.public_2"), body(14.0), pal.gold, floor);
     ui.add_space(10.0);
-    paragraph(ui, &t!("usr.empty_users"), body(14.0), pal.dim);
-    ui.add_space(22.0);
-    paragraph(ui, &t!("usr.public_1"), body(14.0), pal.gold);
-    ui.add_space(4.0);
-    paragraph(ui, &t!("usr.public_2"), body(14.0), pal.gold);
-    ui.add_space(14.0);
-    paragraph(ui, &t!("usr.public_3_hosted"), body(14.0), pal.dim);
+    lines_above(ui, &t!("usr.public_3_hosted"), body(14.0), pal.dim, floor);
 }
 
 /// The room's foot: what it is busy with, its note, or — with a row under
@@ -322,7 +346,7 @@ fn add_form(ui: &Ui, f: &AddForm, composition: &str, over: Rect, pal: &Pal, step
     let focused = f.focused();
     let shown = modal(ui, Id::new("users-add-form"), over, FORM_W, &t!("usr.form_title"), pal, |ui| {
         let mut caret = None;
-        let jump = moved(ui, Id::new("users-add-focus"), f.focus);
+        let jump = moved(ui, Id::new(KEYS_AT[0]), f.focus);
         let w = ui.available_width();
 
         let half = ((w - 24.0) / 2.0).max(0.0);
@@ -342,7 +366,8 @@ fn add_form(ui: &Ui, f: &AddForm, composition: &str, over: Rect, pal: &Pal, step
             if on {
                 caret = typed.caret;
                 if jump {
-                    typed.response.scroll_to_me(None);
+                    // The label with its box: the field, not its box alone.
+                    ui.scroll_to_rect(rect, None);
                 }
             }
         }
@@ -433,7 +458,7 @@ fn grant(ui: &Ui, d: &LibsDraft, over: Rect, pal: &Pal, steps: &mut Vec<Step>) {
             let (line, _) = ui.allocate_exact_size(vec2(w, GRANT_ROW_H), Sense::hover());
             text(ui, line.left_center(), &t!("usr.form_no_libraries"), body(13.5), pal.dim, w, Align2::LEFT_CENTER);
         }
-        let jump = moved(ui, Id::new("users-libs-cursor"), d.cursor);
+        let jump = moved(ui, Id::new(KEYS_AT[1]), d.cursor);
         for (i, (name, on)) in d.libraries.iter().enumerate() {
             let cursor = i == d.cursor;
             let response = grant_row(ui, Id::new("users-libs-row").with(i), *on, &printable(name, NAME_MAX), cursor, pal);
@@ -465,13 +490,14 @@ fn password(ui: &Ui, d: &PwDraft, composition: &str, over: Rect, pal: &Pal, step
     let title = t!("usr.pw_title", user = printable(&d.username, NAME_MAX));
     let shown = modal(ui, Id::new("users-password"), over, SMALL_W, &title, pal, |ui| {
         let mut caret = None;
-        let jump = moved(ui, Id::new("users-pw-focus"), d.focus);
+        let jump = moved(ui, Id::new(KEYS_AT[2]), d.focus);
         let pairs = [(t!("usr.field_password"), &d.password), (t!("usr.field_again"), &d.again)];
         for (k, (label, value)) in pairs.into_iter().enumerate() {
             if k > 0 {
                 ui.add_space(16.0);
             }
             let on = d.focus == k;
+            let top = ui.cursor().min.y;
             let typed = field(ui, Id::new("users-pw-field").with(k), &label, &entry(value, on, composition, true), pal);
             if typed.response.clicked() {
                 steps.push(Step::Act(Act::PwFocus(k)));
@@ -479,7 +505,8 @@ fn password(ui: &Ui, d: &PwDraft, composition: &str, over: Rect, pal: &Pal, step
             if on {
                 caret = typed.caret;
                 if jump {
-                    typed.response.scroll_to_me(None);
+                    // The label with its box: the field, not its box alone.
+                    ui.scroll_to_rect(typed.response.rect.with_min_y(top), None);
                 }
             }
         }
@@ -565,10 +592,20 @@ fn moved(ui: &Ui, id: Id, now: usize) -> bool {
 /// `s` wrapped at the layout's width, a row of the layout as tall as its
 /// lines.
 fn paragraph(ui: &mut Ui, s: &str, font: FontId, color: Color32) {
+    lines_above(ui, s, font, color, f32::INFINITY);
+}
+
+/// [`paragraph`], its lines drawn only where they end above `floor`: a line
+/// with no room left for it is left out rather than cut through, as the
+/// cells leave out a row past the column's end.
+fn lines_above(ui: &mut Ui, s: &str, font: FontId, color: Color32, floor: f32) {
     let w = ui.available_width();
     let galley = ui.painter().layout(s.to_string(), font, color, w.max(1.0));
     let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
-    ui.painter().galley(rect.min, galley, color);
+    let fits = galley.rows.iter().map(|row| rect.min.y + row.rect().max.y).filter(|foot| *foot <= floor).fold(rect.min.y, f32::max);
+    if fits > rect.min.y {
+        ui.painter().with_clip_rect(rect.with_max_y(fits).intersect(ui.clip_rect())).galley(rect.min, galley, color);
+    }
 }
 
 /// A tick box at `rect` on `fill`, as the kit draws one: a dim edge when
@@ -948,5 +985,115 @@ mod tests {
         assert!(shown.outcome.is_none(), "no click ends the room");
         let words = drawn(&pass(&ctx, &mut r, LARGE).out);
         assert!(words.iter().any(|w| w == "removing ben…"), "the busy line: {words:?}");
+    }
+
+    /// The columns `columns` lays across a column `w` points wide, and the
+    /// flags' headings' widths, measured in a pass.
+    fn widths(ctx: &egui::Context, w: f32) -> (Vec<f32>, Vec<f32>) {
+        let mut got = (Vec::new(), Vec::new());
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, LARGE)), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            got.0 = columns(ui, w).iter().map(|c| c.w).collect();
+            got.1 = [Flag::Admin, Flag::Mkdir, Flag::Upload, Flag::Audio, Flag::Modify].map(|f| small_caps_width(ui, &f.header())).to_vec();
+        });
+        out.textures_delta.clear();
+        got
+    }
+
+    #[test]
+    fn the_flags_take_the_boards_widths_in_a_large_room_and_their_headings_in_the_default_one() {
+        let _en = english();
+        let ctx = context();
+        // The canvas's room: its grid, the libraries taking what is left.
+        let (large, _) = widths(&ctx, LARGE.x - 2.0 * PAD_X);
+        assert_eq!(large, [USER_W, 60.0, 0.0, 72.0, 64.0, 56.0, 64.0], "the board's grid");
+        // The GUI's default window: each flag as wide as its heading, so
+        // the names and the libraries keep what the flags leave.
+        let w = SMALL.x - 2.0 * PAD_X;
+        let (small, headings) = widths(&ctx, w);
+        let flags = [small[1], small[3], small[4], small[5], small[6]];
+        for (k, (got, heading)) in flags.iter().zip(&headings).enumerate() {
+            assert!(*got >= heading.ceil() && *got >= HIT && *got <= FLAG_W[k].max(heading.ceil()), "flag {k}: {got} for a {heading} heading");
+        }
+        let libraries = w - 2.0 * CELL_PAD - TRAIL - 6.0 * COL_GAP - small.iter().sum::<f32>();
+        assert!(small[0] >= USER_MIN && libraries >= small[0] - 1.0, "USER {} and LIBRARIES {libraries} share the rest", small[0]);
+    }
+
+    /// Each text the pass drew, with how many of its lines are in view
+    /// under its clip and how many it has; and whether a line is cut
+    /// through, its top in view and its foot not.
+    fn lines_in_view(out: &FullOutput) -> Vec<(String, usize, usize, bool)> {
+        out.shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                Shape::Text(text) => {
+                    let clip = clipped.clip_rect;
+                    let rows: Vec<Rect> = text.galley.rows.iter().map(|row| row.rect().translate(text.pos.to_vec2())).collect();
+                    let shown = rows.iter().filter(|r| r.max.y <= clip.max.y + 0.5).count();
+                    let cut = rows.iter().any(|r| r.min.y < clip.max.y && r.max.y > clip.max.y + 0.5);
+                    Some((text.galley.text().to_string(), shown, rows.len(), cut))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn public_modes_sentences_fit_the_default_window_and_a_line_with_no_room_is_left_out_not_cut() {
+        let _en = english();
+        // The GUI's floor, a 100×24 window: 16 rows under the pick banner's.
+        const FLOOR: Vec2 = vec2(664.0, 256.0);
+        let sentences = ["usr.empty_users", "usr.public_1", "usr.public_2", "usr.public_3_hosted"].map(|key| t!(key).to_string());
+        for size in [SMALL, FLOOR, LARGE] {
+            let ctx = context();
+            let mut r = room();
+            r.queued = None;
+            r.apply(Done::Loaded(Ok((BTreeMap::new(), libs()))));
+            let lines = lines_in_view(&settle(&ctx, &mut r, size).out);
+            assert!(lines.iter().all(|(_, _, _, cut)| !cut), "a line cut through at {size:?}: {lines:?}");
+            let in_view = |s: &str| lines.iter().find(|(text, ..)| text == s).map_or((0, 0), |(_, shown, all, _)| (*shown, *all));
+            if size == FLOOR {
+                // The cells leave the last sentence out at the floor too.
+                assert_eq!(in_view(&sentences[0]), (1, 1), "the empty list's line: {lines:?}");
+                assert_eq!(in_view(&sentences[3]).0, 0, "no room for the last sentence: {lines:?}");
+            } else {
+                for s in &sentences {
+                    let (shown, all) = in_view(s);
+                    assert!(all > 0 && shown == all, "every line of {s:?} at {size:?}: {lines:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_modal_opens_with_its_keyboards_field_in_view_however_it_was_left_scrolled() {
+        let _en = english();
+        let ctx = context();
+        let mut r = loaded();
+        press(&mut r, KeyCode::Char('a'));
+        let _ = settle(&ctx, &mut r, SMALL);
+        let field = |ctx: &egui::Context| ctx.read_response(Id::new("users-add-field").with(0)).expect("the username's box").rect;
+        let top = field(&ctx).min.y;
+        // The wheel takes the form to its foot, the keyboard still on USERNAME.
+        let at = pos2(SMALL.x / 2.0, SMALL.y / 2.0);
+        let wheel = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -2000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::default(),
+        };
+        let _ = pass_with(&ctx, &mut r, SMALL, vec![Event::PointerMoved(at), wheel], "");
+        for _ in 0..40 {
+            let _ = pass(&ctx, &mut r, SMALL);
+        }
+        assert!(field(&ctx).min.y < top - 40.0, "the form scrolled: {} from {top}", field(&ctx).min.y);
+        press(&mut r, KeyCode::Esc);
+        let _ = pass(&ctx, &mut r, SMALL);
+        press(&mut r, KeyCode::Char('a'));
+        // egui eases the body there over a few passes.
+        for _ in 0..40 {
+            let _ = pass(&ctx, &mut r, SMALL);
+        }
+        assert!((field(&ctx).min.y - top).abs() < 1.0, "the form opens on its field and the field's label: {} for {top}", field(&ctx).min.y);
     }
 }
