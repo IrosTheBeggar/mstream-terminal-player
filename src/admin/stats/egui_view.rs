@@ -1,12 +1,13 @@
 //! The stats page drawn by egui — the egui spike's first page. The same
-//! [`Page`] as the cells page above (its state, its worker, its keys);
-//! only the drawing is new, in pixels, inside the window's panel
+//! [`Page`] the cells view draws (the parent module: its state, its worker,
+//! its keys); only the drawing is new, in pixels, inside the window's panel
 //! (src/gui/window/panel.rs). Every click is one of the page's own [`Act`]s,
 //! handed to the page after the pass, so the keyboard and the pointer stay
 //! one model: ←→ still change the tab, `p` still drops the period list,
 //! `x` still opens the forget gate, and egui draws whatever the page holds.
-//! What the cells page decides in words — the tiles, the series and their
-//! axes, the periods, a row's note — is called here, never copied.
+//! What the page says in words — the tiles, the series and their axes, the
+//! periods, a row's note — is the parent's, called here as the cells view
+//! calls it, never copied.
 //!
 //! The look is "Studio", chosen from the style canvas (2026-11-19): a
 //! mixing desk's — square corners, hairline panels, labels in spaced
@@ -27,6 +28,7 @@ use ratatui::style::Color;
 
 use super::*;
 use crate::gui::window::panel::STRONG;
+use crate::kit::theme::th;
 
 /// The page's margin inside the panel, in points.
 const PAD: Vec2 = vec2(22.0, 14.0);
@@ -1278,10 +1280,7 @@ mod tests {
         click(&ctx, &mut page, SMALL, pill.rect.center());
         assert!(matches!(page.modal, Modal::Period(_)), "the list dropped");
         // The keys still walk it: the page's own model, whatever draws it.
-        page.key(ratatui::crossterm::event::KeyEvent::new(
-            ratatui::crossterm::event::KeyCode::Down,
-            ratatui::crossterm::event::KeyModifiers::NONE,
-        ));
+        page.key(KeyEvent::new(KeyCode::Down, crate::input::KeyModifiers::NONE));
         let _ = pass(&ctx, &mut page, SMALL, Vec::new());
         click(&ctx, &mut page, SMALL, pos2(40.0, SMALL.y - 60.0));
         assert_eq!(page.modal, Modal::None, "a click off the list closed it");

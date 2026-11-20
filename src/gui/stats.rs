@@ -119,7 +119,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
         }
     }
     match gui.stats.page.as_mut() {
-        Some(page) => page::render_hosted(frame, page, view),
+        Some(page) => page::cells::render_hosted(frame, page, view),
         None => {
             let why = gui.stats.why.clone().unwrap_or_default();
             put(frame, view.x + 2, view.y + 1, &why, dim());
@@ -154,7 +154,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     };
     // The page first: Esc closes its modal or lets go of its row; with
     // nothing left to close the page says Quit, which here is the way back.
-    if matches!(Hosted::key(page, key), Some(Outcome::Quit)) {
+    if matches!(page.key(key), Some(Outcome::Quit)) {
         return gui.act(Act::Screen(Screen::Library));
     }
     false
@@ -218,7 +218,7 @@ pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
 /// answer is on screen the frame it lands (performance audit #82). True
 /// when anything came: a frame to draw.
 pub(crate) fn absorb(gui: &mut Gui) -> bool {
-    gui.stats.page.as_mut().is_some_and(Hosted::absorb)
+    gui.stats.page.as_mut().is_some_and(Page::absorb)
 }
 
 /// Whether the screen is chosen AND the last frame drew it — not so under
@@ -240,7 +240,7 @@ pub(crate) fn stale(gui: &mut Gui) -> bool {
 /// Whether the page has a call out with its worker — the GUI's loop waits
 /// briskly for the answer while it does (`kit::pace`).
 pub(crate) fn awaiting(gui: &Gui) -> bool {
-    gui.stats.page.as_ref().is_some_and(Hosted::awaiting)
+    gui.stats.page.as_ref().is_some_and(Page::awaiting)
 }
 
 /// What the page's per-frame duties found.
@@ -257,10 +257,10 @@ pub(crate) struct Duties {
 pub(crate) fn frame(gui: &mut Gui) -> Duties {
     let shown = on_screen(gui);
     let Some(page) = gui.stats.page.as_mut() else { return Duties::default() };
-    Hosted::pump(page);
+    page.pump();
     let mut stepped = false;
     if let Some(act) = page.ui().hold_action() {
-        <Page as Hosted>::act(page, act);
+        page.act(act);
         stepped = true;
     }
     page.ui().dwell_tick();
