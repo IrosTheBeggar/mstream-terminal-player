@@ -50,6 +50,9 @@ use crate::kit::clipboard::Copied;
 
 /// The room in character cells: the terminal's room and the GUI's grid.
 mod cells;
+/// The same room drawn by egui, in the desktop window's panel.
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
 
 /// The page's own cadence for its requests card.
 const POLL_EVERY: Duration = Duration::from_secs(30);

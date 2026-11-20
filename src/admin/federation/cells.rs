@@ -98,6 +98,19 @@ impl Screen for Room {
     fn claim(&self) -> Claim {
         Room::claim(self)
     }
+
+    #[cfg(feature = "window")]
+    fn has_egui(&self) -> bool {
+        true
+    }
+
+    /// The room drawn by egui (egui_view.rs), with the input method's
+    /// composition the host handed down to this view's surface.
+    #[cfg(feature = "window")]
+    fn egui(&mut self, ui: &mut egui::Ui) -> Option<crate::admin::EguiShown> {
+        let composition = self.cells.ui.composition().to_string();
+        Some(super::egui_view::show(ui, self, &composition))
+    }
 }
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
