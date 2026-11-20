@@ -103,6 +103,54 @@ server, and no audio files:
     `landing` in `params`, and end with the folder they landed in.
     /_state adds the proxied routes (`proxied`) and the refused
     (`proxy_refused`).
+  - FAKE_P2P=1 (it turns on FAKE_TASTE and FAKE_PLUGINS too): the GUI's
+    Peer recs room's server half, taste generation 3 (mStream
+    docs/peer-recommendations-plan.md §3.1–3.6), answered from the stage's
+    own answers in test/fixtures/peer_recs/*.json, the same files the Rust
+    tests read (peer-recs plan D25). The ping adds `discoveryP2p`,
+    `discoveryTaste: 3` and `discoveryP2pPeers: 1`, and `discoveryPath`
+    as the stage's real server has it, so the GUI's nav stands as the
+    peer-recs contract §1.1 draws it with every tool (Peer recs on row 18).
+      GET /api/v1/discovery/p2p/peers is the strip: peers_admin's rows,
+    shelf peers online first then by label, the addable ones after.
+      POST /api/v1/admin/discovery/p2p/peer-dbs/add {endpointId} is the
+    admin's Add, as discovery-peer-add.js answers it: 202 `adding`; the next
+    poll still reads `adding`, and 2 s after that poll Lighthouse Tapes is
+    on the shelf (`done`), swapping the unpinned Attic Tapes out, as the
+    stage's shelf cap does; Rooftop FM fails `offline` at the same point
+    (`try again`, and a press tries again); Static Garden stays `adding`
+    for 120 s. A peer already held answers 200 done, one not in the
+    catalog 404.
+      POST /api/v1/discovery/taste with `sources: ["network"]` is checked as
+    the route's Joi schema checks it (a key it does not know, `[]` for
+    networkPeers, a bad id: a 400 in Joi's words), then answered by the
+    tab: taste_all for the whole shelf; taste_basement, taste_kitchen,
+    taste_3f9a or taste_attic (nothing new) for one shelf peer;
+    taste_not_on_shelf for a peer the shelf does not hold. The seeds are
+    the pins (`pinned`), else the history's two songs less `exclude`, else
+    the random seed (taste_random's seed and leads, `fallback`), whose
+    network part is null unless networkOnRandomSeed is true. A Discover
+    body (no `network` source) carrying a generation-3 key is counted in
+    `discover_gen3_bodies`: Discover's wire must never change.
+      The plug-ins are links, deezer (preview), federation-copy and
+    noop-acquire (Get it): POST …/deezer/resolve answers a 2 s PCM WAV at
+    /_clip/<rank>.wav, the lead's rank in taste_all; Arcade Rain finds no
+    preview (null); Quiet Engine answers 429 once; Long Exposure's clip URL
+    is dead (404). Each preview names an artwork URL, /_artwork/<rank>.png,
+    which the player must never fetch. POST …/noop-acquire/jobs starts a
+    job (its destination checked as federation-copy's), running at once
+    and done 2 s later ("fail" in the title fails it, as the real
+    plug-in's does); GET /api/v1/discovery/plugin-jobs/<id> reads one.
+      /_state adds `pings`, `peer_polls`, `adds` (the Add posts) with
+    `add_bodies` and `add_answers`, `peer_adds` (each Add's state by
+    label), `network_bodies` with `network_answers` (the fixture or the
+    status that answered), `discover_gen3_bodies`, `preview_resolves`
+    ({title, answer, recommendation}), `clip_gets`, `job_gets` and
+    `art_paths`. `resolves` counts every resolve (links and previews), and
+    `art_gets` counts the previews' artwork beside /album-art/.
+  - FAKE_MEMBER=1 (with FAKE_P2P): the account is a member: `canAdd` is
+    false, the strip has no addable rows and no Add state, and an Add is
+    the admin guard's 403.
 
 Usage: fake_mstream.py PORT [PORTFILE]
 
@@ -110,7 +158,9 @@ PORT 0 takes any free port; PORTFILE, when given, gets the port it is
 listening on (written whole, once it listens), which is how run.sh's
 scenarios, side by side, each get a port no other fake can be handed.
 """
+import copy
 import json
+import math
 import os
 import re
 import socketserver
@@ -130,8 +180,13 @@ LOOP = os.environ.get("FAKE_LOOP", "") not in ("", "0")
 # and /auth/login only knows the users PUT there. Off by default: the
 # wizard legs run on the zero-account window this would close.
 AUTH = os.environ.get("FAKE_AUTH", "") not in ("", "0")
-TASTE = os.environ.get("FAKE_TASTE", "") not in ("", "0")
-PLUGINS = TASTE and os.environ.get("FAKE_PLUGINS", "") not in ("", "0")
+# The Peer recs room's server half (taste generation 3); it needs the taste
+# route and the plug-ins, so it turns both on.
+P2P = os.environ.get("FAKE_P2P", "") not in ("", "0")
+# The Peer recs room's account is a member: no Add.
+MEMBER = P2P and os.environ.get("FAKE_MEMBER", "") not in ("", "0")
+TASTE = P2P or os.environ.get("FAKE_TASTE", "") not in ("", "0")
+PLUGINS = TASTE and (P2P or os.environ.get("FAKE_PLUGINS", "") not in ("", "0"))
 # A server from before the start's destination (mStream before 2026-10-21):
 # its jobs route's strict body refuses the key, and no job is pinned.
 NO_PIN = PLUGINS and os.environ.get("FAKE_NO_PIN", "") not in ("", "0")
@@ -213,7 +268,12 @@ state = {"directories": {}, "users": [], "taste_asks": 0, "taste_body": None, "p
          "peer_asks": 0, "peer_art_gets": 0, "peer_art_paths": [],
          "jobs": [], "job_starts": [], "job_answers": [], "lookup_sizes": [], "cancels": 0, "clears": 0, "resolves": 0,
          "saved_destination": None, "destination_gets": 0, "destination_puts": [], "folder_lists": [],
-         "proxied": [], "proxy_refused": [], "asked": [], "recursive_bodies": [], "batch_bodies": []}
+         "proxied": [], "proxy_refused": [], "asked": [], "recursive_bodies": [], "batch_bodies": [],
+         # The Peer recs room's (FAKE_P2P); there, `resolves` counts the
+         # preview resolves too, and `art_gets` the previews' artwork.
+         "pings": 0, "peer_polls": 0, "adds": 0, "add_bodies": [], "add_answers": [], "peer_adds": {},
+         "network_bodies": [], "network_answers": [], "discover_gen3_bodies": 0, "preview_resolves": [],
+         "clip_gets": [], "job_gets": 0, "art_paths": []}
 
 # The plug-in listing, the destination and the links (FAKE_PLUGINS). A
 # folder copy past `maxFolderSongs` is refused before it starts.
@@ -517,6 +577,9 @@ def _walk_jobs():
     now = time.time()
     for job in state["jobs"]:
         age = now - job["_born"]
+        if job["plugin"] == NOOP_PLUGIN:
+            _walk_noop(job, age)
+            continue
         if job["state"] == "queued" and age >= JOB_QUEUED_S:
             job.update(state="running", progress=0.5, statusText="song 1 of 2")
         if job["state"] == "running" and age >= JOB_QUEUED_S + JOB_RUNNING_S:
@@ -579,6 +642,355 @@ def _png(w=4, h=4, rgb=(200, 120, 40)):
 
 COVER = _png()
 PEER_COVER = _png(rgb=(40, 120, 200))
+
+
+# ── The Peer recs room (FAKE_P2P) ────────────────────────────────────────────
+# The stage's answers (mStream test/stage/peer-recs-stage.mjs), read from the
+# fixtures the Rust tests read, so the two never drift apart.
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fixtures", "peer_recs")
+
+
+def _fixture(name):
+    with open(os.path.join(FIXTURES, name + ".json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+# The taste route's schema (mStream src/api/discovery-taste.js tasteSchema,
+# limitSchema): every key it knows, with its caps. Anything else is Joi's 400.
+TASTE_KEYS = ("window", "pin", "exclude", "sources", "limit", "newArtistsOnly", "ignoreVPaths", "moods",
+              "networkPeers", "networkOnRandomSeed")
+TASTE_LIMITS = {"seeds": (1, 12), "tracks": (0, 50), "albums": (0, 24), "network": (0, 50), "peers": (0, 25)}
+TASTE_WINDOWS = (7, 30, 90, 0)
+TASTE_SOURCES = ("library", "network", "peers")
+# The generation-3 keys Discover's own bodies must never carry.
+GEN3_KEYS = ("networkPeers", "networkOnRandomSeed")
+# An Add's walk: the poll after the post still reads `adding`, and the peer
+# lands (or fails) this long after that poll. Static Garden's download is the
+# stage's slow one.
+ADD_LAND_S = 2.0
+STATIC_LAND_S = 120.0
+# Get it's job (noop-acquire): running at once, done this long after.
+NOOP_PLUGIN = "noop-acquire"
+NOOP_RUNNING_S = 2.0
+NOOP_STEPS = 3
+# The previews (the stage's Deezer mock): a clip this long, Arcade Rain with
+# no match, Quiet Engine rate-limited once, Long Exposure's clip URL dead.
+CLIP_SECONDS = 2.0
+CLIP_RATE = 16000
+NO_PREVIEW = "Arcade Rain"
+LIMITED_ONCE = "Quiet Engine"
+DEAD_CLIP = "Long Exposure"
+
+if P2P:
+    PEER_ROWS = _fixture("peers_admin")
+    TASTE_ALL = _fixture("taste_all")
+    TASTE_RANDOM = _fixture("taste_random")
+    TASTE_NOTHING_NEW = _fixture("taste_attic")
+    TASTE_NOT_ON_SHELF = _fixture("taste_not_on_shelf")
+    PREVIEW_TEMPLATE = _fixture("preview_deezer")["result"]["preview"]
+    PEER_BY_LABEL = {p["label"]: p["endpointId"] for p in PEER_ROWS["peers"]}
+    BASEMENT = PEER_BY_LABEL["Basement Hi-Fi"]
+    KITCHEN = PEER_BY_LABEL["Kitchen Radio"]
+    F3A = PEER_BY_LABEL["mStream · 3f9a"]
+    ATTIC = PEER_BY_LABEL["Attic Tapes"]
+    LIGHTHOUSE = PEER_BY_LABEL["Lighthouse Tapes"]
+    STATIC = PEER_BY_LABEL["Static Garden"]
+    ROOFTOP = PEER_BY_LABEL["Rooftop FM"]
+    # One shelf peer's answer, by its id; a held peer not here has only
+    # songs this library owns, so its tab reads nothing new.
+    TASTE_TABS = {BASEMENT: "taste_basement", KITCHEN: "taste_kitchen", F3A: "taste_3f9a", ATTIC: "taste_attic"}
+    TASTE_TAB_ANSWERS = {pid: _fixture(name) for pid, name in TASTE_TABS.items()}
+    # The leads, in rank order: a lead's rank names its clip.
+    LEADS = TASTE_ALL["network"]["results"]
+    # The seeds this library knows, by path: the history's (finished songs)
+    # and the random draw's; a pin takes the pinned form.
+    HISTORY_SEEDS = TASTE_ALL["seeds"]
+    SEED_POOL = {s["filepath"]: s for s in HISTORY_SEEDS + TASTE_RANDOM["seeds"]}
+    # The shelf as staged, and what an Add swaps out when it lands.
+    p2p = {"rows": {p["endpointId"]: p for p in PEER_ROWS["peers"]},
+           "shelf": [p["endpointId"] for p in PEER_ROWS["peers"] if p["onShelf"]],
+           "adds": {}, "limited": set()}
+    SWAPS = {LIGHTHOUSE: ATTIC}
+    FAILS = {ROOFTOP: "offline"}
+
+# The stage's listing, in its order: Discover's two plus a preview plug-in
+# (the room's first with `preview`) and a Get it one (every acquire but
+# federation-copy).
+P2P_LISTING = {
+    "plugins": [
+        PLUGIN_LISTING["plugins"][0],
+        {"name": "deezer", "title": "Preview on Deezer", "capabilities": ["preview"], "scope": "server",
+         "scopes": ["song"], "settings": [], "enabled": True, "available": True},
+        PLUGIN_LISTING["plugins"][1],
+        {"name": NOOP_PLUGIN, "title": "No-op acquire (test only)", "capabilities": ["acquire"], "scope": "server",
+         "scopes": ["song", "album"], "settings": ["note", "token"], "enabled": True, "available": True},
+    ],
+    "jobs": PLUGIN_LISTING["jobs"],
+}
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".%03dZ" % int((t % 1) * 1000)
+
+
+def _add_wire(entry):
+    return {"state": entry["state"], "code": entry["code"], "at": _iso(entry["at"])}
+
+
+def _note_add(pid):
+    entry = p2p["adds"][pid]
+    state["peer_adds"][p2p["rows"][pid]["label"]] = {"state": entry["state"], "code": entry["code"]}
+
+
+def _walk_adds(now):
+    """Every Add where the clock puts it: Lighthouse Tapes lands (and Attic
+    Tapes leaves the shelf), Rooftop FM fails offline — each 2 s after the
+    first poll that read it adding — and Static Garden lands at 120 s."""
+    for pid, entry in p2p["adds"].items():
+        if entry["state"] != "adding":
+            continue
+        if pid == STATIC:
+            due = entry["posted"] + STATIC_LAND_S
+        elif entry["seen"] is not None:
+            due = entry["seen"] + ADD_LAND_S
+        else:
+            continue
+        if now < due:
+            continue
+        if pid in FAILS:
+            entry.update(state="failed", code=FAILS[pid], at=now)
+        else:
+            entry.update(state="done", code=None, at=now)
+            gone = SWAPS.get(pid)
+            if gone in p2p["shelf"]:
+                p2p["shelf"].remove(gone)
+            if pid not in p2p["shelf"]:
+                p2p["shelf"].append(pid)
+        _note_add(pid)
+
+
+def _peer_view():
+    """GET /api/v1/discovery/p2p/peers as buildPeerView answers it: the shelf
+    online first, then by label; for an admin the catalog's online peers not
+    held, by library size (an Add never reorders a row), each with its Add
+    state; a member sees no addable row and no state."""
+    def row(pid, on_shelf):
+        # A peer an Add landed keeps its catalog row's `pinned: false`: a
+        # page Add never pins.
+        r = dict(p2p["rows"][pid], onShelf=on_shelf)
+        entry = p2p["adds"].get(pid)
+        r["add"] = _add_wire(entry) if entry and not MEMBER else None
+        return r
+    shelf = sorted((row(pid, True) for pid in p2p["shelf"]),
+                   key=lambda r: (not r["online"], r["label"].casefold(), r["endpointId"]))
+    addable = []
+    if not MEMBER:
+        addable = [row(pid, False) for pid in p2p["rows"]
+                   if pid not in p2p["shelf"] and (p2p["rows"][pid]["online"] or pid in p2p["adds"])]
+        addable.sort(key=lambda r: (-r["rowCount"], r["endpointId"]))
+    held = len(p2p["shelf"])
+    return {"canAdd": not MEMBER, "shelf": dict(PEER_ROWS["shelf"], held=held, searchable=held),
+            "peers": shelf + addable}
+
+
+def _joi_refusal(body):
+    """Why the taste route's schema refuses a body, in Joi's words; None when
+    it takes it."""
+    if not isinstance(body, dict):
+        return '"value" must be of type object'
+    for key in body:
+        if key not in TASTE_KEYS:
+            return '"%s" is not allowed' % key
+    window = body.get("window", 30)
+    if window not in TASTE_WINDOWS or isinstance(window, bool):
+        return '"window" must be one of [7, 30, 90, 0]'
+    for key, cap in (("pin", 12), ("exclude", 200)):
+        items = body.get(key, [])
+        if not isinstance(items, list) or not all(isinstance(i, str) and i for i in items):
+            return '"%s" must be an array of strings' % key
+        if len(items) > cap:
+            return '"%s" must contain less than or equal to %d items' % (key, cap)
+    sources = body.get("sources", list(TASTE_SOURCES))
+    if not isinstance(sources, list):
+        return '"sources" must be an array'
+    for i, source in enumerate(sources):
+        if source not in TASTE_SOURCES:
+            return '"sources[%d]" must be one of [library, network, peers]' % i
+        if source in sources[:i]:
+            return '"sources[%d]" contains a duplicate value' % i
+    limit = body.get("limit", {})
+    if not isinstance(limit, dict):
+        return '"limit" must be of type object'
+    for key, value in limit.items():
+        if key not in TASTE_LIMITS:
+            return '"limit.%s" is not allowed' % key
+        low, high = TASTE_LIMITS[key]
+        if not isinstance(value, int) or isinstance(value, bool):
+            return '"limit.%s" must be a number' % key
+        if value < low:
+            return '"limit.%s" must be greater than or equal to %d' % (key, low)
+        if value > high:
+            return '"limit.%s" must be less than or equal to %d' % (key, high)
+    for key in ("newArtistsOnly", "networkOnRandomSeed"):
+        if key in body and not isinstance(body[key], bool):
+            return '"%s" must be a boolean' % key
+    if "networkPeers" in body:
+        ids = body["networkPeers"]
+        if not isinstance(ids, list):
+            return '"networkPeers" must be an array'
+        if not ids:
+            return '"networkPeers" must contain at least 1 items'
+        if len(ids) > 50:
+            return '"networkPeers" must contain less than or equal to 50 items'
+        seen = []
+        for i, pid in enumerate(ids):
+            if not isinstance(pid, str):
+                return '"networkPeers[%d]" must be a string' % i
+            if not re.fullmatch(r"[0-9a-fA-F]*", pid):
+                return '"networkPeers[%d]" must only contain hexadecimal characters' % i
+            if len(pid) != 64:
+                return '"networkPeers[%d]" length must be 64 characters long' % i
+            if pid.lower() in seen:
+                return '"networkPeers[%d]" contains a duplicate value' % i
+            seen.append(pid.lower())
+    return None
+
+
+def _seeds(body):
+    """The seeds the route picks (collectSeeds): the pins first, as pinned
+    seeds (a path it does not know is dropped), then the history's finished
+    songs less `exclude`, else the random draw."""
+    limit = body.get("limit", {}).get("seeds", 12)
+    exclude = set(body.get("exclude", []))
+    seeds, dropped, have = [], 0, set()
+    for path in body.get("pin", []):
+        if len(seeds) >= limit:
+            break
+        seed = SEED_POOL.get(path)
+        if seed is None:
+            dropped += 1
+            continue
+        if seed["hash"] in have:
+            continue
+        have.add(seed["hash"])
+        seeds.append(dict(seed, pinned=True, outcome=None))
+    out = {"seeds": seeds, "dropped": dropped, "seedSource": "pinned" if seeds else None, "fallback": False,
+           "widenedFrom": None,
+           "excluded": [{"hash": s["hash"], "filepath": s["filepath"], "metadata": s["metadata"]}
+                        for s in SEED_POOL.values() if s["hash"] in exclude]}
+    room = limit - len(seeds)
+    if room > 0:
+        history = [s for s in HISTORY_SEEDS if s["hash"] not in exclude and s["hash"] not in have][:room]
+        if history:
+            seeds.extend(history)
+            out["seedSource"] = out["seedSource"] or "history"
+        elif not seeds:
+            # No finished song left to seed from: the window widens to all
+            # time, then the random draw (taste_random, a user with no
+            # plays).
+            seeds.extend(TASTE_RANDOM["seeds"][:room])
+            window = body.get("window", 30)
+            out.update(seedSource="random", fallback=True, window=TASTE_RANDOM["window"], widenedFrom=window or None)
+    return out
+
+
+def _network_part(ids, random_seed):
+    """The answer's network part for these networkPeers (None: the whole
+    shelf), and the fixture's name that gave it. A random seed ranks the
+    leads from its own vector, so its answers are taste_random's."""
+    whole = TASTE_RANDOM if random_seed else TASTE_ALL
+    name = "taste_random" if random_seed else "taste_all"
+    if not ids:
+        return dict(whole["network"], searched=dict(whole["network"]["searched"], peers=len(p2p["shelf"]))), name
+    held = [pid for pid in ids if pid in p2p["shelf"]]
+    if not held:
+        return TASTE_NOT_ON_SHELF["network"], "taste_not_on_shelf"
+    if len(ids) == 1 and not random_seed:
+        tab = TASTE_TAB_ANSWERS.get(held[0])
+        return (tab or TASTE_NOTHING_NEW)["network"], TASTE_TABS.get(held[0], "taste_attic")
+    results = [r for r in whole["network"]["results"] if r["peer"]["endpointId"] in held]
+    return {"results": results, "searched": {"peers": len(held), "tracks": len(results)},
+            "reason": None if results else "nothing-new"}, name
+
+
+def _network_answer(body):
+    """POST /api/v1/discovery/taste with the network source (the Peer recs
+    room's R1–R8): checked, then answered by the tab. A 400 is (status,
+    words); an answer is (200, body, fixture)."""
+    words = _joi_refusal(body)
+    if words:
+        return 400, {"error": words}, None
+    picked = dict({"window": body.get("window", 30)}, **_seeds(body))
+    random_seed = picked["seedSource"] == "random"
+    ids = [pid.lower() for pid in body.get("networkPeers", [])] or None
+    network, name = _network_part(ids, random_seed)
+    network = copy.deepcopy(network)
+    network["results"] = network["results"][:body.get("limit", {}).get("network", 12)]
+    # Each lead names the seed it sits closest to: one of this answer's.
+    hashes = [s["hash"] for s in picked["seeds"]]
+    for lead in network["results"]:
+        if hashes and lead.get("seedHash") not in hashes:
+            lead["seedHash"] = hashes[0]
+    if random_seed and body.get("networkOnRandomSeed") is not True:
+        network, name = None, "taste_network_null"
+    answer = copy.deepcopy(TASTE_ALL)
+    answer.update(picked, network=network, library=None, peers=None)
+    return 200, answer, name
+
+
+def _lead(rec):
+    """The lead a recommendation names, and its rank (1-based), by title and
+    artist; (None, None) for one the shelf never gave."""
+    rec = rec if isinstance(rec, dict) else {}
+    for n, lead in enumerate(LEADS, 1):
+        if lead["title"] == rec.get("title") and lead["artist"] == rec.get("artist"):
+            return lead, n
+    return None, None
+
+
+def _preview(lead, n, port):
+    """The Deezer mock's preview of a lead, shaped as preview_deezer's: its
+    clip on this fake, an https link, and an artwork URL never to fetch."""
+    base = "http://127.0.0.1:%d" % port
+    return dict(PREVIEW_TEMPLATE, url="%s/_clip/%d.wav" % (base, n), title=lead["title"], artist=lead["artist"],
+                album=lead.get("album"), link="https://www.deezer.com/track/%d" % (3995000 + n),
+                artwork="%s/_artwork/%d.png" % (base, n))
+
+
+_CLIPS = {}
+
+
+def _clip(n):
+    """A 2 s mono 16-bit PCM WAV: a quiet tone a pentatonic step per lead,
+    so two clips never sound alike (symphonia decodes it, no ffmpeg)."""
+    if n not in _CLIPS:
+        steps = [0, 2, 4, 7, 9]
+        freq = 220.0 * 2 ** ((steps[(n - 1) % 5] + 12 * ((n - 1) // 5)) / 12)
+        frames = int(CLIP_SECONDS * CLIP_RATE)
+        pcm = b"".join(struct.pack("<h", int(3000 * math.sin(2 * math.pi * freq * i / CLIP_RATE)))
+                       for i in range(frames))
+        fmt = struct.pack("<HHIIHH", 1, 1, CLIP_RATE, CLIP_RATE * 2, 2, 16)
+        _CLIPS[n] = (b"RIFF" + struct.pack("<I", 4 + 8 + len(fmt) + 8 + len(pcm)) + b"WAVE"
+                     + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(pcm)) + pcm)
+    return _CLIPS[n]
+
+
+def _walk_noop(job, age):
+    """Get it's job (noop-acquire) where its age puts it: running from the
+    start, a step a third of the way, then done — or failed for a title
+    with "fail" in it, as the real plug-in refuses one."""
+    if job["state"] != "running":
+        return
+    if age < NOOP_RUNNING_S:
+        step = min(NOOP_STEPS, 1 + int(age / NOOP_RUNNING_S * NOOP_STEPS))
+        job.update(progress=step / NOOP_STEPS, statusText="step %d of %d" % (step, NOOP_STEPS))
+        return
+    title = str(job["recommendation"].get("title") or "")
+    if re.search("fail", title, re.I):
+        job.update(state="failed", progress=None, statusText=None, error='noop-acquire refused "%s"' % title)
+    else:
+        job.update(state="done", progress=1, statusText=None,
+                   result={"echoed": title, "steps": NOOP_STEPS, "scope": "song"})
 
 
 # FAKE_LIBRARY=1: a small made-up library for the SD-card transfer's routes
@@ -839,10 +1251,12 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def do_HEAD(self):
-        if not LIBRARY:
-            return self.send_error(501)
         from urllib.parse import unquote, urlsplit
 
+        if P2P and unquote(urlsplit(self.path).path).startswith("/_clip/"):
+            return self._clip_get(unquote(urlsplit(self.path).path), head=True)
+        if not LIBRARY:
+            return self.send_error(501)
         path = unquote(urlsplit(self.path).path)
         library["asked"].append("HEAD " + path)
         if path.startswith("/media/"):
@@ -967,6 +1381,165 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"albums": ATTIC_ALBUMS.get(_name_key((body or {}).get("artist")), [])})
         return self._json({})
 
+    def _ranged(self, data, kind, head=False):
+        """`data` whole (200), a Range of it (206), or HEAD — as a CDN serves
+        a clip to a streaming reader."""
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes=") and not head:
+            first, _, last = rng[6:].partition("-")
+            start = int(first or 0)
+            end = min(int(last) + 1, len(data)) if last else len(data)
+            if start >= len(data):
+                return self._bytes(416, b"", extra=[("Content-Range", "bytes */%d" % len(data))])
+            span = "bytes %d-%d/%d" % (start, end - 1, len(data))
+            return self._bytes(206, data[start:end], kind, extra=[("Content-Range", span), ("Accept-Ranges", "bytes")])
+        return self._bytes(200, data, kind, extra=[("Accept-Ranges", "bytes")], head=head)
+
+    def _clip_get(self, path, head=False):
+        """/_clip/<rank>.wav: the lead's clip; Long Exposure's is dead (404),
+        and so is a rank no lead has."""
+        m = re.fullmatch(r"/_clip/(\d+)\.wav", path)
+        n = int(m.group(1)) if m else 0
+        if not head:
+            state["clip_gets"].append(n)
+        if not 1 <= n <= len(LEADS) or LEADS[n - 1]["title"] == DEAD_CLIP:
+            return self._bytes(404, b'{"error":"Not Found"}', "application/json", head=head)
+        return self._ranged(_clip(n), "audio/wav", head=head)
+
+    def _p2p_get(self, path):
+        """The Peer recs room's reads: True when answered."""
+        if path == "/api/v1/discovery/p2p/peers":
+            state["peer_polls"] += 1
+            now = time.time()
+            _walk_adds(now)
+            # This poll reads every fresh Add as adding; the walk counts
+            # from it.
+            for pid, entry in p2p["adds"].items():
+                if entry["state"] == "adding" and entry["seen"] is None:
+                    entry["seen"] = now
+            self.send_response(200)
+            data = json.dumps(_peer_view()).encode()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return True
+        if path.startswith("/_clip/"):
+            self._clip_get(path)
+            return True
+        if path.startswith("/_artwork/"):
+            # The previews' artwork: the room draws none, so any get here
+            # is a failure the legs count.
+            state["art_gets"] += 1
+            state["art_paths"].append(path)
+            self._png(COVER)
+            return True
+        m = re.fullmatch(r"/api/v1/discovery/plugin-jobs/(\d+)", path)
+        if m:
+            state["job_gets"] += 1
+            _walk_jobs()
+            job = next((j for j in state["jobs"] if j["id"] == int(m.group(1))), None)
+            if job is None:
+                self._status(404, {"error": "No such job"})
+            else:
+                self._json({"job": _public(job)})
+            return True
+        return False
+
+    def _add(self, body):
+        """POST …/p2p/peer-dbs/add (discovery-peer-add.js add()): the guard,
+        Joi, then the peer's Add as it stands."""
+        state["adds"] += 1
+        state["add_bodies"].append(body)
+
+        def answer(status, payload):
+            state["add_answers"].append(status)
+            return self._status(status, payload)
+        if MEMBER:
+            return answer(403, {"error": "Admin access required"})
+        pid = body.get("endpointId") if isinstance(body, dict) else None
+        if not isinstance(pid, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", pid):
+            return answer(400, {"error": '"endpointId" length must be 64 characters long'})
+        pid = pid.lower()
+        if pid not in p2p["rows"]:
+            return answer(404, {"error": "not-in-catalog"})
+        now = time.time()
+        _walk_adds(now)
+        entry = p2p["adds"].get(pid)
+        if entry and entry["state"] == "adding":
+            return answer(202, dict(endpointId=pid, **_add_wire(entry)))
+        if pid in p2p["shelf"]:
+            done = entry if entry and entry["state"] == "done" else {"state": "done", "code": None, "at": now}
+            return answer(200, dict(endpointId=pid, **_add_wire(done)))
+        p2p["adds"][pid] = {"state": "adding", "code": None, "at": now, "posted": now, "seen": None}
+        _note_add(pid)
+        return answer(202, dict(endpointId=pid, **_add_wire(p2p["adds"][pid])))
+
+    def _resolve_preview(self, body):
+        """POST …/plugins/deezer/resolve: the stage's Deezer mock behind the
+        resolve route (discovery-plugins.js), the recommendation echoed."""
+        state["resolves"] += 1
+        rec = body.get("recommendation") if isinstance(body, dict) else None
+        if not isinstance(rec, dict):
+            return self._status(400, {"error": '"recommendation" is required'})
+        lead, n = _lead(rec)
+        title = rec.get("title")
+        note = lambda answer: state["preview_resolves"].append(
+            {"title": title, "answer": answer, "recommendation": rec})
+        if lead is not None and title == LIMITED_ONCE and title not in p2p["limited"]:
+            p2p["limited"].add(title)
+            note("429")
+            return self._status(429, {"error": "plug-in deezer is rate-limited right now — try again shortly"})
+        preview = None
+        if lead is not None and title != NO_PREVIEW:
+            preview = _preview(lead, n, self.server.server_address[1])
+        note("null" if preview is None else "dead" if title == DEAD_CLIP else "preview")
+        return self._json({"plugin": "deezer", "capabilities": ["preview"], "key": _keys(rec)["song"],
+                           "recommendation": rec, "result": {"preview": preview}})
+
+    def _noop_start(self, body):
+        """POST …/plugins/noop-acquire/jobs: Get it's start, the destination
+        the client showed checked as the jobs route checks an acquire's."""
+        state["job_starts"].append(body)
+        rec = body.get("recommendation") if isinstance(body, dict) else None
+        if not isinstance(rec, dict):
+            state["job_answers"].append(400)
+            return self._status(400, {"error": '"recommendation" is required'})
+        key = _keys(rec)["song"]
+        _walk_jobs()
+        live = [j for j in state["jobs"]
+                if j["plugin"] == NOOP_PLUGIN and j["key"] == key and j["state"] in ("queued", "running")]
+        effective = _effective()
+        if "destination" in body and not _same(body["destination"], effective) and not live:
+            state["job_answers"].append("destination_changed")
+            return self._status(409, {"error": "destination_changed", "destination": effective,
+                                      "message": "your collection destination has changed — check where this will land and ask again"})
+        if live:
+            state["job_answers"].append(200)
+            return self._json({"created": False, "job": _public(live[0])})
+        state["job_answers"].append(202)
+        job = {"id": 1 + max([j["id"] for j in state["jobs"]] or [0]), "plugin": NOOP_PLUGIN, "key": key,
+               "recommendation": rec, "params": {"destination": effective}, "state": "running",
+               "progress": 1 / NOOP_STEPS, "statusText": "step 1 of %d" % NOOP_STEPS, "result": None,
+               "error": None, "attempts": 1, "cancelRequested": False,
+               "createdAt": 1760000000000 + len(state["jobs"]), "_born": time.time()}
+        state["jobs"].append(job)
+        return self._status(202, {"created": True, "job": _public(job)})
+
+    def _p2p_post(self, path, body):
+        """The Peer recs room's writes and resolves: True when answered."""
+        if path == "/api/v1/admin/discovery/p2p/peer-dbs/add":
+            self._add(body)
+            return True
+        if path == "/api/v1/discovery/plugins/deezer/resolve":
+            self._resolve_preview(body)
+            return True
+        if path == "/api/v1/discovery/plugins/%s/jobs" % NOOP_PLUGIN:
+            self._noop_start(body)
+            return True
+        return False
+
     def do_GET(self):
         if PEER_ROLE:
             return self._peer("GET", None)
@@ -978,6 +1551,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._walled():
             return self._deny()
         if LIBRARY and self._library_get():
+            return None
+        if P2P and self._p2p_get(urllib.parse.unquote(self.path.split("?")[0])):
             return None
         if self.path == "/api/v1/scan/progress":
             i = calls["n"]
@@ -994,6 +1569,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._json({"enrichment": step})
         if self.path == "/api/v1/ping":
+            state["pings"] += 1
             ping = {"vpaths": sorted(state["directories"]), "noFileModify": False, "noUpload": False}
             if TASTE:
                 ping.update({"discovery": True, "discoveryTaste": 1, "federationDiscovery": True})
@@ -1001,9 +1577,12 @@ class Handler(BaseHTTPRequestHandler):
                 ping["discoveryPlugins"] = True
             if PEER_URL:
                 ping["federationBrowse"] = True
+            if P2P:
+                ping.update({"discoveryP2p": True, "discoveryTaste": 3, "discoveryP2pPeers": 1,
+                             "discoveryPath": True})
             return self._json(ping)
         if PLUGINS and self.path == "/api/v1/discovery/plugins":
-            return self._json(PLUGIN_LISTING)
+            return self._json(P2P_LISTING if P2P else PLUGIN_LISTING)
         if PLUGINS and self.path == "/api/v1/discovery/collection/destination":
             state["destination_gets"] += 1
             return self._json(_view())
@@ -1039,6 +1618,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if TASTE and self.path.split("?")[0].startswith("/album-art/"):
             state["art_gets"] += 1
+            state["art_paths"].append(self.path)
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(COVER)))
@@ -1061,6 +1641,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._attic(body)
         if PLUGINS and self.path == "/api/v1/db/artists-albums":
             return self._json({"albums": OWN_ALBUMS.get(_name_key(body.get("artist")), [])})
+        if P2P and self._p2p_post(self.path, body):
+            return None
         if self.path == "/api/v1/auth/login":
             if AUTH and body.get("username") not in state["users"]:
                 return self._deny()
@@ -1147,7 +1729,18 @@ class Handler(BaseHTTPRequestHandler):
         if PLUGINS and self.path == "/api/v1/discovery/plugins/links/resolve":
             state["resolves"] += 1
             return self._json({"plugin": "links", "result": LINKS})
+        if P2P and self.path == "/api/v1/discovery/taste" and isinstance(body, dict) \
+                and "network" in (body.get("sources") or []):
+            # The Peer recs room's ask: its own counters, never Discover's.
+            state["network_bodies"].append(body)
+            status, answer, name = _network_answer(body)
+            state["network_answers"].append(name or status)
+            return self._status(status, answer)
         if TASTE and self.path == "/api/v1/discovery/taste":
+            # Discover's own body never carries a generation-3 key.
+            if isinstance(body, dict) and (any(k in body for k in GEN3_KEYS)
+                                           or "network" in (body.get("limit") or {})):
+                state["discover_gen3_bodies"] += 1
             state["taste_asks"] += 1
             state["taste_body"] = body
             gone = [k for k in TASTE_GONE if k in body]
