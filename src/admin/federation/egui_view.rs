@@ -28,7 +28,7 @@ use egui::{Align, Align2, Color32, CursorIcon, FontId, Id, LayerId, Layout, Orde
 use super::*;
 use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
-    self, Col, FIELD_H, FORM_BUTTON_H, Pal, RowCtx, SEG_H, Seg, Table, Typed, begin, body, cell, checkbox, field_box,
+    self, Col, FIELD_H, FORM_BUTTON_H, Pal, RowCtx, SEG_H, Seg, Table, Typed, begin, body, caps, cell, checkbox, field_box,
     form_button, form_button_width, ink, led, lift, meter, modal, mono, note_line, ring, segmented, small_caps, square,
     strong, text, width_of,
 };
@@ -40,9 +40,8 @@ use crate::input::KeyModifiers;
 const PAD_X: f32 = 24.0;
 const PAD_TOP: f32 = 8.0;
 const PAD_FOOT: f32 = 14.0;
-/// The room between the room's parts: a little under the canvas's 18, so a
-/// table keeps rows in the default window.
-const GAP: f32 = 14.0;
+/// The room between the room's parts: the canvas's 18.
+const GAP: f32 = 18.0;
 /// The note line along the room's foot.
 const NOTE_H: f32 = 18.0;
 /// A card's height: the canvas's Mint card, the kit's add card.
@@ -55,8 +54,12 @@ const ROW_H: f32 = 40.0;
 /// The forms' window (the canvas's 640) and the gates', narrower.
 const FORM_W: f32 = 640.0;
 const GATE_W: f32 = 560.0;
-/// The room between a modal's parts.
-const SECTION: f32 = 20.0;
+/// The room between a modal's parts: the canvas's 22.
+const SECTION: f32 = 22.0;
+/// A modal window's padding and its title row, as the kit lays them out:
+/// where a gate paints its own gold title.
+const MODAL_PAD: f32 = 24.0;
+const TITLE_H: f32 = 20.0;
 /// A field with its label over it.
 const LABELLED_H: f32 = 20.0 + FIELD_H;
 /// The gap between the forms' columns (their fields, their tick boxes).
@@ -242,7 +245,7 @@ fn state_line(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal) {
     };
     if let Some(id) = &p.endpoint_id {
         let short = short_id(id);
-        parts.extend(with_figure(&t!("fed.state_endpoint", id = short), &short, body(14.0), pal.text));
+        parts.extend(with_figure(&t!("fed.state_endpoint", id = short), &short, body(14.0), 12.5, pal.text));
     }
     let inbox = if room.accept_requests { t!("fed.state_inbox_open") } else { t!("fed.state_inbox_closed") };
     parts.push((inbox.to_string(), body(14.0), pal.text));
@@ -475,7 +478,7 @@ fn foot(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
         return;
     }
     let Some((words, figure, color)) = story(room, pal) else { return };
-    let parts = with_figure(&words, figure.as_deref().unwrap_or(""), body(13.0), color);
+    let parts = with_figure(&words, figure.as_deref().unwrap_or(""), body(13.0), 12.0, color);
     runs(ui, rect.left_center(), &parts, rect.width());
 }
 
@@ -571,7 +574,8 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
                 let (row, _) = ui.allocate_exact_size(vec2(w, LABELLED_H), Sense::hover());
                 let rect = Rect::from_min_size(row.min, vec2(320.0_f32.min(w), LABELLED_H));
                 let input = input_of(&f.name, focused == Field::Name, composition);
-                let shown = labelled(ui, Id::new("fed-form-field").with(index_of(Field::Name)), rect, &t!("fed.mint_name"), &input, pal);
+                let id = Id::new("fed-form-field").with(index_of(Field::Name));
+                let shown = labelled(ui, id, rect, &t!("fed.mint_name"), Head::Section, &input, pal);
                 take(&mut out, shown, Field::Name);
             }
             FormKind::Accept => {
@@ -593,7 +597,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
         if f.kind != FormKind::Limits {
             let head = if f.kind == FormKind::Mint { t!("fed.mint_libraries") } else { t!("fed.accept_libraries") };
             let (row, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-            caption(ui, row.left_center(), &head, None, w, pal);
+            caption(ui, row.left_center(), &head, Head::Section, None, w, pal);
             ui.add_space(6.0);
             if f.libraries.is_empty() {
                 let (row, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
@@ -620,7 +624,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
         }
 
         let (row, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-        caption(ui, row.left_center(), &t!("fed.limits_label"), None, w, pal);
+        caption(ui, row.left_center(), &t!("fed.limits_label"), Head::Section, None, w, pal);
         ui.add_space(10.0);
         let col_w = (w - 3.0 * FORM_GAP) / 4.0;
         let mut limits = vec![
@@ -635,7 +639,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
         for (k, (field, label, value)) in limits.into_iter().enumerate() {
             let rect = Rect::from_min_size(pos2(row.min.x + k as f32 * (col_w + FORM_GAP), row.min.y), vec2(col_w, LABELLED_H));
             let input = input_of(value, focused == field, composition).mono();
-            let shown = labelled(ui, Id::new("fed-form-field").with(index_of(field)), rect, &label, &input, pal);
+            let shown = labelled(ui, Id::new("fed-form-field").with(index_of(field)), rect, &label, Head::Field, &input, pal);
             take(&mut out, shown, field);
         }
 
@@ -643,12 +647,13 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
             FormKind::Limits => {
                 ui.add_space(SECTION);
                 let (row, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-                caption(ui, row.left_center(), &t!("fed.expiry_current"), Some(&f.current_expiry), w, pal);
+                caption(ui, row.left_center(), &t!("fed.expiry_current"), Head::Section, Some(&f.current_expiry), w, pal);
                 ui.add_space(10.0);
                 let (row, _) = ui.allocate_exact_size(vec2(w, LABELLED_H), Sense::hover());
                 let rect = Rect::from_min_size(row.min, vec2(col_w, LABELLED_H));
                 let input = input_of(&f.expires, focused == Field::Expires, composition).mono();
-                let shown = labelled(ui, Id::new("fed-form-field").with(index_of(Field::Expires)), rect, &t!("fed.field_new_expiry"), &input, pal);
+                let id = Id::new("fed-form-field").with(index_of(Field::Expires));
+                let shown = labelled(ui, id, rect, &t!("fed.field_new_expiry"), Head::Field, &input, pal);
                 take(&mut out, shown, Field::Expires);
                 let x = rect.max.x + FORM_GAP;
                 let mid = rect.max.y - FIELD_H / 2.0;
@@ -670,7 +675,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
             _ => {}
         }
 
-        ui.add_space(SECTION - 6.0);
+        ui.add_space(SECTION);
         let (line, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
         if let Some(err) = &f.error {
             text(ui, line.left_center(), err, body(13.0), pal.gold, w, Align2::LEFT_CENTER);
@@ -751,7 +756,7 @@ fn peer_name(ui: &Ui, name: &tui_input::Input, preview: &TicketPreview, over: Re
         let (row, _) = ui.allocate_exact_size(vec2(w, LABELLED_H), Sense::hover());
         let rect = Rect::from_min_size(row.min, vec2(400.0_f32.min(w), LABELLED_H));
         let input = input_of(name, true, composition);
-        let typed = labelled(ui, Id::new("fed-peer-name-field"), rect, &t!("fed.peer_name_label"), &input, pal);
+        let typed = labelled(ui, Id::new("fed-peer-name-field"), rect, &t!("fed.peer_name_label"), Head::Section, &input, pal);
         if typed.response.clicked() {
             out.acts.push(Act::PeerNameAdd);
         }
@@ -769,13 +774,15 @@ fn peer_name(ui: &Ui, name: &tui_input::Input, preview: &TicketPreview, over: Re
     got.caret = shown.inner.caret;
 }
 
-/// A warning gate: its consequences in gold before its verbs, the safe
-/// choice lit and the destructive one an outline, the window's edge gold.
-/// The cells draw no close button on a gate; the kit's window has one, and
-/// a click on it is Esc, which keeps.
+/// A warning gate: its title and its consequences in gold before its
+/// verbs, the safe choice lit and the destructive one an outline, the
+/// window's edge gold. The cells draw no close button on a gate; the kit's
+/// window has one, and a click on it is Esc, which keeps.
 #[allow(clippy::too_many_arguments)]
 fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (String, Act), go: (String, Act), pal: &Pal, got: &mut Gathered) {
-    let shown = modal(ui, id, over, GATE_W, title, pal, |ui| {
+    // The kit's window titles itself in the text colour: the gate leaves
+    // its title blank and paints its own in gold where the kit's would be.
+    let shown = modal(ui, id, over, GATE_W, "", pal, |ui| {
         for (i, line) in lines.iter().enumerate() {
             if i > 0 {
                 ui.add_space(6.0);
@@ -785,9 +792,15 @@ fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (Strin
         ui.add_space(SECTION);
         buttons(ui, id.with("buttons"), &[(bare(&safe.0), true), (bare(&go.0), false)], pal)
     });
-    // Over the kit's edge, on the window's own layer.
-    let edge = ui.ctx().layer_painter(LayerId::new(Order::Foreground, id));
-    edge.rect_stroke(shown.window, square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
+    // Over the kit's edge and its blank title, on the window's own layer.
+    let layer = ui.ctx().layer_painter(LayerId::new(Order::Foreground, id));
+    layer.rect_stroke(shown.window, square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
+    let inner = shown.window.shrink(MODAL_PAD);
+    let mut head = plain(title, strong(16.0), pal.gold);
+    head.wrap = TextWrapping::truncate_at_width((inner.width() - 40.0).max(1.0));
+    let galley = ui.painter().layout_job(head);
+    let at = Align2::LEFT_CENTER.anchor_size(pos2(inner.min.x, inner.min.y + TITLE_H / 2.0), galley.size());
+    layer.galley(at.min, galley, pal.gold);
     match shown.inner {
         Some(0) => got.acts.push(safe.1),
         Some(_) => got.acts.push(go.1),
@@ -914,8 +927,8 @@ fn choice(ui: &Ui, id: Id, rect: Rect, on: bool, focused: bool, label: &str, pal
 
 /// A field's label over its box, in `rect`: the label's 14 points, 6 of
 /// room, the box.
-fn labelled(ui: &Ui, id: Id, rect: Rect, label: &str, input: &studio::Input, pal: &Pal) -> Typed {
-    caption(ui, pos2(rect.min.x, rect.min.y + 7.0), label, None, rect.width(), pal);
+fn labelled(ui: &Ui, id: Id, rect: Rect, label: &str, head: Head, input: &studio::Input, pal: &Pal) -> Typed {
+    caption(ui, pos2(rect.min.x, rect.min.y + 7.0), label, head, None, rect.width(), pal);
     let at = Rect::from_min_size(pos2(rect.min.x, rect.max.y - FIELD_H), vec2(rect.width(), FIELD_H));
     field_box(ui, id, at, input, pal)
 }
@@ -927,18 +940,31 @@ fn input_of<'a>(value: &'a tui_input::Input, focused: bool, composition: &'a str
     studio::Input::new(value.value(), value.cursor()).focused(focused, if focused { composition } else { "" })
 }
 
-/// A caption in the desk's small capitals up to its first `·`, the rest
-/// dim in the UI face (the canvas's "LIMITS · 0 = unlimited …"), and
-/// `tail` after it in the text colour.
-fn caption(ui: &Ui, pos: Pos2, s: &str, tail: Option<&str>, max_w: f32, pal: &Pal) {
-    let (head, rest) = match s.find('·') {
+/// How a form's caption sets its head, as the canvas's mint form does.
+#[derive(Clone, Copy, PartialEq)]
+enum Head {
+    /// A part of the form (who it is for, the libraries, the limits): the
+    /// desk's capitals at 11 points.
+    Section,
+    /// A field of a row (STREAM KBPS): the small capitals.
+    Field,
+}
+
+/// A caption in the desk's capitals (`head` says which) up to its first
+/// `·`, the rest dim in the UI face 8 points after it (the canvas's
+/// "LIMITS · 0 = unlimited …"), and `tail` after that in the text colour.
+fn caption(ui: &Ui, pos: Pos2, s: &str, head: Head, tail: Option<&str>, max_w: f32, pal: &Pal) {
+    let (first, rest) = match s.find('·') {
         Some(at) => (s[..at].trim_end(), &s[at..]),
         None => (s, ""),
     };
     let end = pos.x + max_w;
-    let mut drawn = small_caps(ui, pos, head, pal.dim, max_w, Align2::LEFT_CENTER);
+    let mut drawn = match head {
+        Head::Section => caps(ui, pos, first, 11.0, pal.dim, max_w, Align2::LEFT_CENTER),
+        Head::Field => small_caps(ui, pos, first, pal.dim, max_w, Align2::LEFT_CENTER),
+    };
     if !rest.is_empty() && end - drawn.max.x > 16.0 {
-        let x = drawn.max.x + 6.0;
+        let x = drawn.max.x + 8.0;
         drawn = text(ui, pos2(x, pos.y), rest, body(13.0), pal.dim, end - x, Align2::LEFT_CENTER);
     }
     if let Some(tail) = tail
@@ -1044,12 +1070,13 @@ fn run_job(parts: &[(String, FontId, Color32)]) -> LayoutJob {
 }
 
 /// `s` split around the first `figure` in it, the figure in the grid's
-/// monospace a size under `font`: an endpoint's short id in its sentence.
-fn with_figure(s: &str, figure: &str, font: FontId, color: Color32) -> Vec<(String, FontId, Color32)> {
+/// monospace at `figure_size` (the canvas's 12.5 in the state line, 12 on
+/// the note line): an endpoint's short id in its sentence.
+fn with_figure(s: &str, figure: &str, font: FontId, figure_size: f32, color: Color32) -> Vec<(String, FontId, Color32)> {
     match s.find(figure).filter(|_| !figure.is_empty()) {
         Some(at) => vec![
             (s[..at].to_string(), font.clone(), color),
-            (figure.to_string(), mono(font.size - 1.5), color),
+            (figure.to_string(), mono(figure_size), color),
             (s[at + figure.len()..].to_string(), font, color),
         ],
         None => vec![(s.to_string(), font, color)],
@@ -1102,14 +1129,22 @@ mod tests {
         ctx
     }
 
-    /// What a run told the host, and every text it drew with where.
+    /// What a run told the host, and every text it drew with where, and in
+    /// what colour it began.
     struct Seen {
         caret: Option<Pos2>,
         outcome: Option<Outcome>,
         texts: Vec<(String, Rect)>,
+        inks: Vec<Color32>,
     }
 
     impl Seen {
+        /// The colour the first text holding `words` was drawn in.
+        fn ink(&self, words: &str) -> Color32 {
+            let found = self.texts.iter().position(|(drawn, _)| drawn.contains(words)).map(|i| self.inks[i]);
+            found.unwrap_or_else(|| panic!("{words:?} drawn: {:?}", self.drawn()))
+        }
+
         fn has(&self, words: &str) -> bool {
             self.texts.iter().any(|(drawn, _)| drawn.contains(words))
         }
@@ -1145,15 +1180,18 @@ mod tests {
         // No GPU here to take the font atlas: let go of it on purpose, or
         // epaint's debug check fails the drop.
         out.textures_delta.clear();
-        let texts = out
+        let (texts, inks) = out
             .shapes
             .iter()
             .filter_map(|clipped| match &clipped.shape {
-                Shape::Text(t) => Some((t.galley.text().to_string(), Rect::from_min_size(t.pos, t.galley.size()))),
+                Shape::Text(t) => {
+                    let ink = t.galley.job.sections.first().map_or(t.fallback_color, |s| s.format.color);
+                    Some(((t.galley.text().to_string(), Rect::from_min_size(t.pos, t.galley.size())), ink))
+                }
                 _ => None,
             })
-            .collect();
-        Seen { caret, outcome, texts }
+            .unzip();
+        Seen { caret, outcome, texts, inks }
     }
 
     /// Two quiet runs, the second's: egui sizes some things on the first.
@@ -1326,6 +1364,12 @@ mod tests {
 
         let _ = click_on(&ctx, &mut room, SMALL, Id::new("fed-tabs").with(0));
         assert_eq!((room.tab, room.sel), (Tab::Requests, None), "a tab switch puts the cursor away");
+        let seen = settle(&ctx, &mut room, SMALL);
+        // The offer is cut in the default window, and carries its tooltip:
+        // a click on it is still the row's.
+        let _ = click(&ctx, &mut room, SMALL, seen.at("\u{201c}Jazz for field recordings?\u{201d} · offers: ambient").center());
+        assert_eq!(room.sel, Some(0), "a click on a cut cell selects its row");
+        room.sel = None;
         let seen = settle(&ctx, &mut room, SMALL);
         let _ = click(&ctx, &mut room, SMALL, seen.at("friend-node").center());
         assert_eq!(room.sel, Some(0));
@@ -1597,6 +1641,8 @@ mod tests {
             let seen = settle(&ctx, &mut room, SMALL);
             seen.shows(&[title, line, safe]);
             assert!(!seen.has("◂"), "{kind}: the arrow is the button's");
+            let gold = Pal::now().gold;
+            assert_eq!((seen.ink(title), seen.ink(line)), (gold, gold), "{kind}: the gate's title and lines are gold, as the cells'");
             let _ = click_on(&ctx, &mut room, SMALL, id.with("buttons").with(0));
             assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "{kind}: the lit button keeps");
             room.modal = gate.clone();
