@@ -477,8 +477,11 @@ fn foot(ui: &mut Ui, id: Id, start: &[(String, bool)], end: &[(String, bool)], p
 /// thousands), the keyboard's row raised and ringed and brought into view
 /// on the pass it moved, a row under the pointer raised. A new `content`
 /// (another directory, another draft) starts at the top, as the cells'
-/// lists do. `draw` paints a row's words, told whether it is the cursor's
-/// and whether the pointer is on it; returns the row a click landed on.
+/// lists do, and so does a list whose window was down on the last pass:
+/// a window opened again on the listing it last showed shows its cursor,
+/// not where the wheel left it. `draw` paints a row's words, told whether
+/// it is the cursor's and whether the pointer is on it; returns the row a
+/// click landed on.
 #[allow(clippy::too_many_arguments)]
 fn list(
     ui: &mut Ui,
@@ -494,9 +497,10 @@ fn list(
     let (region, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let mut inner = ui.new_child(UiBuilder::new().id_salt(id).max_rect(region).layout(Layout::top_down(Align::Min)));
     let memory = id.with("view");
-    let (last_content, last_cursor, last_offset): (Id, Option<usize>, f32) =
-        ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((Id::NULL, None, 0.0));
-    let fresh = last_content != content;
+    let now = ui.ctx().cumulative_pass_nr();
+    let (last_pass, last_content, last_cursor, last_offset): (u64, Id, Option<usize>, f32) =
+        ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((0, Id::NULL, None, 0.0));
+    let fresh = last_content != content || last_pass + 1 != now;
     let mut offset = if fresh { 0.0 } else { last_offset };
     let mut moved = fresh;
     if let Some(s) = cursor
@@ -532,7 +536,7 @@ fn list(
             }
         }
     });
-    ui.ctx().data_mut(|d| d.insert_temp(memory, (content, cursor, out.state.offset.y)));
+    ui.ctx().data_mut(|d| d.insert_temp(memory, (now, content, cursor, out.state.offset.y)));
     clicked
 }
 
@@ -578,25 +582,42 @@ mod tests {
     }
 
     /// A press and a release at `at`, a pass each after the move, as hands
-    /// would make them; what the room told its host over the three.
-    fn press(ctx: &egui::Context, room: &mut Room, at: Pos2) -> Option<Outcome> {
+    /// would make them: what the room told its host, the outcome over the
+    /// three and the caret of the release's pass, the one the click acted in.
+    fn press(ctx: &egui::Context, room: &mut Room, at: Pos2) -> EguiShown {
         let button = |pressed| egui::Event::PointerButton {
             pos: at,
             button: egui::PointerButton::Primary,
             pressed,
             modifiers: egui::Modifiers::default(),
         };
-        let mut outcome = None;
+        let mut told = EguiShown { caret: None, outcome: None };
         for events in [vec![egui::Event::PointerMoved(at)], vec![button(true)], vec![button(false)]] {
-            outcome = outcome.or(pass(ctx, room, events, "").1.outcome);
+            let (_, shown) = pass(ctx, room, events, "");
+            told = EguiShown { caret: shown.caret, outcome: told.outcome.or(shown.outcome) };
         }
-        outcome
+        told
     }
 
     /// [`press`] on the middle of what `id` drew last pass.
-    fn click(ctx: &egui::Context, room: &mut Room, id: Id) -> Option<Outcome> {
+    fn click(ctx: &egui::Context, room: &mut Room, id: Id) -> EguiShown {
         let at = ctx.read_response(id).unwrap_or_else(|| panic!("{id:?} was drawn")).rect.center();
         press(ctx, room, at)
+    }
+
+    /// The wheel turned over `at`, `dy` points of a trackpad's swipe (a
+    /// positive one moves the content down, toward its top), a pass for the
+    /// pointer's move, one for the swipe and one for its end.
+    fn wheel(ctx: &egui::Context, room: &mut Room, at: Pos2, dy: f32) {
+        let turn = |phase, dy| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, dy),
+            phase,
+            modifiers: egui::Modifiers::default(),
+        };
+        let _ = pass(ctx, room, vec![egui::Event::PointerMoved(at)], "");
+        let _ = pass(ctx, room, vec![turn(egui::TouchPhase::Start, 0.0), turn(egui::TouchPhase::Move, dy)], "");
+        let _ = pass(ctx, room, vec![turn(egui::TouchPhase::End, 0.0)], "");
     }
 
     /// Row or button `k` of the control `id` names: an index, as the view
@@ -620,6 +641,14 @@ mod tests {
         drawn.iter().any(|d| d == words)
     }
 
+    /// The colour `words` were drawn in, where the pass drew them.
+    fn color_of(out: &egui::FullOutput, words: &str) -> Option<Color32> {
+        out.shapes.iter().find_map(|clipped| match &clipped.shape {
+            Shape::Text(text) if text.galley.text() == words => text.galley.job.sections.first().map(|s| s.format.color),
+            _ => None,
+        })
+    }
+
     fn listing(path: &str, names: &[&str]) -> DirListing {
         DirListing {
             path: path.into(),
@@ -641,6 +670,8 @@ mod tests {
         }
         assert!(!has(&words, "Libraries") && !words.iter().any(|w| w.contains("b browse")), "no header, no tips: {words:?}");
         assert!(shown.caret.is_none() && shown.outcome.is_none(), "no field has the keyboard");
+        let pal = Pal::now();
+        assert_eq!(color_of(&out, "loading libraries…"), Some(pal.accent), "the busy line in the accent");
 
         // Empty, the headings stay and the list says so; a gold note shows
         // once nothing is busy.
@@ -650,7 +681,7 @@ mod tests {
         let (out, _) = settle(&ctx, &mut room);
         let words = drawn(&out);
         assert!(has(&words, "(nothing added yet)") && has(&words, "NAME"), "{words:?}");
-        assert!(has(&words, "could not load libraries: could not reach server"), "{words:?}");
+        assert_eq!(color_of(&out, "could not load libraries: could not reach server"), Some(pal.gold), "{words:?}");
     }
 
     #[test]
@@ -662,12 +693,12 @@ mod tests {
 
         // A row takes no click as a whole: the cursor is the keys'.
         let row = ctx.read_response(nth(Id::new("libraries-symlinks"), 0)).expect("row 0 drawn").rect;
-        assert_eq!(press(&ctx, &mut room, pos2(PAD_X + 2.0 * CELL_PAD, row.center().y)), None);
+        assert_eq!(press(&ctx, &mut room, pos2(PAD_X + 2.0 * CELL_PAD, row.center().y)).outcome, None);
         assert_eq!(room.sel, None, "a click on a row selects nothing");
         assert!(room.queued.is_none() && matches!(room.modal, Modal::None));
 
         // The add card is `b`: the server's browser, this not being its machine.
-        assert_eq!(click(&ctx, &mut room, Id::new("libraries-add")), None, "no click ends the room");
+        assert_eq!(click(&ctx, &mut room, Id::new("libraries-add")).outcome, None, "no click ends the room");
         assert_eq!(room.queued, Some(Op::OpenBrowser("~".into())));
         room.queued = None;
 
@@ -691,6 +722,11 @@ mod tests {
             .map(|i| Lib { name: format!("lib{i:02}"), root: format!("/srv/{}/leaf{i:02}", "deep".repeat(40)), follow_symlinks: false })
             .collect();
         let _ = settle(&ctx, &mut room);
+        // Where the table's rows stop: the note line's gap above it. A row
+        // is whole in view when its foot, half a row under its tick box's
+        // middle, stands no lower.
+        let floor = SIZE.y - PAD_BOTTOM - NOTE_H - GAP;
+        let foot = |tick: Rect| tick.center().y + ROW_H / 2.0;
         let tick = nth(Id::new("libraries-symlinks"), 30);
         assert!(ctx.read_response(tick).is_none(), "row 30 starts off screen");
         for _ in 0..31 {
@@ -699,9 +735,16 @@ mod tests {
         assert_eq!(room.sel, Some(30));
         let (out, _) = settle(&ctx, &mut room);
         let row = ctx.read_response(tick).expect("the cursor's row is drawn").rect;
-        assert!(row.max.y <= SIZE.y, "and on screen: {row:?}");
+        assert!(foot(row) <= floor + 0.5, "and whole above the note line: {row:?}");
         let words = drawn(&out);
         assert!(words.iter().any(|w| w.starts_with('…') && w.ends_with("leaf30")), "the folder keeps its leaf: {words:?}");
+
+        // Brought into view once, on the pass it moved: the wheel takes the
+        // table away from the cursor's row, and no later pass brings it back.
+        wheel(&ctx, &mut room, row.center(), 4000.0);
+        let _ = settle(&ctx, &mut room);
+        assert!(ctx.read_response(tick).is_none(), "the wheel moved the table off the cursor's row");
+        assert_eq!(room.sel, Some(30), "and left the cursor where it was");
 
         // A fresh add's row is brought into view and not taken by the cursor.
         for _ in 0..31 {
@@ -723,7 +766,7 @@ mod tests {
         }
         let _ = pass(&ctx, &mut room, Vec::new(), "");
         let row = ctx.read_response(tick).expect("the revealed row is drawn").rect;
-        assert!(row.max.y <= SIZE.y, "and on screen: {row:?}");
+        assert!(foot(row) <= floor + 0.5, "and whole above the note line: {row:?}");
         assert_eq!((room.sel, room.reveal), (None, None), "revealed, not selected, and only once");
     }
 
@@ -795,8 +838,11 @@ mod tests {
         let (out, _) = settle(&ctx, &mut room);
         assert!(drawn(&out).iter().any(|w| w.starts_with("could not add") && w.contains("EACCES")), "{:?}", drawn(&out));
 
-        click(&ctx, &mut room, Id::new("libraries-name").with("close"));
+        // The close takes the keyboard from the field on the pass it acts
+        // in: no caret is left noted for the window that is gone.
+        let shown = click(&ctx, &mut room, Id::new("libraries-name").with("close"));
         assert!(matches!(room.modal, Modal::None));
+        assert!(shown.caret.is_none(), "the closing pass notes no caret");
         let (_, shown) = settle(&ctx, &mut room);
         assert!(shown.caret.is_none(), "no field, no caret");
     }
@@ -828,7 +874,7 @@ mod tests {
         // The current directory refused: its reason, in gold, where the list was.
         room.apply(Done::Completed { dir: "/srv/music/".into(), listing: Err("EACCES".into()) });
         let (out, _) = settle(&ctx, &mut room);
-        assert!(drawn(&out).iter().any(|w| w.contains("/srv/music/") && w.contains("EACCES")), "{:?}", drawn(&out));
+        assert_eq!(color_of(&out, "could not list /srv/music/: EACCES"), Some(Pal::now().gold), "{:?}", drawn(&out));
 
         click(&ctx, &mut room, Id::new("libraries-path").with("close"));
         assert!(matches!(room.modal, Modal::None));
@@ -877,5 +923,55 @@ mod tests {
         room.apply(Done::Browsed(Ok(listing("/srv/empty", &[]))));
         let (out, _) = settle(&ctx, &mut room);
         assert!(has(&drawn(&out), "(no folders in here)"), "{:?}", drawn(&out));
+    }
+
+    #[test]
+    fn the_browsers_cursor_row_is_kept_in_view_and_a_window_opened_again_shows_it() {
+        let _en = english();
+        let ctx = context();
+        let mut room = room(false);
+        let names: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let srv = || Done::Browsed(Ok(listing("/srv", &names)));
+        let browse = Id::new("libraries-browse");
+        let rows = browse.with("list").with("row");
+        // The list ends 16 points above the window's buttons.
+        let list_foot = |ctx: &egui::Context| ctx.read_response(nth(browse.with("foot"), 0)).expect("the buttons").rect.min.y - 16.0;
+        room.apply(srv());
+        let _ = settle(&ctx, &mut room);
+        assert!(ctx.read_response(nth(rows, 0)).is_some(), "the list opens at its top");
+        assert!(ctx.read_response(nth(rows, 25)).is_none(), "with row 25 below it");
+
+        // The keys move the cursor and the list follows it, the row whole.
+        for _ in 0..25 {
+            room.key(key(KeyCode::Down));
+        }
+        let _ = settle(&ctx, &mut room);
+        let row = ctx.read_response(nth(rows, 25)).expect("the cursor's row is drawn").rect;
+        assert!(row.max.y <= list_foot(&ctx) + 0.5, "and whole in the list: {row:?}");
+
+        // Followed on the pass it moved, not every pass: the wheel takes the
+        // list back to its top and leaves the cursor where it was.
+        wheel(&ctx, &mut room, row.center(), 4000.0);
+        let _ = settle(&ctx, &mut room);
+        assert!(ctx.read_response(nth(rows, 25)).is_none(), "the wheel moved the list off the cursor's row");
+        assert!(matches!(&room.modal, Modal::Browser(b) if b.sel == 25));
+
+        // The window opened again on the listing it last showed shows its
+        // cursor, wherever the wheel last left the list.
+        room.key(key(KeyCode::Esc));
+        let _ = settle(&ctx, &mut room);
+        room.apply(srv());
+        let _ = settle(&ctx, &mut room);
+        let top = ctx.read_response(nth(rows, 0)).expect("row 0 is drawn").rect;
+        wheel(&ctx, &mut room, top.center(), -4000.0);
+        let _ = settle(&ctx, &mut room);
+        assert!(ctx.read_response(nth(rows, 0)).is_none(), "the wheel took the list to its foot");
+        room.key(key(KeyCode::Esc));
+        let _ = settle(&ctx, &mut room);
+        room.apply(srv());
+        let _ = settle(&ctx, &mut room);
+        assert!(matches!(&room.modal, Modal::Browser(b) if b.sel == 0));
+        assert!(ctx.read_response(nth(rows, 0)).is_some(), "the cursor's row, at the top again");
     }
 }
