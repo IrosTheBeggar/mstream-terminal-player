@@ -124,7 +124,11 @@ def row(lines, y):
 
 
 def cell(lines, x, y, n=1):
-    return row(lines, y)[x:x + n]
+    """The `n` cells from (x, y). replay.py trims each row's trailing
+    blanks, so a cell past the row's last drawn one reads as the blank it
+    is on screen: without a device, column B's empty slot at +36 sits past
+    the row's end."""
+    return row(lines, y)[x:x + n].ljust(n)
 
 
 def show(lines):
