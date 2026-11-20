@@ -58,6 +58,7 @@ pub(crate) mod face;
 mod held;
 mod icon;
 mod input;
+pub(crate) mod panel;
 #[cfg(test)]
 mod render_tests;
 mod script;
@@ -87,6 +88,7 @@ use covers::{Board, CoverPost};
 use face::Face;
 use held::{Held, HeldInput};
 use input::{Grid, Raw, Translator};
+use panel::Panel;
 use script::{Input, Script, Step};
 use stats::{Counted, Lap, Stats};
 
@@ -225,12 +227,16 @@ pub(crate) fn run(mut face: Box<dyn Face>, instance: Option<Instance>) -> i32 {
     let board = Arc::new(Board::default());
     let watching = board.clone();
     face.host_pictures(board.clone(), Box::new(move |rect| watching.overlay(rect)));
+    // A page drawn by egui rather than as cells paints onto the same board.
+    let panel = Arc::new(Panel::new(board.clone()));
+    face.host_panel(panel.clone());
     face.send_early();
     let mut app = App {
         face,
         grid,
         hand: false,
         board,
+        panel,
         window: None,
         terminal: None,
         next_frame: Instant::now(),
@@ -435,6 +441,8 @@ struct App {
     /// This frame's covers, between the drawing path and the backend's
     /// post-processor.
     board: Arc<Board>,
+    /// The egui panel a face may draw a page into (panel.rs).
+    panel: Arc<Panel>,
     window: Option<Arc<Window>>,
     terminal: Option<WindowTerminal>,
     /// When the last frame's wait runs out.
@@ -803,6 +811,7 @@ impl App {
         // alone, and the dialogs open on worker threads.
         #[cfg(windows)]
         crate::setup::picker::set_owner(hwnd(&window));
+        self.panel.attach(window.clone());
         self.window = Some(window);
         self.poll_build(OPEN_WAIT)
     }
@@ -1121,7 +1130,8 @@ impl App {
         // gate). What the surface needs regardless, it is told: drawn
         // until the window is first shown, after a clear, for a present
         // owed, for a cover the worker resampled since.
-        let must_draw = !self.shown || self.cleared || owed || self.board.has_news();
+        let must_draw =
+            !self.shown || self.cleared || owed || self.board.has_news() || self.panel.wants_pass();
         self.board.begin_frame();
         let _ = terminal.backend_mut().take_drew();
         let framed = self
@@ -1145,6 +1155,11 @@ impl App {
                 self.next_frame = Instant::now() + wait;
                 if let Some(until) = self.script_until {
                     self.next_frame = self.next_frame.min(until);
+                }
+                // The panel's pass wants running again by then: a hover's
+                // fade, a tooltip's delay.
+                if let Some(at) = self.panel.wake_at() {
+                    self.next_frame = self.next_frame.min(at);
                 }
             }
             // The terminal's way with a frame that fails: the player
@@ -1368,6 +1383,13 @@ impl App {
             }
             _ => None,
         };
+        // A panel on screen sees the pointer first, and keeps what lands
+        // inside it (panel.rs): the grid never hears of that press. The
+        // translator still learns where the pointer is.
+        if self.panel.route(&raw) {
+            self.ask_redraw();
+            return;
+        }
         let events = self.translator.translate(raw, grid);
         let mut fed = true;
         for event in events {
@@ -1844,6 +1866,9 @@ impl ApplicationHandler for App {
     // close button, the app menu's Quit and the GUI's own quit keys close
     // it.
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // egui keeps its modifiers, focus and scale from winit's own
+        // events; the pointer reaches it through `feed_now` (panel.rs).
+        self.panel.observe(&event);
         match event {
             WindowEvent::CloseRequested => {
                 self.quit_at = self.stats.is_some().then(Instant::now);

@@ -80,6 +80,11 @@ pub(crate) trait Face {
     /// on the frame it opens (`run`, before the loop starts).
     fn host_pictures(&mut self, host: Arc<dyn PictureHost>, overlays: Box<dyn Fn(Rect) + 'static>);
 
+    /// A region the face may draw with egui instead of cells (panel.rs),
+    /// handed over before the loop starts. A face with no such page leaves
+    /// it out.
+    fn host_panel(&mut self, _panel: Arc<super::panel::Panel>) {}
+
     /// Work to start before the first frame, while the window and its
     /// renderer are still being built (`run`, before the loop starts): the
     /// GUI sends its first effects, the connect among them, so input held

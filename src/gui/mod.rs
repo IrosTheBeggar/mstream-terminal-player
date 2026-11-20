@@ -582,6 +582,11 @@ pub(crate) struct Gui {
     now: now::NowUi,
     /// The Stats screen's page, while the screen is up.
     stats: stats::StatsUi,
+    /// The window's egui panel, when the GUI is drawn in a window of its
+    /// own: a page that has an egui face draws into it instead of cells
+    /// (window/panel.rs). The Stats screen is its first tenant.
+    #[cfg(feature = "window")]
+    panel: Option<std::sync::Arc<window::panel::Panel>>,
     /// The Admin screen: its hallway, the room it hosts and the log.
     admin: admin::AdminUi,
     /// The MP3 Player screen's firmware page, while the screen is up.
@@ -695,6 +700,8 @@ impl Gui {
             screen: Screen::Library,
             now: now::NowUi::new(),
             stats: stats::StatsUi::default(),
+            #[cfg(feature = "window")]
+            panel: None,
             admin: admin::AdminUi::new(),
             device: device::DeviceUi::default(),
             vizwin: vizwin::VizWindow::new(),
@@ -4496,6 +4503,15 @@ impl window::face::Face for GuiFace {
     ) {
         self.gui.app.graphics = crate::tui::graphics::Graphics::hosted(host);
         self.gui.ui.watch_overlays(overlays);
+    }
+
+    /// The egui panel, for the pages that have an egui face. Set aside with
+    /// `MSTREAM_WINDOW_CELLS=1`, which keeps every page in cells: the
+    /// spike's way to put the two side by side.
+    fn host_panel(&mut self, panel: std::sync::Arc<window::panel::Panel>) {
+        if std::env::var_os("MSTREAM_WINDOW_CELLS").is_none_or(|v| v.is_empty() || v == "0") {
+            self.gui.panel = Some(panel);
+        }
     }
 
     /// The player's first effects — the connect among them — sent to their
