@@ -491,8 +491,9 @@ not.
     hairline, then the rows. The rows are the model's: set in the
     monospace (Hack, 12 points on 17-point rows), wrapped at the width in
     monospace characters that fit beside the clock's ten, as many whole
-    rows as fit the height, so the two faces agree on every line, step
-    and page; only the lines on screen are laid out. Colours as clause 23,
+    rows as fit the height, standing on the panel's foot as the canvas
+    sets the newest line, so the two faces agree on every line, step and
+    page; only the lines on screen are laid out. Colours as clause 23,
     a highlighted run filled in the accent with the on-accent ink. The
     wheel moves whole lines through the model (no pixel scrolling) and
     follows again at the newest line; the press-drag highlights whole

@@ -562,17 +562,15 @@ pub(crate) fn tool_button_width(ui: &Ui, label: &str) -> f32 {
 
 /// A panel's small tool at `rect`, as the canvas puts copy and download
 /// over the server's log: `icon` and `label` in spaced capitals in a
-/// strong-edged hairline, dim, raised with its ink in the text colour
-/// under the pointer, the hand over it. A busy one is in the accent and
-/// takes no click; an inert one stays at rest (see [`Tool`]).
+/// strong-edged hairline, dim, its ink in the text colour under the
+/// pointer (the canvas lifts no fill under it), the hand over it. A busy
+/// one is in the accent and takes no click; an inert one stays at rest
+/// (see [`Tool`]).
 pub(crate) fn tool_button(ui: &Ui, id: Id, rect: Rect, icon: Icon, label: &str, tool: Tool, pal: &Pal) -> Response {
     let live = tool == Tool::Live;
     let response = ui.interact(rect, id, if live { Sense::click() } else { Sense::hover() });
     let response = if live { hand(response) } else { response };
     let hovered = live && response.hovered();
-    if hovered {
-        ui.painter().rect_filled(rect, square(), pal.raised);
-    }
     ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
     let ink = match tool {
         Tool::Busy => pal.accent,

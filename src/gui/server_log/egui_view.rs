@@ -118,8 +118,11 @@ pub(crate) fn show(ui: &mut Ui, log: &mut LogUi, look: &Look, key_hints: bool, i
 struct Geom {
     head: Rect,
     /// The rows' area: from the panel's left edge to the lines' right (the
-    /// bar's left, while it stands), as many whole rows tall as fit. The
-    /// press-drag region, over the empty rows under the lines too.
+    /// bar's left, while it stands), as many whole rows tall as fit,
+    /// standing on the panel's foot as the canvas sets the newest line
+    /// (with the failure's row under them, while it shows); what is left
+    /// of a row's height goes over them, under the header. The press-drag
+    /// region, over the empty rows under the lines too.
     rows_at: Rect,
     /// Where a row's clock starts, a monospace character's width, and the
     /// lines' right edge.
@@ -146,7 +149,8 @@ impl Geom {
         let char_w = (width_of(ui, "0000000000", mono(MONO)) / 10.0).max(1.0);
         let text_x = full.min.x + PAD_L;
         let top = head.max.y + pad_y;
-        let below = ((full.max.y - pad_y - top) / ROW_H).floor().max(0.0) as usize;
+        let foot = full.max.y - pad_y;
+        let below = ((foot - top) / ROW_H).floor().max(0.0) as usize;
         let held = log.model.shown().len();
         let error_row = log.model.error.is_some() && held > 0 && below > 0;
         let rows = below - usize::from(error_row);
@@ -158,7 +162,8 @@ impl Geom {
         log.rows = rows;
         log.cells = Some(cells);
         log.model.settle(Fit { rows, cells: Some(cells) });
-        let rows_at = Rect::from_min_size(pos2(full.min.x, top), vec2((right - full.min.x).max(0.0), rows as f32 * ROW_H));
+        let first = (foot - below as f32 * ROW_H).max(top);
+        let rows_at = Rect::from_min_size(pos2(full.min.x, first), vec2((right - full.min.x).max(0.0), rows as f32 * ROW_H));
         let bar = bar.then(|| Rect::from_min_max(pos2(full.max.x - BAR_W, rows_at.min.y), pos2(full.max.x, rows_at.max.y)));
         Geom { head, rows_at, text_x, char_w, right, rows, cells, bar, error_row }
     }
@@ -591,9 +596,16 @@ mod tests {
             .collect()
     }
 
+    /// The top of the column's first row: the whole rows that fit under
+    /// the header, standing on the panel's foot.
+    fn first_row() -> f32 {
+        let foot = SIZE.y - PAD_Y;
+        foot - ((foot - HEAD_H - PAD_Y) / ROW_H).floor() * ROW_H
+    }
+
     /// The middle of row `i` of the column's lines, a little past its clock.
     fn row(i: f32) -> Pos2 {
-        pos2(PAD_L + 30.0, HEAD_H + PAD_Y + (i + 0.5) * ROW_H)
+        pos2(PAD_L + 30.0, first_row() + (i + 0.5) * ROW_H)
     }
 
     /// A monospace character's width, as a pass measures it.
@@ -751,10 +763,11 @@ mod tests {
             })
             .collect();
         assert_eq!(thumbs.len(), 1, "one thumb: {thumbs:?}");
-        let track_foot = HEAD_H + PAD_Y + log.rows as f32 * ROW_H;
+        let track_foot = first_row() + log.rows as f32 * ROW_H;
+        assert!((track_foot - (SIZE.y - PAD_Y)).abs() < 0.5, "the rows stand on the panel's foot");
         assert!((thumbs[0].max.y - track_foot).abs() < 0.5, "at the track's foot while following: {thumbs:?}");
         let bar_x = SIZE.x - BAR_W / 2.0;
-        click(&ctx, &mut log, &column(), pos2(bar_x, HEAD_H + PAD_Y + 2.0));
+        click(&ctx, &mut log, &column(), pos2(bar_x, first_row() + 2.0));
         assert!(!log.model.following());
         let oldest = log.model.shown()[0].seq;
         let out = pass(&ctx, &mut log, &column(), Vec::new());
@@ -762,7 +775,7 @@ mod tests {
         // Dragged to the foot, the thumb follows the hand and the log
         // follows again.
         let foot = pos2(bar_x, SIZE.y - 30.0);
-        let _ = pass(&ctx, &mut log, &column(), vec![button(pos2(bar_x, HEAD_H + PAD_Y + 2.0), true)]);
+        let _ = pass(&ctx, &mut log, &column(), vec![button(pos2(bar_x, first_row() + 2.0), true)]);
         let _ = pass(&ctx, &mut log, &column(), vec![Event::PointerMoved(foot)]);
         assert!(log.model.following(), "the thumb rode the hand to the newest line");
         let _ = pass(&ctx, &mut log, &column(), vec![button(foot, false)]);
