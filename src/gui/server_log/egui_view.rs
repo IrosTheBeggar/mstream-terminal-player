@@ -18,14 +18,14 @@
 //! Every click is one of the log's own [`LogAct`]s, applied in the pass
 //! through [`LogUi::act`] as the cells' click is through the host: the
 //! paused word follows, copy and download do what `y` and `d` do, a press
-//! on the bar's track or thumb moves the bottom line, and a press-drag on
-//! the rows highlights whole lines through the model's own hold, which
-//! reads the pointer in cells — here, cells of the rows' grid, a monospace
-//! character wide and a row tall. egui selects no text here: the rows are
-//! painted, not labels. Keys never reach egui: they stay the GUI's, which
-//! hands them to [`LogUi::key`] as ever, measured by the rows this pass
-//! fitted. What a copy or a download says goes to the GUI's note through
-//! the host, as in cells.
+//! on the bar's track, or the thumb dragged, moves the bottom line, and a
+//! press-drag on the rows highlights whole lines through the model's own
+//! hold, which reads the pointer in cells — here, cells of the rows' grid,
+//! a monospace character wide and a row tall. egui selects no text here:
+//! the rows are painted, not labels. Keys never reach egui: they stay the
+//! GUI's, which hands them to [`LogUi::key`] as ever, measured by the rows
+//! this pass fitted. What a copy or a download says goes to the GUI's note
+//! through the host, as in cells.
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
@@ -77,7 +77,9 @@ const ORIGIN: u16 = 1 << 14;
 /// with the header's hint as `look` says and the tooltips' key tails while
 /// `key_hints` is on. An `inert` log (a room's modal is up, or a GUI
 /// overlay owns the pointer) neither lights nor shows the hand, and takes
-/// no click, drag or wheel.
+/// no press, click or wheel; a drag held on its rows or its thumb when it
+/// turned inert goes on to its release, as the cells' grip does, so no
+/// hold outlives the button.
 pub(crate) fn show(ui: &mut Ui, log: &mut LogUi, look: &Look, key_hints: bool, inert: bool) {
     let pal = Pal::now();
     let full = ui.max_rect();
@@ -97,7 +99,7 @@ pub(crate) fn show(ui: &mut Ui, log: &mut LogUi, look: &Look, key_hints: bool, i
         }
     }
     let mut drawn = lay_out(log, &at);
-    if !inert && pointer(ui, id, log, &at, &drawn) {
+    if pointer(ui, id, log, &at, &drawn, inert) {
         drawn = lay_out(log, &at);
     }
     paint_rows(ui, log, &at, &drawn, &pal);
@@ -266,10 +268,12 @@ fn thumb_at(track: Rect, len: f32, top: f32, of: usize) -> usize {
 /// cells' surface hands them on: a press on the rows begins the hold (the
 /// model's [`LogAct::Select`], which clears the highlight), its moves
 /// wherever the hand goes extend it and its release ends it; a press on the
-/// bar moves the bottom line where it lands and arms the thumb, which then
-/// follows the hand until the release, kept by where on the thumb it was
-/// taken. True when the view moved.
-fn pointer(ui: &Ui, id: Id, log: &mut LogUi, at: &Geom, drawn: &[Drawn]) -> bool {
+/// bar's track moves the bottom line where it lands and arms the thumb, a
+/// press on the thumb takes it where it is pressed and moves nothing, and
+/// the thumb then follows the hand until the release, kept by where on it
+/// it was taken. An `inert` log hears no press, but a hold or a thumb
+/// taken before goes on to its release. True when the view moved.
+fn pointer(ui: &Ui, id: Id, log: &mut LogUi, at: &Geom, drawn: &[Drawn], inert: bool) -> bool {
     let key = id.with("thumb");
     let mut grab: Option<f32> = ui.ctx().data(|d| d.get_temp(key));
     let numbers = at.bar.zip(bar_numbers(log, drawn));
@@ -281,14 +285,18 @@ fn pointer(ui: &Ui, id: Id, log: &mut LogUi, at: &Geom, drawn: &[Drawn]) -> bool
     };
     for event in &events {
         match *event {
+            Event::PointerButton { button: PointerButton::Primary, pressed: true, .. } if inert => {}
             Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => {
                 if let Some((track, (held, first, whole, of))) = numbers
                     && track.contains(pos)
                 {
                     let (top, len) = thumb(track, held, whole, first, of);
-                    let taken = if (top..=top + len).contains(&pos.y) { pos.y - top } else { len / 2.0 };
-                    grab = Some(taken);
-                    jump(log, pos.y - taken, len, track, of);
+                    if (top..=top + len).contains(&pos.y) {
+                        grab = Some(pos.y - top);
+                    } else {
+                        grab = Some(len / 2.0);
+                        jump(log, pos.y - len / 2.0, len, track, of);
+                    }
                 } else if at.rows_at.contains(pos) && log.rows_at.is_some() {
                     log.act(LogAct::Select(Grip::Press, at.cell(pos)));
                 }
@@ -815,5 +823,63 @@ mod tests {
         let _ = pass(&ctx, &mut log, &column(), vec![Event::PointerMoved(row(3.0))]);
         let out = pass(&ctx, &mut log, &column(), Vec::new());
         assert_eq!(out.platform_output.cursor_icon, CursorIcon::PointingHand, "live, the hand anywhere over the log");
+    }
+
+    #[test]
+    fn a_drag_held_when_the_log_turns_inert_still_ends_at_its_release() {
+        let _en = english();
+        let ctx = context();
+        let mut log = lines(8);
+        let _ = pass(&ctx, &mut log, &column(), vec![Event::PointerMoved(row(1.0))]);
+        let _ = pass(&ctx, &mut log, &column(), vec![button(row(1.0), true)]);
+        let _ = pass(&ctx, &mut log, &column(), vec![Event::PointerMoved(row(3.0))]);
+        assert_eq!(log.model.highlight, Some((2, 4)));
+        // A room's modal comes up under the held drag: the drag goes on to
+        // its release, as the cells' grip does, and the release ends it.
+        let _ = pass_inert(&ctx, &mut log, &column(), vec![Event::PointerMoved(row(4.0))], true);
+        let _ = pass_inert(&ctx, &mut log, &column(), vec![button(row(4.0), false)], true);
+        assert!(log.hold.is_none(), "the release ended the hold");
+        assert_eq!(log.model.highlight, Some((2, 5)));
+        // The hand moving on with the button up highlights nothing more.
+        let _ = pass(&ctx, &mut log, &column(), vec![Event::PointerMoved(row(6.0))]);
+        assert_eq!(log.model.highlight, Some((2, 5)));
+        // And an inert log starts no drag.
+        let _ = pass_inert(&ctx, &mut log, &column(), vec![button(row(2.0), true)], true);
+        assert!(log.hold.is_none());
+        assert_eq!(log.model.highlight, Some((2, 5)), "nor clears one");
+        let _ = pass_inert(&ctx, &mut log, &column(), vec![button(row(2.0), false)], true);
+    }
+
+    #[test]
+    fn a_press_on_the_thumb_moves_nothing_until_the_hand_does() {
+        let _en = english();
+        let ctx = context();
+        // A line taller than the view, read from a row above its last: the
+        // view stands neither at the top nor following.
+        let tall = (0..60).map(|i| format!("row {i}")).collect::<Vec<_>>().join("\n");
+        let mut entries: Vec<ActivityEntry> = (1..=5).map(|s| entry(s, "info", &format!("line {s}"))).collect();
+        entries.push(entry(6, "info", &tall));
+        let mut log = holding(entries);
+        let _ = pass(&ctx, &mut log, &column(), Vec::new());
+        log.wheel(true);
+        let (scroll, under) = (log.model.scroll, log.model.under);
+        assert!(!log.model.following() && under > 0, "reading the tall line: {scroll}, {under}");
+        let out = pass(&ctx, &mut log, &column(), Vec::new());
+        let thumb = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Rect(r) if r.rect.width() == THUMB_W && r.rect.min.x > SIZE.x - BAR_W => Some(r.rect),
+                _ => None,
+            })
+            .expect("the thumb");
+        let _ = pass(&ctx, &mut log, &column(), vec![Event::PointerMoved(thumb.center())]);
+        let _ = pass(&ctx, &mut log, &column(), vec![button(thumb.center(), true)]);
+        assert_eq!((log.model.scroll, log.model.under), (scroll, under), "the press took the thumb and moved nothing");
+        // The hand takes it to the track's top: the top of the log.
+        let top = pos2(thumb.center().x, first_row() - 40.0);
+        let out = pass(&ctx, &mut log, &column(), vec![Event::PointerMoved(top)]);
+        assert!(texts(&out).iter().any(|(s, _, _)| s == "line 1"), "the oldest line in view");
+        let _ = pass(&ctx, &mut log, &column(), vec![button(top, false)]);
     }
 }

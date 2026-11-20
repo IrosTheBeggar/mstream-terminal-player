@@ -717,12 +717,20 @@ struct LogFace<'a> {
 /// part in a child over its own rect, clipped to it, on the ground the
 /// host paints there — the room exactly as it was hosted alone (the
 /// composition handed down before, its caret and its outcome back up),
-/// the log beside it. What lies between them is left unpainted.
+/// the log beside it. What lies between them is left unpainted. The keys
+/// go to the part the pass's last left press landed in, read from the
+/// pass's own events: a tap's press and release come in one pass, and
+/// egui forgets where a press began once its release is in.
 #[cfg(feature = "window")]
 fn run_parts(ui: &mut egui::Ui, parts: &Parts, room: Option<&mut Box<dyn HostedRoom>>, log: Option<LogFace>) -> Seen {
-    use egui::{Align, Layout as Flow, UiBuilder};
+    use egui::{Align, Event, Layout as Flow, PointerButton, UiBuilder};
     let points = ui.max_rect();
-    let press = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.press_origin()).flatten());
+    let press = ui.input(|i| {
+        i.events.iter().rev().find_map(|event| match *event {
+            Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => Some(pos),
+            _ => None,
+        })
+    });
     let mut seen = Seen { points, ..Seen::default() };
     let child = |ui: &mut egui::Ui, cells: Rect, salt: &str| {
         let rect = points_of(cells, parts.region, points);
@@ -1368,6 +1376,10 @@ mod tests {
         face: bool,
         #[cfg(feature = "window")]
         egui_passes: usize,
+        /// Ask egui to run each pass again, as a modal taking its body's
+        /// height does.
+        #[cfg(feature = "window")]
+        discard: bool,
     }
 
     /// A room that only writes down what the host asked of it.
@@ -1435,8 +1447,12 @@ mod tests {
         }
 
         #[cfg(feature = "window")]
-        fn draw_egui(&mut self, _ui: &mut egui::Ui) -> Option<crate::admin::EguiShown> {
-            self.0.borrow_mut().egui_passes += 1;
+        fn draw_egui(&mut self, ui: &mut egui::Ui) -> Option<crate::admin::EguiShown> {
+            let mut record = self.0.borrow_mut();
+            record.egui_passes += 1;
+            if record.discard {
+                ui.ctx().request_discard("the probe's modal took its body's height");
+            }
             Some(crate::admin::EguiShown { caret: None, outcome: None })
         }
     }
@@ -1664,6 +1680,90 @@ mod tests {
         assert!(!pass.log_pressed && !pass.hand);
         land(&mut gui.admin, &pass);
         assert_eq!(gui.admin.focus, Focus::Room);
+    }
+
+    /// The Admin tab at 176×46 with a probe room that has an egui face and
+    /// a log of `n` lines, and the panel's parts there: a context to pass
+    /// them in, the look, and the parts.
+    #[cfg(feature = "window")]
+    fn both_parts(n: u64) -> (Probe, Gui, egui::Context, Look, Parts) {
+        let probe = Probe::default();
+        probe.0.borrow_mut().face = true;
+        let mut gui = hosting(&probe);
+        gui.admin.log.model.take(lines(1, n));
+        render_at(&mut gui, 176, 46);
+        let lay = layout(176, 46, gui.footer(), false, gui.admin.showing);
+        let parts = egui_parts(&lay, true, true).expect("both parts");
+        let ctx = egui::Context::default();
+        super::super::window::panel::fonts(&ctx);
+        (probe, gui, ctx, log_look(&lay, false), parts)
+    }
+
+    #[cfg(feature = "window")]
+    fn primary(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() }
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn a_tap_whose_press_and_release_share_a_pass_still_hands_the_keys_on() {
+        let _en = english();
+        let (_probe, mut gui, ctx, look, parts) = both_parts(20);
+        let log_at = points_at(parts.log.unwrap()).center();
+        let room_at = points_at(parts.room.unwrap()).center();
+        let tap = |at| vec![egui::Event::PointerMoved(at), primary(at, true), primary(at, false)];
+
+        // A touchpad's tap sends its press and its release at once, so one
+        // pass hears both: the part it landed in takes the keys all the same.
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, tap(log_at));
+        assert!(pass.log_pressed && !pass.room_pressed, "the log");
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, tap(room_at));
+        assert!(pass.room_pressed && !pass.log_pressed, "the room");
+
+        // Two in one pass: the last one's part, as the last press in cells.
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, [tap(room_at), tap(log_at)].concat());
+        assert!(pass.log_pressed && !pass.room_pressed, "the log, pressed last");
+
+        // Only the primary button hands the keys on, as in cells.
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos: log_at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![secondary(true)]);
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![secondary(false)]);
+        assert!(!pass.log_pressed && !pass.room_pressed, "a right press is nobody's");
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn a_pass_egui_runs_twice_applies_the_logs_click_and_wheel_once() {
+        let _en = english();
+        let (probe, mut gui, ctx, look, parts) = both_parts(80);
+        let log_at = points_at(parts.log.unwrap()).center();
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![egui::Event::PointerMoved(log_at)]);
+        let copy = ctx.read_response(egui::Id::new("server-log").with("copy")).expect("the copy control").rect.center();
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![egui::Event::PointerMoved(copy)]);
+
+        // The room asks egui to run each pass again from here on.
+        probe.0.borrow_mut().discard = true;
+        crate::kit::clipboard::catch(crate::kit::clipboard::Copied::Clipboard);
+        let _ = crate::kit::clipboard::caught();
+        let before = probe.0.borrow().egui_passes;
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![primary(copy, true), primary(copy, false)]);
+        assert_eq!(probe.0.borrow().egui_passes - before, 2, "egui ran the pass twice");
+        assert_eq!(crate::kit::clipboard::caught().len(), 1, "one copy");
+        assert!(pass.log_pressed, "the press reached the host from the run that heard it");
+
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        };
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![egui::Event::PointerMoved(log_at), wheel]);
+        assert_eq!(gui.admin.log.model.scroll, 1, "one notch, one line");
     }
 
     #[test]

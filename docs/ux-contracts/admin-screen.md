@@ -470,15 +470,20 @@ not.
     comes up to the GUI's surface where the window floats the input
     method's candidates (clause 28); a press anywhere in the log's rect
     hands the log the keys, as a click on it does in cells, and the hand
-    shows anywhere over it, since its whole rect is that target. A press
-    on the cells between them is nobody's. Keys never reach egui: they go
-    where clause 13 sends them, the log's to its keys (clause 16), whose
-    steps and pages measure the rows egui last drew. The hand ORs in with
-    the room's own. A GUI modal or the server menu stands the whole region
-    down while it overlaps it (window/panel.rs): nothing egui draws shows
-    then, room and log alike, and no hand. Under a room's modal the log
-    neither lights nor shows the hand, takes no click, drag or wheel, and
-    a press on it hands it nothing.
+    shows anywhere over it, since its whole rect is that target. A tap
+    whose press and release come together counts as a press, and of two
+    presses at once the last one counts. A press on the cells between
+    them is nobody's. Keys never reach egui: they go where clause 13
+    sends them, the log's to its keys (clause 16), whose steps and pages
+    measure the rows egui last drew. The hand ORs in with the room's own.
+    A GUI overlay that overlaps the region — a GUI modal, the server menu,
+    a GUI tooltip — stands the whole region down while it is up
+    (window/panel.rs): nothing egui draws shows then, room and log alike;
+    under a GUI modal or the server menu there is no hand either. Under a
+    room's modal the log neither lights nor shows the hand, takes no
+    press, click or wheel, and a press on it hands it nothing; a drag held
+    on its rows or its thumb when the modal came up goes on to its
+    release, as the cells' grip does.
 37. **The log's egui face is the cells' log**, the same model drawn
     another way (boards Main and Log): a panel of the desk with its header
     — the follow state at the left, the ok green's LED and FOLLOWING, or
@@ -501,7 +506,8 @@ not.
     word, copy and download do what their cells do. The scroll bar is the
     canvas's: no endcaps, a slim thumb counted in lines as clause 24
     counts it, in the strong edge, dim under the pointer and the accent
-    while held; a press on its column moves the bottom line there and the
+    while held; a press on its track moves the bottom line there, a press
+    on the thumb takes it where it is pressed and moves nothing, and the
     thumb then follows the hand until the release. The sentence states
     (waiting, ring off, empty, a failure, a refusal) are one row of prose,
     cut with an ellipsis, where clause 23 puts them. Its notes go to the
