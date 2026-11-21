@@ -35,7 +35,7 @@ mod modals;
 
 use std::time::{Duration, Instant};
 
-use egui::{Align, Align2, CursorIcon, Id, LayerId, Layout, Order, Pos2, Rect, Response, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align, Align2, CursorIcon, Id, LayerId, Layout, Order, Pos2, Rect, RectAlign, Response, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 use rust_i18n::t;
 
 use super::cells::footer_hint;
@@ -68,8 +68,10 @@ const LOGO_ROOM: f32 = 56.0 + 18.0 + 34.0 + 3.0 * 40.0;
 /// the screen goes without.
 const LOGO_LEAST: f32 = 24.0;
 /// A tooltip's widest: the boards', the room for the cells' 40 cells of
-/// words, which [`tip`] wraps them at.
+/// words, which [`tip`] wraps them at; and its gap to its target, the
+/// boards' 8.
 const TIP_W: f32 = 300.0;
+const TIP_GAP: f32 = 8.0;
 
 /// What the view keeps between frames that egui's memory cannot: when a
 /// key was last pressed. Keys never reach egui; the host hears them
@@ -126,6 +128,9 @@ struct Page<'a> {
     key_hints: bool,
     /// How long ago a key was last pressed, if one was.
     since_key: Option<Duration>,
+    /// The page inside its margins, the frame's ([`Parts::inner`]): where
+    /// a tooltip stands ([`tip`]).
+    room: Rect,
 }
 
 /// What a part of the page hands back to the frame. A click that ends the
@@ -151,7 +156,8 @@ pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, view: &View, composition: &
     faces(ui.ctx());
     dwell(ui.ctx());
     let full = ui.max_rect();
-    let page = Page { pal, composition, key_hints, since_key: view.keyed.map(|at| at.elapsed()) };
+    let since_key = view.keyed.map(|at| at.elapsed());
+    let page = Page { pal, composition, key_hints, since_key, room: parts(full).inner() };
     let mut shown = Shown { points: full, hand: false, caret: None, outcome: None };
     // Under the cells' floor the page gives way to their words for it, and
     // nothing on it answers a click; the keys still act on what is hidden,
@@ -232,13 +238,27 @@ fn dwell(ctx: &egui::Context) {
 /// [`TIP_W`], once the pointer has rested on the target for the cells'
 /// dwell, and never in the dwell after a key, which hides it as it hides
 /// the cells'. The next pass is asked for when that dwell ends.
+///
+/// The room under it is the page's inside its margins ([`Page::room`]), as
+/// the boards flip one: under the bar's buttons lies only the page's
+/// margin, so their tooltips float over them, where egui alone would flip
+/// one only where it would leave the window. Its size is egui's from the
+/// pass it was last shown in; its first pass, which lays it out unseen,
+/// stands it under.
 fn tip(page: &Page, response: &Response, words: &str) {
     if let Some(since) = page.since_key.filter(|since| *since < TIP_DELAY) {
         response.ctx.request_repaint_after(TIP_DELAY - since);
         return;
     }
     let mut tooltip = egui::Tooltip::for_enabled(response);
-    tooltip.popup = tooltip.popup.align(egui::RectAlign::BOTTOM).align_alternatives(&[egui::RectAlign::TOP]).gap(8.0);
+    let shown = egui::AreaState::load(&response.ctx, egui::Tooltip::tooltip_id(response.id, 0)).and_then(|area| area.size);
+    let target = response.interact_rect;
+    let over = shown.is_some_and(|size| {
+        target.max.y + TIP_GAP + size.y > page.room.max.y && target.min.y - TIP_GAP - size.y >= page.room.min.y
+    });
+    let (align, other): (RectAlign, &[RectAlign]) =
+        if over { (RectAlign::TOP, &[RectAlign::BOTTOM]) } else { (RectAlign::BOTTOM, &[RectAlign::TOP]) };
+    tooltip.popup = tooltip.popup.align(align).align_alternatives(other).gap(TIP_GAP);
     let words = egui::RichText::new(crate::kit::wrap_tip(words).join("\n")).font(body(12.5)).color(page.pal.text);
     let _ = tooltip.show(|ui| {
         ui.set_max_width(TIP_W);
@@ -271,6 +291,14 @@ struct Parts {
     tips: Rect,
     rule: Rect,
     bar: Rect,
+}
+
+impl Parts {
+    /// The page inside its margins: from the top strip's head to the bar's
+    /// foot, between the sides.
+    fn inner(&self) -> Rect {
+        Rect::from_min_max(self.strip.min, pos2(self.strip.max.x, self.bar.max.y))
+    }
 }
 
 fn parts(full: Rect) -> Parts {
@@ -901,6 +929,49 @@ mod tests {
         let _ = probe.settle(&mut wizard);
         probe.click(&mut wizard, Id::new("setup-language"));
         assert_eq!(wizard.modal, Modal::Language(0));
+    }
+
+    /// Where `words` were drawn, as laid out.
+    fn drawn_at(out: &FullOutput, words: &str) -> Option<Rect> {
+        out.shapes.iter().find_map(|clipped| match &clipped.shape {
+            Shape::Text(text) if text.galley.text() == words => Some(Rect::from_min_size(text.pos, text.galley.size())),
+            _ => None,
+        })
+    }
+
+    /// A tooltip stands under its target, and over it where under it lies
+    /// only the page's margin, as the Unreachable board floats the dead
+    /// Continue's: its words' foot over the button's head, inside the page
+    /// (the board's box, its foot 8 over the button, stands at y 683 to
+    /// 715 over a button from 723). The way back's, beside it, likewise;
+    /// the chip's, at the page's head, under it.
+    #[test]
+    fn a_tip_floats_over_its_target_where_the_pages_margin_leaves_no_room_under_it() {
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        let probe = Probe::new(BOARD);
+        let mut wizard = wizard();
+        let _ = probe.settle(&mut wizard);
+        let room = parts(Rect::from_min_size(Pos2::ZERO, BOARD)).inner();
+        let dead = probe.rect(Id::new("setup-forward"));
+        let why = t!("folders.tip_continue_disabled").to_string();
+        let at = drawn_at(&probe.rest(&mut wizard, dead.center(), 0.6), &why).expect("the dead Continue's tip");
+        assert!(at.max.y < dead.min.y - TIP_GAP && at.min.y > dead.min.y - TIP_GAP - 40.0, "over the button: {at:?} {dead:?}");
+        assert!(room.contains_rect(at), "inside the page's margins: {at:?}");
+        assert!((at.center().x - dead.center().x).abs() < 1.0, "on the button's middle: {at:?} {dead:?}");
+
+        wizard.screen = Screen::Extras;
+        let _ = probe.settle(&mut wizard);
+        let back = probe.rect(Id::new("setup-back"));
+        let why = t!("extras.tip_back").to_string();
+        let at = drawn_at(&probe.rest(&mut wizard, back.center(), 0.6), &why).expect("the way back's tip");
+        assert!(at.max.y < back.min.y - TIP_GAP, "over the way back: {at:?} {back:?}");
+
+        wizard.screen = Screen::Folders;
+        let _ = probe.settle(&mut wizard);
+        let chip = probe.rect(Id::new("setup-language"));
+        let why = t!("lang.chip_tip").to_string();
+        let at = drawn_at(&probe.rest(&mut wizard, chip.center(), 0.6), &why).expect("the chip's tip");
+        assert!(at.min.y > chip.max.y + TIP_GAP, "under the chip: {at:?} {chip:?}");
     }
 
     #[test]
