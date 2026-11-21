@@ -377,6 +377,18 @@ mod tests {
         handle_key(wizard, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
+    /// The setup tests' seam for a link: no browser is launched, and the
+    /// note carries the link instead, as on a machine with no desktop. Every
+    /// test here whose click lands on a card sets it first, itself: one that
+    /// counted on another test having set it would open the store page for
+    /// real when run alone.
+    fn no_browser() {
+        // SAFETY: the setup tests' own seam, set the same way by
+        // `the_standalone_qr_page_drops_the_wizard_chrome`, and only ever
+        // to the one value every test that reads it wants.
+        unsafe { std::env::set_var("MSTREAM_NO_OPEN", "1") };
+    }
+
     /// The pictures a pass drew, where, and whether each is sampled
     /// nearest-neighbour (the code) or smoothed (the wordmark), with its
     /// texture's size.
@@ -692,9 +704,7 @@ mod tests {
     #[test]
     fn a_click_on_each_card_opens_its_link_and_leaves_the_selection() {
         let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: the setup tests' own seam, set the same way by
-        // `the_standalone_qr_page_drops_the_wizard_chrome`: never a browser.
-        unsafe { std::env::set_var("MSTREAM_NO_OPEN", "1") };
+        no_browser();
         let probe = Probe::new(BOARD);
         let pal = Pal::now();
         let mut wizard = done();
@@ -784,10 +794,12 @@ mod tests {
     }
 
     /// The page has no field: no caret is handed to the host, whatever the
-    /// input method holds, and the host's input method stays off.
+    /// input method holds, nor after a click on a card, so the host has no
+    /// cell to stand its input method on.
     #[test]
     fn the_page_has_no_field_and_so_no_caret() {
         let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        no_browser();
         let mut probe = Probe::new(BOARD);
         probe.composition = "にほ".into();
         for mut wizard in [done(), quick_connect()] {
@@ -796,6 +808,8 @@ mod tests {
             assert!(!drawn(&out).iter().any(|w| w.contains("にほ")), "no composition drawn");
             let shown = probe.click(&mut wizard, card(1));
             assert!(shown.caret.is_none());
+            let note = wizard.note.clone().map(|(note, _)| note).unwrap_or_default();
+            assert!(note.contains(APP_STORE_URL), "the link left to copy, no browser launched: {note}");
         }
     }
 }
