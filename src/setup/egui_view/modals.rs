@@ -172,11 +172,13 @@ pub(super) fn path(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page) ->
 /// nine at once, the keys' cursor ringed and kept in view, a new listing
 /// from its top, an empty folder saying so; then the cells' four acts in
 /// their order from the left, up, open, the add (lit) and close, a button
-/// that would run past the window starting a row of its own ([`foot`]). A
-/// click on a folder moves the cursor to it and opens nothing, as in the
-/// cells; the add takes the folder listed, not the cursor's. The title says
-/// the server's folders, as the cells' does, though the listing is this
-/// machine's (the code's, left for the owner to rule on).
+/// that would run past the window starting a row of its own
+/// ([`foot_rects`]), and the list giving way to the rows that adds where
+/// the window is short. A click on a folder moves the cursor to it and
+/// opens nothing, as in the cells; the add takes the folder listed, not the
+/// cursor's. The title says the server's folders, as the cells' does,
+/// though the listing is this machine's (the code's, left for the owner to
+/// rule on).
 pub(super) fn browser(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page) -> Drawn {
     let Modal::Browser(browse) = &wizard.modal else { return Drawn::default() };
     let pal = &page.pal;
@@ -184,21 +186,23 @@ pub(super) fn browser(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page)
     let title = t!("browse.title");
     let dialog = Dialog::new(id, over, BROWSER_W, &title);
     let shown = window(ui, over, id, dialog, wizard, page, |ui| {
+        let (up, open, add, close) = (t!("browse.up"), t!("browse.open"), t!("browse.add"), t!("browse.close"));
+        let start = [(up.as_ref(), false), (open.as_ref(), false), (add.as_ref(), true), (close.as_ref(), false)];
+        let (laid, foot_h) = foot_rects(ui, &start, ui.available_width());
         // The kit's browser takes as many rows as the window has room for,
         // up to its eleven, keeping one row of the foot's under them: the
-        // room it is given is nine's at most, whatever the foot then takes.
+        // room it is given is nine's at most, less the rows a stacked foot
+        // adds, so a short window's list gives way to the whole foot.
         let most = BROWSE_ROUND + BROWSE_ROWS as f32 * FOLDER_ROW_H + FORM_BUTTON_H;
         let empty = t!("browse.empty");
         let picked = ui
             .scope(|ui| {
-                ui.set_max_height(most.min(ui.available_height()));
+                ui.set_max_height(most.min(ui.available_height() - (foot_h - FORM_BUTTON_H)).max(0.0));
                 studio::folder_browser(ui, id.with("list"), &browse.path, &browse.dirs, browse.sel, &empty, pal)
             })
             .inner;
-        let (up, open, add, close) = (t!("browse.up"), t!("browse.open"), t!("browse.add"), t!("browse.close"));
-        let start = [(up.as_ref(), false), (open.as_ref(), false), (add.as_ref(), true), (close.as_ref(), false)];
         let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseAdd, Act::BrowseCancel];
-        foot(ui, id.with("foot"), &start, pal).map(|k| meant[k].clone()).or(picked.map(Act::BrowseRow))
+        foot(ui, id.with("foot"), &start, &laid, foot_h, pal).map(|k| meant[k].clone()).or(picked.map(Act::BrowseRow))
     });
     let mut acts = Vec::new();
     if shown.closed {
@@ -208,18 +212,18 @@ pub(super) fn browser(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page)
     Drawn { acts, caret: None }
 }
 
-/// A modal's foot as the kit lays one from the left (`studio::foot`): the
-/// form buttons `labels` in their order, each as wide as its words, the lit
-/// one where its flag is set, 10 points apart, button `k` under `id.with(k)`;
-/// but a button that would run past the window's inner edge starts a row of
-/// its own 10 points under the last, whole, where the kit's would run on
-/// over the window's edge and its clip would cut it through a letter. The
-/// cells cut such a label inside their frame instead; the canvas stacks a
-/// foot that will not fit (the skip gate's). On the boards' page every
-/// language's four fit one row (German's, the longest, take some 533
-/// points of the 592); a narrower window stacks them. The button clicked.
-fn foot(ui: &mut Ui, id: Id, labels: &[(&str, bool)], pal: &Pal) -> Option<usize> {
-    let row_w = ui.available_width();
+/// Where a modal's foot lays the form buttons `labels` across `row_w`
+/// points, as the kit lays one from the left (`studio::foot`): each as wide
+/// as its words, 10 points apart; but a button that would run past the
+/// row's end starts a row of its own 10 points under the last, whole, where
+/// the kit's would run on over the window's edge and its clip would cut it
+/// through a letter. The cells cut such a label inside their frame instead;
+/// the canvas stacks a foot that will not fit (the skip gate's). On the
+/// boards' page every language's four fit one row (German's, the longest,
+/// take some 533 points of the 592); a narrower window stacks them. Each
+/// button's rect from the foot's top left, and the foot's height, which the
+/// page keeps room for before it lays out what stands over the foot.
+fn foot_rects(ui: &Ui, labels: &[(&str, bool)], row_w: f32) -> (Vec<Rect>, f32) {
     let mut at = Vec::with_capacity(labels.len());
     let (mut x, mut y) = (0.0, 0.0);
     for (label, _) in labels {
@@ -230,9 +234,17 @@ fn foot(ui: &mut Ui, id: Id, labels: &[(&str, bool)], pal: &Pal) -> Option<usize
         at.push(Rect::from_min_size(pos2(x, y), vec2(w, FORM_BUTTON_H)));
         x += w + FOOT_GAP;
     }
-    let (rect, _) = ui.allocate_exact_size(vec2(row_w, y + FORM_BUTTON_H), Sense::hover());
+    (at, y + FORM_BUTTON_H)
+}
+
+/// The foot [`foot_rects`] laid out as `laid`, a row of the layout the
+/// column wide and `h` tall: the form buttons `labels` in their rects, the
+/// lit one where its flag is set, button `k` under `id.with(k)`. The button
+/// clicked.
+fn foot(ui: &mut Ui, id: Id, labels: &[(&str, bool)], laid: &[Rect], h: f32, pal: &Pal) -> Option<usize> {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let mut clicked = None;
-    for (k, ((label, primary), at)) in labels.iter().zip(at).enumerate() {
+    for (k, ((label, primary), at)) in labels.iter().zip(laid).enumerate() {
         if studio::form_button(ui, id.with(k), at.translate(rect.min.to_vec2()), label, *primary, pal).clicked() {
             clicked = Some(k);
         }
@@ -293,7 +305,7 @@ mod tests {
     use super::super::FLOOR;
     use super::super::tests::{BOARD, Probe, color_of, drawn, has, tipped, wizard};
     use crate::api::types::{DirEntry, DirListing};
-    use crate::gui::window::studio::Pal;
+    use crate::gui::window::studio::{FORM_BUTTON_H, Pal};
     use crate::setup::cells::footer_hint;
     use crate::setup::tests::{LOCALE_LOCK, in_own_process};
     use crate::setup::{Act, Done, LANGS, Modal, Op, PathDraft, Wizard, handle_key};
@@ -326,6 +338,13 @@ mod tests {
     /// Button `k` of the browser's foot, counted from the left.
     fn foot(k: usize) -> Id {
         Id::new(BROWSE).with("foot").with(k)
+    }
+
+    /// How much of what `id` drew last pass is in view, in points of its
+    /// height: its rect less what the views it is in (a list's, a window
+    /// body's) clip of it. Nothing for what was not drawn.
+    fn shows(probe: &Probe, id: Id) -> f32 {
+        probe.ctx.read_response(id).map_or(0.0, |r| r.interact_rect.height().max(0.0))
     }
 
     /// The colour `words` were drawn in inside `rect`, where the pass drew
@@ -655,6 +674,36 @@ mod tests {
         assert_ne!(french, note);
         for w in [french.as_str(), "Français", card.as_str()] {
             assert!(has(&drawn(&out), w), "{w} drawn: {:?}", drawn(&out));
+        }
+    }
+
+    /// In a window both narrow and short the browser's list gives way to
+    /// the rows its stacked foot adds, so the whole foot stands in the
+    /// window's view, not under its fold: German's four stack in two rows
+    /// at the cells' floor and on pages 464 by 400 and 600 by 360, where
+    /// the list kept room for one row of the foot and the second row's
+    /// buttons were cut by the view (the close, on the last, wholly). The
+    /// list keeps a row or more, the keys' cursor whole in it.
+    #[test]
+    fn in_a_short_narrow_window_the_list_gives_way_to_the_whole_stacked_foot() {
+        let Some(_) = in_own_process(&["de"]) else { return };
+        let names: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        for size in [FLOOR, vec2(464.0, 400.0), vec2(600.0, 360.0)] {
+            let probe = Probe::new(size);
+            let mut wizard = wizard();
+            wizard.apply(Done::Browsed(Ok(listing("/srv", &names))));
+            let _ = probe.settle(&mut wizard);
+            for _ in 0..8 {
+                key(&mut wizard, KeyCode::Down);
+            }
+            let _ = probe.settle(&mut wizard);
+            let buttons: Vec<Rect> = (0..4).map(|k| probe.rect(foot(k))).collect();
+            assert!(buttons[3].min.y > buttons[0].max.y, "at {size:?} the foot stacks: {buttons:?}");
+            for (k, button) in buttons.iter().enumerate() {
+                assert!((shows(&probe, foot(k)) - FORM_BUTTON_H).abs() < 0.01, "at {size:?} button {k} whole in view: {button:?}");
+            }
+            assert!((shows(&probe, row(BROWSE, 8)) - 30.0).abs() < 0.01, "at {size:?} the keys' cursor whole in the list");
         }
     }
 
