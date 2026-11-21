@@ -25,7 +25,7 @@ use super::super::EguiShown;
 use super::*;
 use crate::gui::window::studio::{
     self, BOX, CELL_PAD, COL_GAP, Col, Dialog, FIELD_ROW_H, Glyph, HIT, Icon, Pal, Para, Table, add_card, bare, body,
-    cell, check_line, field, field_at, foot, foot_line, icon_button, ink, label_at, line, list_row_at, name_cell,
+    cadence, cell, check_line, field, field_at, foot, foot_line, gate, icon_button, ink, label_at, line, name_cell,
     reveal, room_rects, small_caps_width, state_line, strong, text, tick_box, tick_row, width_of,
 };
 
@@ -45,11 +45,10 @@ const USER_MIN: f32 = 72.0;
 /// The flag columns on the canvas, in the table's order: ADMIN, then
 /// FOLDERS, UPLOAD, AUDIO and MODIFY.
 const FLAG_W: [f32; 5] = [60.0, 72.0, 64.0, 56.0, 64.0];
-/// The modals' widths: the canvas's add form, the grant and the password,
-/// and the remove gate.
+/// The modals' widths: the canvas's add form, and the grant and the
+/// password.
 const FORM_W: f32 = 640.0;
 const SMALL_W: f32 = 480.0;
-const GATE_W: f32 = 520.0;
 /// A row of the grant's list.
 const GRANT_ROW_H: f32 = 32.0;
 
@@ -138,8 +137,8 @@ fn state(ui: &mut Ui, room: &Room, pal: &Pal) {
         (pal.ok, head, pal.text, tail.to_string(), pal.text)
     };
     let parts = [(bare(&head).to_string(), strong(14.0), head_color), (tail, body(14.0), tail_color)];
-    let polls = (t!("usr.polls").to_string(), body(13.0), pal.dim);
-    state_line(ui, row, lamp, 16.0, &parts, (!public).then_some(&polls));
+    let polls = if public { Vec::new() } else { cadence(&t!("usr.polls"), pal) };
+    state_line(ui, row, lamp, &parts, &polls);
 }
 
 /// The table's columns across `w`: USER, ADMIN, the libraries taking what
@@ -173,13 +172,16 @@ fn columns(ui: &Ui, w: f32) -> Vec<Col> {
 /// outside the row's target as the cells' remove column is. A click on a
 /// row selects it, its boxes included, as in the cells; the cross opens
 /// the remove gate. With no users the headings stand over nothing, as the
-/// cells draw them in every state, and public mode says why under them.
+/// cells draw them in every state; once loaded, the empty list says so on
+/// the first row's line as every room's does, and public mode says why
+/// under it.
 fn table(ui: &mut Ui, room: &Room, pal: &Pal, acts: &mut Vec<Act>) {
     let w = ui.available_width();
     let cols = columns(ui, w);
     let rows: Vec<(&String, &AdminUser)> = room.users.iter().collect();
     let flags = [(1, Flag::Admin), (3, Flag::Mkdir), (4, Flag::Upload), (5, Flag::Audio), (6, Flag::Modify)];
-    let table = Table::new(Id::new("users-table"), &cols, rows.len()).cursor(room.sel).trail(TRAIL).empty("");
+    let empty = if room.loaded { t!("usr.empty_users") } else { "".into() };
+    let table = Table::new(Id::new("users-table"), &cols, rows.len()).cursor(room.sel).trail(TRAIL).empty(&empty);
     let shown = table.show(ui, pal, |ui, i, row| {
         let (name, u) = rows[i];
         name_cell(ui, row, 0, &printable(name, NAME_MAX), pal);
@@ -202,19 +204,17 @@ fn table(ui: &mut Ui, room: &Room, pal: &Pal, acts: &mut Vec<Act>) {
     }
 }
 
-/// Public mode's sentences under the empty table: the empty list, the two
-/// warnings in gold, and what the player must do as well, since the
-/// session the room makes is its own. Where the room is too short for
-/// them, the lines with no room left are left out, as in the cells.
+/// Public mode's sentences under the empty table's line: the two warnings
+/// in gold, and what the player must do as well, since the session the
+/// room makes is its own. Where the room is too short for them, the lines
+/// with no room left are left out, as in the cells.
 fn public(ui: &mut Ui, pal: &Pal) {
-    // The cells' rhythm (the empty line under the rule, two rows to the
-    // warnings, one to the last sentence) tight enough that all of it fits
-    // the GUI's default window, as it does in cells.
+    // The cells' rhythm (two rows from the empty line to the warnings, one
+    // to the last sentence) tight enough that all of it fits the GUI's
+    // default window, as it does in cells.
     let floor = ui.clip_rect().max.y;
     let said = |ui: &mut Ui, key: &str, color| Para::new(&t!(key), body(14.0), color).floor(floor).show(ui);
-    ui.add_space(6.0);
-    said(ui, "usr.empty_users", pal.dim);
-    ui.add_space(18.0);
+    ui.add_space(2.0);
     said(ui, "usr.public_1", pal.gold);
     ui.add_space(2.0);
     said(ui, "usr.public_2", pal.gold);
@@ -254,7 +254,7 @@ fn draw_modal(ui: &Ui, room: &Room, composition: &str, over: Rect, pal: &Pal, ac
         }
         Modal::Password(d) => password(ui, d, composition, over, pal, acts),
         Modal::Remove(name) => {
-            gate(ui, room, name, over, pal, acts);
+            remove_gate(ui, room, name, over, pal, acts);
             None
         }
     }
@@ -370,9 +370,10 @@ fn add_form(ui: &Ui, f: &AddForm, composition: &str, over: Rect, pal: &Pal, acts
     shown.inner
 }
 
-/// The library grant: a row a library, ticked where the user holds it,
-/// the keyboard's cursor in the keyboard's look and brought into view when
-/// it moves, a row under the pointer raised; the two notes; Save.
+/// The library grant: a row a library, the kit's tick row as the add
+/// form's libraries, ticked where the user holds it, the keyboard's cursor
+/// in the keyboard's look and brought into view when it moves, a row under
+/// the pointer raised; the two notes; Save.
 fn grant(ui: &Ui, d: &LibsDraft, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let title = t!("usr.libs_title", user = printable(&d.username, NAME_MAX));
     let id = Id::new("users-libraries");
@@ -392,16 +393,9 @@ fn grant(ui: &Ui, d: &LibsDraft, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
             if !ui.is_rect_visible(rect) {
                 continue;
             }
-            let response = list_row_at(ui, Id::new("users-libs-row").with(i), rect, cursor, pal);
-            if response.clicked() {
+            if tick_row(ui, Id::new("users-libs-row").with(i), rect, *on, &printable(name, NAME_MAX), cursor, pal).clicked() {
                 acts.push(Act::LibsRow(i));
             }
-            let mark = Rect::from_center_size(pos2(rect.min.x + 10.0 + BOX / 2.0, rect.center().y), Vec2::splat(BOX));
-            tick_box(ui, mark, *on, response.hovered(), pal.ground, pal);
-            let x = mark.max.x + 10.0;
-            let font = if cursor { strong(14.0) } else { body(14.0) };
-            let name = printable(name, NAME_MAX);
-            text(ui, pos2(x, rect.center().y), &name, font, pal.text, (rect.max.x - 10.0 - x).max(1.0), egui::Align2::LEFT_CENTER);
         }
         ui.add_space(16.0);
         Para::new(&t!("usr.libs_note_1"), body(13.0), pal.dim).show(ui);
@@ -456,30 +450,22 @@ fn password(ui: &Ui, d: &PwDraft, composition: &str, over: Rect, pal: &Pal, acts
     shown.inner
 }
 
-/// The remove gate, answered as every gate (no close; Esc keeps): what
-/// goes with the user in gold, what stays in green, the last admin's
-/// warning where it applies; Keep lit, Remove not.
-fn gate(ui: &Ui, room: &Room, name: &str, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
+/// The remove gate, the kit's: what goes with the user in gold, what stays
+/// in green, the last admin's warning where it applies; Keep lit, Remove
+/// not.
+fn remove_gate(ui: &Ui, room: &Room, name: &str, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let user = printable(name, NAME_MAX);
     let title = t!("usr.remove_title", user = user.clone());
-    let last_admin = room.last_admin(name);
-    let id = Id::new("users-remove-gate");
-    let _ = Dialog::new(id, over, GATE_W, &title).gate(pal).show(ui, pal, |ui| {
-        Para::new(&t!("usr.remove_1"), body(14.0), pal.gold).show(ui);
-        ui.add_space(4.0);
-        Para::new(&t!("usr.remove_2"), body(14.0), pal.ok).show(ui);
-        if last_admin {
-            ui.add_space(12.0);
-            Para::new(&t!("usr.remove_last_admin", user = user.clone()), strong(14.0), pal.gold).show(ui);
-        }
-        ui.add_space(FORM_GAP);
-        let (keep, go) = (t!("usr.remove_keep"), t!("usr.remove_confirm"));
-        match foot(ui, id.with("foot"), &[], &[(keep.as_ref(), true), (go.as_ref(), false)], None, pal) {
-            Some(0) => acts.push(Act::RemoveCancel),
-            Some(_) => acts.push(Act::RemoveConfirm),
-            None => {}
-        }
-    });
+    let mut sentences = vec![Para::new(&t!("usr.remove_1"), body(14.0), pal.gold), Para::new(&t!("usr.remove_2"), body(14.0), pal.ok)];
+    if room.last_admin(name) {
+        sentences.push(Para::new(&t!("usr.remove_last_admin", user = user), strong(14.0), pal.gold));
+    }
+    let (keep, go) = (t!("usr.remove_keep"), t!("usr.remove_confirm"));
+    match gate(ui, Id::new("users-remove-gate"), over, &title, sentences, [&keep, &go], pal) {
+        Some(true) => acts.push(Act::RemoveConfirm),
+        Some(false) => acts.push(Act::RemoveCancel),
+        None => {}
+    }
 }
 
 #[cfg(test)]

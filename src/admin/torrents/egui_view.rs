@@ -20,10 +20,10 @@ use super::*;
 use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
     self, CELL_PAD, Col, Dialog, FIELD_H, FIELD_ROW_H, FORM_BUTTON_H, Glyph, HIT, Input as Field, Pal, Para, Run, RowCtx, SEG_H,
-    Seg, TABLE_HEAD, Table, bare, body, caps, card, cell, cell_tipped, check, check_line, checkbox, chip, field_at,
-    field_box, foot, foot_line, form_button, form_button_width, ink, led, led_cell, meter, meter_lit, mono, name_cell, path_cell,
-    pointer, radio, ring_since, room_rects, segmented, small_caps, small_caps_width, square, state_line, strong, text,
-    unkeyed, width_of, with_figures,
+    Seg, TABLE_HEAD, Table, bare, body, cadence, caps, card, cell, cell_tipped, check_line, checkbox, chip, field_at,
+    field_box, foot, foot_line, form_button, form_button_width, gate, ink, led, led_cell, meter, meter_lit, mono, name_cell,
+    path_cell, pointer, radio, ring_since, room_rects, segmented, small_caps, small_caps_width, state_line, strong, text,
+    unkeyed, verdict, width_of, with_figures,
 };
 
 /// The room between the page's rows, and between the page and its note
@@ -34,10 +34,8 @@ const LINE_H: f32 = 20.0;
 /// A table's headings and one row: with less room than this a table is
 /// not drawn, as the cells leave off a table with under three rows.
 const TABLE_MIN: f32 = TABLE_HEAD + 40.0;
-/// The modals' widths: an entry's, and a gate's, as wide, so a gate's two
-/// sentences break into whole lines rather than leave a word alone.
+/// An entry modal's width.
 const ENTRY_W: f32 = 600.0;
-const GATE_W: f32 = 600.0;
 /// The connect form's width, its wide fields' and the port's, the room
 /// between its rows, and the few points more over its first row and over
 /// its verdict (the canvas's).
@@ -213,9 +211,9 @@ fn state_row(ui: &mut Ui, room: &Room, pal: &Pal) {
     let figures: Vec<&str> = state.figures.iter().map(String::as_str).collect();
     let mut parts = vec![(state.head.clone(), head_font, state.tone)];
     parts.extend(with_figures(&state.detail, &figures, body(13.5), mono(12.5), pal.soft));
-    let polls = state.polls.map(|p| (p, body(12.5), pal.dim));
+    let polls = state.polls.map(|p| cadence(&p, pal)).unwrap_or_default();
     let line = Rect::from_min_max(row.min, pos2((beta.min.x - 16.0).max(row.min.x), row.max.y));
-    state_line(ui, line, state.tone, 14.0, &parts, polls.as_ref());
+    state_line(ui, line, state.tone, &parts, &polls);
 }
 
 // ── Painting helpers ──────────────────────────────────────────────────────
@@ -231,32 +229,8 @@ fn label(ui: &mut Ui, s: &str, pal: &Pal) {
     ui.add_space(6.0);
 }
 
-/// The cells' tick (`ok`) or dash, drawn as a mark in `tone` centred on
-/// `at`: the canvas's check, or a short rule.
-fn mark(ui: &Ui, at: Pos2, ok: bool, tone: Color32) {
-    if ok {
-        check(ui, at, tone);
-    } else {
-        ui.painter().line_segment([at - vec2(4.0, 0.0), at + vec2(4.0, 0.0)], Stroke::new(1.7, tone));
-    }
-}
-
-/// A verdict or an error: its mark when it has one, then its words wrapped
-/// beside the mark in up to two lines, `figures` in them (a version, an
-/// RPC number) in the monospace. Returns where it was drawn.
-fn verdict(ui: &Ui, at: Pos2, width: f32, words: &str, figures: &[&str], tone: Color32, marked: Option<bool>) -> Rect {
-    // The canvas's 12-point mark and the 8 points after it.
-    let indent = if marked.is_some() { 20.0 } else { 0.0 };
-    let parts = with_figures(words, figures, body(13.5), mono(12.5), tone);
-    let drawn = Para::runs(&parts).rows(2).paint(ui, at + vec2(indent, 0.0), width - indent);
-    if let Some(ok) = marked {
-        mark(ui, pos2(at.x + 6.0, at.y + drawn.height().min(19.0) / 2.0), ok, tone);
-    }
-    drawn.union(Rect::from_min_size(at, vec2(indent, 1.0)))
-}
-
-/// A modal's error line in gold, a row of the layout: the cells' dash as a
-/// mark, then the words.
+/// A modal's error line in gold, a row of the layout: the kit's verdict,
+/// the cells' dash as its mark, then the words.
 fn error_row(ui: &mut Ui, words: &str, pal: &Pal) {
     let w = ui.available_width();
     let at = ui.cursor().min;
@@ -455,23 +429,13 @@ fn place(ui: &Ui, c: &Connect, field: CField, slot: Rect, fields: &[CField], com
     }
 }
 
-/// The HTTPS tick in `at`, its box lit while it has the keys: a click
-/// flips it.
+/// The HTTPS tick in `at`, in the keyboard's look while it has the keys,
+/// as every form's focused tick: a click flips it.
 fn https(ui: &mut Ui, c: &Connect, at: Rect, pal: &Pal, out: &mut Out) {
     let mut row = ui.new_child(UiBuilder::new().id_salt("tor-https-row").max_rect(at).layout(Layout::top_down(Align::Min)));
-    let response = check_line(&mut row, Id::new("tor-https"), c.https, &t!("tor.https"), "", false, pal);
-    if response.clicked() {
+    let focused = c.focused() == CField::Https;
+    if check_line(&mut row, Id::new("tor-https"), c.https, &t!("tor.https"), "", focused, pal).clicked() {
         out.acts.push(Act::ConnectHttps);
-    }
-    // With the keys its box is on-accent on the accent, as the canvas and
-    // the cells mark it: over the kit's box, at the head of its line.
-    if c.focused() == CField::Https {
-        let line = response.rect;
-        let tick = Rect::from_min_size(pos2(line.min.x, line.center().y - 8.0), vec2(16.0, 16.0));
-        ui.painter().rect_filled(tick, square(), pal.accent);
-        if c.https {
-            mark(ui, tick.center(), true, pal.on_accent);
-        }
     }
 }
 
@@ -1102,20 +1066,16 @@ fn draw_modal(ui: &Ui, room: &Room, pal: &Pal, over: Rect, composition: &str, ou
             let name = room.torrent(hash).map(|t| printable(&t.name, NAME_MAX)).unwrap_or_else(|| short_id(hash));
             let title = t!("tor.remove_title", name = name, client = room.kind().label()).to_string();
             let lines = [t!("tor.remove_1").to_string(), t!("tor.remove_2").to_string()];
-            let buttons = [
-                (t!("tor.remove_keep").to_string(), true, Act::RemoveCancel),
-                (t!("tor.remove_confirm").to_string(), false, Act::RemoveConfirm),
-            ];
-            gate(ui, Id::new("tor-remove"), over, &title, &lines, &buttons, pal, out);
+            let safe = (t!("tor.remove_keep").to_string(), Act::RemoveCancel);
+            let go = (t!("tor.remove_confirm").to_string(), Act::RemoveConfirm);
+            warn(ui, Id::new("tor-remove"), over, &title, &lines, safe, go, pal, out);
         }
         Modal::Disconnect => {
             let title = t!("tor.disconnect_title", client = room.kind().label()).to_string();
             let lines = [t!("tor.disconnect_1").to_string(), t!("tor.disconnect_2").to_string()];
-            let buttons = [
-                (t!("tor.disconnect_keep").to_string(), true, Act::DisconnectCancel),
-                (t!("tor.disconnect_confirm").to_string(), false, Act::DisconnectConfirm),
-            ];
-            gate(ui, Id::new("tor-disconnect"), over, &title, &lines, &buttons, pal, out);
+            let safe = (t!("tor.disconnect_keep").to_string(), Act::DisconnectCancel);
+            let go = (t!("tor.disconnect_confirm").to_string(), Act::DisconnectConfirm);
+            warn(ui, Id::new("tor-disconnect"), over, &title, &lines, safe, go, pal, out);
         }
     }
 }
@@ -1141,15 +1101,8 @@ fn candidate(ui: &mut Ui, words: &str, pointed: bool, pal: &Pal) {
     text(ui, pos2(row.min.x + 32.0, mid), words, mono(12.5), pal.dim, (w - 32.0).max(1.0), Align2::LEFT_CENTER);
 }
 
-/// A modal's buttons, right-aligned on a row of their own, 10 points apart
-/// in `buttons`' order: the act of the one clicked.
-fn button_row(ui: &mut Ui, id: Id, buttons: &[(String, bool, Act)], pal: &Pal) -> Option<Act> {
-    let items: Vec<(&str, bool)> = buttons.iter().map(|(label, primary, _)| (label.as_str(), *primary)).collect();
-    foot(ui, id.with("button"), &[], &items, None, pal).map(|k| buttons[k].2.clone())
-}
-
 /// An entry modal: one text field, the lines under it, its error, its
-/// buttons.
+/// buttons at the foot's right in their order.
 struct Entry<'a> {
     id: Id,
     title: &'a str,
@@ -1178,7 +1131,8 @@ impl Entry<'_> {
                 error_row(ui, e, pal);
             }
             ui.add_space(20.0);
-            let clicked = button_row(ui, id, buttons, pal);
+            let items: Vec<(&str, bool)> = buttons.iter().map(|(label, primary, _)| (label.as_str(), *primary)).collect();
+            let clicked = foot(ui, id.with("foot"), &[], &items, None, pal).map(|k| buttons[k].2.clone());
             (typed, clicked)
         });
         let (typed, clicked) = shown.inner;
@@ -1193,23 +1147,17 @@ impl Entry<'_> {
     }
 }
 
-/// A gate, answered as the cells' (gold, its title wrapped where a
-/// torrent's long name runs on, no close; Esc keeps): its lines in gold,
-/// each its own paragraph, then the safe choice lit and the one that goes
-/// through beside it.
+/// A gate, the kit's (its title wrapped where a torrent's long name runs
+/// on): its lines in gold, each its own paragraph, then the safe choice
+/// lit and the one that goes through beside it.
 #[allow(clippy::too_many_arguments)]
-fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], buttons: &[(String, bool, Act)], pal: &Pal, out: &mut Out) {
-    let shown = Dialog::new(id, over, GATE_W, title).gate(pal).show(ui, pal, |ui| {
-        for (k, words) in lines.iter().enumerate() {
-            if k > 0 {
-                ui.add_space(8.0);
-            }
-            Para::new(words, body(14.0), pal.gold).show(ui);
-        }
-        ui.add_space(20.0);
-        button_row(ui, id, buttons, pal)
-    });
-    out.acts.extend(shown.inner);
+fn warn(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (String, Act), go: (String, Act), pal: &Pal, out: &mut Out) {
+    let sentences = lines.iter().map(|words| Para::new(words, body(14.0), pal.gold)).collect();
+    match gate(ui, id, over, title, sentences, [&safe.0, &go.0], pal) {
+        Some(true) => out.acts.push(go.1),
+        Some(false) => out.acts.push(safe.1),
+        None => {}
+    }
 }
 
 #[cfg(test)]
@@ -1670,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn each_gate_draws_and_its_buttons_and_close_do_what_the_cells_and_esc_do() {
+    fn each_gate_draws_has_no_close_and_its_buttons_and_esc_do_what_the_cells_do() {
         let _en = english();
         let ctx = context();
         let mut room = connected();
@@ -1688,7 +1636,7 @@ mod tests {
                 "REMOVE",
             ],
         );
-        click_on(&ctx, &mut room, remove.with("button").with(0));
+        click_on(&ctx, &mut room, remove.with("foot").with(0));
         assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "keep is the safe choice");
         room.act(Act::Remove(hash.clone()));
         let _ = settle(&ctx, &mut room);
@@ -1697,7 +1645,7 @@ mod tests {
         assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "Esc keeps");
         room.act(Act::Remove(hash.clone()));
         let _ = settle(&ctx, &mut room);
-        click_on(&ctx, &mut room, remove.with("button").with(1));
+        click_on(&ctx, &mut room, remove.with("foot").with(1));
         assert_eq!(room.queued, Some(Op::Remove(hash)));
         room.queued = None;
         room.busy = None;
@@ -1719,11 +1667,11 @@ mod tests {
         assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "Esc stays");
         room.act(Act::Disconnect);
         let _ = settle(&ctx, &mut room);
-        click_on(&ctx, &mut room, disconnect.with("button").with(0));
+        click_on(&ctx, &mut room, disconnect.with("foot").with(0));
         assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "stay");
         room.act(Act::Disconnect);
         let _ = settle(&ctx, &mut room);
-        click_on(&ctx, &mut room, disconnect.with("button").with(1));
+        click_on(&ctx, &mut room, disconnect.with("foot").with(1));
         assert_eq!(room.queued, Some(Op::Disconnect(Kind::Transmission)));
     }
 
@@ -1745,7 +1693,7 @@ mod tests {
         assert!(matches!(room.modal, Modal::None));
         room.act(Act::Mapping("music".into()));
         let _ = settle(&ctx, &mut room);
-        click_on(&ctx, &mut room, mapping.with("button").with(0));
+        click_on(&ctx, &mut room, mapping.with("foot").with(0));
         assert_eq!(room.queued, Some(Op::Map { vpath: "music".into(), path: "/downloads/music".into() }));
         room.queued = None;
         room.busy = None;
@@ -1769,13 +1717,13 @@ mod tests {
                 "SAVE",
             ],
         );
-        click_on(&ctx, &mut room, template.with("button").with(1));
+        click_on(&ctx, &mut room, template.with("foot").with(1));
         assert!(matches!(&room.modal, Modal::Template { template, .. } if template.value().is_empty()), "clear");
         assert_drawn(&settle(&ctx, &mut room).0, &["(no template — the user types the path)"]);
-        click_on(&ctx, &mut room, template.with("button").with(0));
+        click_on(&ctx, &mut room, template.with("foot").with(0));
         let suggested = room.templates.suggested_template.clone();
         assert!(matches!(&room.modal, Modal::Template { template, .. } if template.value() == suggested), "suggested");
-        click_on(&ctx, &mut room, template.with("button").with(2));
+        click_on(&ctx, &mut room, template.with("foot").with(2));
         assert_eq!(room.queued, Some(Op::Template { vpath: "music".into(), template: Some(suggested) }));
         room.queued = None;
         room.busy = None;
@@ -1785,7 +1733,7 @@ mod tests {
         room.act(Act::SeedAdd);
         let (out, _) = settle(&ctx, &mut room);
         assert_drawn(&out, &["Add a .torrent file", ".TORRENT FILE ON THIS MACHINE", "Tab completes · the file is read here and sent to the server", "CHECK AND SEED"]);
-        click_on(&ctx, &mut room, seed.with("button").with(0));
+        click_on(&ctx, &mut room, seed.with("foot").with(0));
         assert_drawn(&settle(&ctx, &mut room).0, &["a path to a .torrent file is needed"]);
         if let Modal::SeedPath { asked, .. } = &mut room.modal {
             *asked = Some("/nowhere/".into());

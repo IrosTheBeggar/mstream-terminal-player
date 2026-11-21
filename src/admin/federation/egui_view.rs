@@ -13,10 +13,10 @@
 //! pass. A gate has no close, as the cells draw it: it is answered with its
 //! buttons or its keys. Keys never reach egui: the room's key handler edits
 //! its fields as it always has, and each field is drawn from the room's own
-//! value and caret. Where the cells draw a glyph
-//! — the state line's bullet, the claimed tick, a peer's status dot, the
-//! checkboxes, the connecting strip, a button's arrow — the desk draws its
-//! LED, its tick box, its meter or its button instead.
+//! value and caret. Where the cells draw a glyph — the state line's bullet,
+//! the claimed tick, a peer's status dot, the checkboxes, the connecting
+//! strip, a button's arrow — the desk draws its LED, its tick box, its
+//! meter or its button instead.
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
@@ -25,9 +25,9 @@ use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder,
 use super::*;
 use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
-    self, Col, Dialog, FIELD_H, FIELD_ROW_H, Glyph, Pal, Para, Run, SEG_H, Seg, Table, Typed, bare, body, caps, card, cell,
-    cell_tipped, checkbox, field_at, field_box, fitted, foot, foot_line, ink, label_at, led, led_cell, mono, name_cell,
-    reveal, room_rects, searching, segmented, state_line, strong, text, tick_card, tick_row, unkeyed, with_figures,
+    self, Col, Dialog, FIELD_H, FIELD_ROW_H, Glyph, Pal, Para, Run, SEG_H, Seg, Table, Typed, bare, body, cadence, caps, card,
+    cell, cell_tipped, checkbox, field_at, field_box, fitted, foot, foot_line, gate, ink, label_at, led, led_cell, mono,
+    name_cell, reveal, room_rects, searching, segmented, state_line, strong, text, tick_card, tick_row, unkeyed, with_figures,
 };
 
 /// The room between the room's parts: the canvas's 18.
@@ -35,9 +35,8 @@ const GAP: f32 = studio::ROOM_GAP;
 /// A table's headings and the room under them, and its rows.
 const TABLE_HEAD: f32 = studio::TABLE_HEAD;
 const ROW_H: f32 = 40.0;
-/// The forms' window (the canvas's 640) and the gates', narrower.
+/// The forms' window, the canvas's.
 const FORM_W: f32 = 640.0;
-const GATE_W: f32 = 560.0;
 /// The room between a modal's parts: the canvas's 22.
 const SECTION: f32 = 22.0;
 /// The gap between the forms' columns (their fields, their tick boxes).
@@ -103,7 +102,7 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
             let lines = [t!("fed.decline_1").to_string(), t!("fed.decline_2").to_string()];
             let safe = (t!("fed.gate_keep").to_string(), Act::DeclineCancel);
             let go = (t!("fed.decline_confirm").to_string(), Act::DeclineConfirm);
-            gate(ui, Id::new("fed-gate").with("decline"), full, &t!("fed.decline_title", name = who), &lines, safe, go, &pal, &mut got);
+            warn(ui, Id::new("fed-gate").with("decline"), full, &t!("fed.decline_title", name = who), &lines, safe, go, &pal, &mut got);
         }
         Modal::Revoke(id) => {
             let (name, libs) =
@@ -111,20 +110,20 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
             let lines = [t!("fed.revoke_1", name = name, libraries = libs).to_string(), t!("fed.revoke_2").to_string()];
             let safe = (t!("fed.gate_keep").to_string(), Act::RevokeCancel);
             let go = (t!("fed.revoke_confirm").to_string(), Act::RevokeConfirm);
-            gate(ui, Id::new("fed-gate").with("revoke"), full, &t!("fed.revoke_title", name = name), &lines, safe, go, &pal, &mut got);
+            warn(ui, Id::new("fed-gate").with("revoke"), full, &t!("fed.revoke_title", name = name), &lines, safe, go, &pal, &mut got);
         }
         Modal::Forget(id) => {
             let name = room.peer(id).map(|p| printable(&p.name, NAME_MAX)).unwrap_or_default();
             let lines = [t!("fed.forget_1").to_string(), t!("fed.forget_2").to_string()];
             let safe = (t!("fed.gate_keep").to_string(), Act::ForgetCancel);
             let go = (t!("fed.forget_confirm").to_string(), Act::ForgetConfirm);
-            gate(ui, Id::new("fed-gate").with("forget"), full, &t!("fed.forget_title", name = name), &lines, safe, go, &pal, &mut got);
+            warn(ui, Id::new("fed-gate").with("forget"), full, &t!("fed.forget_title", name = name), &lines, safe, go, &pal, &mut got);
         }
         Modal::TurnOff => {
             let lines = [t!("fed.off_1").to_string(), t!("fed.off_2").to_string()];
             let safe = (t!("fed.off_stay").to_string(), Act::TurnOffCancel);
             let go = (t!("fed.off_confirm").to_string(), Act::TurnOffConfirm);
-            gate(ui, Id::new("fed-gate").with("turn-off"), full, &t!("fed.off_title"), &lines, safe, go, &pal, &mut got);
+            warn(ui, Id::new("fed-gate").with("turn-off"), full, &t!("fed.off_title"), &lines, safe, go, &pal, &mut got);
         }
     }
 
@@ -144,9 +143,9 @@ fn off(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal, got: &mut Gath
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
     if p.available {
-        state_line(ui, row, pal.unlit, 16.0, &[(bare(&t!("fed.state_off")).to_string(), body(14.0), pal.dim)], None);
+        state_line(ui, row, pal.unlit, &[(bare(&t!("fed.state_off")).to_string(), body(14.0), pal.dim)], &[]);
     } else {
-        state_line(ui, row, pal.gold, 16.0, &[(bare(&t!("fed.state_unavailable")).to_string(), body(14.0), pal.gold)], None);
+        state_line(ui, row, pal.gold, &[(bare(&t!("fed.state_unavailable")).to_string(), body(14.0), pal.gold)], &[]);
     }
     ui.add_space(GAP);
     if p.available {
@@ -212,8 +211,7 @@ fn state(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal) {
     }
     let inbox = if room.accept_requests { t!("fed.state_inbox_open") } else { t!("fed.state_inbox_closed") };
     parts.push((inbox.to_string(), body(14.0), pal.text));
-    let polls = (t!("fed.polls").to_string(), body(13.0), pal.dim);
-    state_line(ui, row, lit, 16.0, &parts, Some(&polls));
+    state_line(ui, row, lit, &parts, &cadence(&t!("fed.polls"), pal));
 }
 
 /// The tabs, one segmented group with the open one lit (Requests carrying
@@ -732,24 +730,14 @@ fn peer_name(ui: &Ui, name: &tui_input::Input, preview: &TicketPreview, over: Re
     got.caret = shown.inner.caret;
 }
 
-/// A warning gate, answered as the cells' (gold, no close; Esc keeps): its
-/// consequences in gold before its verbs, the safe choice lit and the
-/// destructive one an outline.
+/// A warning gate, the kit's: its consequences in gold before its verbs,
+/// the safe choice lit and the destructive one an outline.
 #[allow(clippy::too_many_arguments)]
-fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (String, Act), go: (String, Act), pal: &Pal, got: &mut Gathered) {
-    let shown = Dialog::new(id, over, GATE_W, title).gate(pal).show(ui, pal, |ui| {
-        for (i, line) in lines.iter().enumerate() {
-            if i > 0 {
-                ui.add_space(6.0);
-            }
-            Para::new(line, body(14.0), pal.gold).show(ui);
-        }
-        ui.add_space(SECTION);
-        foot(ui, id.with("buttons"), &[], &[(&safe.0, true), (&go.0, false)], None, pal)
-    });
-    match shown.inner {
-        Some(0) => got.acts.push(safe.1),
-        Some(_) => got.acts.push(go.1),
+fn warn(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (String, Act), go: (String, Act), pal: &Pal, got: &mut Gathered) {
+    let sentences = lines.iter().map(|line| Para::new(line, body(14.0), pal.gold)).collect();
+    match gate(ui, id, over, title, sentences, [&safe.0, &go.0], pal) {
+        Some(true) => got.acts.push(go.1),
+        Some(false) => got.acts.push(safe.1),
         None => {}
     }
 }
@@ -1362,7 +1350,7 @@ mod tests {
             assert!(!seen.has("◂"), "{kind}: the arrow is the button's");
             let gold = Pal::now().gold;
             assert_eq!((seen.ink(title), seen.ink(line)), (gold, gold), "{kind}: the gate's title and lines are gold, as the cells'");
-            let _ = click_on(&ctx, &mut room, SMALL, id.with("buttons").with(0));
+            let _ = click_on(&ctx, &mut room, SMALL, id.with("foot").with(0));
             assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "{kind}: the lit button keeps");
             room.modal = gate.clone();
             let _ = settle(&ctx, &mut room, SMALL);
@@ -1371,7 +1359,7 @@ mod tests {
             assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "{kind}: Esc keeps");
             room.modal = gate;
             let _ = settle(&ctx, &mut room, SMALL);
-            let _ = click_on(&ctx, &mut room, SMALL, id.with("buttons").with(1));
+            let _ = click_on(&ctx, &mut room, SMALL, id.with("foot").with(1));
             assert_eq!(room.queued, Some(op), "{kind}: the other acts");
             room.queued = None;
             room.busy = None;

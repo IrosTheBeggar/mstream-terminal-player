@@ -19,10 +19,10 @@ use super::super::{EguiShown, age_text, iso_unix, unix_now};
 use super::*;
 use crate::api::types::ActiveBackup;
 use crate::gui::window::studio::{
-    self, Col, Dialog, FIELD_H, FORM_BUTTON_H, Glyph, Pal, Para, Run, Table, add_card, bare, body, cell, check, checkbox,
-    chip, cut_start, field_box, foot, foot_line, form_button, form_button_width, hand, ink, label, led, led_cell, line,
-    meter, meter_lit, mono, name_cell, path_cell, pointer, radio, reveal, ring, ring_since, room_rects, small_caps, square,
-    strong, text, width_of, with_figures,
+    self, BROWSER_W, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, Table, add_card, bare, body, cadence, cell, checkbox,
+    chip, field_box, fitted, folder_browser, foot, foot_line, form_button, gate, hand, ink, label, led_cell, line, meter,
+    meter_lit, mono, name_cell, path_cell, radio, reveal, ring, ring_since, room_rects, small_caps, square, state_line,
+    strong, text, unkeyed, verdict, width_of, with_figures,
 };
 
 /// The canvas's room between the room's blocks, the note line's among them.
@@ -30,17 +30,12 @@ const GAP: f32 = studio::ROOM_GAP;
 /// The form's room between its blocks, and between a label and its field.
 const FORM_GAP: f32 = 20.0;
 const LABEL_GAP: f32 = 8.0;
-/// The modals' widths: the canvas's form, and the others to sit with it.
+/// The modals' widths: the canvas's form, and the history's wider one.
 const FORM_W: f32 = 640.0;
-const BROWSER_W: f32 = 560.0;
 const HISTORY_W: f32 = 760.0;
-const GATE_W: f32 = 560.0;
 /// The history's rows, and how many show at once (the cells' eight).
 const RUN_ROW: f32 = 32.0;
 const RUNS_SHOWN: usize = 8;
-/// The folder browser's rows, and how many show at once (the cells' eleven).
-const DIR_ROW: f32 = 30.0;
-const DIRS_SHOWN: usize = 11;
 /// A number field's box, as the canvas draws it.
 const NUMBER_W: f32 = 120.0;
 
@@ -82,7 +77,7 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
         Modal::Form(f) => caret = form(ui, room, f, full, composition, &pal, &mut acts),
         Modal::Browser { browse, .. } => browser(ui, browse, full, &pal, &mut acts),
         Modal::History { dest, runs, loaded, sel } => history(ui, dest, runs, *loaded, *sel, full, &pal, &mut acts),
-        &Modal::Remove(id) => gate(ui, room, id, full, &pal, &mut acts),
+        &Modal::Remove(id) => remove_gate(ui, room, id, full, &pal, &mut acts),
     }
 
     let acted = !acts.is_empty();
@@ -118,7 +113,6 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
 fn state(ui: &mut Ui, room: &Room, pal: &Pal) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
-    let y = row.center().y;
     let beta = chip(ui, row.right_center(), Align2::RIGHT_CENTER, &t!("bak.beta"), pal.gold);
     if !room.loaded {
         return;
@@ -153,37 +147,17 @@ fn state(ui: &mut Ui, room: &Room, pal: &Pal) {
             (t!("bak.state_idle"), detail, pal.dim, pal.unlit, Vec::new(), t!("bak.polls_5"))
         }
     };
-    let (word, detail) = (bare(&word), detail.trim_start());
     let font = if room.status.active.is_some() || room.status.queue_length > 0 { strong(14.0) } else { body(14.0) };
     let figures: Vec<&str> = figures.iter().map(String::as_str).collect();
-    let detail = with_figures(detail, &figures, body(14.0), mono(12.5), pal.text);
-    let polls = cadence(&polls, pal);
-    let x = row.min.x + 16.0;
-    let state_w = 16.0 + width_of(ui, word, font.clone()) + 10.0 + studio::runs_width(ui, &detail);
-    let mut right = beta.min.x - 16.0;
-    // The cadence only where the whole state fits beside it, as the cells
-    // show it.
-    let polls_w = studio::runs_width(ui, &polls);
-    if state_w + 16.0 + polls_w <= right - row.min.x {
-        studio::runs(ui, pos2(right, y), &polls, polls_w + 1.0, Align2::RIGHT_CENTER);
-        right -= polls_w + 16.0;
-    }
-    led(ui, pos2(row.min.x + 3.0, y), lamp);
-    // The board's 10 points between the word and its detail.
-    let said = text(ui, pos2(x, y), word, font, tone, (right - x).max(1.0), Align2::LEFT_CENTER);
-    let from = said.max.x + 10.0;
-    if from < right {
-        studio::runs(ui, pos2(from, y), &detail, right - from, Align2::LEFT_CENTER);
-    }
+    let mut parts = vec![(bare(&word).to_string(), font, tone)];
+    parts.extend(with_figures(&detail, &figures, body(14.0), mono(12.5), pal.text));
+    // The kit's line, short of the chip, the cadence only where the whole
+    // state fits beside it, as the cells show it.
+    let line = Rect::from_min_max(row.min, pos2((beta.min.x - 16.0).max(row.min.x), row.max.y));
+    state_line(ui, line, lamp, &parts, &cadence(&polls, pal));
     if let Some(a) = &room.status.active {
         progress(ui, a, pal);
     }
-}
-
-/// A cadence ("polls every 2 s") dim, its figure in the monospace.
-fn cadence(s: &str, pal: &Pal) -> Vec<Run> {
-    let figure = s.find(|c: char| c.is_ascii_digit()).map_or("", |at| &s[at..]);
-    with_figures(s, &[figure], body(13.0), mono(12.0), pal.dim)
 }
 
 /// The figures of a line of counts, each run of digits with the marks that
@@ -281,21 +255,20 @@ fn status_tone(status: &str, pal: &Pal) -> Color32 {
 /// its box turns the destination on or off.
 fn table(ui: &mut Ui, room: &Room, pal: &Pal, acts: &mut Vec<Act>) {
     // The canvas's widths, narrowed together where the column is narrow so
-    // the destination keeps some room; the row's padding and the gaps are
-    // the kit table's.
-    let w = ui.available_width() - 20.0;
-    let want = [150.0, 150.0, 110.0, 170.0];
-    let on_w = 48.0;
-    let gaps = 5.0 * 16.0;
-    let k = ((w - 160.0 - on_w - gaps) / want.iter().sum::<f32>()).clamp(0.6, 1.0);
-    let cols = [
-        Col::left(t!("bak.col_library"), want[0] * k),
-        Col::left(t!("bak.col_destination"), 0.0),
-        Col::left(t!("bak.col_trigger"), want[1] * k),
-        Col::left(t!("bak.col_retention"), want[2] * k),
-        Col::left(t!("bak.col_last_run"), want[3] * k),
-        Col::center(t!("bak.col_on"), on_w),
-    ];
+    // the destination keeps some room.
+    let cols = fitted(
+        ui.available_width(),
+        vec![
+            Col::left(t!("bak.col_library"), 150.0),
+            Col::left(t!("bak.col_destination"), 0.0),
+            Col::left(t!("bak.col_trigger"), 150.0),
+            Col::left(t!("bak.col_retention"), 110.0),
+            Col::left(t!("bak.col_last_run"), 170.0),
+            Col::center(t!("bak.col_on"), 48.0),
+        ],
+        160.0,
+        0.6,
+    );
     let now = unix_now();
     let running = room.running_id();
     let pct = room.status.active.as_ref().and_then(|a| {
@@ -470,28 +443,6 @@ fn choices(ui: &mut Ui, id: Id, names: &[String], chosen: usize, pal: &Pal) -> (
     (group, clicked)
 }
 
-/// A listing's folders with no headings, [`DIR_ROW`] points a row and at
-/// most [`DIRS_SHOWN`] on screen: the kit's list, a new listing (a folder
-/// opened, its parent, the browser opened again) starting at its top and
-/// bringing the keys' row in from there, as the cells' list opens. Returns
-/// the row a click landed on.
-fn dirs(ui: &mut Ui, listing: &str, names: &[String], sel: usize, pal: &Pal) -> Option<usize> {
-    let h = names.len().min(DIRS_SHOWN) as f32 * DIR_ROW;
-    let list = Table::new(Id::new("backups-browser").with("dirs"), &[], names.len())
-        .headless()
-        .row_height(DIR_ROW)
-        .height(h)
-        .cursor(Some(sel))
-        .content(Id::new(listing));
-    let shown = list.show(ui, pal, |ui, i, row| {
-        let y = row.rect.center().y;
-        pointer(ui, pos2(row.rect.min.x + 14.0, y), if row.selected { pal.accent } else { pal.dim });
-        let ink = if row.hovered { Color32::WHITE } else { pal.text };
-        text(ui, pos2(row.rect.min.x + 28.0, y), &names[i], body(14.0), ink, row.rect.width() - 38.0, Align2::LEFT_CENTER);
-    });
-    shown.row
-}
-
 // ── The add and edit form ─────────────────────────────────────────────────
 
 /// The add and edit form in the kit's modal over the room: the library (a
@@ -570,7 +521,8 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         ui.add_space(LABEL_GAP);
         let w = ui.available_width();
         let (line, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
-        let browse = t!("bak.browse_button").to_string();
+        // Bare of the cells' key, as the canvas draws it.
+        let browse = unkeyed(&t!("bak.browse_button")).0.to_string();
         let bw = browse_button_width(ui, &browse).min(w * 0.5);
         let boxed = Rect::from_min_max(line.min, pos2(line.max.x - bw - 8.0, line.max.y));
         let input = studio::Input::of(&f.dest).mono().focused(focused == Field::Dest, composition);
@@ -587,7 +539,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
             acts.push(Act::FormBrowse);
         }
         ui.add_space(LABEL_GAP);
-        verdict(ui, f, pal);
+        dest_verdict(ui, f, pal);
         ui.add_space(FORM_GAP);
 
         // 4. The numbers side by side, each its hint beneath; the hour
@@ -633,34 +585,22 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         }
         ui.add_space(FORM_GAP + 4.0);
 
-        // The button row: the one act at the right, and while editing the
+        // The kit's foot: the one act at the right, and while editing the
         // patterns' reset at the left, the error then on a line of its own
         // above them (the cells drew the one over the other); while adding
         // the error sits at the row's left, as the canvas has it.
-        let w = ui.available_width();
         if editing && let Some(err) = &f.error {
             studio::line(ui, 18.0, err, body(13.0), pal.gold);
             ui.add_space(LABEL_GAP);
         }
-        let (line, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
-        let label = if editing { t!("bak.save") } else { t!("bak.add_submit") }.to_string();
-        let gw = form_button_width(ui, &label).min(w);
-        let go = Rect::from_min_max(pos2(line.max.x - gw, line.min.y), line.max);
-        if form_button(ui, id.with("submit"), go, &label, true, pal).clicked() {
-            acts.push(Act::FormSubmit);
-        }
-        if editing {
-            let reset = t!("bak.reset_patterns").to_string();
-            let rw = form_button_width(ui, &reset).min((go.min.x - 10.0 - line.min.x).max(0.0));
-            let at = Rect::from_min_size(line.min, vec2(rw, line.height()));
-            if rw > 0.0 && form_button(ui, id.with("reset"), at, &reset, false, pal).clicked() {
-                acts.push(Act::FormResetExcludes);
-            }
-        } else if let Some(err) = &f.error {
-            let room_w = go.min.x - 16.0 - line.min.x;
-            if room_w > 0.0 {
-                text(ui, line.left_center(), err, body(13.0), pal.gold, room_w, Align2::LEFT_CENTER);
-            }
+        let submit = if editing { t!("bak.save") } else { t!("bak.add_submit") }.to_string();
+        let reset = unkeyed(&t!("bak.reset_patterns")).0.to_string();
+        let start: &[(&str, bool)] = if editing { &[(reset.as_str(), false)] } else { &[] };
+        let refusal = if editing { None } else { f.error.as_deref() };
+        match foot(ui, id.with("foot"), start, &[(submit.as_str(), true)], refusal, pal) {
+            Some(k) if k == start.len() => acts.push(Act::FormSubmit),
+            Some(_) => acts.push(Act::FormResetExcludes),
+            None => {}
         }
         caret
     });
@@ -670,66 +610,50 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
     shown.inner
 }
 
-/// The server's word on the destination under its field: nothing for an
-/// empty field; checking, dim; its first error or warning in gold, in at
-/// most two lines; or the check mark and its "looks good" in green.
-fn verdict(ui: &mut Ui, f: &Form, pal: &Pal) {
+/// The server's word on the destination under its field, the kit's
+/// verdict: nothing for an empty field; checking, dim; its first error or
+/// warning in gold behind the cells' dash, in at most two lines; or the
+/// check mark and its "looks good" in green.
+fn dest_verdict(ui: &mut Ui, f: &Form, pal: &Pal) {
     let dest = f.dest.value().trim();
     let w = ui.available_width();
-    let said: Option<(String, Color32, bool)> = if dest.is_empty() {
+    let said: Option<(String, Color32, Option<bool>)> = if dest.is_empty() {
         None
     } else if f.checked_for != dest || f.check.is_none() {
-        Some((t!("bak.checking").to_string(), pal.dim, false))
+        Some((t!("bak.checking").to_string(), pal.dim, None))
     } else if let Some(check) = &f.check {
         if let Some(err) = check.errors.first() {
-            Some((format!("− {}", printable(err, 200)), pal.gold, false))
+            Some((printable(err, 200), pal.gold, Some(false)))
         } else if let Some(warn) = check.warnings.first() {
             let more = if check.warnings.len() > 1 { format!(" (+{})", check.warnings.len() - 1) } else { String::new() };
-            Some((format!("− {}{more}", printable(warn, 200)), pal.gold, false))
+            Some((format!("{}{more}", printable(warn, 200)), pal.gold, Some(false)))
         } else {
-            Some((t!("bak.check_ok").to_string(), pal.ok, true))
+            Some((t!("bak.check_ok").to_string(), pal.ok, Some(true)))
         }
     } else {
         None
     };
-    match said {
-        None => {
-            let _ = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-        }
-        Some((words, color, true)) => {
-            let (row, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-            check(ui, pos2(row.min.x + 5.0, row.center().y), color);
-            text(ui, pos2(row.min.x + 18.0, row.center().y), &words, body(13.0), color, w - 18.0, Align2::LEFT_CENTER);
-        }
-        Some((words, color, false)) => {
-            Para::new(&words, body(13.0), color).rows(2).show(ui);
-        }
-    }
+    let at = ui.cursor().min;
+    let h = said.map_or(0.0, |(words, tone, mark)| verdict(ui, at, w, &words, &[], tone, mark).height());
+    let _ = ui.allocate_exact_size(vec2(w, h.max(18.0)), Sense::hover());
 }
 
 // ── The folder browser, the history, the gate ────────────────────────────
 
-/// The server's folder browser, over the form that waits beneath: the path
-/// listed, its folders (a click picks one), and the buttons in the cells'
-/// order from the left, up, open, use this folder (lit) and close.
+/// The server's folder browser, the kit's (Libraries' too), over the form
+/// that waits beneath: the path listed, its folders (a click picks one),
+/// and the buttons in the cells' order from the left, up, open, use this
+/// folder (lit) and close.
 fn browser(ui: &Ui, browse: &Browse, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let id = Id::new("backups-browser");
     let shown = Dialog::new(id, over, BROWSER_W, &t!("bak.browser_title")).show(ui, pal, |ui| {
-        let w = ui.available_width();
-        let (path, _) = cut_start(ui, &browse.path, mono(12.5), w);
-        line(ui, 18.0, &path, mono(12.5), pal.dim);
-        ui.add_space(12.0);
-        if browse.dirs.is_empty() {
-            let (row, _) = ui.allocate_exact_size(vec2(w, DIR_ROW), Sense::hover());
-            text(ui, row.left_center() + vec2(10.0, 0.0), &t!("browse.empty"), body(14.0), pal.dim, w - 10.0, Align2::LEFT_CENTER);
-        } else if let Some(i) = dirs(ui, &browse.path, &browse.dirs, browse.sel, pal) {
+        if let Some(i) = folder_browser(ui, id.with("list"), &browse.path, &browse.dirs, browse.sel, &t!("browse.empty"), pal) {
             acts.push(Act::BrowseRow(i));
         }
-        ui.add_space(FORM_GAP);
         let (up, open, choose, close) = (t!("browse.up"), t!("browse.open"), t!("bak.browse_use"), t!("browse.close"));
         let start = [(up.as_ref(), false), (open.as_ref(), false), (choose.as_ref(), true), (close.as_ref(), false)];
         let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseChoose, Act::BrowseCancel];
-        if let Some(k) = foot(ui, id.with("button"), &start, &[], None, pal) {
+        if let Some(k) = foot(ui, id.with("foot"), &start, &[], None, pal) {
             acts.push(meant[k].clone());
         }
     });
@@ -825,26 +749,18 @@ fn history(ui: &Ui, dest: &BackupDestination, runs: &[BackupRun], loaded: bool, 
     }
 }
 
-/// The remove gate, answered as the cells' (gold, no close; Esc keeps):
-/// the consequences, then Keep, the safe choice and the primary, and
-/// Remove after it.
-fn gate(ui: &Ui, room: &Room, id: i64, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
+/// The remove gate, the kit's: the consequences, then Keep, the safe
+/// choice and the primary, and Remove after it.
+fn remove_gate(ui: &Ui, room: &Room, id: i64, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let (library, path) = room.dest(id).map(|d| (printable(&d.library_name, 64), d.dest_path.clone())).unwrap_or_default();
     let title = t!("bak.remove_title", library = library, path = path);
-    let gate_id = Id::new("backups-remove");
-    let _ = Dialog::new(gate_id, over, GATE_W, &title).gate(pal).show(ui, pal, |ui| {
-        for key in ["bak.remove_1", "bak.remove_2"] {
-            Para::new(&t!(key), body(14.0), pal.gold).show(ui);
-            ui.add_space(6.0);
-        }
-        ui.add_space(14.0);
-        let (keep, go) = (t!("bak.remove_keep"), t!("bak.remove_confirm"));
-        match foot(ui, gate_id.with("foot"), &[], &[(keep.as_ref(), true), (go.as_ref(), false)], None, pal) {
-            Some(0) => acts.push(Act::RemoveCancel),
-            Some(_) => acts.push(Act::RemoveConfirm),
-            None => {}
-        }
-    });
+    let sentences = ["bak.remove_1", "bak.remove_2"].map(|key| Para::new(&t!(key), body(14.0), pal.gold)).into();
+    let (keep, go) = (t!("bak.remove_keep"), t!("bak.remove_confirm"));
+    match gate(ui, Id::new("backups-remove"), over, &title, sentences, [&keep, &go], pal) {
+        Some(true) => acts.push(Act::RemoveConfirm),
+        Some(false) => acts.push(Act::RemoveCancel),
+        None => {}
+    }
 }
 
 #[cfg(test)]
@@ -967,12 +883,12 @@ mod tests {
         assert!(!texts.iter().any(|t| t == "LIBRARY" || t == "Add a backup destination"), "{texts:?}");
         assert!(shown.caret.is_none() && shown.outcome.is_none());
 
-        // Empty: the idle state, the card, the headings and the empty line.
+        // Empty: the idle state (the kit's state line, in one run), the
+        // card, the headings and the empty line.
         let mut room = loaded_room(Vec::new(), BackupStatus::default());
         let (out, _) = pass(&ctx, &mut room, LARGE);
         assert_drew(&out, &[
-            "idle",
-            "— nothing running · 0 of 0 destinations on · trash swept hourly",
+            "idle — nothing running · 0 of 0 destinations on · trash swept hourly",
             "polls every 5 s",
             "BETA",
             "Add a backup destination",
@@ -985,7 +901,7 @@ mod tests {
         let mut room = idle();
         let (out, shown) = pass(&ctx, &mut room, LARGE);
         assert_drew(&out, &[
-            "— nothing running · 2 of 3 destinations on · trash swept hourly",
+            "idle — nothing running · 2 of 3 destinations on · trash swept hourly",
             "LIBRARY",
             "DESTINATION",
             "TRIGGER",
@@ -1037,13 +953,12 @@ mod tests {
         room.apply(loaded(dests(), BackupStatus { active: Some(active.clone()), queue_length: 1 }));
         let (out, _) = pass(&ctx, &mut room, LARGE);
         assert_drew(&out, &[
-            "running",
             "polls every 2 s",
             "41% · 1,204 of 2,930 · 812 copied · 380 unchanged · 12 trashed · 3.4 GB written",
             "running… 41%",
         ]);
         let texts = drawn(&out);
-        assert!(texts.iter().any(|t| t.starts_with("— podcasts → /Volumes/Backup/podcasts · after each scan · 2m 1")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.starts_with("running — podcasts → /Volumes/Backup/podcasts · after each scan · 2m 1")), "{texts:?}");
         // A narrow room drops whole count groups off the progress line's end.
         let whole = "41% · 1,204 of 2,930 · 812 copied · 380 unchanged · 12 trashed · 3.4 GB written";
         let (out, _) = pass(&ctx, &mut room, vec2(560.0, 420.0));
@@ -1061,7 +976,7 @@ mod tests {
         // Tasks waiting.
         room.apply(loaded(dests(), BackupStatus { active: None, queue_length: 2 }));
         let (out, _) = pass(&ctx, &mut room, LARGE);
-        assert_drew(&out, &["2 tasks queued", "— waiting for the active scan or backup to finish", "polls every 2 s"]);
+        assert_drew(&out, &["2 tasks queued — waiting for the active scan or backup to finish", "polls every 2 s"]);
     }
 
     #[test]
@@ -1115,7 +1030,7 @@ mod tests {
             "— when the library finishes scanning",
             "DESTINATION",
             "· another drive, not inside the library",
-            "^B BROWSE",
+            "BROWSE",
             "RETENTION DAYS",
             "0 = no trash",
             "HOUR (0–23)",
@@ -1165,7 +1080,7 @@ mod tests {
         // Submit: Act::FormSubmit, refused here for its hour.
         let _ = click_id(&ctx, &mut room, LARGE, id.with("number").with(2));
         press(&mut room, KeyCode::Backspace);
-        let _ = click_id(&ctx, &mut room, LARGE, id.with("submit"));
+        let _ = click_id(&ctx, &mut room, LARGE, id.with("foot").with(0));
         assert_eq!(form(&room).error.as_deref(), Some("the hour is 0 to 23"));
         let (out, _) = pass(&ctx, &mut room, LARGE);
         assert_drew(&out, &["the hour is 0 to 23"]);
@@ -1191,17 +1106,17 @@ mod tests {
             "Edit — podcasts → /Volumes/Backup/podcasts",
             "podcasts",
             "  — fixed: remove and re-add to retarget",
-            "^P RESET PATTERNS TO THE DEFAULTS",
+            "RESET PATTERNS TO THE DEFAULTS",
             "SAVE",
         ]);
         let id = Id::new("backups-form");
         let _ = click_id(&ctx, &mut room, LARGE, id.with("excludes"));
         assert_eq!(form(&room).focused(), Field::Excludes);
         type_text(&mut room, ", *.log");
-        let _ = click_id(&ctx, &mut room, LARGE, id.with("reset"));
+        let _ = click_id(&ctx, &mut room, LARGE, id.with("foot").with(0));
         let f = form(&room);
         assert!(f.excludes_reset && f.excludes.value() == "Thumbs.db, desktop.ini, .DS_Store, ._*", "Act::FormResetExcludes");
-        let _ = click_id(&ctx, &mut room, LARGE, id.with("submit"));
+        let _ = click_id(&ctx, &mut room, LARGE, id.with("foot").with(1));
         assert!(
             matches!(room.queued, Some(Op::Patch { id: 2, patch: BackupPatch { exclude_globs: Some(None), .. }, .. })),
             "the save sends the reset as null: {:?}",
@@ -1232,18 +1147,18 @@ mod tests {
 
         let _ = click(&ctx, &mut room, LARGE, find(&out, "NAS").center());
         assert!(matches!(&room.modal, Modal::Browser { browse, .. } if browse.sel == 1), "Act::BrowseRow");
-        let _ = click_id(&ctx, &mut room, LARGE, id.with("button").with(1));
+        let _ = click_id(&ctx, &mut room, LARGE, id.with("foot").with(1));
         assert_eq!(room.queued, Some(Op::Browse("/Volumes/NAS".into())), "Act::BrowseEnter");
         room.queued = None;
-        let _ = click_id(&ctx, &mut room, LARGE, id.with("button").with(0));
+        let _ = click_id(&ctx, &mut room, LARGE, id.with("foot").with(0));
         assert_eq!(room.queued, Some(Op::Browse("/".into())), "Act::BrowseUp");
         room.queued = None;
-        let _ = click_id(&ctx, &mut room, LARGE, id.with("button").with(2));
+        let _ = click_id(&ctx, &mut room, LARGE, id.with("foot").with(2));
         assert_eq!(form(&room).dest.value(), "/Volumes", "Act::BrowseChoose");
         assert!(matches!(room.queued, Some(Op::Check { .. })), "the chosen path is checked");
 
         // Its close button and its window's close: Act::BrowseCancel both.
-        for close in [id.with("button").with(3), id.with("close")] {
+        for close in [id.with("foot").with(3), id.with("close")] {
             room.queued = None;
             room.busy = None;
             ctrl(&mut room, 'b');
@@ -1298,7 +1213,7 @@ mod tests {
 
         // Up to the parent, its cursor still on the first row: the parent's
         // listing opens there.
-        let _ = click_id(&ctx, &mut room, LARGE, Id::new("backups-browser").with("button").with(0));
+        let _ = click_id(&ctx, &mut room, LARGE, Id::new("backups-browser").with("foot").with(0));
         assert_eq!(room.queued, Some(Op::Browse("/".into())), "Act::BrowseUp");
         room.queued = None;
         room.apply(listing("/", "root"));
@@ -1309,7 +1224,7 @@ mod tests {
         // opens on its cursor too.
         let out = wheel_down(&ctx, &mut room, &out, "root05");
         assert!(!drawn(&out).iter().any(|t| t == "root00"), "the wheel took the list down");
-        let _ = click_id(&ctx, &mut room, LARGE, Id::new("backups-browser").with("button").with(3));
+        let _ = click_id(&ctx, &mut room, LARGE, Id::new("backups-browser").with("foot").with(3));
         assert!(matches!(room.modal, Modal::Form(_)), "Act::BrowseCancel");
         // The frame the close brings, the form back under no browser.
         let _ = pass(&ctx, &mut room, LARGE);

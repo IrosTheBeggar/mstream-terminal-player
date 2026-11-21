@@ -10,12 +10,13 @@
 //!
 //! A click here is the act the cells' click on the same thing is, applied
 //! through the room's own [`Room::act`] once the pass is drawn, so the two
-//! views cannot disagree about what the room does. A few controls the
-//! canvas draws stand for a key the cells' words name (the hidden servers'
-//! `h`, the blocked list's `u`, a gate's close for Esc): they hand the room
-//! that key, as the keyboard would. Keys never reach egui: every field is
-//! drawn from the room's own value and caret, which its key handler edits
-//! as it always has, and the focused one says where its caret stands.
+//! views cannot disagree about what the room does. Two controls the canvas
+//! draws stand for a key the cells' words name (the hidden servers' `h`,
+//! the blocked list's `u`): they hand the room that key, as the keyboard
+//! would. A gate is the kit's, answered with its buttons or its keys, with
+//! no close. Keys never reach egui: every field is drawn from the room's
+//! own value and caret, which its key handler edits as it always has, and
+//! the focused one says where its caret stands.
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
@@ -26,16 +27,13 @@ use super::super::{EguiShown, age_text, fmt_bytes, fmt_count, iso_unix, unix_now
 use super::*;
 use crate::gui::window::studio::{
     self, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, RowCtx, SEG_H, Seg, Table, add_card, bare, body, caps, caps_width, cell,
-    field, field_box, foot, form_button, hand, ink, label, label_at, led, led_cell, line, list_row, mono, name_cell, reveal,
-    runs, runs_width, searching, segmented, segmented_width, small_caps, small_caps_width, square, strong, text, tick_card,
-    tick_row, unkeyed, width_of,
+    field, field_box, foot, form_button, gate, hand, ink, label, label_at, led, led_cell, line, list_row, mono, name_cell,
+    reveal, runs, runs_width, searching, segmented, segmented_width, small_caps, small_caps_width, square, strong, text,
+    tick_card, tick_row, unkeyed, width_of,
 };
 use crate::input::KeyModifiers;
 
-/// The note line's height along the room's foot: the canvas's 18 points,
-/// a full gap under the servers you follow.
-const NOTE_H: f32 = 18.0;
-/// Where a line's words start after the LED that leads it.
+/// Where a fact's words start after the LED that leads it.
 const LED_W: f32 = 14.0;
 /// The table's headings and the room under them, as the kit draws them.
 const HEAD_H: f32 = studio::TABLE_HEAD;
@@ -192,7 +190,7 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str, key_hints: b
     let look = Look::for_height(full.height());
     let column =
         Rect::from_min_max(pos2(full.min.x + look.side, full.min.y + look.top), pos2(full.max.x - look.side, full.max.y - look.bottom));
-    let foot = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
+    let foot = Rect::from_min_max(pos2(column.min.x, column.max.y - studio::NOTE_H), column.max);
     let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, foot.min.y - look.gap));
 
     // The sheet of a server that left the catalog closes, as the cells'
@@ -346,13 +344,12 @@ fn state(ui: &Ui, row: Rect, s: &DiscoveryStatus, polls: bool, pal: &Pal) {
         (t!("p2p.state_announcing").to_string(), body(14.0), pal.text),
         (printable(&s.server_name, NAME_MAX), strong(14.0), pal.text),
     ]);
-    let room_w = row.width() - LED_W;
+    let room_w = row.width() - studio::STATE_INDENT;
     while groups.len() > 1 && runs_width(ui, &groups.concat()) > room_w {
         groups.pop();
     }
-    // The board sets this room's cadence in the figures' face.
-    let cadence = (t!("p2p.polls").to_string(), mono(12.0), pal.dim);
-    studio::state_line(ui, row, lamp, LED_W, &groups.concat(), polls.then_some(&cadence));
+    let cadence = if polls { studio::cadence(&t!("p2p.polls"), pal) } else { Vec::new() };
+    studio::state_line(ui, row, lamp, &groups.concat(), &cadence);
 }
 
 /// The four tabs as one segmented control from `left`, the open one lit.
@@ -861,7 +858,7 @@ fn off_network(ui: &mut Ui, room: &Room, s: &DiscoveryStatus, look: &Look, pal: 
             }
             (words, pal.dim, pal.unlit)
         };
-        studio::state_line(ui, row, lamp, LED_W, &[(words, body(14.0), tone)], None);
+        studio::state_line(ui, row, lamp, &[(words, body(14.0), tone)], &[]);
         ui.add_space(look.gap);
         if !unavailable {
             if add_card(ui, Id::new("disc-join"), &t!("p2p.off_join"), Glyph::None, pal).clicked() {
@@ -907,7 +904,7 @@ fn modals(ui: &Ui, room: &Room, over: Rect, pal: &Pal, typing: Typing, key_hints
         Modal::Setting(d) => setting(ui, over, d, pal, typing.composition, pass),
         Modal::Block(id) => {
             let name = room.peer(id).map(display_name).unwrap_or_else(|| short_id(id));
-            gate(
+            warn(
                 ui,
                 Id::new("disc-block"),
                 over,
@@ -919,7 +916,7 @@ fn modals(ui: &Ui, room: &Room, over: Rect, pal: &Pal, typing: Typing, key_hints
                 pass,
             )
         }
-        Modal::Leave => gate(
+        Modal::Leave => warn(
             ui,
             Id::new("disc-leave"),
             over,
@@ -1240,23 +1237,14 @@ fn setting(ui: &Ui, over: Rect, d: &SettingDraft, pal: &Pal, composition: &str, 
     pass.caret = caret;
 }
 
-/// A warning gate, answered as the cells' (gold title and frame, no close;
-/// Esc keeps): its consequences in gold, the safe choice lit as the
-/// primary and the act beside it.
+/// A warning gate, the kit's: its consequences in gold, the safe choice
+/// lit as the primary and the act beside it.
 #[allow(clippy::too_many_arguments)]
-fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: [String; 2], safe: (String, Act), go: (String, Act), pal: &Pal, pass: &mut Pass) {
-    let shown = Dialog::new(id, over, MODAL_W, title).gate(pal).show(ui, pal, |ui| {
-        let w = ui.available_width();
-        for words in &lines {
-            para(ui, w, &[(words.clone(), body(14.0), pal.gold)]);
-            ui.add_space(4.0);
-        }
-        ui.add_space(18.0);
-        foot(ui, id.with("foot"), &[], &[(&safe.0, true), (&go.0, false)], None, pal)
-    });
-    match shown.inner {
-        Some(0) => pass.act(safe.1),
-        Some(_) => pass.act(go.1),
+fn warn(ui: &Ui, id: Id, over: Rect, title: &str, lines: [String; 2], safe: (String, Act), go: (String, Act), pal: &Pal, pass: &mut Pass) {
+    let sentences = lines.map(|words| Para::new(&words, body(14.0), pal.gold)).into();
+    match gate(ui, id, over, title, sentences, [&safe.0, &go.0], pal) {
+        Some(true) => pass.act(go.1),
+        Some(false) => pass.act(safe.1),
         None => {}
     }
 }

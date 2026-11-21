@@ -518,23 +518,59 @@ pub(crate) fn foot_line(ui: &Ui, rect: Rect, busy: Option<&str>, note: Option<&(
     }
 }
 
+/// Where a state line's words start: the LED's 6 points and the 10 after.
+pub(crate) const STATE_INDENT: f32 = 16.0;
+
 /// A room's state line across `row`: the LED lit `lamp` at its left, then
-/// `parts` in one run from `indent` points in, cut with an ellipsis, and
-/// `right` (the reload's cadence) at the row's end, only where the whole
-/// line fits beside it. Returns where the words were drawn.
-pub(crate) fn state_line(ui: &Ui, row: Rect, lamp: Color32, indent: f32, parts: &[Run], right: Option<&Run>) -> Rect {
+/// `parts` in one run 16 points in, cut with an ellipsis, and `right` (the
+/// reload's [`cadence`]; none for nothing) at the row's end, only where the
+/// whole line fits beside it. Every room's state line is this one, so the
+/// words stand in one place whichever room is shown. Returns where the
+/// words were drawn.
+pub(crate) fn state_line(ui: &Ui, row: Rect, lamp: Color32, parts: &[Run], right: &[Run]) -> Rect {
     let mid = row.center().y;
     led(ui, pos2(row.min.x + 3.0, mid), lamp);
-    let x = row.min.x + indent;
+    let x = row.min.x + STATE_INDENT;
     let mut end = row.max.x;
-    if let Some((words, font, color)) = right {
-        let right_w = width_of(ui, words, font.clone());
+    if !right.is_empty() {
+        let right_w = runs_width(ui, right);
         if x + runs_width(ui, parts) + 16.0 + right_w <= row.max.x {
-            text(ui, pos2(row.max.x, mid), words, font.clone(), *color, right_w + 1.0, Align2::RIGHT_CENTER);
+            runs(ui, pos2(row.max.x, mid), right, right_w + 1.0, Align2::RIGHT_CENTER);
             end = row.max.x - right_w - 16.0;
         }
     }
     runs(ui, pos2(x, mid), parts, (end - x).max(1.0), Align2::LEFT_CENTER)
+}
+
+/// The server's word on what a form was given (a path checked, a client
+/// probed) or the form's own refusal, from `at`, its top left, `w` wide:
+/// behind its `mark` — the cells' "✓" as the canvas's check (`true`), or
+/// their "−" as a short rule (`false`), 6 points in, in `tone` — the words
+/// wrapped beside it in up to two lines of 13.5-point `tone`, `figures` in
+/// them (a version, a number) in the monospace. With no mark the words
+/// start at `at`. Returns where it was drawn.
+pub(crate) fn verdict(ui: &Ui, at: Pos2, w: f32, words: &str, figures: &[&str], tone: Color32, mark: Option<bool>) -> Rect {
+    // The canvas's 12-point mark and the 8 points after it.
+    let indent = if mark.is_some() { 20.0 } else { 0.0 };
+    let parts = with_figures(words, figures, body(13.5), mono(12.5), tone);
+    let drawn = Para::runs(&parts).rows(2).paint(ui, at + vec2(indent, 0.0), w - indent);
+    let centre = pos2(at.x + 6.0, at.y + drawn.height().min(19.0) / 2.0);
+    match mark {
+        Some(true) => check(ui, centre, tone),
+        Some(false) => {
+            ui.painter().line_segment([centre - vec2(4.0, 0.0), centre + vec2(4.0, 0.0)], Stroke::new(1.7, tone));
+        }
+        None => {}
+    }
+    drawn.union(Rect::from_min_size(at, vec2(indent, 1.0)))
+}
+
+/// A room's reload cadence ("polls every 2 s"), for the right of its
+/// [`state_line`]: dim, its words in the UI face and its figure, from its
+/// first digit on, in the monospace, as the canvas's Backups board sets it.
+pub(crate) fn cadence(s: &str, pal: &Pal) -> Vec<Run> {
+    let figure = s.find(|c: char| c.is_ascii_digit()).map_or("", |at| &s[at..]);
+    with_figures(s, &[figure], body(13.0), mono(12.0), pal.dim)
 }
 
 // ── The room ──────────────────────────────────────────────────────────────
@@ -936,21 +972,16 @@ fn cursor_look(ui: &Ui, rect: Rect, pal: &Pal) {
     ring(ui, rect, pal);
 }
 
-/// A tick at `rect` with its words, a form's choice (a library of a grant,
-/// a permission): the box 8 points in on the panel's fill and `label`
-/// beside it, cut to the row. The form's focus wears the keyboard's look —
-/// the raised fill, the accent ring, the label semibold — and the pointer
-/// raises it; the whole row takes the click (the canvas's FederationMint).
+/// A tick at `rect` with its words, a form's choice or a list's (a library
+/// of a grant or a ticket): a [`list_row_at`] with the box 8 points in on
+/// the panel's fill and `label` beside it, cut to the row. The form's focus
+/// or the list's cursor wears the keyboard's look — the raised fill, the
+/// accent ring, the label semibold — and the pointer raises it; the whole
+/// row takes the click (the canvas's FederationMint).
 pub(crate) fn tick_row(ui: &Ui, id: Id, rect: Rect, on: bool, label: &str, focused: bool, pal: &Pal) -> Response {
-    let response = hand(ui.interact(rect, id, Sense::click()));
-    let hovered = response.hovered();
-    if focused {
-        cursor_look(ui, rect, pal);
-    } else if hovered {
-        ui.painter().rect_filled(rect, square(), pal.raised);
-    }
+    let response = list_row_at(ui, id, rect, focused, pal);
     let mark = Rect::from_min_size(pos2(rect.min.x + 8.0, rect.center().y - BOX / 2.0), Vec2::splat(BOX));
-    tick_box(ui, mark, on, hovered, pal.panel, pal);
+    tick_box(ui, mark, on, response.hovered(), pal.panel, pal);
     let x = mark.max.x + 10.0;
     let font = if focused { strong(14.0) } else { body(14.0) };
     text(ui, pos2(x, rect.center().y), label, font, pal.text, (rect.max.x - x - 8.0).max(1.0), Align2::LEFT_CENTER);
@@ -969,7 +1000,7 @@ pub(crate) fn list_row(ui: &mut Ui, id: Id, h: f32, on: bool, pal: &Pal) -> (Rec
 }
 
 /// [`list_row`] at `rect`.
-pub(crate) fn list_row_at(ui: &Ui, id: Id, rect: Rect, on: bool, pal: &Pal) -> Response {
+fn list_row_at(ui: &Ui, id: Id, rect: Rect, on: bool, pal: &Pal) -> Response {
     let response = hand(ui.interact(rect, id, Sense::click()));
     if on {
         cursor_look(ui, rect, pal);
@@ -1895,6 +1926,50 @@ pub(crate) fn fitted(w: f32, cols: Vec<Col>, least: f32, floor: f32) -> Vec<Col>
     cols.into_iter().map(|c| Col { w: (c.w * k).floor(), ..c }).collect()
 }
 
+// ── Folders ───────────────────────────────────────────────────────────────
+
+/// The server's folder browser's window, every room's that picks a folder.
+pub(crate) const BROWSER_W: f32 = 640.0;
+/// A row of a modal's list of folders, and the most a browser shows at
+/// once (the cells' eleven).
+pub(crate) const FOLDER_ROW_H: f32 = 30.0;
+const BROWSE_ROWS: usize = 11;
+
+/// A folder in a modal's list at `rect`: the cells' "▸" ([`pointer`]) 13
+/// points in, in the accent on the keyboard's row (`on`), and `name` 26
+/// points in, in `color`, the text colour on the keyboard's row.
+pub(crate) fn folder_row(ui: &Ui, rect: Rect, name: &str, on: bool, color: Color32, pal: &Pal) {
+    pointer(ui, pos2(rect.min.x + 13.0, rect.center().y), if on { pal.accent } else { pal.dim });
+    let color = if on { pal.text } else { color };
+    text(ui, pos2(rect.min.x + 26.0, rect.center().y), name, body(14.0), color, (rect.width() - 36.0).max(1.0), Align2::LEFT_CENTER);
+}
+
+/// The body of the server's folder browser, as both rooms that pick a
+/// folder draw it, rows of the layout: `path`, the folder listed, cut at
+/// its start in the dim monospace; under it its folders as [`folder_row`]s
+/// in a headless [`Table`] under `id`, at most eleven on screen and no
+/// more than leave a [`foot`] room under it, the keyboard's `sel` ringed
+/// and kept in view and a new listing starting at its top; with none,
+/// `empty` dim on the first row's line; then the 20 points over the foot,
+/// which the page draws. The row a click landed on.
+pub(crate) fn folder_browser(ui: &mut Ui, id: Id, path: &str, names: &[String], sel: usize, empty: &str, pal: &Pal) -> Option<usize> {
+    let w = ui.available_width();
+    let (shown, _) = cut_start(ui, path, mono(12.5), w);
+    line(ui, 18.0, &shown, mono(12.5), pal.dim);
+    ui.add_space(12.0);
+    let most = names.len().min(BROWSE_ROWS) as f32 * FOLDER_ROW_H;
+    let list = Table::new(id, &[], names.len())
+        .headless()
+        .row_height(FOLDER_ROW_H)
+        .height(most.min(ui.available_height() - 20.0 - FORM_BUTTON_H).max(FOLDER_ROW_H))
+        .cursor(Some(sel))
+        .content(Id::new(path))
+        .empty(empty);
+    let picked = list.show(ui, pal, |ui, i, row| folder_row(ui, row.rect, &names[i], row.selected, ink(row, pal.text, pal), pal));
+    ui.add_space(20.0);
+    picked.row
+}
+
 // ── Modals ────────────────────────────────────────────────────────────────
 
 /// A modal window's padding, the room under its title, and the title row.
@@ -1925,8 +2000,9 @@ struct BodyView {
 /// `width` wide (less where `over` is narrower) on the panel's fill in a
 /// strong-edged hairline with the canvas's shadow, 24 points in: `title`
 /// in 16-point semibold (wrapped where it runs long, never cut short of its
-/// question) with a close button at its right, then the body laid out
-/// top-down under it, scrolled where it is taller than `over` allows.
+/// question) with a close button at its right (none on a gate), then the
+/// body laid out top-down under it, scrolled where it is taller than
+/// `over` allows.
 ///
 /// The window takes the height its body asked for on the last pass (egui
 /// runs the pass again when that changed, so it never shows misplaced). A
@@ -1949,22 +2025,12 @@ impl<'a> Dialog<'a> {
         Dialog { id, over, width, title, tone: None, close: true, hold: None }
     }
 
-    /// The title and the frame in `color`.
-    pub(crate) fn tone(self, color: Color32) -> Self {
-        Dialog { tone: Some(color), ..self }
-    }
-
-    /// With no close button: what it asks is answered with its own
-    /// buttons and keys.
-    pub(crate) fn closable(self, close: bool) -> Self {
-        Dialog { close, ..self }
-    }
-
     /// A warning gate, as the cells draw every one: its title and frame in
     /// the warning's gold, and no close, since a gate is answered — Esc and
-    /// the safe button keep — never dismissed.
-    pub(crate) fn gate(self, pal: &Pal) -> Self {
-        self.tone(pal.gold).closable(false)
+    /// the safe button keep — never dismissed. A room draws its gates with
+    /// [`gate`], which wears this.
+    fn gate(self, pal: &Pal) -> Self {
+        Dialog { tone: Some(pal.gold), close: false, ..self }
     }
 
     /// The window's top held where a window with a body `body_h` tall would
@@ -2054,6 +2120,33 @@ impl<'a> Dialog<'a> {
         }
         ModalShown { closed, inner }
     }
+}
+
+/// A warning gate's window, every room's: room for the longest of their
+/// sentences to break into whole lines.
+const GATE_W: f32 = 600.0;
+
+/// A warning gate over `over`, as the cells draw every one and every room
+/// draws it alike: a [`Dialog`] in the warning's gold with no close,
+/// [`GATE_W`] wide, asking `title`; its `sentences` (each a [`Para`]: its
+/// colour, a list's lead) 6 points apart; and 20 points under them its
+/// foot, `answers` the safe choice lit and then the one that goes through,
+/// buttons 0 and 1 of `id.with("foot")`. Esc keeps, as the room's keys
+/// have it. How a click answered it: `Some(true)` goes through,
+/// `Some(false)` keeps.
+pub(crate) fn gate(ui: &Ui, id: Id, over: Rect, title: &str, sentences: Vec<Para>, answers: [&str; 2], pal: &Pal) -> Option<bool> {
+    let shown = Dialog::new(id, over, GATE_W, title).gate(pal).show(ui, pal, |ui| {
+        for (k, sentence) in sentences.into_iter().enumerate() {
+            if k > 0 {
+                ui.add_space(6.0);
+            }
+            sentence.show(ui);
+        }
+        ui.add_space(20.0);
+        let [keep, go] = answers;
+        foot(ui, id.with("foot"), &[], &[(keep, true), (go, false)], None, pal)
+    });
+    shown.inner.map(|k| k == 1)
 }
 
 /// The keyboard's control in the body of the modal `modal` at `rect`,
@@ -2482,12 +2575,19 @@ mod tests {
         let ctx = context();
         let size = vec2(600.0, 400.0);
         let over = Rect::from_min_size(Pos2::ZERO, size);
+        let id = Id::new("probe-gate");
         let title = "Remove Boards of Canada - Music Has the Right to Children (1998) [FLAC] from Transmission?";
-        let out = pass(&ctx, size, Vec::new(), &mut |ui| {
+        let answered = Cell::new(None);
+        let mut run = |ui: &mut Ui| {
             let pal = Pal::now();
-            let _ = Dialog::new(Id::new("probe-gate"), over, 420.0, title).gate(&pal).show(ui, &pal, |ui| ui.add_space(40.0));
-        });
-        assert!(ctx.read_response(Id::new("probe-gate").with("close")).is_none(), "no close");
+            let sentences = vec![Para::new("The files stay.", body(14.0), pal.gold), Para::new("Only the record goes.", body(14.0), pal.gold)];
+            if let Some(go) = gate(ui, id, over, title, sentences, ["Keep", "Remove"], &pal) {
+                answered.set(Some(go));
+            }
+        };
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(ctx.read_response(id.with("close")).is_none(), "no close");
         let galley = out
             .shapes
             .iter()
@@ -2499,6 +2599,15 @@ mod tests {
         assert!(galley.rows.len() >= 2, "wrapped, its question kept");
         assert!(!galley.elided, "never cut short");
         assert_eq!(galley.job.sections[0].format.color, Pal::now().gold, "in the warning's gold");
+        let drawn = texts(&out);
+        let at = |s: &str| drawn.iter().find(|(t, _)| t == s).unwrap_or_else(|| panic!("{s} drawn: {drawn:?}")).1;
+        assert!((at("Only the record goes.").min.y - at("The files stay.").max.y - 6.0).abs() < 0.5, "its sentences 6 points apart");
+        let keep = ctx.read_response(id.with("foot").with(0usize)).expect("the safe choice").rect;
+        assert!(keep.min.y - at("Only the record goes.").max.y >= 20.0 - 0.5, "the foot 20 points under them");
+        for events in click_events(keep.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(answered.get(), Some(false), "the safe choice keeps");
     }
 
     #[test]
@@ -2615,16 +2724,18 @@ mod tests {
         let ctx = context();
         let pal = Pal::now();
         let parts = [("running".to_string(), strong(14.0), pal.ok), (" — music → /srv/backup".to_string(), body(14.0), pal.text)];
-        let polls = ("polls every 2 s".to_string(), body(13.0), pal.dim);
+        let polls = cadence("polls every 2 s", &pal);
+        let figure: Vec<(&str, bool)> = polls.iter().map(|(s, f, _)| (s.as_str(), *f == mono(12.0))).collect();
+        assert_eq!(figure, [("polls every ", false), ("2 s", true)], "the cadence's figure in the monospace");
         let (wide, narrow) = (Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 20.0)), Rect::from_min_size(pos2(0.0, 40.0), vec2(220.0, 20.0)));
         let out = pass(&ctx, vec2(800.0, 200.0), Vec::new(), &mut |ui| {
-            let _ = state_line(ui, wide, pal.ok, 16.0, &parts, Some(&polls));
-            let _ = state_line(ui, narrow, pal.ok, 16.0, &parts, Some(&polls));
+            let _ = state_line(ui, wide, pal.ok, &parts, &polls);
+            let _ = state_line(ui, narrow, pal.ok, &parts, &polls);
         });
         let drawn = texts(&out);
-        let cadence: Vec<Rect> = drawn.iter().filter(|(t, _)| t == &polls.0).map(|(_, r)| *r).collect();
-        assert_eq!(cadence.len(), 1, "on the wide row only: {drawn:?}");
-        assert!((cadence[0].max.x - wide.max.x).abs() < 1.0 && wide.contains(cadence[0].center()), "at the wide row's end: {cadence:?}");
+        let right: Vec<Rect> = drawn.iter().filter(|(t, _)| t == "polls every 2 s").map(|(_, r)| *r).collect();
+        assert_eq!(right.len(), 1, "on the wide row only: {drawn:?}");
+        assert!((right[0].max.x - wide.max.x).abs() < 1.0 && wide.contains(right[0].center()), "at the wide row's end: {right:?}");
         let words: Vec<Rect> = drawn.iter().filter(|(t, _)| t.starts_with("running — music")).map(|(_, r)| *r).collect();
         assert_eq!(words.len(), 2, "the state in one run on each row: {drawn:?}");
         assert!(words.iter().all(|r| (r.min.x - 16.0).abs() < 0.5), "from the indent: {words:?}");
@@ -2729,5 +2840,59 @@ mod tests {
         let glyph = glyph.get();
         assert!(shortest(true) > 200.0 - 2.0 * glyph, "every line filled: {}", shortest(true));
         assert!(shortest(false) < 200.0 - 4.0 * glyph, "a dash ends the default's lines short: {}", shortest(false));
+    }
+
+    #[test]
+    fn a_verdict_hangs_its_words_beside_its_mark_in_two_lines_at_most() {
+        let ctx = context();
+        let pal = Pal::now();
+        let long = "connection failed: ".to_string() + &"the daemon refused the request ".repeat(12);
+        let out = pass(&ctx, vec2(800.0, 300.0), Vec::new(), &mut |ui| {
+            let _ = verdict(ui, pos2(10.0, 10.0), 300.0, "reachable — Transmission 4.0.6", &["4.0.6"], pal.ok, Some(true));
+            let _ = verdict(ui, pos2(10.0, 100.0), 300.0, &long, &[], pal.gold, Some(false));
+            let _ = verdict(ui, pos2(400.0, 10.0), 300.0, "checking the path…", &[], pal.dim, None);
+        });
+        let drawn = texts(&out);
+        let at = |s: &str| drawn.iter().find(|(t, _)| t.starts_with(s)).unwrap_or_else(|| panic!("{s} drawn: {drawn:?}")).1;
+        assert!((at("reachable").min.x - 30.0).abs() < 0.5, "the words 20 points in, beside the mark");
+        assert!((at("checking").min.x - 400.0).abs() < 0.5, "no mark, no indent");
+        assert!(at("connection failed").height() < 3.0 * 13.5 * 1.3 - 1.0, "two lines at most");
+        // What the pass drew that is no text, by where it stands.
+        let marks_in = |x0: f32, x1: f32| {
+            out.shapes
+                .iter()
+                .filter(|c| !matches!(c.shape, Shape::Text(_)))
+                .map(|c| c.shape.visual_bounding_rect())
+                .filter(|r| r.is_positive() && r.min.x >= x0 && r.max.x <= x1)
+                .count()
+        };
+        assert_eq!(marks_in(5.0, 25.0), 2, "a check and a dash, each before its words");
+        assert_eq!(marks_in(395.0, 415.0), 0, "and none for the third");
+    }
+
+    #[test]
+    fn a_folder_browser_leaves_its_foot_room_and_says_when_a_folder_is_empty() {
+        let ctx = context();
+        let names: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        let listed = Cell::new(Rect::NOTHING);
+        let empty_at = Cell::new(Rect::NOTHING);
+        let out = pass(&ctx, vec2(800.0, 600.0), Vec::new(), &mut |ui| {
+            let pal = Pal::now();
+            // A short modal body: the list gives way to the foot under it.
+            let short = Rect::from_min_size(pos2(20.0, 20.0), vec2(400.0, 260.0));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(short).layout(Layout::top_down(Align::Min)));
+            let _ = folder_browser(&mut child, Id::new("probe-browse"), "/srv", &names, 0, "(no folders in here)", &pal);
+            listed.set(Rect::from_min_max(short.min, child.cursor().min));
+            let other = Rect::from_min_size(pos2(440.0, 20.0), vec2(300.0, 260.0));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(other).layout(Layout::top_down(Align::Min)));
+            let top = child.cursor().min.y;
+            let _ = folder_browser(&mut child, Id::new("probe-empty"), "/srv/empty", &[], 0, "(no folders in here)", &pal);
+            empty_at.set(Rect::from_min_max(pos2(other.min.x, top), child.cursor().min));
+        });
+        assert!(listed.get().max.y + FORM_BUTTON_H <= 20.0 + 260.0 + 0.5, "room for the foot: {:?}", listed.get());
+        let said = texts(&out).into_iter().find(|(t, _)| t == "(no folders in here)").expect("the empty words").1;
+        assert!((said.min.x - (440.0 + CELL_PAD)).abs() < 0.5, "on the first row's line, as a table's: {said:?}");
+        let first_row = empty_at.get().min.y + 18.0 + 12.0;
+        assert!((said.center().y - (first_row + FOLDER_ROW_H / 2.0)).abs() < 1.0, "{said:?} {:?}", empty_at.get());
     }
 }

@@ -15,13 +15,14 @@
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
-use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Ui, pos2, vec2};
+use egui::{Color32, FontId, Id, Pos2, Rect, Ui, pos2, vec2};
 
 use super::*;
 use crate::admin::EguiShown;
 use crate::gui::window::studio::{
-    self, Col, Dialog, FIELD_H, Glyph, Icon, Pal, Para, Table, add_card, body, checkbox, cut_start, field_beside,
-    field_box, foot, icon_button, ink, label, line, mono, path_cell, pointer, room_rects, strong, text,
+    self, BROWSER_W, Col, Dialog, FIELD_H, FOLDER_ROW_H, Glyph, Icon, Pal, Para, Table, add_card, body, checkbox,
+    cut_start, field_beside, field_box, folder_browser, folder_row, foot, gate, icon_button, ink, label, line, mono,
+    path_cell, room_rects, strong,
 };
 
 /// The table's NAME and SYMLINKS columns (FOLDER takes the rest), and the
@@ -30,17 +31,13 @@ const NAME_W: f32 = 220.0;
 const SYM_W: f32 = 96.0;
 const REMOVE_W: f32 = 36.0;
 const TRAIL: f32 = REMOVE_W + 8.0;
-/// The table's rows, and a modal list's.
+/// The table's rows.
 const ROW_H: f32 = 40.0;
-const LIST_ROW_H: f32 = 30.0;
-/// The modals' widths: the canvas's Name window, and the wider one the
-/// lists of folders and the typed path get.
+/// The Name window, the canvas's.
 const NARROW: f32 = 560.0;
-const WIDE: f32 = 640.0;
 /// The name field's box, the canvas's.
 const NAME_BOX_W: f32 = 264.0;
-/// The most rows a modal list shows: the cells' browser and suggestions.
-const BROWSE_ROWS: usize = 11;
+/// The most suggestions the typed path shows, as the cells'.
 const SUGGEST_ROWS: usize = 6;
 
 /// One pass of the room over the whole of `ui`, the room's area less its
@@ -134,34 +131,15 @@ fn libraries(ui: &mut Ui, room: &mut Room, pal: &Pal, acts: &mut Vec<Act>) {
 
 // ── Modals ────────────────────────────────────────────────────────────────
 
-/// The server's folders: the listed path, its folders (a click moves the
-/// cursor, as in the cells), and the four acts in the cells' order from
-/// the left — up, open, the add (lit) and close.
+/// The server's folders, the kit's browser (Backups' too): the listed
+/// path, its folders (a click moves the cursor, as in the cells), and the
+/// four acts in the cells' order from the left — up, open, the add (lit)
+/// and close.
 fn browser(ui: &Ui, over: Rect, browse: &Browse, pal: &Pal, acts: &mut Vec<Act>) {
     let id = Id::new("libraries-browse");
-    let shown = Dialog::new(id, over, WIDE, &t!("browse.title")).show(ui, pal, |ui| {
-        let w = ui.available_width();
-        let (path, _) = cut_start(ui, &browse.path, mono(12.5), w);
-        line(ui, 18.0, &path, mono(12.5), pal.dim);
-        ui.add_space(10.0);
-        let rows = browse.dirs.len().clamp(1, BROWSE_ROWS) as f32;
-        let h = (rows * LIST_ROW_H).min(ui.available_height() - 16.0 - studio::FORM_BUTTON_H).max(LIST_ROW_H);
-        let mut act = None;
-        if browse.dirs.is_empty() {
-            let (region, _) = ui.allocate_exact_size(vec2(w, h), egui::Sense::hover());
-            let at = pos2(region.min.x + studio::CELL_PAD, region.min.y + LIST_ROW_H / 2.0);
-            text(ui, at, &t!("browse.empty"), body(14.0), pal.dim, w - studio::CELL_PAD, Align2::LEFT_CENTER);
-        } else {
-            let list = Table::new(id.with("list"), &[], browse.dirs.len())
-                .headless()
-                .row_height(LIST_ROW_H)
-                .height(h)
-                .cursor(Some(browse.sel))
-                .content(Id::new(&browse.path));
-            let picked = list.show(ui, pal, |ui, i, row| folder_row(ui, row.rect, &browse.dirs[i], row.selected, pal.text, pal));
-            act = picked.row.map(Act::BrowseRow);
-        }
-        ui.add_space(16.0);
+    let shown = Dialog::new(id, over, BROWSER_W, &t!("browse.title")).show(ui, pal, |ui| {
+        let picked = folder_browser(ui, id.with("list"), &browse.path, &browse.dirs, browse.sel, &t!("browse.empty"), pal);
+        let act = picked.map(Act::BrowseRow);
         let (up, open, add, close) = (t!("browse.up"), t!("browse.open"), t!("browse.add"), t!("browse.close"));
         let start = [(up.as_ref(), false), (open.as_ref(), false), (add.as_ref(), true), (close.as_ref(), false)];
         let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseAdd, Act::BrowseCancel];
@@ -178,11 +156,12 @@ fn browser(ui: &Ui, over: Rect, browse: &Browse, pal: &Pal, acts: &mut Vec<Act>)
 /// one, or the gold reason the directory could not be listed. The window
 /// holds its top where it stands with the most suggestions it shows, and
 /// the list grows down from the field as the suggestions come and go, as
-/// the cells anchor theirs.
+/// the cells anchor theirs. As wide as the browser, the other way to a
+/// folder.
 fn path_entry(ui: &Ui, over: Rect, draft: &PathDraft, composition: &str, pal: &Pal, acts: &mut Vec<Act>) -> Option<Pos2> {
     let id = Id::new("libraries-path");
-    let most = FIELD_H + 12.0 + SUGGEST_ROWS as f32 * LIST_ROW_H;
-    let shown = Dialog::new(id, over, WIDE, &t!("path_modal.title")).hold(most).show(ui, pal, |ui| {
+    let most = FIELD_H + 12.0 + SUGGEST_ROWS as f32 * FOLDER_ROW_H;
+    let shown = Dialog::new(id, over, BROWSER_W, &t!("path_modal.title")).hold(most).show(ui, pal, |ui| {
         let w = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(vec2(w, FIELD_H), egui::Sense::hover());
         let input = studio::Input::of(&draft.text).focused(true, composition).mono();
@@ -190,18 +169,18 @@ fn path_entry(ui: &Ui, over: Rect, draft: &PathDraft, composition: &str, pal: &P
         let mut picked = None;
         if let Some(err) = &draft.error {
             ui.add_space(12.0);
-            line(ui, LIST_ROW_H, err, body(13.0), pal.gold);
+            line(ui, FOLDER_ROW_H, err, body(13.0), pal.gold);
         } else if draft.suggestion_count() > 0 {
             ui.add_space(12.0);
             let rows = draft.suggestion_count().min(SUGGEST_ROWS);
-            let h = (rows as f32 * LIST_ROW_H).min(ui.available_height()).max(LIST_ROW_H);
+            let h = (rows as f32 * FOLDER_ROW_H).min(ui.available_height()).max(FOLDER_ROW_H);
             // The suggestions are the listing filtered: walked once a pass
             // for the rows on screen, never collected whole (a listing can
             // run to thousands).
             let (mut from, mut window): (usize, Vec<&str>) = (0, Vec::new());
             let list = Table::new(id.with("list"), &[], draft.suggestion_count())
                 .headless()
-                .row_height(LIST_ROW_H)
+                .row_height(FOLDER_ROW_H)
                 .height(h)
                 .cursor(draft.sel)
                 .content(Id::new(draft.text.value()));
@@ -249,7 +228,7 @@ fn name(ui: &Ui, over: Rect, draft: &NameDraft, composition: &str, pal: &Pal, ac
         // second indented under the first's words in their grid, joined and
         // hung beside the dash.
         let permanent = format!("{} {}", t!("admin.name_permanent_1").trim(), t!("admin.name_permanent_2").trim());
-        listed(&permanent, pal.gold).line(1.45).show(ui);
+        listed(&permanent, body(13.0), pal.gold).line(1.45).show(ui);
         ui.add_space(12.0);
         // The refusal's line is kept empty until there is one, so the
         // window does not grow under the hand that pressed Add.
@@ -269,37 +248,33 @@ fn name(ui: &Ui, over: Rect, draft: &NameDraft, composition: &str, pal: &Pal, ac
     caret
 }
 
-/// The warning gate before a remove, answered (no close, as every gate):
-/// what stays and what goes, then Keep (the safe choice, lit) and Remove.
+/// The warning gate before a remove, the kit's: what stays and what goes,
+/// then Keep (the safe choice, lit) and Remove.
 fn remove(ui: &Ui, over: Rect, room: &Room, i: usize, pal: &Pal, acts: &mut Vec<Act>) {
-    let id = Id::new("libraries-gate");
     let name = room.libs.get(i).map(|l| l.name.clone()).unwrap_or_default();
     let title = t!("admin.remove_title", name = name);
-    let shown = Dialog::new(id, over, NARROW, &title).gate(pal).show(ui, pal, |ui| {
-        listed(&t!("admin.remove_files_stay"), pal.ok).line(1.45).show(ui);
-        ui.add_space(6.0);
-        listed(&t!("admin.remove_users", name = name), pal.gold).line(1.45).show(ui);
-        listed(&t!("admin.remove_tracks"), pal.gold).line(1.45).show(ui);
-        ui.add_space(20.0);
-        let (keep, go) = (t!("admin.remove_keep"), t!("admin.remove_confirm"));
-        match foot(ui, id.with("foot"), &[], &[(keep.as_ref(), true), (go.as_ref(), false)], None, pal) {
-            Some(0) => Some(Act::RemoveCancel),
-            Some(_) => Some(Act::RemoveConfirm),
-            None => None,
-        }
-    });
-    acts.extend(shown.inner);
+    let sentences = vec![
+        listed(&t!("admin.remove_files_stay"), body(14.0), pal.ok),
+        listed(&t!("admin.remove_users", name = name), body(14.0), pal.gold),
+        listed(&t!("admin.remove_tracks"), body(14.0), pal.gold),
+    ];
+    let (keep, go) = (t!("admin.remove_keep"), t!("admin.remove_confirm"));
+    match gate(ui, Id::new("libraries-gate"), over, &title, sentences, [&keep, &go], pal) {
+        Some(true) => acts.push(Act::RemoveConfirm),
+        Some(false) => acts.push(Act::RemoveCancel),
+        None => {}
+    }
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────
 
-/// A sentence of the room's in 13-point `color`, wrapped to the column; one
-/// the cells lead with a dash ("− …") hangs its lines beside the dash, as
-/// a list item does, rather than under it.
-fn listed(s: &str, color: Color32) -> Para {
+/// A sentence of the room's in `font` and `color`, wrapped to the column;
+/// one the cells lead with a dash ("− …") hangs its lines beside the dash,
+/// as a list item does, rather than under it.
+fn listed(s: &str, font: FontId, color: Color32) -> Para {
     match s.strip_prefix('−') {
-        Some(rest) => Para::new(rest.trim_start(), body(13.0), color).lead("−"),
-        None => Para::new(s, body(13.0), color),
+        Some(rest) => Para::new(rest.trim_start(), font, color).lead("−"),
+        None => Para::new(s, font, color),
     }
 }
 
@@ -309,14 +284,6 @@ fn clipped(ui: &Ui, rect: Rect, s: &str, font: FontId, color: Color32) {
     let galley = ui.painter().layout_no_wrap(s.to_string(), font, color);
     let at = pos2(rect.min.x, rect.center().y - galley.size().y / 2.0);
     ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(at, galley, color);
-}
-
-/// A folder in a modal list: the cells' "▸" before the name, in the accent
-/// on the keyboard's row, and the name.
-fn folder_row(ui: &Ui, rect: Rect, name: &str, on: bool, color: Color32, pal: &Pal) {
-    pointer(ui, pos2(rect.min.x + 13.0, rect.center().y), if on { pal.accent } else { pal.dim });
-    let color = if on { pal.text } else { color };
-    text(ui, pos2(rect.min.x + 26.0, rect.center().y), name, body(14.0), color, rect.width() - 36.0, Align2::LEFT_CENTER);
 }
 
 #[cfg(test)]
@@ -714,8 +681,8 @@ mod tests {
         let srv = || Done::Browsed(Ok(listing("/srv", &names)));
         let browse = Id::new("libraries-browse");
         let rows = browse.with("list").with("row");
-        // The list ends 16 points above the window's buttons.
-        let list_foot = |ctx: &egui::Context| ctx.read_response(nth(browse.with("foot"), 0)).expect("the buttons").rect.min.y - 16.0;
+        // The list ends 20 points above the window's buttons.
+        let list_foot = |ctx: &egui::Context| ctx.read_response(nth(browse.with("foot"), 0)).expect("the buttons").rect.min.y - 20.0;
         room.apply(srv());
         let _ = settle(&ctx, &mut room);
         assert!(ctx.read_response(nth(rows, 0)).is_some(), "the list opens at its top");
