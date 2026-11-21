@@ -172,22 +172,18 @@ fn path(ui: &Ui, row: &RowCtx, i: usize, folder: &Folder, page: &Page) {
 #[cfg(test)]
 mod tests {
     use egui::epaint::Shape;
-    use egui::{Event, Id, Pos2, Rect, pos2, vec2};
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use egui::{Event, Id, Rect, pos2, vec2};
+    use ratatui::crossterm::event::KeyCode;
     use rust_i18n::t;
 
-    use super::super::tests::{BOARD, Probe, color_of, drawn, has, tipped, wizard};
+    use super::super::tests::{BOARD, Probe, color_of, drawn, has, key, tipped, wheel, wizard};
     use crate::gui::window::studio::Pal;
     use crate::setup::tests::LOCALE_LOCK;
-    use crate::setup::{Act, Done, FolderCheck, Modal, Op, Wizard, ellipsize_path_start, handle_key};
+    use crate::setup::{Act, Done, FolderCheck, Modal, Op, Wizard, ellipsize_path_start};
 
     /// Row `i`'s control under `id`: an index, as the view numbers them.
     fn nth(id: &str, i: usize) -> Id {
         Id::new(id).with(i)
-    }
-
-    fn key(wizard: &mut Wizard, code: KeyCode) {
-        handle_key(wizard, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
     /// A check's answer for `path`, folded in as the frame half folds the
@@ -195,19 +191,6 @@ mod tests {
     fn checked(wizard: &mut Wizard, path: &str, check: FolderCheck) {
         let canonical = (check == FolderCheck::Ok).then(|| path.to_string());
         wizard.apply(Done::Validated { path: path.to_string(), check, canonical });
-    }
-
-    /// The wheel turned over `at`, `dy` points of a swipe.
-    fn wheel(probe: &Probe, wizard: &mut Wizard, at: Pos2, dy: f32) {
-        let turn = |phase, dy| Event::MouseWheel {
-            unit: egui::MouseWheelUnit::Point,
-            delta: vec2(0.0, dy),
-            phase,
-            modifiers: egui::Modifiers::default(),
-        };
-        let _ = probe.pass(wizard, vec![Event::PointerMoved(at)]);
-        let _ = probe.pass(wizard, vec![turn(egui::TouchPhase::Start, 0.0), turn(egui::TouchPhase::Move, dy)]);
-        let _ = probe.pass(wizard, vec![turn(egui::TouchPhase::End, 0.0)]);
     }
 
     #[test]

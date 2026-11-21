@@ -734,10 +734,10 @@ pub(super) fn done_buttons() -> [(String, String); DONE_ACTIONS] {
     ]
 }
 
-/// The port a server URL listens on, for the Done page's opening line.
-/// None for URLs that don't carry one (a Quick Connect tunnel id) and
-/// don't imply one by scheme.
-fn server_port(server: &str) -> Option<u16> {
+/// The port a server URL listens on, for the Done page's opening line
+/// (the egui view's too). None for URLs that don't carry one (a Quick
+/// Connect tunnel id) and don't imply one by scheme.
+pub(super) fn server_port(server: &str) -> Option<u16> {
     if let Some((_, tail)) = server.rsplit_once(':') {
         if let Ok(port) = tail.trim_end_matches('/').parse() {
             return Some(port);

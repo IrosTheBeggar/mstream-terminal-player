@@ -867,7 +867,7 @@ fn off_network(ui: &mut Ui, room: &Room, s: &DiscoveryStatus, look: &Look, pal: 
             ui.add_space(10.0);
             // The opt-in wears the Federation board's inbox card: the same
             // server flag, one look.
-            let card = tick_card(ui, Id::new("disc-requests-card"), room.accept_requests, &t!("p2p.off_requests"), &t!("p2p.off_requests_hint"), pal);
+            let card = tick_card(ui, Id::new("disc-requests-card"), room.accept_requests, &t!("p2p.off_requests"), &t!("p2p.off_requests_hint"), false, pal);
             if card.clicked() {
                 pass.act(Act::ToggleRequests);
             }
@@ -1234,7 +1234,7 @@ fn setting(ui: &Ui, over: Rect, d: &SettingDraft, pal: &Pal, composition: &str, 
 #[allow(clippy::too_many_arguments)]
 fn warn(ui: &Ui, id: Id, over: Rect, title: &str, lines: [String; 2], safe: (String, Act), go: (String, Act), pal: &Pal, pass: &mut Pass) {
     let sentences = lines.map(|words| Para::new(&words, body(14.0), pal.gold)).into();
-    match gate(ui, id, over, title, sentences, [&safe.0, &go.0], pal) {
+    match gate(ui, id, over, title, sentences, [&safe.0, &go.0], pal).inner {
         Some(true) => pass.act(go.1),
         Some(false) => pass.act(safe.1),
         None => {}

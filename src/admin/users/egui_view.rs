@@ -453,7 +453,7 @@ fn remove_gate(ui: &Ui, room: &Room, name: &str, over: Rect, pal: &Pal, acts: &m
         sentences.push(Para::new(&t!("usr.remove_last_admin", user = user), strong(14.0), pal.gold));
     }
     let (keep, go) = (t!("usr.remove_keep"), t!("usr.remove_confirm"));
-    match gate(ui, Id::new("users-remove-gate"), over, &title, sentences, [&keep, &go], pal) {
+    match gate(ui, Id::new("users-remove-gate"), over, &title, sentences, [&keep, &go], pal).inner {
         Some(true) => acts.push(Act::RemoveConfirm),
         Some(false) => acts.push(Act::RemoveCancel),
         None => {}

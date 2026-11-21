@@ -19,16 +19,17 @@
 //! the page ends the wizard: there is no Finish to click, as in the cells,
 //! and f, q and Esc end it from the keys. The keyboard's selection over the
 //! cards is the model's own (↑ ↓ move it, Enter opens it), kept apart from
-//! the pointer's hover: a click never moves it.
+//! the pointer's hover: a click never moves it. The cards are the kit's
+//! link cards, the selection in the kit's keyboard look, as Extras wears it
+//! on its cards.
 
-use egui::epaint::StrokeKind;
-use egui::{Align2, Id, Rect, Response, Sense, Stroke, Ui, Vec2, pos2, vec2};
+use egui::{Align2, Id, Rect, Stroke, Ui, Vec2, pos2, vec2};
 use rust_i18n::t;
 
-use super::super::cells::done_buttons;
+use super::super::cells::{done_buttons, server_port};
 use super::super::{APP_STORE_URL, DONE_ACTIONS, PLAY_STORE_URL, Wizard, done_action};
 use super::{Drawn, LINE_H, Page, ROOMY, SIDE, logo_size, logo_texture, parts, scan_widget, status_line, strip, tip, tips_line};
-use crate::gui::window::studio::{self, HIT, Pal, Para, Run, body, mono, strong};
+use crate::gui::window::studio::{self, HIT, Pal, Para, Run, body, mono};
 use crate::tui::art::Art;
 
 /// The two columns' block at its widest, the boards' 920 points, centred on
@@ -62,13 +63,12 @@ const PART_GAP: f32 = 20.0;
 /// The scan's slot on the wizard's page: its three lines, kept from the
 /// page's first frame so nothing moves when the first report lands.
 const SCAN_H: f32 = 3.0 * LINE_H;
-/// A link card, the boards' 420 by 56 and 8 apart, its label 18 points in;
-/// and the short card the cells' one-row list becomes where the tall cards
-/// have no room, a control's [`HIT`] tall and 4 apart.
+/// A link card, the boards' 420 by 56 and 8 apart (the kit's, its label 18
+/// points in); and the short card the cells' one-row list becomes where the
+/// tall cards have no room, a control's [`HIT`] tall and 4 apart.
 const CARD_W: f32 = 420.0;
 const CARD_H: f32 = 56.0;
 const CARD_GAP: f32 = 8.0;
-const CARD_PAD: f32 = 18.0;
 const SHORT_GAP: f32 = 4.0;
 /// The tips line's foot over the page's bottom, the boards' 18.
 const FOOT: f32 = 18.0;
@@ -114,7 +114,7 @@ pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, page: &Page) -> Drawn {
         scan_widget(ui, slot, scan, pal);
     }
     for (i, ((label, why), rect)) in done_buttons().into_iter().zip(at.cards).enumerate() {
-        let response = link_card(ui, Id::new("setup-link").with(i), rect, &label, wizard.done_sel == Some(i), pal);
+        let response = studio::link_card(ui, Id::new("setup-link").with(i), rect, &label, wizard.done_sel == Some(i), pal);
         tip(page, &response, &why);
         if response.clicked() {
             drawn.acts.push(done_action(i));
@@ -153,11 +153,12 @@ fn links(wizard: &Wizard) -> [String; DONE_ACTIONS] {
 }
 
 /// The message and its figure, in the cells' words: where the server
-/// listens (its port, or the whole address where none can be read), then
-/// what became of Quick Connect (that the code is on the left, or the
-/// model's note for it: off, starting, a ticket that would not draw;
-/// nothing while it loads or where the read failed, which the status line
-/// says). The figure is what the monospace sets: the port, or the address.
+/// listens (its port, or the whole address where none can be read, as the
+/// cells read it), then what became of Quick Connect (that the code is on
+/// the left, or the model's note for it: off, starting, a ticket that would
+/// not draw; nothing while it loads or where the read failed, which the
+/// status line says). The figure is what the monospace sets: the port, or
+/// the address.
 fn message(wizard: &Wizard) -> (String, String) {
     let server = wizard.client.server();
     let (opening, figure) = match server_port(&server) {
@@ -169,22 +170,6 @@ fn message(wizard: &Wizard) -> (String, String) {
     // second; here there is none to trim.
     let words = if second.is_empty() { opening } else { format!("{opening} {second}") };
     (words, figure)
-}
-
-/// The port a server URL listens on, as the cells read it for the same
-/// sentence (cells.rs `server_port`): the figures after the last colon,
-/// else the scheme's own, else none.
-fn server_port(server: &str) -> Option<u16> {
-    if let Some((_, tail)) = server.rsplit_once(':')
-        && let Ok(port) = tail.trim_end_matches('/').parse()
-    {
-        return Some(port);
-    }
-    match server.split_once("://").map(|(scheme, _)| scheme) {
-        Some("http") => Some(80),
-        Some("https") => Some(443),
-        _ => None,
-    }
 }
 
 /// How tall the message stands at `w`, exactly as [`Para`] lays it out
@@ -281,32 +266,6 @@ fn places(full: Rect, standalone: bool, say: impl Fn(f32) -> f32, mark: Option<V
     Places { strip, mark, code, rule, message, scan, cards, status, tips }
 }
 
-/// A link card at `rect`, as the boards draw the three (the kit has no
-/// card of the kind: its tick card has a box and a hint, its call to act a
-/// centred glyph): the panel's fill in an edge hairline, `label` in the
-/// semibold text colour 18 points in, cut with an ellipsis, never changing
-/// colour. Under the pointer the fill rises and the edge strengthens, with
-/// the hand; the keyboard's selection (`selected`) is the kit's accent ring
-/// on the panel's fill. The hover wins the look, as the cells' bright
-/// border wins over their selected one, and the selection's ring comes back
-/// when the pointer leaves: the selection itself never moves for the
-/// pointer. The whole card takes the click and the tooltip.
-fn link_card(ui: &Ui, id: Id, rect: Rect, label: &str, selected: bool, pal: &Pal) -> Response {
-    let response = studio::hand(ui.interact(rect, id, Sense::click()));
-    if response.hovered() {
-        ui.painter().rect_filled(rect, studio::square(), pal.raised);
-        ui.painter().rect_stroke(rect, studio::square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
-    } else if selected {
-        ui.painter().rect_filled(rect, studio::square(), pal.panel);
-        studio::ring(ui, rect, pal);
-    } else {
-        studio::panel(ui, rect, pal);
-    }
-    let room = (rect.width() - 2.0 * CARD_PAD).max(1.0);
-    studio::text(ui, pos2(rect.min.x + CARD_PAD, rect.center().y), label, strong(14.0), pal.text, room, Align2::LEFT_CENTER);
-    response
-}
-
 /// The Quick Connect code as egui holds it: the model's picture of the
 /// ticket (8 pixels a module on its white quiet zone) made into a texture
 /// once and kept until the ticket changes, sampled nearest-neighbour so its
@@ -331,17 +290,17 @@ fn code_image(art: &Art) -> Option<egui::ColorImage> {
 mod tests {
     use egui::epaint::Shape;
     use egui::{Color32, Event, FullOutput, Id, Pos2, Rect, TextureFilter, pos2, vec2};
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::KeyCode;
     use rust_i18n::t;
 
     use super::super::super::cells::{done_buttons, footer_hint};
-    use super::super::tests::{BOARD, Probe, color_of, drawn, has, tipped, wizard};
+    use super::super::tests::{BOARD, Probe, color_of, drawn, has, key, stripes, tipped, wizard};
     use super::{Places, places};
     use crate::api::ApiError;
     use crate::api::types::IrohStatus;
     use crate::gui::window::studio::Pal;
     use crate::setup::tests::LOCALE_LOCK;
-    use crate::setup::{APP_STORE_URL, Done, PLAY_STORE_URL, ProgressReport, Screen, Wizard, handle_key};
+    use crate::setup::{APP_STORE_URL, Done, PLAY_STORE_URL, ProgressReport, Screen, Wizard};
 
     /// Card `i`, as the view numbers them.
     fn card(i: usize) -> Id {
@@ -371,10 +330,6 @@ mod tests {
 
     fn opening() -> String {
         t!("done.running_port", port = 9).to_string()
-    }
-
-    fn key(wizard: &mut Wizard, code: KeyCode) {
-        handle_key(wizard, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
     /// The setup tests' seam for a link: no browser is launched, and the
@@ -414,17 +369,6 @@ mod tests {
         let edge = shapes().filter(|r| r.stroke.width > 0.0).last().map(|r| r.stroke.color);
         let fill = shapes().filter(|r| r.fill != Color32::TRANSPARENT).last().map(|r| r.fill);
         (edge, fill)
-    }
-
-    /// The meter's lit stripes in `color`: three to a lit segment.
-    fn stripes(out: &FullOutput, color: Color32) -> usize {
-        out.shapes
-            .iter()
-            .filter(|c| match &c.shape {
-                Shape::Rect(r) => r.fill == color && (r.rect.width() - 5.0).abs() < 0.01 && (r.rect.height() - 2.0).abs() < 0.01,
-                _ => false,
-            })
-            .count()
     }
 
     fn near(a: Rect, b: Rect) -> bool {
@@ -767,11 +711,13 @@ mod tests {
         assert!(probe.pass(&mut wizard, Vec::new()).1.hand);
     }
 
-    /// The keyboard's selection is the model's, drawn as the kit's accent
-    /// ring on its card; the pointer raises the card under it, and the hover
-    /// wins the look on the selected card until the pointer leaves it.
+    /// The keyboard's selection is the model's, drawn in the kit's keyboard
+    /// look on its card (raised, the accent's ring), as Extras' cursor is;
+    /// the pointer raises the card under it with its edge brightened, and
+    /// on the selected card the keyboard's look stays, the board's ring
+    /// kept under the pointer.
     #[test]
-    fn the_keyboard_selection_is_a_ring_and_the_hover_wins_the_look() {
+    fn the_keyboard_selection_wears_the_kits_keyboard_look_and_keeps_it_under_the_pointer() {
         let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let probe = Probe::new(BOARD);
         let pal = Pal::now();
@@ -780,17 +726,17 @@ mod tests {
         assert_eq!(wizard.done_sel, Some(2), "up from nothing takes the last");
         let (out, _) = probe.settle(&mut wizard);
         let rects = [0, 1, 2].map(|i| probe.rect(card(i)));
-        assert_eq!(look(&out, rects[2]), (Some(pal.accent), Some(pal.panel)), "the selection's ring on the panel's fill");
+        assert_eq!(look(&out, rects[2]), (Some(pal.accent), Some(pal.raised)), "the selection's keyboard look");
         assert_eq!(look(&out, rects[0]), (Some(pal.edge), Some(pal.panel)));
         // The pointer on another card raises that one; the ring stays.
         let out = probe.rest(&mut wizard, rects[0].center(), 0.0);
-        assert_eq!(look(&out, rects[0]), (Some(pal.edge_strong), Some(pal.raised)), "raised under the pointer");
+        assert_eq!(look(&out, rects[0]), (Some(pal.dim), Some(pal.raised)), "raised under the pointer");
         assert_eq!(look(&out, rects[2]).0, Some(pal.accent));
-        // On the selected card the hover wins; off it, the ring is back.
+        // On the selected card the keyboard's look stays; off it, too.
         let out = probe.rest(&mut wizard, rects[2].center(), 0.0);
-        assert_eq!(look(&out, rects[2]), (Some(pal.edge_strong), Some(pal.raised)), "the hover wins");
+        assert_eq!(look(&out, rects[2]), (Some(pal.accent), Some(pal.raised)), "the ring kept under the pointer");
         let out = probe.rest(&mut wizard, pos2(4.0, 4.0), 0.0);
-        assert_eq!(look(&out, rects[2]), (Some(pal.accent), Some(pal.panel)));
+        assert_eq!(look(&out, rects[2]), (Some(pal.accent), Some(pal.raised)));
         assert_eq!(wizard.done_sel, Some(2), "the pointer never moved it");
     }
 

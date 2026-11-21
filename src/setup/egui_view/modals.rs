@@ -13,19 +13,21 @@
 //! title's right, where the cells draw their [X], with the cells' tooltip.
 //! Where the window leaves them clear, the frame's status line and tips
 //! line are drawn again over the scrim, lit, as every board stands them
-//! ([`lift_lines`]): the modal's hint, a listing being read, a refusal, the
-//! machine translation's note.
+//! (the frame's `lift_lines`): the modal's hint, a listing being read, a
+//! refusal, the machine translation's note.
 //!
 //! Each takes the root `ui`, `over` (the whole page, the scrim's reach),
 //! the wizard and the frame's [`Page`], and hands back what its clicks
 //! asked for and the caret of its field with the keyboard.
 
-use egui::{Align2, Id, LayerId, Order, Rect, Sense, Ui, pos2, vec2};
+use egui::{Align2, Id, Rect, Sense, Ui, pos2, vec2};
 use rust_i18n::t;
 
 use super::super::{Act, LANGS, Modal, Wizard};
-use super::{Drawn, Page, parts, status_line, tip_keyed, tips_line};
-use crate::gui::window::studio::{self, BROWSER_W, Dialog, FIELD_H, FOLDER_ROW_H, FORM_BUTTON_H, ModalShown, Pal, Table, body, strong};
+use super::{Drawn, Page, lift_lines, tip_keyed};
+use crate::gui::window::studio::{
+    self, BROWSER_W, Dialog, FIELD_H, FOLDER_ROW_H, ModalShown, ROW_MARK_IN, ROW_WORDS_AFTER, ROW_WORDS_IN, Table, body,
+};
 
 /// The language list's window at its narrowest, the board's 300: wider
 /// where the title or an autonym asks for more.
@@ -37,22 +39,6 @@ const SUGGEST_ROWS: usize = 6;
 /// over the status line it leaves lit (FoldersBrowse: y 178 to 622, the
 /// line at 640).
 const BROWSE_ROWS: usize = 9;
-/// What the kit's browser lays round its list: the path's line and the 12
-/// points under it, then the 20 over the foot.
-const BROWSE_ROUND: f32 = 18.0 + 12.0 + 20.0;
-/// The kit's window round a modal's body: the padding that stands its foot
-/// this far under the body's, and the room its close takes beside the
-/// title (studio.rs keeps both its own).
-const WINDOW_PAD: f32 = 24.0;
-const CLOSE_ROOM: f32 = 40.0;
-/// Between a foot's buttons, beside one another and a row apart: the kit's
-/// 10 beside, and the canvas's 10 between the rows of a foot that stacks.
-const FOOT_GAP: f32 = 10.0;
-/// Where a list row's words start, and the room after them: the kit's
-/// folder row's, whose marker stands centred 13 points in.
-const WORDS_IN: f32 = 26.0;
-const WORDS_AFTER: f32 = 10.0;
-const MARK_IN: f32 = 13.0;
 
 /// The language list (`Modal::Language`, its cursor in it), after the
 /// canvas's Language board: every language the wizard speaks by its own
@@ -72,8 +58,7 @@ pub(super) fn language(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page
     let id = Id::new("setup-language-list");
     let title = t!("lang.modal_title");
     let widest = LANGS.iter().map(|(_, name)| studio::width_of(ui, name, body(14.0))).fold(0.0, f32::max);
-    let wants = (WORDS_IN + widest + WORDS_AFTER).max(studio::width_of(ui, &title, strong(16.0)) + CLOSE_ROOM);
-    let width = LIST_W.max((wants + 2.0 * WINDOW_PAD).ceil());
+    let width = LIST_W.max(studio::dialog_width(ui, &title, ROW_WORDS_IN + widest + ROW_WORDS_AFTER).ceil());
     let current = wizard.lang;
     let dialog = Dialog::new(id, over, width, &title);
     let shown = window(ui, over, id, dialog, wizard, page, |ui| {
@@ -83,10 +68,10 @@ pub(super) fn language(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page
             let on = i == current;
             let mid = row.rect.center().y;
             let lamp = if on { pal.accent } else { pal.unlit };
-            studio::led(ui, pos2(row.rect.min.x + MARK_IN, studio::led_mid(ui, mid, &body(14.0), false)), lamp);
+            studio::led(ui, pos2(row.rect.min.x + ROW_MARK_IN, studio::led_mid(ui, mid, &body(14.0), false)), lamp);
             let ink = if on || row.selected || row.hovered { pal.text } else { pal.soft };
-            let x = row.rect.min.x + WORDS_IN;
-            studio::text(ui, pos2(x, mid), LANGS[i].1, body(14.0), ink, (row.rect.max.x - x - WORDS_AFTER).max(1.0), Align2::LEFT_CENTER);
+            let x = row.rect.min.x + ROW_WORDS_IN;
+            studio::text(ui, pos2(x, mid), LANGS[i].1, body(14.0), ink, (row.rect.max.x - x - ROW_WORDS_AFTER).max(1.0), Align2::LEFT_CENTER);
         });
         shown.row
     });
@@ -171,14 +156,13 @@ pub(super) fn path(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page) ->
 /// folder listed cut at its start so its leaf stays, its folders under it,
 /// nine at once, the keys' cursor ringed and kept in view, a new listing
 /// from its top, an empty folder saying so; then the cells' four acts in
-/// their order from the left, up, open, the add (lit) and close, a button
-/// that would run past the window starting a row of its own
-/// ([`foot_rects`]), and the list giving way to the rows that adds where
-/// the window is short. A click on a folder moves the cursor to it and
-/// opens nothing, as in the cells; the add takes the folder listed, not the
-/// cursor's. The title says the server's folders, as the cells' does,
-/// though the listing is this machine's (the code's, left for the owner to
-/// rule on).
+/// their order from the left, up, open, the add (lit) and close, the kit's
+/// foot stacking them where the window is too narrow for one row and the
+/// list giving way to the rows that adds where it is short. A click on a
+/// folder moves the cursor to it and opens nothing, as in the cells; the
+/// add takes the folder listed, not the cursor's. The title says the
+/// server's folders, as the cells' does, though the listing is this
+/// machine's (the code's, left for the owner to rule on).
 pub(super) fn browser(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page) -> Drawn {
     let Modal::Browser(browse) = &wizard.modal else { return Drawn::default() };
     let pal = &page.pal;
@@ -188,21 +172,9 @@ pub(super) fn browser(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page)
     let shown = window(ui, over, id, dialog, wizard, page, |ui| {
         let (up, open, add, close) = (t!("browse.up"), t!("browse.open"), t!("browse.add"), t!("browse.close"));
         let start = [(up.as_ref(), false), (open.as_ref(), false), (add.as_ref(), true), (close.as_ref(), false)];
-        let (laid, foot_h) = foot_rects(ui, &start, ui.available_width());
-        // The kit's browser takes as many rows as the window has room for,
-        // up to its eleven, keeping one row of the foot's under them: the
-        // room it is given is nine's at most, less the rows a stacked foot
-        // adds, so a short window's list gives way to the whole foot.
-        let most = BROWSE_ROUND + BROWSE_ROWS as f32 * FOLDER_ROW_H + FORM_BUTTON_H;
-        let empty = t!("browse.empty");
-        let picked = ui
-            .scope(|ui| {
-                ui.set_max_height(most.min(ui.available_height() - (foot_h - FORM_BUTTON_H)).max(0.0));
-                studio::folder_browser(ui, id.with("list"), &browse.path, &browse.dirs, browse.sel, &empty, pal)
-            })
-            .inner;
         let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseAdd, Act::BrowseCancel];
-        foot(ui, id.with("foot"), &start, &laid, foot_h, pal).map(|k| meant[k].clone()).or(picked.map(Act::BrowseRow))
+        let browsed = studio::folder_browser(ui, id, &browse.path, &browse.dirs, browse.sel, &t!("browse.empty"), BROWSE_ROWS, &start, pal);
+        browsed.button.map(|k| meant[k].clone()).or(browsed.row.map(Act::BrowseRow))
     });
     let mut acts = Vec::new();
     if shown.closed {
@@ -212,112 +184,38 @@ pub(super) fn browser(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page)
     Drawn { acts, caret: None }
 }
 
-/// Where a modal's foot lays the form buttons `labels` across `row_w`
-/// points, as the kit lays one from the left (`studio::foot`): each as wide
-/// as its words, 10 points apart; but a button that would run past the
-/// row's end starts a row of its own 10 points under the last, whole, where
-/// the kit's would run on over the window's edge and its clip would cut it
-/// through a letter. The cells cut such a label inside their frame instead;
-/// the canvas stacks a foot that will not fit (the skip gate's). On the
-/// boards' page every language's four fit one row (German's, the longest,
-/// take some 533 points of the 592); a narrower window stacks them. Each
-/// button's rect from the foot's top left, and the foot's height, which the
-/// page keeps room for before it lays out what stands over the foot.
-fn foot_rects(ui: &Ui, labels: &[(&str, bool)], row_w: f32) -> (Vec<Rect>, f32) {
-    let mut at = Vec::with_capacity(labels.len());
-    let (mut x, mut y) = (0.0, 0.0);
-    for (label, _) in labels {
-        let w = studio::form_button_width(ui, label).min(row_w);
-        if x > 0.0 && x + w > row_w {
-            (x, y) = (0.0, y + FORM_BUTTON_H + FOOT_GAP);
-        }
-        at.push(Rect::from_min_size(pos2(x, y), vec2(w, FORM_BUTTON_H)));
-        x += w + FOOT_GAP;
-    }
-    (at, y + FORM_BUTTON_H)
-}
-
-/// The foot [`foot_rects`] laid out as `laid`, a row of the layout the
-/// column wide and `h` tall: the form buttons `labels` in their rects, the
-/// lit one where its flag is set, button `k` under `id.with(k)`. The button
-/// clicked.
-fn foot(ui: &mut Ui, id: Id, labels: &[(&str, bool)], laid: &[Rect], h: f32, pal: &Pal) -> Option<usize> {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-    let mut clicked = None;
-    for (k, ((label, primary), at)) in labels.iter().zip(laid).enumerate() {
-        if studio::form_button(ui, id.with(k), at.translate(rect.min.to_vec2()), label, *primary, pal).clicked() {
-            clicked = Some(k);
-        }
-    }
-    clicked
-}
-
 /// The modal `id`'s window, `dialog` over `over` with `body` in it: the
 /// cells' tooltip on its close ("Close — Esc", the key named where the
 /// wizard names its keys), and the frame's lines lifted over its scrim
-/// where the window leaves them clear ([`lift_lines`]).
+/// where the window leaves them clear (`lift_lines`).
 fn window<R>(ui: &Ui, over: Rect, id: Id, dialog: Dialog<'_>, wizard: &Wizard, page: &Page, body: impl FnOnce(&mut Ui) -> R) -> ModalShown<R> {
-    let shown = dialog.show(ui, &page.pal, |ui| {
-        let inner = body(ui);
-        // The window's foot: the padding's under the body's, or under its
-        // view's where the body is taller and scrolls.
-        let foot = ui.min_rect().max.y.min(ui.clip_rect().max.y) + WINDOW_PAD;
-        (inner, foot)
-    });
+    let shown = dialog.show(ui, &page.pal, body);
     if let Some(response) = ui.ctx().read_response(id.with("close")) {
         tip_keyed(page, &response, &t!("path_modal.tip_close"));
     }
-    let (inner, foot) = shown.inner;
-    lift_lines(ui, id, over, foot, wizard, page);
-    ModalShown { closed: shown.closed, inner }
-}
-
-/// The frame's status line and tips line drawn again over the scrim of the
-/// modal `modal`, lit, as every board stands them over every modal's scrim
-/// and as the cells leave them beside theirs: the modal's hint, what the
-/// wizard is busy with (a listing being read), its note (a refusal, the
-/// machine translation's). Only where the window, its foot at `foot`,
-/// leaves them clear: where it reaches them (a short page), they stay under
-/// the scrim where the frame drew them, never over the window. Drawn in a
-/// layer of their own that egui keeps just over the modal's, which takes no
-/// pointer.
-pub(super) fn lift_lines(ui: &Ui, modal: Id, over: Rect, foot: f32, wizard: &Wizard, page: &Page) {
-    let at = parts(over);
-    if foot > at.status.min.y {
-        return;
-    }
-    let lines = Id::new("setup-modal-lines");
-    ui.ctx().set_sublayer(LayerId::new(Order::Foreground, modal), LayerId::new(Order::Foreground, lines));
-    let area = egui::Area::new(lines).order(Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false).interactable(false);
-    let _ = area.show(ui.ctx(), |ui| {
-        status_line(ui, at.status, wizard, &page.pal);
-        tips_line(ui, at.tips, wizard, &page.pal);
-    });
+    lift_lines(ui, id, over, shown.window.max.y, wizard, page);
+    shown
 }
 
 #[cfg(test)]
 mod tests {
     use egui::epaint::Shape;
-    use egui::{Color32, Event, FullOutput, Id, Pos2, Rect, pos2, vec2};
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use egui::{Color32, Event, FullOutput, Id, Rect, pos2, vec2};
+    use ratatui::crossterm::event::KeyCode;
     use rust_i18n::t;
 
     use super::super::FLOOR;
-    use super::super::tests::{BOARD, Probe, color_of, drawn, has, tipped, wizard};
+    use super::super::tests::{BOARD, Probe, color_of, drawn, has, key, lifted, tipped, wizard};
     use crate::api::types::{DirEntry, DirListing};
     use crate::gui::window::studio::{FORM_BUTTON_H, Pal};
     use crate::setup::cells::footer_hint;
     use crate::setup::tests::{LOCALE_LOCK, in_own_process};
-    use crate::setup::{Act, Done, LANGS, Modal, Op, PathDraft, Wizard, handle_key};
+    use crate::setup::{Act, Done, LANGS, Modal, Op, PathDraft, Wizard};
 
     /// The three windows' ids, as the frame's test names them.
     const LIST: &str = "setup-language-list";
     const PATH: &str = "setup-path-entry";
     const BROWSE: &str = "setup-browser";
-
-    fn key(wizard: &mut Wizard, code: KeyCode) {
-        handle_key(wizard, KeyEvent::new(code, KeyModifiers::NONE));
-    }
 
     fn type_text(wizard: &mut Wizard, s: &str) {
         for c in s.chars() {
@@ -364,16 +262,6 @@ mod tests {
             Shape::Rect(r) if (r.rect.width() - 6.0).abs() < 0.01 && (r.rect.height() - 6.0).abs() < 0.01 && rect.contains(r.rect.center()) => Some(r.fill),
             _ => None,
         })
-    }
-
-    /// Whether `words` were drawn over the scrim the page `size` lies under:
-    /// their last drawing comes after it.
-    fn lifted(out: &FullOutput, size: egui::Vec2, words: &str) -> bool {
-        let page = Rect::from_min_size(Pos2::ZERO, size);
-        let at = |hit: &dyn Fn(&Shape) -> bool| out.shapes.iter().rposition(|c| hit(&c.shape));
-        let scrim = at(&|s| matches!(s, Shape::Rect(r) if r.rect == page && r.fill.a() > 0 && r.fill.a() < 255));
-        let words = at(&|s| matches!(s, Shape::Text(t) if t.galley.text() == words));
-        matches!((scrim, words), (Some(scrim), Some(words)) if words > scrim)
     }
 
     #[test]

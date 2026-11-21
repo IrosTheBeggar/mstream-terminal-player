@@ -35,8 +35,7 @@ mod modals;
 
 use std::time::{Duration, Instant};
 
-use egui::epaint::StrokeKind;
-use egui::{Align, Align2, CursorIcon, Id, Layout, Pos2, Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align, Align2, CursorIcon, Id, LayerId, Layout, Order, Pos2, Rect, Response, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 use rust_i18n::t;
 
 use super::cells::footer_hint;
@@ -344,22 +343,10 @@ fn strip(ui: &Ui, rect: Rect, wizard: &Wizard, page: &Page, acts: &mut Vec<Act>)
 }
 
 /// The language chip, its left middle at `at`, as the canvas draws it: the
-/// chevron and the language's own name in a box the strip's height on the
-/// panel's fill inside an edge hairline, raised under the pointer with the
-/// name in the text colour and the hand, the cells' tooltip on it. As wide
-/// as its name: 日本語 is narrower than Deutsch.
+/// kit's chip that opens a list, the language's own name in it, as wide as
+/// its name (日本語 is narrower than Deutsch), with the cells' tooltip.
 fn language_chip(ui: &Ui, at: Pos2, wizard: &Wizard, page: &Page) -> Response {
-    let pal = &page.pal;
-    let name = LANGS[wizard.lang].1;
-    let w = 10.0 + 12.0 + 8.0 + studio::width_of(ui, name, body(13.0)) + 10.0;
-    let rect = Rect::from_min_size(pos2(at.x, at.y - STRIP_H / 2.0), vec2(w, STRIP_H));
-    let response = studio::hand(ui.interact(rect, Id::new("setup-language"), Sense::click()));
-    let hovered = response.hovered();
-    ui.painter().rect_filled(rect, studio::square(), if hovered { pal.raised } else { pal.panel });
-    ui.painter().rect_stroke(rect, studio::square(), Stroke::new(1.0, pal.edge), StrokeKind::Inside);
-    let ink = if hovered { pal.text } else { pal.soft };
-    studio::chevron(ui, pos2(rect.min.x + 16.0, at.y), ink, false);
-    studio::text(ui, pos2(rect.min.x + 30.0, at.y), name, body(13.0), ink, w, Align2::LEFT_CENTER);
+    let response = studio::select_chip(ui, Id::new("setup-language"), at, LANGS[wizard.lang].1, &page.pal);
     tip(page, &response, &t!("lang.chip_tip"));
     response
 }
@@ -393,23 +380,13 @@ fn logo(ui: &Ui, column: Rect) -> f32 {
 }
 
 /// The wordmark's texture for `band`: the picture halved as many times as
-/// leaves it at most twice the pixels it is drawn at, each half made once
-/// and kept. The window's textures have no mipmaps, and one sampled at
-/// under half its size skips texels (covers.rs fits a cover down for the
-/// same reason): the 1224 pixels drawn 372 points wide on a screen at 100%
-/// would lose the wordmark's thin strokes, which their half keeps.
+/// leaves it at most twice the pixels it is drawn at (`studio::halvings`),
+/// each half made once and kept: the 1224 pixels drawn 372 points wide on a
+/// screen at 100% would lose the wordmark's thin strokes, which their half
+/// keeps.
 fn logo_texture(ctx: &egui::Context, band: Rect) -> Option<egui::TextureHandle> {
-    let halvings = halvings(logo_size(ctx)?, band, ctx.pixels_per_point());
+    let halvings = studio::halvings(logo_size(ctx)?, band, ctx.pixels_per_point());
     studio::texture(ctx, Id::new("setup-logo").with(halvings), 0, false, || logo_image(halvings))
-}
-
-/// How many times a picture `size` pixels is halved to be drawn whole in
-/// `band` at `ppp` pixels a point: as often as leaves it at most twice the
-/// pixels it is drawn at, and never once where it is drawn at its own size
-/// or larger.
-fn halvings(size: Vec2, band: Rect, ppp: f32) -> u32 {
-    let drawn = size.x * (band.width() / size.x).min(band.height() / size.y) * ppp;
-    (size.x / drawn.max(1.0)).log2().floor().clamp(0.0, 8.0) as u32
 }
 
 /// The wordmark's size in pixels, read once off its header and kept.
@@ -425,40 +402,15 @@ fn logo_size(ctx: &egui::Context) -> Option<Vec2> {
 }
 
 /// The wordmark's pixels with their alpha, as egui takes them, halved
-/// `halvings` times: each half a texel the mean of the four under it,
-/// premultiplied, so the clear pixels round its strokes lend the edges
-/// none of their colour (a mipmap's level, made by hand).
+/// `halvings` times (`studio::halved`, a mipmap's level made by hand).
 fn logo_image(halvings: u32) -> Option<egui::ColorImage> {
     let image = image::load_from_memory(LOGO_PNG).ok()?.to_rgba8();
     let size = [image.width() as usize, image.height() as usize];
     let mut image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
     for _ in 0..halvings {
-        image = halved(&image);
+        image = studio::halved(&image);
     }
     Some(image)
-}
-
-/// `image` at half its size, each texel the mean of the (premultiplied)
-/// two by two under it: an odd last row or column is left out, as a
-/// mipmap's level leaves it, and a side one texel long is kept.
-fn halved(image: &egui::ColorImage) -> egui::ColorImage {
-    let [w, h] = image.size;
-    let (hw, hh) = ((w / 2).max(1), (h / 2).max(1));
-    let at = |x: usize, y: usize| image.pixels[y.min(h - 1) * w + x.min(w - 1)].to_array();
-    let mut pixels = Vec::with_capacity(hw * hh);
-    for y in 0..hh {
-        for x in 0..hw {
-            let mut sum = [0u32; 4];
-            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                for (s, v) in sum.iter_mut().zip(at(2 * x + dx, 2 * y + dy)) {
-                    *s += u32::from(v);
-                }
-            }
-            let [r, g, b, a] = sum.map(|s| ((s + 2) / 4) as u8);
-            pixels.push(egui::Color32::from_rgba_premultiplied(r, g, b, a));
-        }
-    }
-    egui::ColorImage::new([hw, hh], pixels)
 }
 
 /// The status line across `rect`, the cells' one row of it: what the
@@ -503,6 +455,30 @@ fn key_of(part: &str) -> (&str, &str) {
         end += 1 + word.len();
     }
     part.split_at(end)
+}
+
+/// The frame's status line and tips line drawn again over the scrim of the
+/// modal `modal` (its window's foot at `foot`), lit, as every board stands
+/// them over every modal's scrim and as the cells leave them beside their
+/// modal: the modal's hint, what the wizard is busy with (a listing being
+/// read), its note (a refusal, the machine translation's, a problem the
+/// login form had before the skip gate came up). Only where the window
+/// leaves them clear: where it reaches them (a short page), they stay under
+/// the scrim where the frame drew them, never over the window. Drawn in a
+/// layer of their own that egui keeps just over the modal's, which takes no
+/// pointer.
+fn lift_lines(ui: &Ui, modal: Id, over: Rect, foot: f32, wizard: &Wizard, page: &Page) {
+    let at = parts(over);
+    if foot > at.status.min.y {
+        return;
+    }
+    let lines = Id::new("setup-modal-lines");
+    ui.ctx().set_sublayer(LayerId::new(Order::Foreground, modal), LayerId::new(Order::Foreground, lines));
+    let area = egui::Area::new(lines).order(Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false).interactable(false);
+    let _ = area.show(ui.ctx(), |ui| {
+        status_line(ui, at.status, wizard, &page.pal);
+        tips_line(ui, at.tips, wizard, &page.pal);
+    });
 }
 
 /// The bar across `rect`: the screen's way forward as the kit's lit form
@@ -590,11 +566,12 @@ mod tests {
 
     use egui::epaint::Shape;
     use egui::{Color32, FullOutput};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
     use crate::api::Client;
-    use crate::setup::Op;
     use crate::setup::tests::LOCALE_LOCK;
+    use crate::setup::{Op, handle_key};
 
     /// The boards' page, in points.
     pub(super) const BOARD: Vec2 = vec2(1280.0, 800.0);
@@ -727,7 +704,7 @@ mod tests {
     }
 
     /// The meter's lit stripes in `color`: three to a lit segment.
-    fn stripes(out: &FullOutput, color: Color32) -> usize {
+    pub(super) fn stripes(out: &FullOutput, color: Color32) -> usize {
         out.shapes
             .iter()
             .filter(|clipped| match &clipped.shape {
@@ -735,6 +712,35 @@ mod tests {
                 _ => false,
             })
             .count()
+    }
+
+    /// A key pressed, through the wizard's own keymap, as the host hands it.
+    pub(super) fn key(wizard: &mut Wizard, code: KeyCode) {
+        handle_key(wizard, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// The wheel turned over `at`, `dy` points of a swipe, a pass each for
+    /// the move, the turn and its end.
+    pub(super) fn wheel(probe: &Probe, wizard: &mut Wizard, at: Pos2, dy: f32) {
+        let turn = |phase, dy| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, dy),
+            phase,
+            modifiers: egui::Modifiers::default(),
+        };
+        let _ = probe.pass(wizard, vec![egui::Event::PointerMoved(at)]);
+        let _ = probe.pass(wizard, vec![turn(egui::TouchPhase::Start, 0.0), turn(egui::TouchPhase::Move, dy)]);
+        let _ = probe.pass(wizard, vec![turn(egui::TouchPhase::End, 0.0)]);
+    }
+
+    /// Whether `words` were drawn over the scrim the page `size` lies under:
+    /// their last drawing comes after it.
+    pub(super) fn lifted(out: &FullOutput, size: Vec2, words: &str) -> bool {
+        let page = Rect::from_min_size(Pos2::ZERO, size);
+        let at = |hit: &dyn Fn(&Shape) -> bool| out.shapes.iter().rposition(|c| hit(&c.shape));
+        let scrim = at(&|s| matches!(s, Shape::Rect(r) if r.rect == page && r.fill.a() > 0 && r.fill.a() < 255));
+        let words = at(&|s| matches!(s, Shape::Text(t) if t.galley.text() == words));
+        matches!((scrim, words), (Some(scrim), Some(words)) if words > scrim)
     }
 
     #[test]
@@ -944,14 +950,15 @@ mod tests {
         let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let probe = Probe::new(BOARD);
         type Open = fn(&mut Wizard);
-        // Each modal, the screen it opens over and a live control there.
+        // Each modal, the screen it opens over and a live control there,
+        // and its close: the window's, or the gate's way back.
         let modals: [(Screen, &str, Open, &str, Id); 4] = [
-            (Screen::Folders, "setup-add", |w| w.modal = Modal::Language(0), "lang.modal_title", Id::new("setup-language-list")),
-            (Screen::Folders, "setup-add", |w| w.modal = Modal::PathEntry(Default::default()), "path_modal.title", Id::new("setup-path-entry")),
-            (Screen::Folders, "setup-add", |w| w.modal = Modal::Browser(Default::default()), "browse.title", Id::new("setup-browser")),
-            (Screen::Login, "setup-forward", |w| w.modal = Modal::SkipWarning, "skip_modal.title", Id::new("setup-skip")),
+            (Screen::Folders, "setup-add", |w| w.modal = Modal::Language(0), "lang.modal_title", Id::new("setup-language-list").with("close")),
+            (Screen::Folders, "setup-add", |w| w.modal = Modal::PathEntry(Default::default()), "path_modal.title", Id::new("setup-path-entry").with("close")),
+            (Screen::Folders, "setup-add", |w| w.modal = Modal::Browser(Default::default()), "browse.title", Id::new("setup-browser").with("close")),
+            (Screen::Login, "setup-forward", |w| w.modal = Modal::SkipWarning, "skip_modal.title", Id::new("setup-skip").with("foot").with(0usize)),
         ];
-        for (screen, beneath, open, title, id) in modals {
+        for (screen, beneath, open, title, close) in modals {
             let mut wizard = wizard();
             wizard.screen = screen;
             let _ = probe.settle(&mut wizard);
@@ -966,7 +973,7 @@ mod tests {
             probe.press(&mut wizard, beneath);
             assert!(wizard.queued.is_none() && wizard.note.is_none() && wizard.modal != Modal::None, "{title}: the scrim took it");
             let _ = probe.settle(&mut wizard);
-            probe.click(&mut wizard, id.with("close"));
+            probe.click(&mut wizard, close);
             assert_eq!(wizard.modal, Modal::None, "{title}: closed");
         }
     }
@@ -1016,34 +1023,17 @@ mod tests {
         }
     }
 
-    /// The wordmark is never sampled at under half its pixels (the window's
-    /// textures have no mipmaps): halved until it is at most twice what it
-    /// is drawn at, whole where the screen's pixels are as many, each half
-    /// the mean of the premultiplied texels under it.
+    /// The wordmark (1224 by 306) is drawn from the half the kit's halving
+    /// leaves it at most twice the pixels it is drawn at on the boards'
+    /// page at 100%, and its least (24 points tall) from an eighth.
     #[test]
     fn the_wordmark_is_halved_to_within_twice_the_pixels_it_is_drawn_at() {
         let size = vec2(1224.0, 306.0);
-        let band = |h: f32| Rect::from_min_size(pos2(280.0, 64.0), vec2(720.0, h));
-        assert_eq!(halvings(size, band(93.0), 1.0), 1, "372 pixels wide: the 612 half");
-        assert_eq!(halvings(size, band(93.0), 1.5), 1, "558 wide: still the half");
-        assert_eq!(halvings(size, band(93.0), 2.0), 0, "744 wide: the whole");
-        assert_eq!(halvings(size, band(93.0), 3.0), 0, "never more than whole");
-        assert_eq!(halvings(size, band(24.0), 1.0), 3, "the least it is drawn at: an eighth");
-        assert_eq!(halvings(size, Rect::from_min_size(Pos2::ZERO, vec2(100.0, 93.0)), 1.0), 3, "a narrow band, by its width");
-        for (h, ppp) in [(93.0, 1.0), (93.0, 1.25), (60.0, 1.0), (24.0, 2.0)] {
-            let n = halvings(size, band(h), ppp);
-            let ratio = size.y / 2f32.powi(n as i32) / (h * ppp);
-            assert!(ratio <= 2.0 + 1e-3, "{h} at {ppp}: {n} halvings sample at {ratio}");
-        }
-        let image = logo_image(1).expect("the half");
-        assert_eq!(image.size, [612, 153]);
-        // Each texel the mean of the four under it, an odd last column
-        // left out.
-        let red = Color32::from_rgba_premultiplied(200, 0, 0, 200);
-        let two = egui::ColorImage::new([2, 2], vec![red, Color32::TRANSPARENT, Color32::TRANSPARENT, Color32::TRANSPARENT]);
-        assert_eq!(halved(&two).pixels, [Color32::from_rgba_premultiplied(50, 0, 0, 50)]);
-        let three = egui::ColorImage::new([3, 1], vec![red, red, Color32::TRANSPARENT]);
-        assert_eq!((halved(&three).size, halved(&three).pixels), ([1, 1], vec![red]));
+        let band = |h: f32| Rect::from_min_size(pos2(280.0, 64.0), vec2(COLUMN_W, h));
+        assert_eq!(studio::halvings(size, band(LOGO_H), 1.0), 1);
+        assert_eq!(studio::halvings(size, band(LOGO_LEAST), 1.0), 3);
+        assert_eq!(logo_image(1).expect("the half").size, [612, 153]);
+        assert_eq!(logo_image(3).expect("the eighth").size, [153, 38]);
     }
 
     #[test]
