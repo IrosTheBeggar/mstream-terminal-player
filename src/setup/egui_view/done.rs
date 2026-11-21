@@ -577,30 +577,46 @@ mod tests {
         assert!(probe.rect(card(0)).min.y >= whole.max.y + 20.0 - 0.01, "the cards under it");
     }
 
-    /// The code's texture is made once and kept: passes after the first add
-    /// none, and the same texture is drawn.
+    /// One pass of the view on `probe`'s context, as the probe runs one, and
+    /// the textures whose pixels it sent to the GPU, which the probe lets go
+    /// of unread.
+    fn sent(probe: &Probe, wizard: &mut Wizard) -> (FullOutput, Vec<egui::TextureId>) {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, probe.size)), ..Default::default() };
+        let mut out = probe.ctx.run_ui(input, |ui| {
+            let _ = super::super::show(ui, wizard, &probe.view, &probe.composition, true);
+        });
+        let ids = out.textures_delta.set.keys().copied().collect();
+        out.textures_delta.clear();
+        (out, ids)
+    }
+
+    /// The code's texture is made once and kept: its pixels go to the GPU
+    /// with the pass that first draws it and with none after, no texture is
+    /// added, and the same one is drawn.
     #[test]
     fn the_codes_texture_is_made_once() {
         let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
         let probe = Probe::new(BOARD);
         let mut wizard = done();
         answered(&mut wizard, true, Some("iroh-ticket-abc123"));
-        let (first, _) = probe.settle(&mut wizard);
-        let textures = probe.ctx.tex_manager().read().num_allocated();
+        let crisp = |id: &egui::TextureId| {
+            *id != egui::TextureId::default()
+                && probe.ctx.tex_manager().read().meta(*id).is_some_and(|m| m.options.magnification == TextureFilter::Nearest)
+        };
         let code = |out: &FullOutput| {
             out.shapes.iter().find_map(|c| match &c.shape {
-                Shape::Mesh(mesh) if mesh.texture_id != egui::TextureId::default() => {
-                    let manager = probe.ctx.tex_manager();
-                    let crisp = manager.read().meta(mesh.texture_id).is_some_and(|m| m.options.magnification == TextureFilter::Nearest);
-                    crisp.then_some(mesh.texture_id)
-                }
+                Shape::Mesh(mesh) if crisp(&mesh.texture_id) => Some(mesh.texture_id),
                 _ => None,
             })
         };
-        let id = code(&first).expect("the code drawn");
+        let (first, ids) = sent(&probe, &mut wizard);
+        let id = code(&first).expect("the code drawn on the first pass");
+        assert_eq!(ids.iter().filter(|t| crisp(*t)).collect::<Vec<_>>(), [&id], "its pixels sent with its first drawing");
+        let textures = probe.ctx.tex_manager().read().num_allocated();
         for _ in 0..5 {
-            let (out, _) = probe.pass(&mut wizard, Vec::new());
+            let (out, ids) = sent(&probe, &mut wizard);
             assert_eq!(code(&out), Some(id), "the same texture");
+            assert!(!ids.contains(&id), "its pixels never sent again");
         }
         assert_eq!(probe.ctx.tex_manager().read().num_allocated(), textures, "none made again");
     }
@@ -624,19 +640,19 @@ mod tests {
         assert_eq!(color_of(&out, &t!("busy.fetching_qc")), Some(pal.accent));
         assert!(!code_drawn(&out));
 
-        // Off, starting, a ticket that will not draw: the model's note second.
-        for (enabled, ticket, note) in [(false, None, "qc.off_panel"), (true, None, "qc.starting")] {
+        // Off, starting, a ticket too long for any code to hold, which will
+        // not draw: the model's note second, and the band bare.
+        let undrawable = "t".repeat(4096);
+        let answers = [(false, None, "qc.off_panel"), (true, None, "qc.starting"), (true, Some(undrawable.as_str()), "qc.on_panel")];
+        for (enabled, ticket, note) in answers {
             let mut wizard = quick_connect();
             answered(&mut wizard, enabled, ticket);
+            assert!(wizard.qr.is_none() && wizard.qr_art.is_none(), "{note}: no code in the model");
             let (out, _) = probe.settle(&mut wizard);
             let words = drawn(&out);
             assert!(has(&words, &format!("{} {}", opening(), t!(note))), "{note}: {words:?}");
             assert!(!code_drawn(&out), "{note}: bare ground");
         }
-        let mut wizard = quick_connect();
-        wizard.qr_note = t!("qc.on_panel").to_string();
-        let (out, _) = probe.settle(&mut wizard);
-        assert!(has(&drawn(&out), &format!("{} {}", opening(), t!("qc.on_panel"))));
 
         // Failed: the opening alone, and the cells' gold line.
         let mut wizard = quick_connect();
