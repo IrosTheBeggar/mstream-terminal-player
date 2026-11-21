@@ -2367,18 +2367,28 @@ pub(crate) struct Browsed {
     pub button: Option<usize>,
 }
 
+/// A folder browser's path line, and the room it leaves under that line
+/// and over its foot where the window gives it them.
+const BROWSE_PATH_H: f32 = 18.0;
+const BROWSE_UNDER_PATH: f32 = 12.0;
+const BROWSE_OVER_FOOT: f32 = 20.0;
+
 /// The body of the server's folder browser, as every page that picks a
 /// folder draws it, rows of the layout: `path`, the folder listed, cut at
-/// its start in the dim monospace; under it its folders as [`folder_row`]s
-/// in a headless [`Table`] under `id.with("list")`, at most `most` on
-/// screen (the cells' [`BROWSE_ROWS`], or fewer where a page's board asks)
-/// and no more than leave its foot room under it, the keyboard's `sel`
-/// ringed and kept in view and a new listing starting at its top; with
-/// none, `empty` dim on the first row's line; then, 20 points on, its foot
-/// under `id.with("foot")`, `buttons` from the left ([`foot`]). Where the
-/// window is too narrow for them on one row the foot stacks, and where it
-/// is short too the list gives way to the rows that adds, so the whole foot
-/// stands in the window's view.
+/// its start in the dim monospace; 12 points under it its folders as
+/// [`folder_row`]s in a headless [`Table`] under `id.with("list")`, at most
+/// `most` on screen (the cells' [`BROWSE_ROWS`], or fewer where a page's
+/// board asks) and no more than leave its foot room under it, the
+/// keyboard's `sel` ringed and kept in view and a new listing starting at
+/// its top; with none, `empty` dim on the first row's line; then, 20
+/// points on, its foot under `id.with("foot")`, `buttons` from the left
+/// ([`foot`]). Where the window is too narrow for them on one row the foot
+/// stacks, and where it is short too the list gives way to the rows that
+/// adds, down to one row. Where even one row leaves the foot under the
+/// body's fold, the 12 and the 20 close up as far as that takes and no
+/// further ([`browser_gaps`]), so the whole foot stands in the window's
+/// view wherever their 32 points are enough; at every size where one row
+/// fits with them, they are as drawn.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn folder_browser(
     ui: &mut Ui,
@@ -2392,22 +2402,43 @@ pub(crate) fn folder_browser(
     pal: &Pal,
 ) -> Browsed {
     let w = ui.available_width();
-    let (shown, _) = cut_start(ui, path, mono(12.5), w);
-    line(ui, 18.0, &shown, mono(12.5), pal.dim);
-    ui.add_space(12.0);
     let (_, foot_h) = foot_rects(ui, buttons, &[], w);
+    // The least the list takes: a row, or none for no folders and no words.
+    let least = if names.is_empty() && empty.is_empty() { 0.0 } else { FOLDER_ROW_H };
+    let (under_path, over_foot) = browser_gaps(ui.available_height(), least + foot_h);
+    let (shown, _) = cut_start(ui, path, mono(12.5), w);
+    line(ui, BROWSE_PATH_H, &shown, mono(12.5), pal.dim);
+    ui.add_space(under_path);
     let rows = names.len().min(most) as f32 * FOLDER_ROW_H;
     let list = Table::new(id.with("list"), &[], names.len())
         .headless()
         .row_height(FOLDER_ROW_H)
-        .height(rows.min(ui.available_height() - 20.0 - foot_h).max(FOLDER_ROW_H))
+        .height(rows.min(ui.available_height() - over_foot - foot_h).max(FOLDER_ROW_H))
         .cursor(Some(sel))
         .content(Id::new(path))
         .empty(empty);
     let picked = list.show(ui, pal, |ui, i, row| folder_row(ui, row.rect, &names[i], row.selected, ink(row, pal.text, pal), pal));
-    ui.add_space(20.0);
+    ui.add_space(over_foot);
     let button = foot(ui, id.with("foot"), buttons, &[], None, pal);
     Browsed { row: picked.row, button }
+}
+
+/// The room a folder browser leaves under its path and over its foot in a
+/// body `room` points tall, where the least its list takes and its foot
+/// are `rest` tall together: the 12 and the 20 wherever the path and the
+/// rest stand whole with them, as on every board's page; where they do
+/// not, the two closed up together, in whole points and each in its share
+/// of the 32, by what the body runs over and no more, so the foot's last
+/// row ends less than a point over the body's end. Where the body runs
+/// over by more than the two together, none: the body scrolls, the foot as
+/// near the view as it can stand.
+fn browser_gaps(room: f32, rest: f32) -> (f32, f32) {
+    let gaps = BROWSE_UNDER_PATH + BROWSE_OVER_FOOT;
+    let over = BROWSE_PATH_H + gaps + rest - room;
+    // A hundredth's grace, for the room's sums.
+    let cut = (over - 0.01).ceil().clamp(0.0, gaps);
+    let over_foot = (BROWSE_OVER_FOOT * (gaps - cut) / gaps).round();
+    (gaps - cut - over_foot, over_foot)
 }
 
 // ── Modals ────────────────────────────────────────────────────────────────
@@ -4122,6 +4153,58 @@ mod tests {
         assert!(ended.get() <= body.max.y + 0.5, "the whole foot in the body: {}", ended.get());
         let row = ctx.read_response(Id::new("probe-stack").with("list").with("row").with(0usize)).expect("a row kept").rect;
         assert!(foot(0).min.y - row.max.y >= 20.0 - 0.5, "the list 20 over the foot at least: {row:?}");
+    }
+
+    #[test]
+    fn a_browsers_gaps_close_up_only_as_far_as_its_foot_needs() {
+        // A row of the list and a foot of three rows, 122 points.
+        let rest = 30.0 + 122.0;
+        // Room for the path and the rest with the 12 and the 20, or more,
+        // or no end to it: as drawn.
+        assert_eq!(browser_gaps(18.0 + 12.0 + 20.0 + rest, rest), (12.0, 20.0));
+        assert_eq!(browser_gaps(300.0, 30.0 + 78.0), (12.0, 20.0));
+        assert_eq!(browser_gaps(f32::INFINITY, 30.0 + 34.0), (12.0, 20.0));
+        // No folders and no words: no row, so 30 points less will do.
+        assert_eq!(browser_gaps(18.0 + 12.0 + 20.0 + 34.0, 34.0), (12.0, 20.0));
+        // Two points short (a modal at the cells' floor, 200 points of body):
+        // a point from each.
+        assert_eq!(browser_gaps(200.0, rest), (11.0, 19.0));
+        // A sum's crumbs short take nothing; half a point takes a whole one.
+        assert_eq!(browser_gaps(202.0 - 0.001, rest), (12.0, 20.0));
+        assert_eq!(browser_gaps(199.5, rest), (11.0, 18.0));
+        // Half the two: each halved.
+        assert_eq!(browser_gaps(18.0 + 16.0 + 30.0 + 34.0, 30.0 + 34.0), (6.0, 10.0));
+        // More than the two together: none, and the body scrolls.
+        assert_eq!(browser_gaps(150.0, rest), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_browser_a_little_short_for_its_foot_closes_its_gaps_and_keeps_its_row_and_the_whole_foot() {
+        let ctx = context();
+        let names: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        let buttons = [("up", false), ("open", false), ("Add this very folder here", true), ("close it", false)];
+        let (left, w) = (20.0, 300.0);
+        let foot_h = Cell::new(0.0);
+        let ended = Cell::new(0.0);
+        // The body three points short of the path, a row and the foot with
+        // the 12 and the 20, whatever the face makes of the foot.
+        let mut run = |ui: &mut Ui| {
+            foot_h.set(foot_rects(ui, &buttons, &[], w).1);
+            let body = Rect::from_min_size(pos2(left, 20.0), vec2(w, 18.0 + 12.0 + 30.0 + 20.0 + foot_h.get() - 3.0));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)));
+            let _ = folder_browser(&mut child, Id::new("probe-tight"), "/srv", &names, 5, "", 9, &buttons, &Pal::now());
+            ended.set(child.cursor().min.y);
+        };
+        let _ = pass(&ctx, vec2(400.0, 400.0), Vec::new(), &mut run);
+        let _ = pass(&ctx, vec2(400.0, 400.0), Vec::new(), &mut run);
+        let bottom = 20.0 + 18.0 + 12.0 + 30.0 + 20.0 + foot_h.get() - 3.0;
+        let foot = |k: usize| ctx.read_response(Id::new("probe-tight").with("foot").with(k)).expect("drawn").rect;
+        let row = ctx.read_response(Id::new("probe-tight").with("list").with("row").with(5usize)).expect("the cursor's row").rect;
+        assert!((row.height() - FOLDER_ROW_H).abs() < 0.01, "one row, the cursor's, whole: {row:?}");
+        assert!((row.min.y - (20.0 + 18.0 + 11.0)).abs() < 0.01, "11 under the path: {row:?}");
+        assert!((foot(0).min.y - row.max.y - 18.0).abs() < 0.01, "18 over the foot: {row:?} {:?}", foot(0));
+        let last = (0..4).map(foot).fold(f32::MIN, |y, r| y.max(r.max.y));
+        assert!(last <= bottom + 0.01 && ended.get() <= bottom + 0.01, "the whole foot in the body: {last} {} {bottom}", ended.get());
     }
 
     // ── Cards, headings and pictures halved ──────────────────────────────

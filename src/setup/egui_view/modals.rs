@@ -441,10 +441,14 @@ mod tests {
         assert!(cursor.max.y <= buttons.min.y - 20.0 + 0.5, "whole in the list: {cursor:?}");
     }
 
-    /// In a window narrower than the boards' the browser's foot stacks
-    /// rather than run past the window: German's four buttons want some 533
-    /// points, a page 500 wide leaves its window 420 inside, so close starts
-    /// a row of its own under the other three, every label whole, and each
+    /// In a narrow window the browser's foot stacks rather than run past
+    /// the window. A page 500 wide leaves its window 420 inside, less than
+    /// German's four buttons want on one row in each platform's face (some
+    /// 533 points in Segoe UI, 594 in DejaVu Sans). So they fill rows from
+    /// the left in their order, each as wide as its label: a button that
+    /// would run past the inside starts the next row at the left, 10 under,
+    /// and close ends on a row under up's, alone or beside the add as the
+    /// face's widths fall. Every label is whole, none cut short, and each
     /// button still does the cells' act.
     #[test]
     fn in_a_narrow_window_the_browsers_foot_stacks_inside_it_every_label_whole() {
@@ -461,11 +465,20 @@ mod tests {
         for (k, b) in buttons.iter().enumerate() {
             assert!(b.min.x >= left - 0.5 && b.max.x <= right + 0.5, "button {k} inside the window: {b:?}, {left} to {right}");
         }
-        assert!(buttons[..3].iter().all(|b| (b.min.y - buttons[0].min.y).abs() < 0.5), "up, open and the add on one row: {buttons:?}");
-        let under = pos2(left, buttons[0].max.y + 10.0);
-        assert!((buttons[3].min - under).length() < 0.5, "close starts the next row, 10 under: {buttons:?}");
+        let wants = buttons.iter().map(Rect::width).sum::<f32>() + 3.0 * 10.0;
+        assert!(wants > right - left, "the four want more than a row: {wants} in {}", right - left);
+        // Each where the rule puts it, from the widths the face gave them:
+        // 10 after the last where it ends inside, else a row 10 under.
+        assert!((buttons[0].min.x - left).abs() < 0.01, "up at the left: {buttons:?}");
+        for k in 1..4 {
+            let (last, x) = (buttons[k - 1], buttons[k - 1].max.x + 10.0);
+            let at = if x + buttons[k].width() <= right + 0.01 { pos2(x, last.min.y) } else { pos2(left, last.max.y + 10.0) };
+            assert!((buttons[k].min - at).length() < 0.01, "button {k} at {at:?}: {buttons:?}");
+        }
+        assert!(buttons[3].min.y > buttons[0].max.y, "close on a row under up's: {buttons:?}");
         for w in ["HOCH", "ÖFFNEN", "DIESEN ORDNER HINZUFÜGEN", "SCHLIESSEN"] {
-            assert!(has(&drawn(&out), w), "{w} whole: {:?}", drawn(&out));
+            let whole = out.shapes.iter().any(|c| matches!(&c.shape, Shape::Text(t) if t.galley.text() == w && !t.galley.elided));
+            assert!(whole, "{w} whole: {:?}", drawn(&out));
         }
         // Each still does what the cells' does: close shuts it, the add adds
         // the folder listed.
@@ -575,32 +588,62 @@ mod tests {
 
     /// In a window both narrow and short the browser's list gives way to
     /// the rows its stacked foot adds, so the whole foot stands in the
-    /// window's view, not under its fold: German's four stack in two rows
-    /// at the cells' floor and on pages 464 by 400 and 600 by 360, where
-    /// the list kept room for one row of the foot and the second row's
-    /// buttons were cut by the view (the close, on the last, wholly). The
-    /// list keeps a row or more, the keys' cursor whole in it.
+    /// window's view, not under its fold: German's four stack at the cells'
+    /// floor and on pages 464 by 400 and 600 by 360, in two rows or three
+    /// as wide as the face sets their labels, where the list once kept room
+    /// for one row of the foot and the buttons under it were cut by the
+    /// view. Where one row of the list still leaves the foot short (three
+    /// rows of it at the floor, in a face as wide as DejaVu Sans), the gaps
+    /// over and under the list close up as far as that takes. The list
+    /// keeps a row or more, the keys' cursor whole in it.
     #[test]
     fn in_a_short_narrow_window_the_list_gives_way_to_the_whole_stacked_foot() {
         let Some(_) = in_own_process(&["de"]) else { return };
+        for size in [FLOOR, vec2(464.0, 400.0), vec2(600.0, 360.0)] {
+            let (probe, buttons) = browsing_short(size);
+            assert!(buttons[3].min.y > buttons[0].max.y, "at {size:?} the foot stacks: {buttons:?}");
+            whole_foot_and_cursor(&probe, size, &buttons);
+        }
+    }
+
+    /// In every language the wizard speaks, the browser's whole foot and
+    /// the keys' cursor stand in view at the cells' floor and on pages 464
+    /// by 400 and 600 by 360, whether its labels take one row there or
+    /// stack.
+    #[test]
+    fn in_every_language_a_short_narrow_browser_shows_its_whole_foot_and_its_cursor() {
+        let codes = LANGS.map(|(code, _)| code);
+        let Some(_) = in_own_process(&codes) else { return };
+        for size in [FLOOR, vec2(464.0, 400.0), vec2(600.0, 360.0)] {
+            let (probe, buttons) = browsing_short(size);
+            whole_foot_and_cursor(&probe, size, &buttons);
+        }
+    }
+
+    /// The browser on a page `size` large, a listing of forty in it and the
+    /// keys' cursor moved to the ninth: the probe, and the foot's buttons.
+    fn browsing_short(size: egui::Vec2) -> (Probe, Vec<Rect>) {
         let names: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        for size in [FLOOR, vec2(464.0, 400.0), vec2(600.0, 360.0)] {
-            let probe = Probe::new(size);
-            let mut wizard = wizard();
-            wizard.apply(Done::Browsed(Ok(listing("/srv", &names))));
-            let _ = probe.settle(&mut wizard);
-            for _ in 0..8 {
-                key(&mut wizard, KeyCode::Down);
-            }
-            let _ = probe.settle(&mut wizard);
-            let buttons: Vec<Rect> = (0..4).map(|k| probe.rect(foot(k))).collect();
-            assert!(buttons[3].min.y > buttons[0].max.y, "at {size:?} the foot stacks: {buttons:?}");
-            for (k, button) in buttons.iter().enumerate() {
-                assert!((shows(&probe, foot(k)) - FORM_BUTTON_H).abs() < 0.01, "at {size:?} button {k} whole in view: {button:?}");
-            }
-            assert!((shows(&probe, row(BROWSE, 8)) - 30.0).abs() < 0.01, "at {size:?} the keys' cursor whole in the list");
+        let probe = Probe::new(size);
+        let mut wizard = wizard();
+        wizard.apply(Done::Browsed(Ok(listing("/srv", &names))));
+        let _ = probe.settle(&mut wizard);
+        for _ in 0..8 {
+            key(&mut wizard, KeyCode::Down);
         }
+        let _ = probe.settle(&mut wizard);
+        let buttons = (0..4).map(|k| probe.rect(foot(k))).collect();
+        (probe, buttons)
+    }
+
+    /// Every button of the foot whole in the window's view, and the keys'
+    /// cursor, on the ninth folder, whole in the list's.
+    fn whole_foot_and_cursor(probe: &Probe, size: egui::Vec2, buttons: &[Rect]) {
+        for (k, button) in buttons.iter().enumerate() {
+            assert!((shows(probe, foot(k)) - FORM_BUTTON_H).abs() < 0.01, "at {size:?} button {k} whole in view: {button:?}");
+        }
+        assert!((shows(probe, row(BROWSE, 8)) - 30.0).abs() < 0.01, "at {size:?} the keys' cursor whole in the list");
     }
 
     /// Over every modal of the three, the status line and the tips line
