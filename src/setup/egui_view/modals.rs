@@ -462,6 +462,10 @@ mod tests {
         assert!(probe.ctx.read_response(row(PATH, 10)).is_none(), "six at once, not forty");
         let sixth = probe.rect(row(PATH, 5));
         assert!((sixth.max.y - first.min.y - 6.0 * 30.0).abs() < 0.5, "six rows of 30: {first:?} {sixth:?}");
+        // The sixth whole in the list's view, and none of the seventh,
+        // which egui lays out a row past the view.
+        let (six, seven) = (shows(&probe, row(PATH, 5)), shows(&probe, row(PATH, 6)));
+        assert!((six - 30.0).abs() < 0.01 && seven < 0.01, "six at once, not seven: {six} {seven}");
         // ↑ wraps to the last, which is brought into view.
         key(&mut wizard, KeyCode::Up);
         assert!(matches!(&wizard.modal, Modal::PathEntry(d) if d.sel == Some(39)));
@@ -530,12 +534,16 @@ mod tests {
         let first = probe.rect(row(BROWSE, 0));
         let ninth = probe.rect(row(BROWSE, 8));
         assert!((ninth.max.y - first.min.y - 9.0 * 30.0).abs() < 0.5, "nine rows of 30: {first:?} {ninth:?}");
-        assert!(probe.ctx.read_response(row(BROWSE, 12)).is_none(), "nine at once, not the kit's eleven");
+        // The ninth whole in the list's view, and none of the tenth, which
+        // egui lays out a row past the view: the kit's eleven would show
+        // the tenth whole, and an eleventh.
+        let (nine, ten) = (shows(&probe, row(BROWSE, 8)), shows(&probe, row(BROWSE, 9)));
+        assert!((nine - 30.0).abs() < 0.01 && ten < 0.01, "nine at once, not the kit's eleven: {nine} {ten}");
         // The board's window, y 178 to 622 (its edge outside where the
         // kit's is inside): its foot 18 points over the status line at 640.
         let buttons = probe.rect(foot(0));
         assert!((buttons.max.y + 24.0 - 621.0).abs() < 1.0, "the window's foot: {buttons:?}");
-        assert!(ninth.max.y + 20.0 <= buttons.min.y + 0.5, "the list ends 20 over the foot");
+        assert!((buttons.min.y - ninth.max.y - 20.0).abs() < 0.5, "the list ends 20 over the foot: {ninth:?} {buttons:?}");
         // The keys' cursor is kept in view.
         for _ in 0..20 {
             key(&mut wizard, KeyCode::Down);
