@@ -72,9 +72,12 @@ pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, page: &Page) -> Drawn {
     let editing = wizard.editing.as_ref().map(|(row, _)| *row);
     let nothing = t!("folders.nothing_yet");
     // The row being renamed drops the cursor's look, as the cells drop its
-    // slab: the field is the row's mark then.
+    // slab: the field is the row's mark then. The cursor itself stays, so
+    // the rename's end is no move of it and the view stands where the wheel
+    // put it, as the cells' does.
     let table = Table::new(Id::new("setup-folders"), &cols, wizard.folders.len())
-        .cursor(wizard.sel.filter(|s| Some(*s) != editing))
+        .cursor(wizard.sel)
+        .unmarked(editing)
         .row_height(if short { SHORT_ROW_H } else { ROW_H })
         .trail(TRAIL)
         .inert()
@@ -493,5 +496,95 @@ mod tests {
         let _ = probe.settle(&mut wizard);
         assert!(probe.ctx.read_response(nth("setup-name", 0)).is_some(), "the modal's scrim took the wheel");
         assert_eq!(wizard.sel, Some(30), "and the cursor never moved");
+    }
+
+    /// Renaming the cursor's own row hides the cursor's look, not the
+    /// cursor: when the rename ends, by a blur or by Enter, the view stays
+    /// where the wheel put it, as the cells' stays (they bring the cursor in
+    /// only when it moves), and a click that ended it does what it was for.
+    #[test]
+    fn ending_the_cursor_rows_rename_leaves_the_view_where_the_wheel_put_it() {
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        let probe = Probe::new(BOARD);
+        let mut wizard = wizard();
+        for i in 0..40 {
+            wizard.add_folder(format!("/srv/music/{i:02}"));
+        }
+        let _ = probe.settle(&mut wizard);
+        for _ in 0..4 {
+            key(&mut wizard, KeyCode::Down);
+        }
+        assert_eq!(wizard.sel, Some(3));
+        let _ = probe.settle(&mut wizard);
+        let at_foot = |probe: &Probe| probe.ctx.read_response(nth("setup-path", 35)).is_some() && probe.ctx.read_response(nth("setup-path", 3)).is_none();
+        let settled = |probe: &Probe, wizard: &mut Wizard| {
+            for _ in 0..10 {
+                let _ = probe.pass_after(wizard, Vec::new(), 0.1);
+            }
+        };
+
+        // A blur: the click on another row's name that ends the rename
+        // starts that row's, the view left at the foot.
+        key(&mut wizard, KeyCode::Enter);
+        assert_eq!(wizard.editing.as_ref().map(|(row, _)| *row), Some(3));
+        let _ = probe.settle(&mut wizard);
+        wheel(&probe, &mut wizard, probe.rect(nth("setup-path", 3)).center(), -4000.0);
+        settled(&probe, &mut wizard);
+        assert!(at_foot(&probe), "the wheel took the table to its foot");
+        probe.click(&mut wizard, nth("setup-name", 35));
+        assert_eq!(wizard.editing.as_ref().map(|(row, _)| *row), Some(35), "the click started row 35's rename");
+        assert_eq!(wizard.folders[3].name, "03", "and kept row 3's draft");
+        assert_eq!(wizard.sel, Some(3), "the cursor never moved");
+        settled(&probe, &mut wizard);
+        assert!(at_foot(&probe), "the view stayed at the foot");
+        assert!(probe.pass(&mut wizard, Vec::new()).1.caret.is_some(), "the field in view keeps the keyboard");
+        let field = probe.rect(Id::new("setup-rename"));
+        assert!(field.max.y <= BOARD.y && field.min.y >= 0.0, "{field:?}");
+
+        // Enter on the cursor's own row's rename, likewise.
+        key(&mut wizard, KeyCode::Esc);
+        key(&mut wizard, KeyCode::Up);
+        let _ = probe.settle(&mut wizard);
+        key(&mut wizard, KeyCode::Down);
+        let _ = probe.settle(&mut wizard);
+        assert!(probe.ctx.read_response(nth("setup-path", 3)).is_some(), "the cursor's move brought it in");
+        key(&mut wizard, KeyCode::Enter);
+        assert_eq!(wizard.editing.as_ref().map(|(row, _)| *row), Some(3));
+        let _ = probe.settle(&mut wizard);
+        wheel(&probe, &mut wizard, probe.rect(nth("setup-path", 3)).center(), -4000.0);
+        settled(&probe, &mut wizard);
+        assert!(at_foot(&probe), "the wheel took the table to its foot");
+        key(&mut wizard, KeyCode::Enter);
+        assert!(wizard.editing.is_none());
+        settled(&probe, &mut wizard);
+        assert!(at_foot(&probe), "the view stayed at the foot");
+    }
+
+    /// The row being renamed wears no cursor: no raised fill and no ring,
+    /// as the cells drop its slab, while the cursor is still there for the
+    /// rows after the rename.
+    #[test]
+    fn the_row_being_renamed_drops_the_cursors_look() {
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        let probe = Probe::new(BOARD);
+        let pal = Pal::now();
+        let mut wizard = wizard();
+        for path in ["/srv/music", "/srv/vinyl"] {
+            wizard.add_folder(path.into());
+        }
+        key(&mut wizard, KeyCode::Down);
+        let raised = |out: &egui::FullOutput, row: Rect| {
+            out.shapes.iter().any(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == pal.raised && r.rect.intersects(row.shrink(1.0))))
+        };
+        let (out, _) = probe.settle(&mut wizard);
+        let row = probe.rect(nth("setup-path", 0));
+        assert!(raised(&out, row), "the cursor's row raised");
+        key(&mut wizard, KeyCode::Enter);
+        let (out, _) = probe.settle(&mut wizard);
+        assert!(!raised(&out, row), "the row being renamed is not");
+        assert_eq!(color_of(&out, "vinyl"), Some(pal.text));
+        key(&mut wizard, KeyCode::Enter);
+        let (out, _) = probe.settle(&mut wizard);
+        assert!(raised(&out, row), "the cursor's look back with the rename's end");
     }
 }

@@ -1981,6 +1981,7 @@ pub(crate) struct Table<'a> {
     cols: &'a [Col],
     len: usize,
     cursor: Option<usize>,
+    unmarked: Option<usize>,
     look: Look,
     row_h: f32,
     trail: f32,
@@ -2011,6 +2012,7 @@ impl<'a> Table<'a> {
             cols,
             len,
             cursor: None,
+            unmarked: None,
             look: Look::Ring,
             row_h: 40.0,
             trail: 0.0,
@@ -2026,6 +2028,14 @@ impl<'a> Table<'a> {
     /// The keyboard cursor's row.
     pub(crate) fn cursor(self, cursor: Option<usize>) -> Self {
         Table { cursor, ..self }
+    }
+
+    /// Row `row` drawn as no cursor's row though the cursor is on it, a
+    /// row whose own control is its mark for now (a name being renamed in
+    /// its field): the cursor is still the cursor, so the view moves with
+    /// it as it moves and stands where it stands when the mark comes back.
+    pub(crate) fn unmarked(self, row: Option<usize>) -> Self {
+        Table { unmarked: row, ..self }
     }
 
     /// The Stats page's table: 26-point headings, 30-point rows ruled
@@ -2092,7 +2102,7 @@ impl<'a> Table<'a> {
     /// thumb stands clear of the cursor's ring. A wheel's notch moves the
     /// view a row.
     pub(crate) fn show(self, ui: &mut Ui, pal: &Pal, mut draw_row: impl FnMut(&Ui, usize, &RowCtx)) -> TableShown {
-        let Table { id, cols, len, cursor, look, row_h, trail, clickable, reveal, empty, headless, height, content } = self;
+        let Table { id, cols, len, cursor, unmarked, look, row_h, trail, clickable, reveal, empty, headless, height, content } = self;
         let w = ui.available_width();
         let head_h = match (headless, look) {
             (true, _) => 0.0,
@@ -2179,7 +2189,7 @@ impl<'a> Table<'a> {
                 // The Stats page's controls show no hand yet, its rows
                 // among them; the rooms' do.
                 let response = if clickable && look == Look::Ring { hand(response) } else { response };
-                let selected = cursor == Some(i);
+                let selected = cursor == Some(i) && unmarked != Some(i);
                 // A room's row stays raised while the pointer is on a
                 // control the page draws in it (a tick box), which egui
                 // hovers in its stead: the row would blink out under it.
