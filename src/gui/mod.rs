@@ -1955,6 +1955,10 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
             if let Some(text) = &banner {
                 draw_capture_banner(frame, gui, Rect { x: 1, y: 1, width: area.width - 2, height: 1 }, text);
             }
+            // Under a room's egui modal, the cells beside the room — the
+            // banner's row among them — dimmed as its scrim dims the room.
+            #[cfg(feature = "window")]
+            admin::dim_under_modal(frame, gui);
         }
         Screen::Device => {
             // The firmware page, whole, under the top bar in the Stats

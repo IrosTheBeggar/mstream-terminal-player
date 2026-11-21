@@ -102,6 +102,15 @@ impl Pal {
     }
 }
 
+/// `c` seen through a modal's scrim, as egui blends it over `c`: what the
+/// host's cells beside a room's modal wear, so the whole room reads as
+/// under it.
+pub(crate) fn under_scrim(c: Color32) -> Color32 {
+    let keep = 1.0 - f32::from(SCRIM.a()) / 255.0;
+    let mix = |s: u8, d: u8| (f32::from(s) + f32::from(d) * keep).round().min(255.0) as u8;
+    Color32::from_rgb(mix(SCRIM.r(), c.r()), mix(SCRIM.g(), c.g()), mix(SCRIM.b(), c.b()))
+}
+
 /// `c` lifted toward white by `by` of 255, opaque.
 fn lift(c: Color32, by: u8) -> Color32 {
     let up = |v: u8| v.saturating_add(by);
@@ -3478,5 +3487,11 @@ mod tests {
             // Its 16 points and half its stroke either side.
             assert!(Rect::from_center_size(centre, Vec2::splat(16.0 + 2.0)).contains_rect(bounds), "{glyph:?} in its 16 points: {bounds:?}");
         }
+    }
+
+    #[test]
+    fn a_scrim_over_the_ground_is_what_the_capture_measured() {
+        assert_eq!(under_scrim(Color32::from_rgb(0x12, 0x13, 0x1c)), Color32::from_rgb(13, 13, 20));
+        assert_eq!(under_scrim(Color32::BLACK), Color32::from_rgb(SCRIM.r(), SCRIM.g(), SCRIM.b()), "black shows the scrim alone");
     }
 }

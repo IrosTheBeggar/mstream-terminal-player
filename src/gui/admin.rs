@@ -200,6 +200,10 @@ pub(crate) struct AdminUi {
     /// hand.
     #[cfg(feature = "window")]
     egui_hand: bool,
+    /// The GUI's cells beside a room's modal this frame, which it dims as
+    /// the modal's scrim dims the room ([`under_modal`]).
+    #[cfg(feature = "window")]
+    under_modal: Vec<Rect>,
 }
 
 impl AdminUi {
@@ -222,6 +226,8 @@ impl AdminUi {
             bar_held: false,
             #[cfg(feature = "window")]
             egui_hand: false,
+            #[cfg(feature = "window")]
+            under_modal: Vec::new(),
         }
     }
 }
@@ -496,6 +502,12 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let by_egui = egui_frame(gui, frame.area(), &lay, look.as_ref(), modal);
     #[cfg(not(feature = "window"))]
     let by_egui = ByEgui::default();
+    // Under egui's room's modal, the GUI's cells beside the room read as
+    // under its scrim too; the GUI dims them last, over the pick banner.
+    #[cfg(feature = "window")]
+    {
+        gui.admin.under_modal = if by_egui.room && modal { under_modal(&lay, log_on) } else { Vec::new() };
+    }
     let admin = &mut gui.admin;
     let mut drew_room = false;
     if let (Hall::Room(_), Some(room)) = (admin.showing, admin.room.as_mut()) {
@@ -546,6 +558,66 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 /// draws.
 fn below_banner(lay: &Layout) -> Rect {
     Rect { y: lay.room.y + 1, height: lay.room.height.saturating_sub(1), ..lay.room }
+}
+
+/// The GUI's cells beside a room whose egui modal is up, which egui's
+/// scrim does not reach: the room's first row, the pick banner's, and with
+/// the log on screen (`log_on`) whatever lies between the room and it —
+/// the docked column's blank columns and `│`, or the band's `─` row. The
+/// host dims them as the scrim dims the room, so the whole room reads as
+/// under the modal; the log itself stays live (clause 18).
+#[cfg(feature = "window")]
+fn under_modal(lay: &Layout, log_on: bool) -> Vec<Rect> {
+    let room = lay.room;
+    let mut cells = vec![Rect { height: room.height.min(1), ..room }];
+    match (lay.placement, lay.log.filter(|_| log_on)) {
+        (Placement::Column, Some(log)) => {
+            cells.push(Rect { x: room.right(), y: room.y, width: log.x.saturating_sub(room.right()), height: room.height });
+        }
+        (Placement::Band, Some(log)) => {
+            cells.push(Rect { x: room.x, y: room.bottom(), width: room.width, height: log.y.saturating_sub(room.bottom()) });
+        }
+        _ => {}
+    }
+    cells.retain(|r| !r.is_empty());
+    cells
+}
+
+/// The cells [`under_modal`] noted this frame dimmed as the room's modal's
+/// scrim dims what egui drew there: each cell's ground and ink seen
+/// through it (an ink the terminal picks stays its own). The GUI calls it
+/// last, after the pick banner that takes the room's first row.
+#[cfg(feature = "window")]
+pub(super) fn dim_under_modal(frame: &mut Frame, gui: &Gui) {
+    let buf = frame.buffer_mut();
+    for rect in &gui.admin.under_modal {
+        dim_cells(buf, *rect);
+    }
+}
+
+/// Every cell of `rect` in `buf` under the scrim: its ground (the theme's
+/// where it has none of its own) and its RGB ink.
+#[cfg(feature = "window")]
+fn dim_cells(buf: &mut ratatui::buffer::Buffer, rect: Rect) {
+    use ratatui::style::Color;
+    let ground = crate::kit::theme::th().ground_rgb.unwrap_or((0x12, 0x13, 0x1c));
+    let scrimmed = |(r, g, b): (u8, u8, u8)| {
+        let c = super::window::studio::under_scrim(egui::Color32::from_rgb(r, g, b));
+        Color::Rgb(c.r(), c.g(), c.b())
+    };
+    let rect = rect.intersection(buf.area);
+    for y in rect.top()..rect.bottom() {
+        for x in rect.left()..rect.right() {
+            let cell = &mut buf[(x, y)];
+            cell.bg = scrimmed(match cell.bg {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => ground,
+            });
+            if let Color::Rgb(r, g, b) = cell.fg {
+                cell.fg = scrimmed((r, g, b));
+            }
+        }
+    }
 }
 
 /// How the log is drawn where the layout puts it: a blank row under the
@@ -694,8 +766,9 @@ fn egui_pass(
     grid: Rect,
 ) -> Option<Pass> {
     let mut seen = Seen::default();
+    let focused = admin.focus == Focus::Log;
     let shown = panel.show(parts.region, grid, &mut |ui| {
-        let log = look.map(|look| LogFace { log: &mut admin.log, look, key_hints, inert });
+        let log = look.map(|look| LogFace { log: &mut admin.log, look, key_hints, inert, focused });
         let run = run_parts(ui, parts, admin.room.as_mut(), log);
         seen = std::mem::take(&mut seen).and(run);
     })?;
@@ -704,13 +777,15 @@ fn egui_pass(
 }
 
 /// What the log's part of a pass draws from: the log, its look, whether
-/// key names are shown, and whether something over it leaves it inert.
+/// key names are shown, whether something over it leaves it inert, and
+/// whether it has the keys.
 #[cfg(feature = "window")]
 struct LogFace<'a> {
     log: &'a mut LogUi,
     look: &'a Look,
     key_hints: bool,
     inert: bool,
+    focused: bool,
 }
 
 /// One run of the panel's pass over the whole of `ui`, the region: each
@@ -749,7 +824,7 @@ fn run_parts(ui: &mut egui::Ui, parts: &Parts, room: Option<&mut Box<dyn HostedR
     if let (Some(cells), Some(face)) = (parts.log, log) {
         let (mut part, pressed) = child(ui, cells, "admin-log");
         seen.log_pressed = pressed && !face.inert;
-        server_log::show_egui(&mut part, face.log, face.look, face.key_hints, face.inert);
+        server_log::show_egui(&mut part, face.log, face.look, face.key_hints, face.inert, face.focused);
     }
     seen
 }
@@ -1592,6 +1667,47 @@ mod tests {
         assert_eq!(egui_parts(&hidden, true, false).map(|p| p.region), Some(Rect::new(17, 2, 159, 38)));
     }
 
+    #[cfg(feature = "window")]
+    #[test]
+    fn a_rooms_modal_dims_the_guis_cells_beside_the_room_and_leaves_the_log_live() {
+        let libraries = Hall::Room(RoomId::Libraries);
+        // Column, 176×46: the banner's row over the room, and the three
+        // columns from the room to the log — its │ among them — all the
+        // room's rows down; the log's own columns are not touched.
+        let column = layout(176, 46, true, false, libraries);
+        assert_eq!(under_modal(&column, true), vec![Rect::new(17, 1, 100, 1), Rect::new(117, 1, 3, 39)]);
+        let both = egui_parts(&column, true, true).expect("both parts");
+        for rect in under_modal(&column, true) {
+            assert!(!both.room.is_some_and(|r| r.intersects(rect)) && !both.log.is_some_and(|r| r.intersects(rect)), "only what egui leaves: {rect:?}");
+        }
+        assert_eq!(under_modal(&column, false), vec![Rect::new(17, 1, 100, 1)], "no log, nothing between");
+        // Band, 136×52: the banner's row, and the `─` row over the band.
+        let band = layout(136, 52, false, false, libraries);
+        assert_eq!(under_modal(&band, true), vec![Rect::new(17, 1, 119, 1), Rect::new(17, 35, 119, 1)]);
+        // The Room placement: the banner's row alone.
+        assert_eq!(under_modal(&layout(136, 40, false, false, libraries), false), vec![Rect::new(17, 1, 119, 1)]);
+
+        // Dimmed as the scrim dims: a blank ground cell and the rule's ink
+        // seen through it, the cell beside untouched.
+        let ground = th_ground();
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 4, 1));
+        buf[(1, 0)].set_symbol("│").set_fg(ratatui::style::Color::Rgb(122, 130, 160));
+        dim_cells(&mut buf, Rect::new(0, 0, 2, 1));
+        let scrim = |(r, g, b): (u8, u8, u8)| {
+            let c = super::super::window::studio::under_scrim(egui::Color32::from_rgb(r, g, b));
+            ratatui::style::Color::Rgb(c.r(), c.g(), c.b())
+        };
+        assert_eq!(buf[(0, 0)].bg, scrim(ground), "the ground under the scrim");
+        assert_eq!((buf[(1, 0)].fg, buf[(1, 0)].symbol()), (scrim((122, 130, 160)), "│"), "the rule seen through it");
+        assert_eq!(buf[(2, 0)].bg, ratatui::style::Color::Reset, "past the rect, as it was");
+    }
+
+    /// The ground the GUI paints, as the dimming reads it.
+    #[cfg(feature = "window")]
+    fn th_ground() -> (u8, u8, u8) {
+        crate::kit::theme::th().ground_rgb.unwrap_or((0x12, 0x13, 0x1c))
+    }
+
     /// One run of the panel's pass over `parts` headless, the region at 8×16
     /// points a cell as the window would place it, with `events`: what it
     /// saw, its hand, and the clip rects its shapes were drawn in.
@@ -1600,7 +1716,8 @@ mod tests {
         let input = egui::RawInput { screen_rect: Some(points_at(parts.region)), events, ..Default::default() };
         let mut seen = Seen::default();
         let mut out = ctx.run_ui(input, |ui| {
-            let log = Some(LogFace { log: &mut gui.admin.log, look, key_hints: false, inert });
+            let focused = gui.admin.focus == Focus::Log;
+            let log = Some(LogFace { log: &mut gui.admin.log, look, key_hints: false, inert, focused });
             seen = std::mem::take(&mut seen).and(run_parts(ui, parts, gui.admin.room.as_mut(), log));
         });
         out.textures_delta.clear();

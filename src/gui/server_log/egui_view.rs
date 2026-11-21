@@ -36,7 +36,7 @@ use rust_i18n::t;
 
 use super::{Drawn, Fit, LATER_LINES, Level, LogAct, LogUi, Look, clock, counted, needs_bar, view};
 use crate::gui::window::studio::{
-    Icon, Pal, THUMB_MIN, THUMB_REST, THUMB_W, TOOL_H, Tool, body, caps, caps_width, led, led_mid, mono, panel, square,
+    Icon, Pal, THUMB_MIN, THUMB_REST, THUMB_W, TOOL_H, Tool, body, caps, caps_width, led, led_mid, mono, panel, ring, square,
     strong, text, tool_button, tool_button_width, width_of,
 };
 use crate::kit::Grip;
@@ -78,8 +78,10 @@ const ORIGIN: u16 = 1 << 14;
 /// overlay owns the pointer) neither lights nor shows the hand, and takes
 /// no press, click or wheel; a drag held on its rows or its thumb when it
 /// turned inert goes on to its release, as the cells' grip does, so no
-/// hold outlives the button.
-pub(crate) fn show(ui: &mut Ui, log: &mut LogUi, look: &Look, key_hints: bool, inert: bool) {
+/// hold outlives the button. While the log has the keys (`focused`) its
+/// panel's hairline is the keyboard's accent ring, as a room's focused
+/// control wears it and as the cells light the log's rule.
+pub(crate) fn show(ui: &mut Ui, log: &mut LogUi, look: &Look, key_hints: bool, inert: bool, focused: bool) {
     let pal = Pal::now();
     let full = ui.max_rect();
     let id = Id::new("server-log");
@@ -106,6 +108,9 @@ pub(crate) fn show(ui: &mut Ui, log: &mut LogUi, look: &Look, key_hints: bool, i
     // The header last, in the state the pass left: what its own controls
     // do comes after, and the next pass, at once, shows it.
     let acts = header(ui, id, at.head, log, look, key_hints, inert, &pal);
+    if focused {
+        ring(ui, full, &pal);
+    }
     if !acts.is_empty() {
         for act in acts {
             log.act(act);
@@ -574,7 +579,7 @@ mod tests {
 
     fn pass_inert(ctx: &egui::Context, log: &mut LogUi, look: &Look, events: Vec<Event>, inert: bool) -> egui::FullOutput {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)), events, ..Default::default() };
-        let mut out = ctx.run_ui(input, |ui| show(ui, log, look, false, inert));
+        let mut out = ctx.run_ui(input, |ui| show(ui, log, look, false, inert, false));
         // No GPU here to take the font atlas: let go of it on purpose, or
         // epaint's debug check fails the drop.
         out.textures_delta.clear();
@@ -883,5 +888,28 @@ mod tests {
         let out = pass(&ctx, &mut log, &column(), vec![Event::PointerMoved(top)]);
         assert!(texts(&out).iter().any(|(s, _, _)| s == "line 1"), "the oldest line in view");
         let _ = pass(&ctx, &mut log, &column(), vec![button(top, false)]);
+    }
+
+    #[test]
+    fn the_log_with_the_keys_wears_the_keyboards_ring_round_its_panel() {
+        let _en = english();
+        let ctx = context();
+        let mut log = lines(5);
+        let pal = Pal::now();
+        let edges = |focused: bool, log: &mut LogUi| -> Vec<egui::Color32> {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| show(ui, log, &column(), false, false, focused));
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    Shape::Rect(r) if r.rect == Rect::from_min_size(Pos2::ZERO, SIZE) && r.stroke.width > 0.0 => Some(r.stroke.color),
+                    _ => None,
+                })
+                .collect()
+        };
+        let _ = edges(false, &mut log);
+        assert!(edges(true, &mut log).contains(&pal.accent), "the accent round the whole log");
+        assert!(!edges(false, &mut log).contains(&pal.accent), "and only while it has the keys");
     }
 }
