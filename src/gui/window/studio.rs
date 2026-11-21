@@ -3112,10 +3112,22 @@ mod tests {
             foot_line(ui, row(80.0), None, Some(&note), &story, &pal);
         });
         let drawn = texts(&out);
-        let at = |s: &str| drawn.iter().filter(|(t, _)| t == s).map(|(_, r)| r.center().y.round()).collect::<Vec<f32>>();
-        assert_eq!(at(&story[0].0), [9.0], "the story on the first row alone: {drawn:?}");
-        assert_eq!(at("saving…"), [49.0], "busy wins over the note");
-        assert_eq!(at(&note.0), [89.0], "the note over the story");
+        // The rows each line stands on, told by its middle, which sits within
+        // a point and a half of its row's: the system's UI face stands a run a
+        // point higher or lower on one platform than on another (San Francisco
+        // on a Mac, Segoe on Windows), and which row says what is the point.
+        let rows = |s: &str| {
+            drawn.iter().filter(|(t, _)| t == s).map(|(_, r)| r.center().y)
+                .map(|y| {
+                    let top = (y / 40.0).floor() * 40.0;
+                    assert!((y - (top + NOTE_H / 2.0)).abs() <= 1.5, "{s:?} centred in its row: {drawn:?}");
+                    top
+                })
+                .collect::<Vec<f32>>()
+        };
+        assert_eq!(rows(&story[0].0), [0.0], "the story on the first row alone: {drawn:?}");
+        assert_eq!(rows("saving…"), [40.0], "busy wins over the note");
+        assert_eq!(rows(&note.0), [80.0], "the note over the story");
     }
 
     #[test]
