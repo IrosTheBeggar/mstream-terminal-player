@@ -1088,17 +1088,47 @@ pub(crate) fn tool_button(ui: &Ui, id: Id, rect: Rect, icon: Icon, label: &str, 
 pub(crate) const BOX: f32 = 16.0;
 
 /// A tick box at `rect` on `fill`: a dim edge when off, the ok green's
-/// edge and [`check`] when on, each brighter under the pointer. Alone it
-/// takes no click: a page's flag column can show its state while the row
-/// takes the click.
+/// edge and [`check`] when on. Under the pointer its edge brightens as the
+/// boards' dim brightens to the text colour — off, the text colour's edge;
+/// on, the green lifted near white — so the box shows its own hover
+/// wherever it stands, beside a row's or a card's. Alone it takes no
+/// click: a page's flag column can show its state while the row takes
+/// the click.
 pub(crate) fn tick_box(ui: &Ui, rect: Rect, on: bool, hovered: bool, fill: Color32, pal: &Pal) {
-    let edge = if on { pal.ok } else { pal.dim };
-    let edge = if hovered { lift(edge, 40) } else { edge };
+    tick_box_in(ui, rect, on, hovered, fill, pal.ok, pal);
+}
+
+/// The edge a tick box wears: its `tone` when on, else the dim; under the
+/// pointer the tone lifted near white, or the text colour.
+fn tick_edge(on: bool, hovered: bool, tone: Color32, pal: &Pal) -> Color32 {
+    match (on, hovered) {
+        (true, false) => tone,
+        (true, true) => lift(tone, 70),
+        (false, false) => pal.dim,
+        (false, true) => pal.text,
+    }
+}
+
+/// [`tick_box`] with its tick in `tone`: the ok green for a lever, the
+/// dim for a flag that is only information.
+fn tick_box_in(ui: &Ui, rect: Rect, on: bool, hovered: bool, fill: Color32, tone: Color32, pal: &Pal) {
+    let edge = tick_edge(on, hovered, tone, pal);
     ui.painter().rect_filled(rect, square(), fill);
     ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, edge), StrokeKind::Inside);
     if on {
-        check(ui, rect.center(), if hovered { lift(pal.ok, 40) } else { pal.ok });
+        check(ui, rect.center(), edge);
     }
+}
+
+/// A tick box alone, centred on `at`, that takes no click of its own — a
+/// table's flag the row's click stands for (Users' five, Torrents'
+/// access) — on the panel's fill, its tick in `tone`, lit under the
+/// pointer over its [`HIT`] square as a [`checkbox`] is, wherever its row
+/// is raised. Whether the pointer is on it.
+pub(crate) fn tick_mark(ui: &Ui, at: Pos2, on: bool, tone: Color32, pal: &Pal) -> bool {
+    let hovered = ui.rect_contains_pointer(Rect::from_center_size(at, Vec2::splat(HIT)));
+    tick_box_in(ui, Rect::from_center_size(at, Vec2::splat(BOX)), on, hovered, pal.panel, tone, pal);
+    hovered
 }
 
 /// The keyboard's look on a control of a form: the raised fill and the
@@ -1122,6 +1152,123 @@ pub(crate) fn tick_row(ui: &Ui, id: Id, rect: Rect, on: bool, label: &str, focus
     let font = if focused { strong(14.0) } else { body(14.0) };
     text(ui, pos2(x, rect.center().y), label, font, pal.text, (rect.max.x - x - 8.0).max(1.0), Align2::LEFT_CENTER);
     response
+}
+
+/// A form's tick's height, the room between lines of ticks, and between a
+/// grid's columns (the mint form's 4 and 8).
+pub(crate) const TICK_H: f32 = HIT;
+const TICK_GAP: f32 = 4.0;
+const TICK_COL_GAP: f32 = 8.0;
+/// What a [`tick_row`] takes beside its words: its box 8 points in, the
+/// 10 after the box, and 8 after the words.
+const TICK_PAD: f32 = 8.0 + BOX + 10.0 + 8.0;
+
+/// What a form's ticks' pass gives back: the one a click landed on, and
+/// where each was drawn, in order (the page brings its keyboard's into
+/// view).
+pub(crate) struct Ticks {
+    pub clicked: Option<usize>,
+    pub rects: Vec<Rect>,
+}
+
+/// How wide a tick wants to be for `label`: whole even in the semibold
+/// the keyboard's tick wears.
+fn tick_want(ui: &Ui, label: &str) -> f32 {
+    TICK_PAD + width_of(ui, label, strong(14.0))
+}
+
+/// A form's ticks in a grid (the mint form's), a row of the layout the
+/// column wide and as tall as its lines: at most `most` columns 8 points
+/// apart ([`grid_columns`]), in reading order, lines [`TICK_H`] tall and
+/// [`TICK_GAP`] apart, each a [`tick_row`], `focus` in the keyboard's
+/// look.
+pub(crate) fn tick_grid(ui: &mut Ui, id: Id, items: &[(String, bool)], focus: Option<usize>, most: usize, pal: &Pal) -> Ticks {
+    let w = ui.available_width();
+    let wants: Vec<f32> = items.iter().map(|(label, _)| tick_want(ui, label)).collect();
+    let cols = grid_columns(&wants, w, TICK_COL_GAP, most);
+    let n = cols.len();
+    let lines = items.len().div_ceil(n);
+    let h = (lines as f32 * (TICK_H + TICK_GAP) - TICK_GAP).max(0.0);
+    let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let mut ticks = Ticks { clicked: None, rects: Vec::new() };
+    for (i, (label, on)) in items.iter().enumerate() {
+        let (line, col) = (i / n, i % n);
+        let x = area.min.x + cols[..col].iter().sum::<f32>() + col as f32 * TICK_COL_GAP;
+        let rect = Rect::from_min_size(pos2(x, area.min.y + line as f32 * (TICK_H + TICK_GAP)), vec2(cols[col], TICK_H));
+        if tick_row(ui, id.with(i), rect, *on, label, focus == Some(i), pal).clicked() {
+            ticks.clicked = Some(i);
+        }
+        ticks.rects.push(rect);
+    }
+    ticks
+}
+
+/// A grid's column widths for ticks that want `wants` each, in at most
+/// `most` columns `gap` apart across `room`: even columns, as the boards'
+/// grids are, where each column's widest tick fits its share; else each
+/// column as wide as its widest tick and the room left shared among them;
+/// else a column fewer, and so on — so a tick is cut only where one
+/// column cannot hold it.
+fn grid_columns(wants: &[f32], room: f32, gap: f32, most: usize) -> Vec<f32> {
+    let most = most.min(wants.len()).max(1);
+    for n in (1..=most).rev() {
+        let gaps = gap * (n - 1) as f32;
+        let widest: Vec<f32> = (0..n).map(|c| wants.iter().skip(c).step_by(n).fold(0.0_f32, |a, w| a.max(*w))).collect();
+        let even = (room - gaps) / n as f32;
+        if widest.iter().all(|w| *w <= even) {
+            return vec![even; n];
+        }
+        let need = widest.iter().sum::<f32>() + gaps;
+        if need <= room {
+            let spare = (room - need) / n as f32;
+            return widest.iter().map(|w| w + spare).collect();
+        }
+    }
+    vec![room.max(0.0)]
+}
+
+/// A form's ticks in a flow (the Users add form's), a row of the layout
+/// the column wide and as tall as its lines: each tick as wide as its
+/// words want, its box at the column's edge and its look reaching 8 points
+/// past it either side, 4 points apart, a tick that would pass the
+/// column's end starting a line [`TICK_GAP`] under the last ([`flow`]), so
+/// none is left off; each a [`tick_row`], `focus` in the keyboard's look.
+pub(crate) fn tick_flow(ui: &mut Ui, id: Id, items: &[(String, bool)], focus: Option<usize>, pal: &Pal) -> Ticks {
+    let w = ui.available_width();
+    let wants: Vec<f32> = items.iter().map(|(label, _)| tick_want(ui, label)).collect();
+    let placed = flow(&wants, w + 16.0, 4.0);
+    let lines = placed.last().map_or(0, |(line, ..)| line + 1);
+    let h = (lines as f32 * (TICK_H + TICK_GAP) - TICK_GAP).max(0.0);
+    let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let mut ticks = Ticks { clicked: None, rects: Vec::new() };
+    for (i, ((label, on), (line, x, tw))) in items.iter().zip(placed).enumerate() {
+        let rect = Rect::from_min_size(pos2(area.min.x - 8.0 + x, area.min.y + line as f32 * (TICK_H + TICK_GAP)), vec2(tw, TICK_H));
+        if tick_row(ui, id.with(i), rect, *on, label, focus == Some(i), pal).clicked() {
+            ticks.clicked = Some(i);
+        }
+        ticks.rects.push(rect);
+    }
+    ticks
+}
+
+/// Where a flow of ticks wanting `wants` each stands in lines `room`
+/// wide, `gap` apart: each tick's line, its left and its width. A tick
+/// that would pass the line's end starts the next; one wider than a line
+/// takes one, cut to it.
+fn flow(wants: &[f32], room: f32, gap: f32) -> Vec<(usize, f32, f32)> {
+    let (mut line, mut x) = (0, 0.0);
+    wants
+        .iter()
+        .map(|want| {
+            if x > 0.0 && x + want > room {
+                (line, x) = (line + 1, 0.0);
+            }
+            let w = want.min(room);
+            let placed = (line, x, w);
+            x += w + gap;
+            placed
+        })
+        .collect()
 }
 
 /// A row of a list in a modal, `h` points of the layout the column wide,
@@ -1234,6 +1381,9 @@ pub(crate) enum Glyph {
     Tray,
     /// A ticket, notched at its sides, its stub perforated (Federation's).
     Ticket,
+    /// A sheet, its corner folded, with a plus on it (Torrents' "Add a
+    /// .torrent file").
+    File,
 }
 
 /// `glyph` in `color`, its 16-point box centred on `at`: the canvas's
@@ -1285,6 +1435,14 @@ fn draw_glyph(ui: &Ui, at: Pos2, glyph: Glyph, color: Color32) {
             outline.extend(notch(1.5, 1.0).into_iter().rev());
             painter.add(Shape::closed_line(outline, stroke));
             painter.extend(Shape::dashed_line(&[p(10.5, 5.0), p(10.5, 11.0)], stroke, 1.5, 1.5));
+        }
+        Glyph::File => {
+            // In the family's paths: M3.5 1.5h6l3 3v10h-9z, its fold
+            // M9.5 1.5v3h3, and M8 7.2v4.6M5.7 9.5h4.6.
+            painter.add(Shape::closed_line(vec![p(3.5, 1.5), p(9.5, 1.5), p(12.5, 4.5), p(12.5, 14.5), p(3.5, 14.5)], stroke));
+            painter.add(Shape::line(vec![p(9.5, 1.5), p(9.5, 4.5), p(12.5, 4.5)], stroke));
+            painter.line_segment([p(8.0, 7.2), p(8.0, 11.8)], stroke);
+            painter.line_segment([p(5.7, 9.5), p(10.3, 9.5)], stroke);
         }
     }
 }
@@ -2052,7 +2210,7 @@ pub(crate) fn cell_tipped(ui: &Ui, row: &RowCtx, at: usize, s: &str, tip: &str, 
     let drawn = cell(ui, row, at, s, font.clone(), color, false);
     let rect = row.cell(at);
     if width_of(ui, s, font) > rect.width() {
-        let _ = ui.interact(rect, id, Sense::hover()).on_hover_text(tip);
+        cell_tip(&ui.interact(rect, id, Sense::hover()), tip);
     }
     drawn
 }
@@ -2064,9 +2222,25 @@ pub(crate) fn path_cell(ui: &Ui, row: &RowCtx, at: usize, path: &str, font: Font
     let (shown, cut) = cut_start(ui, path, font.clone(), rect.width());
     let drawn = text(ui, rect.left_center(), &shown, font.clone(), color, rect.width(), Align2::LEFT_CENTER);
     if cut {
-        let _ = ui.interact(rect, id, Sense::hover()).on_hover_text(egui::RichText::new(path).font(font));
+        cell_tip(&ui.interact(rect, id, Sense::hover()), egui::RichText::new(path).font(font));
     }
     drawn
+}
+
+/// A cut cell's tooltip under the pointer, where the canvas sets its
+/// tooltips (the log's: 8 points under the control, their right edges
+/// one): under the cell, its right edge at the cell's, so it reaches left
+/// over the cells before it — words — and covers none of the next row's
+/// controls in the columns after it; over the cell where there is no room
+/// under it.
+fn cell_tip(response: &Response, tip: impl Into<egui::WidgetText>) {
+    let mut tooltip = egui::Tooltip::for_enabled(response);
+    tooltip.popup = tooltip.popup.align(egui::RectAlign::BOTTOM_END).align_alternatives(&[egui::RectAlign::TOP_END]).gap(8.0);
+    let tip = tip.into();
+    let _ = tooltip.show(|ui| {
+        ui.set_max_width(ui.spacing().tooltip_width);
+        ui.add(egui::Label::new(tip));
+    });
 }
 
 /// `cols` for a table `w` wide: their fixed widths narrowed together, to
@@ -3168,5 +3342,141 @@ mod tests {
         // Three rows fit: the whole width, and no thumb.
         let (_, rows) = run_with(3);
         assert!(rows.iter().all(|(_, r)| (r.max.x - size.x).abs() < 0.5), "{rows:?}");
+    }
+
+    #[test]
+    fn a_tick_box_lights_its_own_edge_under_the_pointer_wherever_it_stands() {
+        let ctx = context();
+        let pal = Pal::now();
+        let size = vec2(600.0, 300.0);
+        let cols = [Col::left("User", 0.0), Col::center("Admin", 60.0)];
+        let tick_at = Cell::new(Pos2::ZERO);
+        let card_at = Cell::new(Rect::NOTHING);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            Table::new(Id::new("probe-ticks"), &cols, 2).height(80.0).show(ui, &pal, |ui, i, row| {
+                let at = row.cell(1).center();
+                let _ = tick_mark(ui, at, false, pal.ok, &pal);
+                if i == 0 {
+                    tick_at.set(at);
+                }
+            });
+            ui.add_space(20.0);
+            let top = ui.cursor().min.y;
+            let _ = tick_card(ui, Id::new("probe-card"), true, "Accept requests", "anyone may ask", &pal);
+            card_at.set(Rect::from_min_size(pos2(ui.max_rect().min.x, top), vec2(ui.max_rect().width(), 60.0)));
+        };
+        // The edge each tick box was drawn with, by its centre.
+        let edges = |out: &egui::FullOutput| -> Vec<(Pos2, Color32)> {
+            out.shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    Shape::Rect(r) if (r.rect.width() - BOX).abs() < 0.5 && r.stroke.width > 0.0 => Some((r.rect.center(), r.stroke.color)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let box_at = tick_at.get();
+        let edge_of = |out: &egui::FullOutput, at: Pos2| edges(out).into_iter().find(|(c, _)| c.distance(at) < 1.0).map(|(_, e)| e);
+        // On the box: its own edge lights, though the row takes the click.
+        let mut out = None;
+        for _ in 0..2 {
+            out = Some(pass(&ctx, size, vec![egui::Event::PointerMoved(box_at + vec2(5.0, 5.0))], &mut run));
+        }
+        let out = out.expect("a pass");
+        assert_eq!(edge_of(&out, box_at), Some(pal.text), "the box under the pointer");
+        // On the row's words: the row is raised, the box stays at rest.
+        let out = pass(&ctx, size, vec![egui::Event::PointerMoved(pos2(40.0, box_at.y))], &mut run);
+        assert_eq!(edge_of(&out, box_at), Some(pal.dim), "the box at rest beside the pointer");
+        // A tick card: the box lights with the card the click is.
+        let card = card_at.get();
+        let mark = pos2(card.min.x + 24.0, card.min.y + 20.0);
+        let rest = pass(&ctx, size, vec![egui::Event::PointerMoved(pos2(5.0, 5.0))], &mut run);
+        assert_eq!(edge_of(&rest, mark), Some(pal.ok));
+        let lit = pass(&ctx, size, vec![egui::Event::PointerMoved(card.center())], &mut run);
+        assert_eq!(edge_of(&lit, mark), Some(lift(pal.ok, 70)), "the box's own edge, not only the card's");
+    }
+
+    #[test]
+    fn ticks_wrap_and_narrow_their_columns_before_they_cut_a_name() {
+        // The federate form's libraries at its 512 points: the long name's
+        // column as wide as it wants, the others sharing what is left.
+        let wants = [87.0, 117.0, 181.0, 80.0, 99.0, 70.0];
+        let cols = grid_columns(&wants, 512.0, 8.0, 3);
+        assert_eq!(cols.len(), 3);
+        assert!(cols[2] >= 181.0 && cols[0] >= 87.0 && cols[1] >= 117.0, "no name cut: {cols:?}");
+        assert!((cols.iter().sum::<f32>() + 16.0 - 512.0).abs() < 0.01, "the grid spans the column: {cols:?}");
+        assert_eq!(grid_columns(&[60.0, 70.0, 80.0, 90.0], 512.0, 8.0, 3), vec![(512.0 - 16.0) / 3.0; 3], "short names: even columns");
+        assert_eq!(grid_columns(&[300.0, 300.0, 300.0], 512.0, 8.0, 3).len(), 1, "a column fewer, then one");
+        assert_eq!(grid_columns(&[700.0], 512.0, 8.0, 3), vec![512.0], "one too long for any column is cut");
+
+        // The add form's six libraries in a line too short for them: two
+        // lines, every one placed, none past the line's end.
+        let wants = [110.0, 120.0, 180.0, 95.0, 105.0, 90.0];
+        let placed = flow(&wants, 608.0, 4.0);
+        assert_eq!(placed.len(), 6, "every library has its tick");
+        assert_eq!(placed.iter().map(|(line, ..)| *line).max(), Some(1), "wrapped once: {placed:?}");
+        assert!(placed.iter().all(|(_, x, w)| x + w <= 608.0 + 0.01), "{placed:?}");
+        assert_eq!(placed[4], (1, 0.0, 105.0), "the next line starts at the left");
+        assert_eq!(flow(&[700.0, 50.0], 608.0, 4.0), vec![(0, 0.0, 608.0), (1, 0.0, 50.0)], "one wider than a line is cut to it");
+
+        // Drawn: the long name whole, beside the others.
+        let ctx = context();
+        let names = ["archive", "audiobooks", "field-recordings-2024", "music", "podcasts", "vinyl"];
+        let items: Vec<(String, bool)> = names.iter().map(|n| (n.to_string(), true)).collect();
+        let out = pass(&ctx, vec2(600.0, 300.0), Vec::new(), &mut |ui| {
+            let column = Rect::from_min_size(pos2(20.0, 20.0), vec2(512.0, 200.0));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(column).layout(Layout::top_down(Align::Min)));
+            let _ = tick_grid(&mut child, Id::new("probe-grid"), &items, Some(2), 3, &Pal::now());
+        });
+        let drawn: Vec<String> = texts(&out).into_iter().map(|(t, _)| t).collect();
+        assert!(names.iter().all(|n| drawn.iter().any(|t| t == n)), "every name whole, the focused one in its semibold too: {drawn:?}");
+    }
+
+    #[test]
+    fn a_cut_cells_tooltip_hangs_under_it_clear_of_the_next_rows_controls() {
+        let ctx = context();
+        let size = vec2(900.0, 400.0);
+        // The folder column narrower than its path's tooltip, as Libraries'
+        // is: a tooltip left-aligned under it would reach the box beyond.
+        let cols = [Col::left("Name", 0.0), Col::left("Folder", 300.0), Col::center("Symlinks", 80.0)];
+        let path = "/Volumes/NAS/Archive/Lossless Rips/2019 Remasters/Box Sets/and a good deal more besides";
+        let boxes: std::cell::RefCell<Vec<Rect>> = Default::default();
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            boxes.borrow_mut().clear();
+            Table::new(Id::new("probe-tips"), &cols, 3).inert().show(ui, &pal, |ui, i, row| {
+                let _ = path_cell(ui, row, 1, path, mono(12.5), pal.soft, Id::new("probe-tip").with(i));
+                let at = row.cell(2).center();
+                let _ = checkbox(ui, Id::new("probe-box").with(i), at, false, &pal);
+                boxes.borrow_mut().push(Rect::from_center_size(at, Vec2::splat(HIT)));
+            });
+        };
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        // The pointer on the first row's folder, near the cell's right.
+        let over = pos2(size.x - CELL_PAD - 80.0 - COL_GAP - 30.0, 34.0 + 20.0);
+        let mut out = None;
+        for _ in 0..3 {
+            out = Some(pass(&ctx, size, vec![egui::Event::PointerMoved(over)], &mut run));
+        }
+        let out = out.expect("a pass");
+        let tip = texts(&out).into_iter().find(|(t, _)| t == path).expect("the whole path in its tooltip").1;
+        let next = boxes.borrow()[1];
+        assert!(!tip.intersects(next), "the tooltip over the next row's box: {tip:?} {next:?}");
+        assert!(tip.min.y > 34.0 + 40.0 - 0.5, "under the row: {tip:?}");
+    }
+
+    #[test]
+    fn every_cards_glyph_stands_in_its_box() {
+        let ctx = context();
+        let centre = pos2(100.0, 100.0);
+        for glyph in [Glyph::Folder, Glyph::User, Glyph::Tray, Glyph::Ticket, Glyph::File] {
+            let out = pass(&ctx, vec2(200.0, 200.0), Vec::new(), &mut |ui| draw_glyph(ui, centre, glyph, Color32::WHITE));
+            let bounds = out.shapes.iter().map(|c| c.shape.visual_bounding_rect()).fold(Rect::NOTHING, |a, b| a.union(b));
+            assert!(bounds.is_positive(), "{glyph:?} draws");
+            // Its 16 points and half its stroke either side.
+            assert!(Rect::from_center_size(centre, Vec2::splat(16.0 + 2.0)).contains_rect(bounds), "{glyph:?} in its 16 points: {bounds:?}");
+        }
     }
 }

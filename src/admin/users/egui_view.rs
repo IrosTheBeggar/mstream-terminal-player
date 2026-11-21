@@ -19,14 +19,14 @@
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
-use egui::{Align, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
 use super::super::EguiShown;
 use super::*;
 use crate::gui::window::studio::{
-    self, BOX, CELL_PAD, COL_GAP, Col, Dialog, FIELD_ROW_H, Glyph, HIT, Icon, Pal, Para, Table, add_card, bare, body,
-    cadence, cell, check_line, field, field_at, foot, foot_line, gate, icon_button, ink, label_at, line, name_cell,
-    reveal, room_rects, small_caps_width, state_line, strong, text, tick_box, tick_row, width_of,
+    self, CELL_PAD, COL_GAP, Col, Dialog, FIELD_ROW_H, Glyph, HIT, Icon, Pal, Para, Table, add_card, bare, body, cadence,
+    cell, check_line, field, field_at, foot, foot_line, gate, icon_button, ink, label_at, line, name_cell, reveal,
+    room_rects, small_caps_width, state_line, strong, text, tick_flow, tick_mark, tick_row,
 };
 
 /// The canvas's gap between a form's blocks.
@@ -187,8 +187,7 @@ fn table(ui: &mut Ui, room: &Room, pal: &Pal, acts: &mut Vec<Act>) {
         let (libs, own) = if u.vpaths.is_empty() { ("—".to_string(), pal.dim) } else { (u.vpaths.join(" · "), pal.soft) };
         cell(ui, row, 2, &libs, body(13.5), ink(row, own, pal), false);
         for (at, flag) in flags {
-            let mark = Rect::from_center_size(row.cell(at).center(), Vec2::splat(BOX));
-            tick_box(ui, mark, flag.get(u), false, pal.panel, pal);
+            let _ = tick_mark(ui, row.cell(at).center(), flag.get(u), pal.ok, pal);
         }
         let at = pos2(row.trail.min.x + REMOVE_W / 2.0, row.rect.center().y);
         if icon_button(ui, Id::new("users-remove").with(i), at, Icon::Remove, pal.dim, pal).clicked() {
@@ -266,8 +265,9 @@ fn entry<'a>(input: &'a Input, on: bool, composition: &'a str, masked: bool) -> 
     if masked { field.masked() } else { field }
 }
 
-/// The add form: the two fields side by side, the libraries in one row of
-/// ticks (those with no room left off, as the cells leave them), the four
+/// The add form: the two fields side by side, the libraries in a flow of
+/// ticks wrapped to as many lines as they take (the cells leave off those
+/// with no room in their one row; the form has room for them all), the four
 /// permissions, the name's note and the error, and the one button. The
 /// control with the keyboard wears the keyboard's look, and is brought
 /// into view on the pass the keyboard moved to it.
@@ -305,29 +305,22 @@ fn add_form(ui: &Ui, f: &AddForm, composition: &str, over: Rect, pal: &Pal, acts
         let hint = text(ui, head.right_center(), &t!("usr.form_libraries_hint"), body(13.0), pal.dim, w * 0.6, egui::Align2::RIGHT_CENTER);
         label_at(ui, head.left_center(), &t!("usr.form_libraries"), (hint.min.x - 16.0 - head.min.x).max(1.0), pal);
         ui.add_space(8.0);
-        let (line_rect, _) = ui.allocate_exact_size(vec2(w, HIT), Sense::hover());
         if f.libraries.is_empty() {
-            text(ui, line_rect.left_center(), &t!("usr.form_no_libraries"), body(13.5), pal.dim, w, egui::Align2::LEFT_CENTER);
+            line(ui, HIT, &t!("usr.form_no_libraries"), body(13.5), pal.dim);
         }
-        let mut x = line_rect.min.x - 8.0;
-        for (i, (name, on)) in f.libraries.iter().enumerate() {
-            // The first is drawn however long, cut at the row's end; a
-            // later one with no room left is left off, as in the cells.
-            let label = printable(name, NAME_MAX);
-            let which = AField::Lib(i);
-            let font = if focused == which { strong(14.0) } else { body(14.0) };
-            let want = 8.0 + BOX + 10.0 + width_of(ui, &label, font) + 8.0;
-            if x + want > line_rect.max.x + 8.0 && i > 0 {
-                break;
-            }
-            let rect = Rect::from_min_max(pos2(x, line_rect.min.y), pos2((x + want).min(line_rect.max.x + 8.0), line_rect.max.y));
-            if tick_row(ui, Id::new("users-add-lib").with(i), rect, *on, &label, focused == which, pal).clicked() {
-                acts.push(Act::FormToggle(index_of(which)));
-            }
-            if focused == which {
-                reveal(ui, id, f.focus, rect);
-            }
-            x = rect.max.x + 4.0;
+        // Every library, the ticks wrapped to further lines where one line
+        // cannot hold them, so each can be ticked; the form has the room.
+        let libs: Vec<(String, bool)> = f.libraries.iter().map(|(name, on)| (printable(name, NAME_MAX), *on)).collect();
+        let lib_focus = match focused {
+            AField::Lib(i) => Some(i),
+            _ => None,
+        };
+        let ticks = tick_flow(ui, Id::new("users-add-lib"), &libs, lib_focus, pal);
+        if let Some(i) = ticks.clicked {
+            acts.push(Act::FormToggle(index_of(AField::Lib(i))));
+        }
+        if let Some(rect) = lib_focus.and_then(|i| ticks.rects.get(i)) {
+            reveal(ui, id, f.focus, *rect);
         }
 
         ui.add_space(FORM_GAP);
@@ -470,7 +463,7 @@ fn remove_gate(ui: &Ui, room: &Room, name: &str, over: Rect, pal: &Pal, acts: &m
 #[cfg(test)]
 mod tests {
     use egui::epaint::Shape;
-    use egui::{Event, FullOutput, Modifiers, PointerButton};
+    use egui::{Event, FullOutput, Modifiers, PointerButton, Vec2};
 
     use super::super::tests::{english, libs, loaded, press, room, type_text};
     use super::*;

@@ -29,7 +29,7 @@ use crate::gui::window::studio::{
     self, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, RowCtx, SEG_H, Seg, Table, add_card, bare, body, caps, caps_width, cell,
     field, field_box, foot, form_button, gate, hand, ink, label, label_at, led, led_cell, led_mid, line, list_row, mono,
     name_cell, reveal, runs, runs_width, searching, segmented, segmented_width, small_caps, small_caps_width, square, strong,
-    text, tick_card, tick_row, unkeyed, width_of,
+    text, tick_card, tick_grid, unkeyed, width_of,
 };
 use crate::input::KeyModifiers;
 
@@ -1111,24 +1111,15 @@ fn compose(ui: &Ui, over: Rect, c: &Compose, pal: &Pal, composition: &str, pass:
         } else if c.libraries.is_empty() {
             line(ui, 24.0, &t!("p2p.compose_none"), body(13.5), pal.dim);
         }
-        // The libraries in three columns, each a tick row, the keyboard's
-        // in the form's focused look, as the Federation mint draws them.
-        let col_w = ((w + 8.0) / 3.0).floor();
-        for (r, chunk) in c.libraries.chunks(3).enumerate() {
-            let (row, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
-            for (k, (name, on)) in chunk.iter().enumerate() {
-                let i = r * 3 + k;
-                let at = Rect::from_min_size(pos2(row.min.x - 8.0 + k as f32 * col_w, row.min.y), vec2(col_w - 8.0, 32.0));
-                let here = c.focus == Some(i);
-                let response = tick_row(ui, Id::new("disc-compose-lib").with(i), at, *on, name, here, pal);
-                if here {
-                    reveal(ui, Id::new("disc-compose"), i, row);
-                }
-                if response.clicked() {
-                    does.push(Act::ComposeToggle(i));
-                }
-            }
-            ui.add_space(4.0);
+        // The libraries in three columns, the kit's grid of ticks, the
+        // keyboard's in the form's focused look, as the Federation mint
+        // draws them; a name is cut only where no column could hold it.
+        let ticks = tick_grid(ui, Id::new("disc-compose-lib"), &c.libraries, c.focus, 3, pal);
+        if let Some(i) = ticks.clicked {
+            does.push(Act::ComposeToggle(i));
+        }
+        if let Some((i, rect)) = c.focus.and_then(|i| ticks.rects.get(i).map(|r| (i, *r))) {
+            reveal(ui, Id::new("disc-compose"), i, rect);
         }
         if let Some(error) = &c.error {
             ui.add_space(8.0);

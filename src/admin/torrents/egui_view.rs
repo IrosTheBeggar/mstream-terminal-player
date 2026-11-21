@@ -13,17 +13,16 @@
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
-use egui::epaint::StrokeKind;
-use egui::{Align, Align2, Color32, FontId, Id, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Align2, Color32, FontId, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
 use super::*;
 use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
-    self, CELL_PAD, Col, Dialog, FIELD_H, FIELD_ROW_H, FORM_BUTTON_H, Glyph, HIT, Input as Field, Pal, Para, Run, RowCtx, SEG_H,
-    Seg, TABLE_HEAD, Table, bare, body, cadence, caps, card, cell, cell_tipped, check_line, checkbox, chip, field_at,
+    self, BOX, CELL_PAD, Col, Dialog, FIELD_H, FIELD_ROW_H, FORM_BUTTON_H, Glyph, HIT, Input as Field, Pal, Para, Run, RowCtx,
+    SEG_H, Seg, TABLE_HEAD, Table, bare, body, cadence, caps, card, cell, cell_tipped, check_line, checkbox, chip, field_at,
     field_box, foot, foot_line, form_button, form_button_width, gate, ink, led, led_cell, led_mid, meter, meter_lit, mono,
     name_cell, path_cell, pointer, radio, ring_since, room_rects, segmented, small_caps, small_caps_width, state_line, strong,
-    text, unkeyed, verdict, width_of, with_figures,
+    text, tick_mark, unkeyed, verdict, width_of, with_figures,
 };
 
 /// The room between the page's rows, and between the page and its note
@@ -242,17 +241,6 @@ fn error_row(ui: &mut Ui, words: &str, pal: &Pal) {
 /// to the room's tips row: the canvas's buttons carry the word alone.
 fn word_of(label: &str) -> &str {
     unkeyed(label).0
-}
-
-/// A flag that is information, not a lever, as an LED: lit `on` in `tone`,
-/// or, off, the LED's outline in the dim, so an off flag still shows.
-fn flag_led(ui: &Ui, at: Pos2, on: bool, tone: Color32, pal: &Pal) {
-    if on {
-        led(ui, at, tone);
-    } else {
-        let rect = Rect::from_center_size(at, vec2(6.0, 6.0));
-        ui.painter().rect_stroke(rect, egui::CornerRadius::same(1), Stroke::new(1.0, pal.dim), StrokeKind::Inside);
-    }
 }
 
 // ── The client page ───────────────────────────────────────────────────────
@@ -667,7 +655,7 @@ fn seeding(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
     line(ui, &t!("tor.seed_intro_1"), body(13.0), pal.dim);
     line(ui, &t!("tor.seed_intro_2"), body(13.0), pal.dim);
     ui.add_space(14.0);
-    if card(ui, Id::new("tor-seed-card"), &t!("tor.seed_card"), Glyph::None, pal.ok, true, pal).clicked() {
+    if card(ui, Id::new("tor-seed-card"), &t!("tor.seed_card"), Glyph::File, pal.ok, true, pal).clicked() {
         out.acts.push(Act::SeedAdd);
     }
     ui.add_space(14.0);
@@ -771,9 +759,10 @@ fn seed_row(ui: &Ui, s: &SeedRow, client: &str, i: usize, row: &RowCtx, pal: &Pa
 // ── Access ────────────────────────────────────────────────────────────────
 
 /// Access: the policy as a radio group, then the users. A user's access
-/// is an LED, lit green when the whitelist lets them add torrents and dim
-/// while every user may: information, not a lever, as the cells' tick is
-/// (a click on it picks the row, and s flips it).
+/// is the cells' tick box, its tick green while the whitelist decides and
+/// dim while every user may: information, not a lever, as the cells' tick
+/// is (a click on it picks the row, and s flips it), lit under the pointer
+/// all the same.
 fn access(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
     label(ui, &t!("tor.policy_label"), pal);
     let whitelist = room.policy_whitelist();
@@ -812,7 +801,8 @@ fn user_row(ui: &Ui, name: &str, user: &AdminUser, whitelist: bool, row: &RowCtx
     let admin = if user.admin { t!("tor.admin_yes").to_string() } else { "—".to_string() };
     cell(ui, row, 1, &admin, body(13.0), ink(row, pal.dim, pal), false);
     let tone = if whitelist { pal.ok } else { pal.dim };
-    flag_led(ui, pos2(row.cells[2].0 + 3.0, row.rect.center().y), user.allow_torrent, tone, pal);
+    // The box's left edge on the column's, under its heading's first letter.
+    let _ = tick_mark(ui, pos2(row.cells[2].0 + BOX / 2.0, row.rect.center().y), user.allow_torrent, tone, pal);
 }
 
 // ── Client ────────────────────────────────────────────────────────────────

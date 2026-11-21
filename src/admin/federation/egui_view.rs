@@ -25,9 +25,9 @@ use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder,
 use super::*;
 use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
-    self, Col, Dialog, FIELD_H, FIELD_ROW_H, Glyph, Pal, Para, Run, SEG_H, Seg, Table, Typed, bare, body, cadence, caps, card,
-    cell, cell_tipped, checkbox, field_at, field_box, fitted, foot, foot_line, gate, ink, label_at, led, led_cell, led_mid,
-    mono, name_cell, reveal, room_rects, searching, segmented, state_line, strong, text, tick_card, tick_row, unkeyed,
+    self, Col, Dialog, FIELD_H, FIELD_ROW_H, Glyph, Pal, Para, Run, SEG_H, Seg, TICK_H, Table, Typed, bare, body, cadence, caps,
+    card, cell, cell_tipped, checkbox, field_at, field_box, fitted, foot, foot_line, gate, ink, label_at, led, led_cell, led_mid,
+    mono, name_cell, reveal, room_rects, searching, segmented, state_line, strong, text, tick_card, tick_grid, tick_row, unkeyed,
     with_figures,
 };
 
@@ -40,10 +40,8 @@ const ROW_H: f32 = 40.0;
 const FORM_W: f32 = 640.0;
 /// The room between a modal's parts: the canvas's 22.
 const SECTION: f32 = 22.0;
-/// The gap between the forms' columns (their fields, their tick boxes).
+/// The gap between the forms' columns (their fields).
 const FORM_GAP: f32 = 16.0;
-/// A tick box's row in a form.
-const CHOICE_H: f32 = 32.0;
 /// The least a table's flexible column keeps where the default window is
 /// narrower than the canvas, and the least share its fixed ones narrow to.
 const FLEX_LEAST: f32 = 120.0;
@@ -562,21 +560,18 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
                 let (row, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
                 text(ui, row.left_center(), &t!("fed.no_libraries"), body(14.0), pal.dim, w, Align2::LEFT_CENTER);
             } else {
-                let lines = f.libraries.len().div_ceil(3);
-                let col_w = (w - 2.0 * 8.0) / 3.0;
-                let (grid, _) = ui.allocate_exact_size(vec2(w, lines as f32 * (CHOICE_H + 4.0) - 4.0), Sense::hover());
+                // The kit's grid of ticks, the mint board's three columns.
                 let first = index_of(Field::Library(0));
-                for (i, (name, on)) in f.libraries.iter().enumerate() {
-                    let at = pos2(grid.min.x + (i % 3) as f32 * (col_w + 8.0), grid.min.y + (i / 3) as f32 * (CHOICE_H + 4.0));
-                    let rect = Rect::from_min_size(at, vec2(col_w, CHOICE_H));
-                    let here = focused == Field::Library(i);
-                    let response = tick_row(ui, Id::new("fed-form-lib").with(i), rect, *on, name, here, pal);
-                    if here {
-                        reveal(ui, form_id, f.focus, rect);
-                    }
-                    if response.clicked() {
-                        out.acts.push(Act::FormToggle(first + i));
-                    }
+                let here = match focused {
+                    Field::Library(i) => Some(i),
+                    _ => None,
+                };
+                let ticks = tick_grid(ui, Id::new("fed-form-lib"), &f.libraries, here, 3, pal);
+                if let Some(rect) = here.and_then(|i| ticks.rects.get(i)) {
+                    reveal(ui, form_id, f.focus, *rect);
+                }
+                if let Some(i) = ticks.clicked {
+                    out.acts.push(Act::FormToggle(first + i));
                 }
             }
             ui.add_space(SECTION);
@@ -620,7 +615,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
             }
             FormKind::Accept if !f.their_offer.is_empty() => {
                 ui.add_space(SECTION);
-                let (rect, _) = ui.allocate_exact_size(vec2(w, CHOICE_H), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(vec2(w, TICK_H), Sense::hover());
                 let words = t!("fed.accept_their_offer", libraries = f.their_offer.join(", "));
                 let here = focused == Field::TheirOffer;
                 let response = tick_row(ui, Id::new("fed-form-offer"), rect, f.accept_their_offer, &words, here, pal);
