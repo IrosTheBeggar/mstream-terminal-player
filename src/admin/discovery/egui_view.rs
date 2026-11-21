@@ -1787,6 +1787,11 @@ mod tests {
             room.queued = None;
             let words = drawn(&settle(&ctx, &mut room, LARGE).0);
             assert!(words.iter().any(|w| w == word), "{id}: {word}: {words:?}");
+            if id == "disc-setting-form" {
+                // The label's hint after its head, from its dot, dim in the
+                // UI face rather than in the capitals.
+                assert!(words.iter().any(|w| w == "· 0 = never"), "{id}: the label's hint: {words:?}");
+            }
             if matches!(room.modal, Modal::Block(_) | Modal::Leave) {
                 // A gate has no close, as the cells draw it: Esc keeps.
                 assert!(ctx.read_response(Id::new(id).with("close")).is_none(), "{id}: no close");

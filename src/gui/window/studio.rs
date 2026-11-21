@@ -2609,4 +2609,125 @@ mod tests {
         }
         assert_eq!(picked.get(), Some(0), "the selection area does");
     }
+
+    #[test]
+    fn a_state_lines_cadence_stands_only_where_the_whole_line_fits_beside_it() {
+        let ctx = context();
+        let pal = Pal::now();
+        let parts = [("running".to_string(), strong(14.0), pal.ok), (" — music → /srv/backup".to_string(), body(14.0), pal.text)];
+        let polls = ("polls every 2 s".to_string(), body(13.0), pal.dim);
+        let (wide, narrow) = (Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 20.0)), Rect::from_min_size(pos2(0.0, 40.0), vec2(220.0, 20.0)));
+        let out = pass(&ctx, vec2(800.0, 200.0), Vec::new(), &mut |ui| {
+            let _ = state_line(ui, wide, pal.ok, 16.0, &parts, Some(&polls));
+            let _ = state_line(ui, narrow, pal.ok, 16.0, &parts, Some(&polls));
+        });
+        let drawn = texts(&out);
+        let cadence: Vec<Rect> = drawn.iter().filter(|(t, _)| t == &polls.0).map(|(_, r)| *r).collect();
+        assert_eq!(cadence.len(), 1, "on the wide row only: {drawn:?}");
+        assert!((cadence[0].max.x - wide.max.x).abs() < 1.0 && wide.contains(cadence[0].center()), "at the wide row's end: {cadence:?}");
+        let words: Vec<Rect> = drawn.iter().filter(|(t, _)| t.starts_with("running — music")).map(|(_, r)| *r).collect();
+        assert_eq!(words.len(), 2, "the state in one run on each row: {drawn:?}");
+        assert!(words.iter().all(|r| (r.min.x - 16.0).abs() < 0.5), "from the indent: {words:?}");
+        assert!(words[1].max.x <= narrow.max.x + 0.5, "and cut to the narrow row: {words:?}");
+    }
+
+    #[test]
+    fn a_rooms_foot_tells_its_story_only_with_nothing_busy_and_no_note() {
+        let ctx = context();
+        let pal = Pal::now();
+        let story = [("music → /srv/backup".to_string(), body(13.0), pal.text)];
+        let row = |y: f32| Rect::from_min_size(pos2(0.0, y), vec2(500.0, NOTE_H));
+        let note = ("could not reach the server".to_string(), true);
+        let out = pass(&ctx, vec2(600.0, 200.0), Vec::new(), &mut |ui| {
+            foot_line(ui, row(0.0), None, None, &story, &pal);
+            foot_line(ui, row(40.0), Some("saving…"), Some(&note), &story, &pal);
+            foot_line(ui, row(80.0), None, Some(&note), &story, &pal);
+        });
+        let drawn = texts(&out);
+        let at = |s: &str| drawn.iter().filter(|(t, _)| t == s).map(|(_, r)| r.center().y.round()).collect::<Vec<f32>>();
+        assert_eq!(at(&story[0].0), [9.0], "the story on the first row alone: {drawn:?}");
+        assert_eq!(at("saving…"), [49.0], "busy wins over the note");
+        assert_eq!(at(&note.0), [89.0], "the note over the story");
+    }
+
+    #[test]
+    fn a_short_fields_note_stands_beside_its_box_where_it_fits_and_under_it_where_not() {
+        let ctx = context();
+        let note = "a-z, 0-9 and dashes";
+        let boxes = std::cell::RefCell::new(Vec::new());
+        let out = pass(&ctx, vec2(800.0, 400.0), Vec::new(), &mut |ui| {
+            let pal = Pal::now();
+            let input = Input::new("field-recordings", 0);
+            for (k, (top, w)) in [(0.0, 600.0), (200.0, 300.0)].into_iter().enumerate() {
+                let column = Rect::from_min_size(pos2(20.0, top), vec2(w, 150.0));
+                let mut child = ui.new_child(UiBuilder::new().max_rect(column).layout(Layout::top_down(Align::Min)));
+                let typed = field_beside(&mut child, Id::new("probe-beside").with(k), "Name", &input, 264.0, note, &pal);
+                boxes.borrow_mut().push(typed.response.rect);
+            }
+        });
+        let boxes = boxes.into_inner();
+        let notes: Vec<Rect> = texts(&out).into_iter().filter(|(t, _)| t == note).map(|(_, r)| r).collect();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert_eq!(boxes[0].width(), 264.0, "the box its own width, not the column's");
+        assert!((notes[0].min.x - (boxes[0].max.x + 16.0)).abs() < 0.5, "16 points beside the box: {notes:?} {boxes:?}");
+        assert!((notes[0].center().y - boxes[0].center().y).abs() < 1.0, "on its line");
+        assert!(notes[1].min.y >= boxes[1].max.y && (notes[1].min.x - boxes[1].min.x).abs() < 0.5, "under it where it does not fit");
+    }
+
+    #[test]
+    fn a_cells_tip_is_registered_only_where_its_words_were_cut() {
+        let ctx = context();
+        let cols = [Col::left("Name", 60.0), Col::left("Path", 0.0)];
+        let _ = pass(&ctx, vec2(600.0, 300.0), Vec::new(), &mut |ui| {
+            let _ = Table::new(Id::new("probe-tips"), &cols, 1).show(ui, &Pal::now(), |ui, _, row| {
+                let _ = cell_tipped(ui, row, 0, "a long name that runs on", "whole", body(14.0), Color32::WHITE, Id::new("probe-cut"));
+                let _ = cell_tipped(ui, row, 1, "short", "whole", body(14.0), Color32::WHITE, Id::new("probe-whole"));
+            });
+        });
+        assert!(ctx.read_response(Id::new("probe-cut")).is_some(), "a tip over the cut cell");
+        assert!(ctx.read_response(Id::new("probe-whole")).is_none(), "none over the whole one");
+    }
+
+    #[test]
+    fn a_groups_ring_reaches_past_the_column_round_what_was_drawn_since_its_top() {
+        let ctx = context();
+        let got = Cell::new(Rect::NOTHING);
+        let _ = pass(&ctx, vec2(600.0, 400.0), Vec::new(), &mut |ui| {
+            let column = Rect::from_min_max(pos2(100.0, 50.0), pos2(400.0, 300.0));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(column).layout(Layout::top_down(Align::Min)));
+            let top = child.cursor().min.y;
+            child.add_space(40.0);
+            got.set(ring_since(&child, top, &Pal::now()));
+        });
+        assert_eq!(got.get(), Rect::from_min_max(pos2(92.0, 48.0), pos2(408.0, 92.0)));
+    }
+
+    #[test]
+    fn a_ticket_broken_anywhere_fills_its_lines_where_its_marks_would_end_them_short() {
+        let ctx = context();
+        let ticket = format!("mstrfed1:{}", "eyJ0-Ijoi_YWJj".repeat(12));
+        let glyph = Cell::new(0.0);
+        let out = pass(&ctx, vec2(800.0, 400.0), Vec::new(), &mut |ui| {
+            glyph.set(width_of(ui, "m", mono(12.5)));
+            let _ = Para::new(&ticket, mono(12.5), Color32::WHITE).anywhere().paint(ui, pos2(10.0, 10.0), 200.0);
+            let _ = Para::new(&ticket, mono(12.5), Color32::WHITE).paint(ui, pos2(400.0, 10.0), 200.0);
+        });
+        let galleys: Vec<(Pos2, std::sync::Arc<egui::Galley>)> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == ticket => Some((t.pos, t.galley.clone())),
+                _ => None,
+            })
+            .collect();
+        // The narrowest of the lines a wrap ended, the last left out.
+        let shortest = |left: bool| {
+            let galley = &galleys.iter().find(|(at, _)| (at.x < 200.0) == left).expect("both drawn").1;
+            let ended = &galley.rows[..galley.rows.len() - 1];
+            ended.iter().map(|r| r.rect().width()).fold(f32::INFINITY, f32::min)
+        };
+        let glyph = glyph.get();
+        assert!(shortest(true) > 200.0 - 2.0 * glyph, "every line filled: {}", shortest(true));
+        assert!(shortest(false) < 200.0 - 4.0 * glyph, "a dash ends the default's lines short: {}", shortest(false));
+    }
 }
