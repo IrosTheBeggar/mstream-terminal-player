@@ -33,11 +33,10 @@ use crate::gui::window::studio::{
 const FORM_GAP: f32 = 20.0;
 /// The state line's height.
 const STATE_H: f32 = 20.0;
-/// The table's trail: the remove column, then the slot egui's scroll bar
-/// floats in at the table's edge.
+/// The table's trail: the remove column. The kit's table leaves the
+/// thumb its room past it while the rows overflow.
 const REMOVE_W: f32 = 36.0;
-const BAR_SLOT: f32 = 14.0;
-const TRAIL: f32 = REMOVE_W + BAR_SLOT;
+const TRAIL: f32 = REMOVE_W;
 /// The USER column: the canvas's 180 points where the room has them, and
 /// half of what the flags leave where it has not, never under 72.
 const USER_W: f32 = 180.0;

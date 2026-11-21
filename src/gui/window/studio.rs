@@ -136,10 +136,27 @@ pub(crate) fn begin(ui: &Ui) -> Pal {
     pal
 }
 
+/// A scroll bar's thumb as the boards draw every one (their thin
+/// `scrollbar-color: #363740 transparent`): [`THUMB_W`] points wide, its
+/// ends rounded, on no track, in the strong edge at rest — the dim lifted
+/// to [`THUMB_REST`] over the ground, so the whole bar brightens to the dim
+/// under the pointer — and the accent in the hand. The server's log draws
+/// its own thumb so (server_log/egui_view.rs); egui's areas wear it
+/// through [`style_once`].
+pub(crate) const THUMB_W: f32 = 6.0;
+/// How much of the dim a thumb at rest shows over the ground: the strong
+/// edge's lift.
+pub(crate) const THUMB_REST: f32 = 0.265;
+/// The shortest thumb, a fingertip's.
+pub(crate) const THUMB_MIN: f32 = 20.0;
+/// The room a list's rows leave at their right while they overflow, for
+/// the thumb over it: the thumb's [`THUMB_W`] and 4 points before it.
+pub(crate) const BAR_ROOM: f32 = THUMB_W + 4.0;
+
 /// egui's look for the desk, set once per context, which every page that
-/// draws in the panel shares: dark; a scroll bar a slim thumb in the strong
-/// edge whenever there is more than the view shows (the log's, and the
-/// cells' bar, which never hides), amber under the pointer and in the hand;
+/// draws in the panel shares: dark; a scroll bar the boards' thumb
+/// ([`THUMB_W`]) at the area's right edge whenever there is more than the
+/// view shows, over the room the area's rows leave for it ([`BAR_ROOM`]);
 /// a tooltip the canvas's, raised on a strong-edged hairline with no
 /// shadow.
 pub(crate) fn style_once(ctx: &egui::Context, pal: &Pal) {
@@ -148,7 +165,7 @@ pub(crate) fn style_once(ctx: &egui::Context, pal: &Pal) {
         return;
     }
     ctx.set_theme(egui::Theme::Dark);
-    let (accent, text, ground, edge, raised) = (pal.accent, pal.text, pal.ground, pal.edge_strong, pal.raised);
+    let (accent, text, ground, edge, raised, dim) = (pal.accent, pal.text, pal.ground, pal.edge_strong, pal.raised, pal.dim);
     ctx.all_styles_mut(|style| {
         style.visuals.selection.bg_fill = accent;
         style.visuals.extreme_bg_color = ground;
@@ -165,20 +182,28 @@ pub(crate) fn style_once(ctx: &egui::Context, pal: &Pal) {
         widgets.noninteractive.fg_stroke.color = text;
         for state in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
             state.fg_stroke.color = text;
-            state.corner_radius = CornerRadius::same(1);
+            state.corner_radius = CornerRadius::same((THUMB_W / 2.0) as u8);
         }
-        widgets.inactive.bg_fill = edge;
-        widgets.hovered.bg_fill = accent.gamma_multiply(0.75);
+        // The thumb: the dim, shown at THUMB_REST while the pointer is off
+        // the bar (the strong edge over the ground) and whole on it; the
+        // accent in the hand.
+        widgets.inactive.bg_fill = dim;
+        widgets.hovered.bg_fill = dim;
         widgets.active.bg_fill = accent;
-        // The thumb at rest too, never its track: egui's floating bar shows
-        // nothing until the pointer comes, and draws its thumb in the text
-        // colour.
+        // Floating, so the thumb neither grows under the pointer nor takes
+        // room of its own: the rows leave BAR_ROOM for it (Table, Dialog).
+        // Never a track.
         style.spacing.scroll = egui::style::ScrollStyle {
-            floating_width: 4.0,
-            bar_width: 6.0,
+            floating: true,
+            bar_width: THUMB_W,
+            floating_width: THUMB_W,
+            floating_allocated_width: 0.0,
+            bar_inner_margin: 0.0,
+            bar_outer_margin: 0.0,
+            handle_min_length: THUMB_MIN,
             foreground_color: false,
-            dormant_handle_opacity: 1.0,
-            active_handle_opacity: 1.0,
+            dormant_handle_opacity: THUMB_REST,
+            active_handle_opacity: THUMB_REST,
             interact_handle_opacity: 1.0,
             dormant_background_opacity: 0.0,
             active_background_opacity: 0.0,
@@ -1683,6 +1708,14 @@ fn spans(x0: f32, x1: f32, cols: &[Col]) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// A view `room` points tall cut down to whole rows `row_h` tall, so a
+/// table never ends on a sliver of one; the room as it is where not one
+/// row fits it.
+fn whole_rows(room: f32, row_h: f32) -> f32 {
+    let n = ((room + 0.01) / row_h.max(1.0)).floor();
+    if n >= 1.0 { n * row_h } else { room }
+}
+
 /// What one row hands its painter: the row's selection area, its cells,
 /// and its state.
 pub(crate) struct RowCtx<'a> {
@@ -1829,14 +1862,28 @@ impl<'a> Table<'a> {
     }
 
     /// Lay the table out in what is left of `ui`, `draw_row` painting each
-    /// row on screen.
+    /// row on screen: its view as many whole rows tall as fit, so it never
+    /// ends on a sliver of one, and while the rows overflow it, they and
+    /// their headings [`BAR_ROOM`] short of its right edge, where the
+    /// thumb stands clear of the cursor's ring. A wheel's notch moves the
+    /// view a row.
     pub(crate) fn show(self, ui: &mut Ui, pal: &Pal, mut draw_row: impl FnMut(&Ui, usize, &RowCtx)) -> TableShown {
         let Table { id, cols, len, cursor, look, row_h, trail, clickable, reveal, empty, headless, height, content } = self;
         let w = ui.available_width();
+        let head_h = match (headless, look) {
+            (true, _) => 0.0,
+            (false, Look::Lit) => 26.0,
+            (false, Look::Ring) => 30.0,
+        };
+        let below = if headless { 0.0 } else { head_h + 4.0 };
+        let room_h = height.unwrap_or_else(|| ui.available_height() - below);
+        let room_h = if room_h.is_finite() { room_h.max(0.0) } else { len as f32 * row_h };
+        let view_h = whole_rows(room_h, row_h);
+        let overflows = len as f32 * row_h > view_h + 0.5;
+        let bar = if overflows { BAR_ROOM } else { 0.0 };
         if !headless {
-            let head_h = if look == Look::Lit { 26.0 } else { 30.0 };
             let (head, _) = ui.allocate_exact_size(vec2(w, head_h), Sense::hover());
-            let cells = spans(head.min.x + CELL_PAD, head.max.x - CELL_PAD - trail, cols);
+            let cells = spans(head.min.x + CELL_PAD, head.max.x - CELL_PAD - trail - bar, cols);
             for (c, (x, cw)) in cols.iter().zip(&cells) {
                 let y = head.center().y;
                 let (pos, align) = match c.align {
@@ -1872,8 +1919,6 @@ impl<'a> Table<'a> {
         let (last_pass, last_content, last_cursor, last_offset): (u64, Id, Option<usize>, f32) =
             ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((0, Id::NULL, None, 0.0));
         let fresh = content.is_some_and(|key| key != last_content || last_pass + 1 != now);
-        let view_h = height.unwrap_or_else(|| ui.available_height());
-        let view_h = if view_h.is_finite() { view_h.max(0.0) } else { len as f32 * row_h };
         let (mut offset, mut moved) = if fresh { (0.0, true) } else { (last_offset, false) };
         let mut bring = |row: usize| {
             let (top, bottom) = (row as f32 * row_h, (row + 1) as f32 * row_h);
@@ -1889,9 +1934,11 @@ impl<'a> Table<'a> {
         if let Some(r) = reveal {
             bring(r);
         }
-        let mut scroll = ScrollArea::vertical().id_salt(id).auto_shrink([false, false]);
-        if let Some(h) = height {
-            scroll = scroll.max_height(h).min_scrolled_height(h);
+        // A notch a row, as the cells' wheel steps their lists.
+        let notch = ui.ctx().options(|o| o.input_options.line_scroll_speed).max(1.0);
+        let mut scroll = ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).wheel_scroll_multiplier(vec2(1.0, row_h / notch));
+        if height.is_some() || overflows {
+            scroll = scroll.max_height(view_h).min_scrolled_height(view_h);
         }
         if moved {
             scroll = scroll.vertical_scroll_offset(offset.max(0.0));
@@ -1901,7 +1948,7 @@ impl<'a> Table<'a> {
         let output = scroll.show_rows(ui, row_h, len, |ui, range| {
             shown.last_on_screen = range.end.saturating_sub(1);
             for i in range {
-                let (full, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+                let (full, _) = ui.allocate_exact_size(vec2(ui.available_width() - bar, row_h), Sense::hover());
                 let rect = Rect::from_min_max(full.min, pos2((full.max.x - trail).max(full.min.x), full.max.y));
                 let trail_rect = Rect::from_min_max(pos2(rect.max.x, full.min.y), full.max);
                 let response = ui.interact(rect, id.with("row").with(i), sense);
@@ -2087,6 +2134,10 @@ pub(crate) fn folder_browser(ui: &mut Ui, id: Id, path: &str, names: &[String], 
 const MODAL_PAD: f32 = 24.0;
 const MODAL_GAP: f32 = 20.0;
 const TITLE_H: f32 = 20.0;
+/// How far a modal's scrolled body reaches into the window's right
+/// padding for its thumb: the thumb 10 points past the body, 8 in from the
+/// window's edge.
+const BODY_BAR: f32 = MODAL_PAD - 8.0;
 
 /// What a modal's pass gives back.
 pub(crate) struct ModalShown<R> {
@@ -2207,7 +2258,11 @@ impl<'a> Dialog<'a> {
             };
             ui.painter().galley(pos2(inner.min.x, title_row.center().y - line_h / 2.0), galley, title_color);
             let budget = (max_h - fixed).max(0.0);
-            let body_rect = Rect::from_min_size(pos2(inner.min.x, inner.min.y + title_h + MODAL_GAP), vec2(inner.width(), budget));
+            // The scrolled area reaches into the window's padding, where its
+            // thumb stands 8 points in from the window's edge, clear of the
+            // body, which keeps the inner width.
+            let body_rect =
+                Rect::from_min_size(pos2(inner.min.x, inner.min.y + title_h + MODAL_GAP), vec2(inner.width() + BODY_BAR, budget));
             let mut child =
                 ui.new_child(UiBuilder::new().id_salt(id.with("body")).max_rect(body_rect).layout(Layout::top_down(Align::Min)));
             let mut scroll = ScrollArea::vertical().id_salt(id.with("scroll")).max_height(budget).auto_shrink([false, true]);
@@ -2217,6 +2272,7 @@ impl<'a> Dialog<'a> {
                 scroll = scroll.vertical_scroll_offset(to);
             }
             let out = scroll.show(&mut child, |ui| {
+                ui.set_max_width(inner.width());
                 let view = BodyView { origin: ui.max_rect().min.y, view: ui.clip_rect(), opened };
                 ui.ctx().data_mut(|d| d.insert_temp(id.with("view"), view));
                 body(ui)
@@ -3060,5 +3116,57 @@ mod tests {
         // on capitals than on small letters.
         assert!(leds[0] > 200.0 + 2.0 && leds[0] < b_words - 5.0, "on the small letters' middle: {leds:?}, baseline {b_words}");
         assert!(leds[1] < leds[0], "a capital's middle is higher: {leds:?}");
+    }
+
+    #[test]
+    fn a_table_ends_on_whole_rows_and_leaves_its_thumb_room_while_it_overflows() {
+        assert_eq!(whole_rows(250.0, 40.0), 240.0);
+        assert_eq!(whole_rows(240.0, 40.0), 240.0, "a view of whole rows keeps them");
+        assert_eq!(whole_rows(30.0, 40.0), 30.0, "less than a row stays what it is");
+
+        let ctx = context();
+        let size = vec2(600.0, 30.0 + 4.0 + 250.0);
+        let cols = [Col::left("Name", 0.0)];
+        let drawn: std::cell::RefCell<Vec<(usize, Rect)>> = Default::default();
+        let clip = Cell::new(Rect::NOTHING);
+        let run_with = |len: usize| {
+            drawn.borrow_mut().clear();
+            let out = pass(&ctx, size, Vec::new(), &mut |ui| {
+                let _ = Table::new(Id::new("probe-whole").with(len), &cols, len).cursor(Some(0)).show(ui, &Pal::now(), |ui, i, row| {
+                    drawn.borrow_mut().push((i, row.rect));
+                    clip.set(ui.clip_rect());
+                });
+            });
+            (out, drawn.borrow().clone())
+        };
+        // Twenty rows in 250 points: a view of six whole rows, none cut at
+        // its foot, every row BAR_ROOM short of the edge, and the thumb
+        // there.
+        // (egui brings a bar in over a few passes.)
+        for _ in 0..8 {
+            let _ = run_with(20);
+        }
+        let (out, rows) = run_with(20);
+        let view_foot = 34.0 + 240.0;
+        assert!((clip.get().max.y - view_foot).abs() < 0.5, "the view ends with the sixth row: {:?}", clip.get());
+        let seen: Vec<Rect> = rows.iter().map(|(_, r)| *r).filter(|r| r.intersects(clip.get().shrink(0.5))).collect();
+        assert!(seen.iter().all(|r| clip.get().contains_rect(*r)), "whole rows only: {rows:?}");
+        assert_eq!(seen.len(), 6, "{rows:?}");
+        assert!(rows.iter().all(|(_, r)| (r.max.x - (size.x - BAR_ROOM)).abs() < 0.5), "room for the thumb: {rows:?}");
+        let ring = rows[0].1;
+        let thumbs: Vec<Rect> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::Rect(r) if (r.rect.width() - THUMB_W).abs() < 0.5 && r.rect.max.x > size.x - 1.0 && r.fill.a() > 0 => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thumbs.len(), 1, "the thumb at the edge: {thumbs:?}");
+        assert!(!thumbs[0].intersects(ring.shrink(0.5)), "clear of the cursor's ring: {:?} {ring:?}", thumbs[0]);
+        assert!(thumbs[0].max.y <= view_foot + 0.5, "in the view: {:?}", thumbs[0]);
+        // Three rows fit: the whole width, and no thumb.
+        let (_, rows) = run_with(3);
+        assert!(rows.iter().all(|(_, r)| (r.max.x - size.x).abs() < 0.5), "{rows:?}");
     }
 }

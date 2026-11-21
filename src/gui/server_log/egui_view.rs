@@ -36,8 +36,8 @@ use rust_i18n::t;
 
 use super::{Drawn, Fit, LATER_LINES, Level, LogAct, LogUi, Look, clock, counted, needs_bar, view};
 use crate::gui::window::studio::{
-    Icon, Pal, TOOL_H, Tool, body, caps, caps_width, led, led_mid, mono, panel, square, strong, text, tool_button,
-    tool_button_width, width_of,
+    Icon, Pal, THUMB_MIN, THUMB_REST, THUMB_W, TOOL_H, Tool, body, caps, caps_width, led, led_mid, mono, panel, square,
+    strong, text, tool_button, tool_button_width, width_of,
 };
 use crate::kit::Grip;
 
@@ -61,11 +61,10 @@ const STATE_SIZE: f32 = 11.5;
 const CONTROL_GAP: f32 = 8.0;
 const STATE_GAP: f32 = 16.0;
 const HINT_SIZE: f32 = 12.5;
-/// The bar's column beside the rows, its thumb, and the shortest thumb.
+/// The bar's column beside the rows, and the room right of its thumb (the
+/// kit's: [`THUMB_W`] wide, no shorter than [`THUMB_MIN`]).
 const BAR_W: f32 = 14.0;
-const THUMB_W: f32 = 6.0;
 const THUMB_RIGHT: f32 = 4.0;
-const THUMB_MIN: f32 = 20.0;
 /// How far a highlighted run's fill reaches left of the clock.
 const FILL_IN: f32 = 8.0;
 /// Where the rows' grid of cells starts, for the hold: far from zero, so
@@ -398,9 +397,10 @@ fn paint_rows(ui: &Ui, log: &LogUi, at: &Geom, drawn: &[Drawn], pal: &Pal) {
     }
 }
 
-/// The bar, counted in lines (see [`counted`]): only its thumb, as the
-/// canvas draws it, a slim bar in the strong edge, dim under the pointer
-/// and the accent while the hand holds it.
+/// The bar, counted in lines (see [`counted`]): only its thumb, the kit's
+/// as every egui area wears it ([`THUMB_W`]) — the dim at [`THUMB_REST`]
+/// at rest (the strong edge), the dim under the pointer anywhere on the
+/// bar, and the accent while the hand holds it.
 fn paint_bar(ui: &Ui, id: Id, log: &LogUi, at: &Geom, drawn: &[Drawn], inert: bool, pal: &Pal) {
     let Some((track, (held, first, whole, of))) = at.bar.zip(bar_numbers(log, drawn)) else { return };
     let (top, len) = thumb(track, held, whole, first, of);
@@ -411,9 +411,9 @@ fn paint_bar(ui: &Ui, id: Id, log: &LogUi, at: &Geom, drawn: &[Drawn], inert: bo
     } else if !inert && ui.rect_contains_pointer(track) {
         pal.dim
     } else {
-        pal.edge_strong
+        pal.dim.gamma_multiply(THUMB_REST)
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(3), color);
+    ui.painter().rect_filled(rect, CornerRadius::same((THUMB_W / 2.0) as u8), color);
 }
 
 /// What a header tooltip says: the whole of it while key names are shown,
