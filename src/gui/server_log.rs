@@ -41,6 +41,17 @@
 //! never the poll's, so a zip that takes a minute never holds up the tail,
 //! and `o` shows the file it saved. Their answers come back as a note the
 //! screen lifts into the GUI's.
+//!
+//! In the desktop window the same log is drawn by egui instead
+//! (`server_log/egui_view.rs`, a child of the model, so both faces share its
+//! fitting, its view and its acts): its rows are this module's, wrapped at
+//! the monospace characters that fit.
+
+// The log's egui face: the window's panel draws it in the Studio look.
+#[cfg(feature = "window")]
+mod egui_view;
+#[cfg(feature = "window")]
+pub(crate) use egui_view::show as show_egui;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -1204,6 +1215,21 @@ fn needs_bar(shown: &[&Line], rows: usize, cells: usize) -> bool {
     shown.len() >= 2 && rows >= 3 && depth(shown, shown.len() - 1, 0, fit, rows + 1) > rows
 }
 
+/// The bar's numbers, counted in lines, as both faces stand its thumb:
+/// the oldest line the view shows from its clock (`first`), how many lines
+/// it shows whole (`whole`), and the positions past the first (`of`), for
+/// `drawn` with line `bottom` of `held` at the bottom and `under` of its
+/// rows below the view. The view's lines run on up from the bottom one and
+/// only the bottom one can be cut below the view, so the clocks in view
+/// tell both; a line taller than the view, read a row at a time, shows no
+/// clock and stands at its own place.
+fn counted(drawn: &[Drawn], bottom: usize, under: usize, held: usize) -> (usize, usize, usize) {
+    let clocks = drawn.iter().filter(|row| row.first).count();
+    let first = (bottom + 1).saturating_sub(clocks.max(1));
+    let whole = clocks.saturating_sub(usize::from(clocks > 0 && under > 0)).max(1);
+    (first, whole, held.saturating_sub(whole))
+}
+
 /// The log in `area`: the header on its first row, then the lines, the
 /// newest at the bottom, each wrapped whole under its clock — or the one
 /// sentence when there are none to show. A failure while lines are held
@@ -1372,18 +1398,12 @@ pub(crate) fn draw<A: Clone + 'static>(
     // shown from its clock stands among all the lines, and its length is
     // the share of them the view shows whole, so it is at the bottom while
     // following and at the top at the top of the log, even where the
-    // bottom line is cut there. The view's lines run on up from the bottom
-    // one and only the bottom one can be cut below the view, so the clocks
-    // in view tell both. A line taller than the view, read a row at a
-    // time, shows no clock and stands at its own place. The endcaps act as
-    // ↑ and ↓ (with the kit's hold-repeat), the track and the thumb move
-    // the bottom line, and the bar's cells are registered after the drag
-    // region, so a press on them is the bar's whatever the region spans.
+    // bottom line is cut there ([`counted`]). The endcaps act as ↑ and ↓
+    // (with the kit's hold-repeat), the track and the thumb move the bottom
+    // line, and the bar's cells are registered after the drag region, so a
+    // press on them is the bar's whatever the region spans.
     if bar && let Some(bottom) = held.checked_sub(1 + log.model.scroll) {
-        let clocks = drawn.iter().filter(|row| row.first).count();
-        let first = (bottom + 1).saturating_sub(clocks.max(1));
-        let whole = clocks.saturating_sub(usize::from(clocks > 0 && log.model.under > 0)).max(1);
-        let of = held.saturating_sub(whole);
+        let (first, whole, of) = counted(&drawn, bottom, log.model.under, held);
         let rect = Rect { x: lines_right, y: top, width: 1, height: rows as u16 };
         let (older, newer) = (wrap(LogAct::Older), wrap(LogAct::Newer));
         let jump = move |at| wrap(LogAct::Jump { at, of });

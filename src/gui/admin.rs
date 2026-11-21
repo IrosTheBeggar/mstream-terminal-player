@@ -17,6 +17,11 @@
 //! geometry, the key routing and the focus cycle are pure functions of
 //! their inputs, so the tests pin them by window size and by key before
 //! any frame is drawn.
+//!
+//! In the desktop window, a room with an egui face and the log are drawn
+//! by egui in the window's panel, which shows one region a frame: both
+//! parts and the cells between them, each part in its own rect, the rule
+//! between them left to the cells (contract clauses 35-37).
 
 use std::time::Instant;
 
@@ -190,6 +195,15 @@ pub(crate) struct AdminUi {
     /// dragged thumb lets go with the log, as a grip on the lines does. A
     /// bar of another list's holds on wherever that list stands.
     bar_held: bool,
+    /// The last frame drew the room or the log with egui (the window's
+    /// panel), and the pointer was over something egui would act on: the
+    /// hand.
+    #[cfg(feature = "window")]
+    egui_hand: bool,
+    /// The GUI's cells beside a room's modal this frame, which it dims as
+    /// the modal's scrim dims the room ([`under_modal`]).
+    #[cfg(feature = "window")]
+    under_modal: Vec<Rect>,
 }
 
 impl AdminUi {
@@ -210,6 +224,10 @@ impl AdminUi {
             log_at: None,
             pressed: false,
             bar_held: false,
+            #[cfg(feature = "window")]
+            egui_hand: false,
+            #[cfg(feature = "window")]
+            under_modal: Vec::new(),
         }
     }
 }
@@ -471,17 +489,35 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // a GUI field's; the composition while one is up is its own field's,
     // so the room's beneath does not draw it too.
     let composition = if gui.modal_open() { "" } else { gui.ui.composition() };
+    let look = log_on.then(|| log_look(&lay, key_hints));
+    if let (Hall::Room(_), Some(room)) = (gui.admin.showing, gui.admin.room.as_mut()) {
+        room.set_key_hints(key_hints);
+        room.set_composition(composition);
+    }
+    // In a window of its own, the room with an egui face and the log are
+    // drawn by egui, in the one region the window's panel shows a frame,
+    // over cells that stay blank (window/panel.rs); keys still reach both
+    // as below, and the pointer inside the region is egui's.
+    #[cfg(feature = "window")]
+    let by_egui = egui_frame(gui, frame.area(), &lay, look.as_ref(), modal);
+    #[cfg(not(feature = "window"))]
+    let by_egui = ByEgui::default();
+    // Under egui's room's modal, the GUI's cells beside the room read as
+    // under its scrim too; the GUI dims them last, over the pick banner.
+    #[cfg(feature = "window")]
+    {
+        gui.admin.under_modal = if by_egui.room && modal { under_modal(&lay, log_on) } else { Vec::new() };
+    }
     let admin = &mut gui.admin;
     let mut drew_room = false;
     if let (Hall::Room(_), Some(room)) = (admin.showing, admin.room.as_mut()) {
-        room.set_key_hints(key_hints);
-        room.set_composition(composition);
-        room.draw_in(frame, lay.room);
-        if let Some(at) = room.caret_at() {
-            gui.ui.note_caret(at);
+        if !by_egui.room {
+            room.draw_in(frame, lay.room);
+            if let Some(at) = room.caret_at() {
+                gui.ui.note_caret(at);
+            }
         }
-        // The first row is the pick banner's, so its [X] stays the GUI's.
-        admin.room_at = Rect { y: lay.room.y + 1, height: lay.room.height.saturating_sub(1), ..lay.room };
+        admin.room_at = below_banner(&lay);
         drew_room = true;
     } else if !session {
         // The sentence where the room would be, on a second row where the
@@ -512,9 +548,340 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
 
     draw_hallway(frame, gui, &lay, session);
-    if log_on {
-        draw_log(frame, gui, &lay, key_hints);
+    if let Some(look) = &look {
+        draw_log(frame, gui, &lay, look, by_egui.log);
     }
+}
+
+/// The room's area less its first row, the pick banner's, whose `[X]`
+/// stays the GUI's: where the room takes the pointer, and what of it egui
+/// draws.
+fn below_banner(lay: &Layout) -> Rect {
+    Rect { y: lay.room.y + 1, height: lay.room.height.saturating_sub(1), ..lay.room }
+}
+
+/// The GUI's cells beside a room whose egui modal is up, which egui's
+/// scrim does not reach: the room's first row, the pick banner's, and with
+/// the log on screen (`log_on`) whatever lies between the room and it —
+/// the docked column's blank columns and `│`, or the band's `─` row. The
+/// host dims them as the scrim dims the room, so the whole room reads as
+/// under the modal; the log itself stays live (clause 18).
+#[cfg(feature = "window")]
+fn under_modal(lay: &Layout, log_on: bool) -> Vec<Rect> {
+    let room = lay.room;
+    let mut cells = vec![Rect { height: room.height.min(1), ..room }];
+    match (lay.placement, lay.log.filter(|_| log_on)) {
+        (Placement::Column, Some(log)) => {
+            cells.push(Rect { x: room.right(), y: room.y, width: log.x.saturating_sub(room.right()), height: room.height });
+        }
+        (Placement::Band, Some(log)) => {
+            cells.push(Rect { x: room.x, y: room.bottom(), width: room.width, height: log.y.saturating_sub(room.bottom()) });
+        }
+        _ => {}
+    }
+    cells.retain(|r| !r.is_empty());
+    cells
+}
+
+/// The cells [`under_modal`] noted this frame dimmed as the room's modal's
+/// scrim dims what egui drew there: each cell's ground and ink seen
+/// through it (an ink the terminal picks stays its own). The GUI calls it
+/// last, after the pick banner that takes the room's first row.
+#[cfg(feature = "window")]
+pub(super) fn dim_under_modal(frame: &mut Frame, gui: &Gui) {
+    let buf = frame.buffer_mut();
+    for rect in &gui.admin.under_modal {
+        dim_cells(buf, *rect);
+    }
+}
+
+/// Every cell of `rect` in `buf` under the scrim: its ground (the theme's
+/// where it has none of its own) and its RGB ink.
+#[cfg(feature = "window")]
+fn dim_cells(buf: &mut ratatui::buffer::Buffer, rect: Rect) {
+    use ratatui::style::Color;
+    let ground = crate::kit::theme::th().ground_rgb.unwrap_or((0x12, 0x13, 0x1c));
+    let scrimmed = |(r, g, b): (u8, u8, u8)| {
+        let c = super::window::studio::under_scrim(egui::Color32::from_rgb(r, g, b));
+        Color::Rgb(c.r(), c.g(), c.b())
+    };
+    let rect = rect.intersection(buf.area);
+    for y in rect.top()..rect.bottom() {
+        for x in rect.left()..rect.right() {
+            let cell = &mut buf[(x, y)];
+            cell.bg = scrimmed(match cell.bg {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => ground,
+            });
+            if let Color::Rgb(r, g, b) = cell.fg {
+                cell.fg = scrimmed((r, g, b));
+            }
+        }
+    }
+}
+
+/// How the log is drawn where the layout puts it: a blank row under the
+/// header in the column and the Log room, and the header's hint of what
+/// `L` does here while key names are shown.
+fn log_look(lay: &Layout, key_hints: bool) -> Look {
+    let hint = key_hints.then(|| {
+        match lay.placement {
+            Placement::Column => t!("gui.admin.log.hint_undock"),
+            Placement::Band => t!("gui.admin.log.hint_hide"),
+            Placement::Room => t!("gui.admin.log.hint_room"),
+        }
+        .to_string()
+    });
+    Look { spaced: lay.spaced, hint }
+}
+
+/// What the window's panel drew this frame in the cells' stead: the room,
+/// the log, both or neither. Neither in a terminal, which has no panel.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ByEgui {
+    room: bool,
+    log: bool,
+}
+
+/// The panel's one region a frame and the parts egui draws in it, in
+/// cells: the room's area less its first row while the room has an egui
+/// face, and the log's rect while the log is on screen.
+#[cfg(feature = "window")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Parts {
+    region: Rect,
+    room: Option<Rect>,
+    log: Option<Rect>,
+}
+
+/// What the panel covers this frame (contract clause 35): the room's area
+/// less the pick banner's row when `room_face` (a room drawn this frame
+/// with an egui face), the log's rect when `log_on`, and, with both, the
+/// cells between them — the column's `│` and its blank columns, the band's
+/// `─` row — which egui leaves unpainted, so what the cells draw there
+/// shows through. In the Room placement the log is the room. None when
+/// egui draws neither, and everything is cells.
+#[cfg(feature = "window")]
+fn egui_parts(lay: &Layout, room_face: bool, log_on: bool) -> Option<Parts> {
+    let room = Some(below_banner(lay)).filter(|r| room_face && !r.is_empty());
+    let log = lay.log.filter(|r| log_on && !r.is_empty());
+    let region = match (room, log) {
+        (Some(room), Some(log)) => room.union(log),
+        (Some(part), None) | (None, Some(part)) => part,
+        (None, None) => return None,
+    };
+    Some(Parts { region, room, log })
+}
+
+/// The panel's pass for this frame, if it draws anything, and what it
+/// left the host: the hand ORed in as the room's always was, the room's
+/// caret lifted to the GUI's surface, the keys to whichever part a press
+/// landed in, and the log's note lifted into the GUI's.
+#[cfg(feature = "window")]
+fn egui_frame(gui: &mut Gui, grid: Rect, lay: &Layout, look: Option<&Look>, room_modal: bool) -> ByEgui {
+    gui.admin.egui_hand = false;
+    let Some(panel) = gui.panel.clone() else { return ByEgui::default() };
+    let face = room_up(&gui.admin) && gui.admin.room.as_ref().is_some_and(|room| room.egui_face());
+    let Some(parts) = egui_parts(lay, face, look.is_some()) else { return ByEgui::default() };
+    // A GUI modal or the server menu owns the pointer, and nothing egui
+    // draws shows the hand or lights under it, as `pointer` has the cells
+    // let go of the pointer: over the region the panel stands down and
+    // egui hears no more of the pointer, so what egui last hovered would
+    // show the hand over the GUI's own for as long as it is up. Under a
+    // room's modal the log neither lights nor takes the pointer (clause 18).
+    let gui_owns_pointer = gui.modal_open() || gui.servers.drop_open;
+    let key_hints = gui.config.gui.key_hints;
+    let Some(pass) = egui_pass(&panel, &mut gui.admin, &parts, look, key_hints, room_modal || gui_owns_pointer, grid)
+    else {
+        return ByEgui::default();
+    };
+    gui.admin.egui_hand = pass.hand && !gui_owns_pointer;
+    if let Some(at) = pass.caret {
+        gui.ui.note_caret(at);
+    }
+    land(&mut gui.admin, &pass);
+    take_log_note(gui);
+    ByEgui { room: parts.room.is_some(), log: parts.log.is_some() }
+}
+
+/// What the panel's pass saw: where its region stood in points, the room's
+/// caret foot and a click that ended it, and whether a press landed in the
+/// room's part or the log's.
+#[cfg(feature = "window")]
+struct Seen {
+    points: egui::Rect,
+    caret: Option<egui::Pos2>,
+    outcome: Option<Outcome>,
+    room_pressed: bool,
+    log_pressed: bool,
+}
+
+#[cfg(feature = "window")]
+impl Default for Seen {
+    fn default() -> Self {
+        Seen { points: egui::Rect::NOTHING, caret: None, outcome: None, room_pressed: false, log_pressed: false }
+    }
+}
+
+#[cfg(feature = "window")]
+impl Seen {
+    /// Another run of the same frame's pass: egui may run it twice (a
+    /// modal taking its body's height), and a click either one reported
+    /// stands; the caret and the region are the last one's.
+    fn and(self, next: Seen) -> Seen {
+        Seen {
+            points: next.points,
+            caret: next.caret,
+            outcome: self.outcome.or(next.outcome),
+            room_pressed: self.room_pressed || next.room_pressed,
+            log_pressed: self.log_pressed || next.log_pressed,
+        }
+    }
+}
+
+/// What one frame's egui pass left its host: the hand, the cell under the
+/// room's focused field's caret, a click that ended the room, and whether
+/// a press landed in the room or in the log.
+#[cfg(feature = "window")]
+struct Pass {
+    hand: bool,
+    caret: Option<Position>,
+    outcome: Option<Outcome>,
+    room_pressed: bool,
+    log_pressed: bool,
+}
+
+/// One egui pass over `parts` on the window's panel: None while the
+/// panel drew nothing (there is no window yet), when the parts draw their
+/// cells instead.
+#[cfg(feature = "window")]
+#[allow(clippy::too_many_arguments)]
+fn egui_pass(
+    panel: &super::window::panel::Panel,
+    admin: &mut AdminUi,
+    parts: &Parts,
+    look: Option<&Look>,
+    key_hints: bool,
+    inert: bool,
+    grid: Rect,
+) -> Option<Pass> {
+    let mut seen = Seen::default();
+    let focused = admin.focus == Focus::Log;
+    let shown = panel.show(parts.region, grid, &mut |ui| {
+        let log = look.map(|look| LogFace { log: &mut admin.log, look, key_hints, inert, focused });
+        let run = run_parts(ui, parts, admin.room.as_mut(), log);
+        seen = std::mem::take(&mut seen).and(run);
+    })?;
+    let caret = seen.caret.map(|foot| caret_cell(foot, seen.points, parts.region));
+    Some(Pass { hand: shown.hand, caret, outcome: seen.outcome, room_pressed: seen.room_pressed, log_pressed: seen.log_pressed })
+}
+
+/// What the log's part of a pass draws from: the log, its look, whether
+/// key names are shown, whether something over it leaves it inert, and
+/// whether it has the keys.
+#[cfg(feature = "window")]
+struct LogFace<'a> {
+    log: &'a mut LogUi,
+    look: &'a Look,
+    key_hints: bool,
+    inert: bool,
+    focused: bool,
+}
+
+/// One run of the panel's pass over the whole of `ui`, the region: each
+/// part in a child over its own rect, clipped to it, on the ground the
+/// host paints there — the room exactly as it was hosted alone (the
+/// composition handed down before, its caret and its outcome back up),
+/// the log beside it. What lies between them is left unpainted. The keys
+/// go to the part the pass's last left press landed in, read from the
+/// pass's own events: a tap's press and release come in one pass, and
+/// egui forgets where a press began once its release is in.
+#[cfg(feature = "window")]
+fn run_parts(ui: &mut egui::Ui, parts: &Parts, room: Option<&mut Box<dyn HostedRoom>>, log: Option<LogFace>) -> Seen {
+    use egui::{Align, Event, Layout as Flow, PointerButton, UiBuilder};
+    let points = ui.max_rect();
+    let press = ui.input(|i| {
+        i.events.iter().rev().find_map(|event| match *event {
+            Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => Some(pos),
+            _ => None,
+        })
+    });
+    let mut seen = Seen { points, ..Seen::default() };
+    let child = |ui: &mut egui::Ui, cells: Rect, salt: &str| {
+        let rect = points_of(cells, parts.region, points);
+        let mut child = ui.new_child(UiBuilder::new().id_salt(salt).max_rect(rect).layout(Flow::top_down(Align::Min)));
+        child.set_clip_rect(rect.intersect(ui.clip_rect()));
+        let _ = super::window::studio::begin(&child);
+        (child, press.is_some_and(|at| rect.contains(at)))
+    };
+    if let (Some(cells), Some(room)) = (parts.room, room) {
+        let (mut part, pressed) = child(ui, cells, "admin-room");
+        seen.room_pressed = pressed;
+        let pass = room.draw_egui(&mut part);
+        seen.caret = pass.as_ref().and_then(|p| p.caret);
+        seen.outcome = pass.and_then(|p| p.outcome);
+    }
+    if let (Some(cells), Some(face)) = (parts.log, log) {
+        let (mut part, pressed) = child(ui, cells, "admin-log");
+        seen.log_pressed = pressed && !face.inert;
+        server_log::show_egui(&mut part, face.log, face.look, face.key_hints, face.inert, face.focused);
+    }
+    seen
+}
+
+/// The rect in points of `cells`, a part of `region`, whose points the
+/// pass's screen is: the region's size in cells and in points is the scale
+/// between the two.
+#[cfg(feature = "window")]
+fn points_of(cells: Rect, region: Rect, points: egui::Rect) -> egui::Rect {
+    let x = |c: u16| points.min.x + f32::from(c.saturating_sub(region.x)) / f32::from(region.width.max(1)) * points.width();
+    let y = |r: u16| points.min.y + f32::from(r.saturating_sub(region.y)) / f32::from(region.height.max(1)) * points.height();
+    egui::Rect::from_min_max(egui::pos2(x(cells.x), y(cells.y)), egui::pos2(x(cells.right()), y(cells.bottom())))
+}
+
+/// The keys after a pass, as a press in cells hands them: to the room a
+/// press landed in (the panel took it, so `pointer` never saw it), to the
+/// log likewise (its whole rect is a target that takes them, clause 19);
+/// and a click that ended the room is Esc at its base.
+#[cfg(feature = "window")]
+fn land(admin: &mut AdminUi, pass: &Pass) {
+    if pass.room_pressed {
+        admin.focus = Focus::Room;
+    }
+    if pass.log_pressed {
+        admin.focus = Focus::Log;
+    }
+    if pass.outcome == Some(Outcome::Quit) {
+        admin.focus = Focus::Hall;
+        admin.cursor = row_of(admin.showing);
+    }
+}
+
+/// The cell of `cells` under `at`, a point of an egui pass whose screen,
+/// `points`, is those cells: the region's size in cells and in points is
+/// the scale between the two.
+#[cfg(feature = "window")]
+fn cell_under(at: egui::Pos2, points: egui::Rect, cells: Rect) -> Position {
+    let along = |v: f32, from: f32, span: f32, n: u16| -> u16 {
+        if n == 0 || span <= 0.0 {
+            return 0;
+        }
+        (((v - from) / span * f32::from(n)).floor().max(0.0) as u16).min(n - 1)
+    };
+    Position {
+        x: cells.x + along(at.x, points.min.x, points.width(), cells.width),
+        y: cells.y + along(at.y, points.min.y, points.height(), cells.height),
+    }
+}
+
+/// The cell a caret stands in, by its foot as a room's egui pass reports
+/// it ([`crate::admin::EguiShown`]): the foot is the caret's bottom edge
+/// rather than a point of it, so the cell is the one under its last
+/// half-point. A foot on a cell's top edge is the cell above, and the
+/// candidates float right under the caret, not a row lower.
+#[cfg(feature = "window")]
+fn caret_cell(foot: egui::Pos2, points: egui::Rect, cells: Rect) -> Position {
+    cell_under(foot - egui::vec2(0.0, 0.5), points, cells)
 }
 
 /// The hallway: the groups dim at x 1, the rooms at x 3, the open row
@@ -597,7 +964,10 @@ fn log_count(x: u16, words: &str, unseen: usize) -> Option<String> {
 /// The log where the layout puts it, behind its rule — `│` at x 118 when
 /// docked, a `─` row over the band — lit while the log has the keys. The
 /// header's hint says what `L` does here, while the key names are shown.
-fn draw_log(frame: &mut Frame, gui: &mut Gui, lay: &Layout, key_hints: bool) {
+/// The rule is always the cells'; the log itself is too unless the
+/// window's panel drew it this frame (`by_egui`), when its cells stay
+/// blank and its clicks were egui's.
+fn draw_log(frame: &mut Frame, gui: &mut Gui, lay: &Layout, look: &Look, by_egui: bool) {
     let Some(rect) = lay.log else { return };
     let style = if gui.admin.focus == Focus::Log { accent() } else { dim() };
     if let Some(rule) = lay.rule {
@@ -611,18 +981,11 @@ fn draw_log(frame: &mut Frame, gui: &mut Gui, lay: &Layout, key_hints: bool) {
             Placement::Room => {}
         }
     }
-    let hint = key_hints.then(|| {
-        match lay.placement {
-            Placement::Column => t!("gui.admin.log.hint_undock"),
-            Placement::Band => t!("gui.admin.log.hint_hide"),
-            Placement::Room => t!("gui.admin.log.hint_room"),
-        }
-        .to_string()
-    });
-    // Under the log's own controls: a click anywhere in it takes the keys.
-    gui.ui.click(rect, Act::Adm(AdmAct::Focus(Focus::Log)));
-    let look = Look { spaced: lay.spaced, hint };
-    server_log::draw(frame, &mut gui.ui, &mut gui.admin.log, rect, &look, wrap_log);
+    if !by_egui {
+        // Under the log's own controls: a click anywhere in it takes the keys.
+        gui.ui.click(rect, Act::Adm(AdmAct::Focus(Focus::Log)));
+        server_log::draw(frame, &mut gui.ui, &mut gui.admin.log, rect, look, wrap_log);
+    }
     gui.admin.log_at = Some(rect);
     gui.admin.log.model.mark_seen();
 }
@@ -965,7 +1328,8 @@ pub(super) fn wheel(gui: &mut Gui, at: Position, delta: i32) {
 /// and the note a download or a shown file left, the room's worker,
 /// timers, held control and tooltip dwell (the room is pumped while the
 /// Log room hides it). Returns whether the pointer rests on one of the
-/// shown room's clickables, for the hand.
+/// shown room's clickables, for the hand: its cells', or what egui drew
+/// of the room or the log.
 pub(super) fn frame(gui: &mut Gui) -> bool {
     if gui.screen != Screen::Admin {
         return false;
@@ -974,7 +1338,12 @@ pub(super) fn frame(gui: &mut Gui) -> bool {
     take_log_note(gui);
     let admin = &mut gui.admin;
     let drawn = !admin.room_at.is_empty() && matches!(admin.showing, Hall::Room(_));
-    admin.room.as_mut().is_some_and(|room| room.after_frame()) && drawn
+    let over = admin.room.as_mut().is_some_and(|room| room.after_frame()) && drawn;
+    // The panel's hand stands only while the last frame drew what it was
+    // over: the room, or the log (the Log room draws no room).
+    #[cfg(feature = "window")]
+    let over = over || (admin.egui_hand && (drawn || admin.log_at.is_some()));
+    over
 }
 
 /// The footer's line by focus (contract clause 27): with no session the
@@ -1077,6 +1446,15 @@ mod tests {
         caret: Option<Position>,
         /// Each composition the host handed down, in order.
         compositions: Vec<String>,
+        /// Say it has an egui face, and count the passes it was drawn in.
+        #[cfg(feature = "window")]
+        face: bool,
+        #[cfg(feature = "window")]
+        egui_passes: usize,
+        /// Ask egui to run each pass again, as a modal taking its body's
+        /// height does.
+        #[cfg(feature = "window")]
+        discard: bool,
     }
 
     /// A room that only writes down what the host asked of it.
@@ -1136,6 +1514,21 @@ mod tests {
 
         fn set_composition(&mut self, text: &str) {
             self.0.borrow_mut().compositions.push(text.to_string());
+        }
+
+        #[cfg(feature = "window")]
+        fn egui_face(&self) -> bool {
+            self.0.borrow().face
+        }
+
+        #[cfg(feature = "window")]
+        fn draw_egui(&mut self, ui: &mut egui::Ui) -> Option<crate::admin::EguiShown> {
+            let mut record = self.0.borrow_mut();
+            record.egui_passes += 1;
+            if record.discard {
+                ui.ctx().request_discard("the probe's modal took its body's height");
+            }
+            Some(crate::admin::EguiShown { caret: None, outcome: None })
         }
     }
 
@@ -1212,6 +1605,312 @@ mod tests {
     }
 
     // ── The pure parts ──────────────────────────────────────────────────────
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn an_egui_caret_lifts_to_the_cell_under_it() {
+        // The room's cells under its first row at 100×30, and the same
+        // region in points at 8×16 points a cell, starting at 136,32.
+        let cells = Rect::new(17, 2, 83, 22);
+        let points = egui::Rect::from_min_size(egui::pos2(136.0, 32.0), egui::vec2(83.0 * 8.0, 22.0 * 16.0));
+        assert_eq!(cell_under(egui::pos2(136.0, 32.0), points, cells), Position { x: 17, y: 2 });
+        assert_eq!(cell_under(egui::pos2(136.0 + 8.0 * 10.0 + 3.0, 32.0 + 16.0 * 5.0 + 15.9), points, cells), Position { x: 27, y: 7 });
+        // A point on the region's far edge is in its last cell, never past.
+        assert_eq!(cell_under(points.max, points, cells), Position { x: 99, y: 23 });
+        assert_eq!(cell_under(egui::pos2(0.0, 0.0), points, cells), Position { x: 17, y: 2 }, "before it, its first");
+        // A caret whose foot is the top edge of row 8 stands in row 7.
+        let foot = egui::pos2(136.0 + 8.0 * 10.0 + 3.0, 32.0 + 16.0 * 6.0);
+        assert_eq!(caret_cell(foot, points, cells), Position { x: 27, y: 7 }, "the caret's own row, not the one under it");
+        assert_eq!(caret_cell(foot + egui::vec2(0.0, 1.0), points, cells), Position { x: 27, y: 8 });
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn the_panels_one_region_covers_the_room_and_the_log_in_every_placement() {
+        let libraries = Hall::Room(RoomId::Libraries);
+        let between = |parts: &Parts, at: Position| {
+            parts.region.contains(at) && !parts.room.is_some_and(|r| r.contains(at)) && !parts.log.is_some_and(|r| r.contains(at))
+        };
+
+        // Column, 176×46 with the footer on: the room under its banner's
+        // row, the log, and the rule between them, which egui leaves to
+        // the cells.
+        let column = layout(176, 46, true, false, libraries);
+        let both = egui_parts(&column, true, true).expect("the room's face and the log");
+        assert_eq!(both.room, Some(Rect::new(17, 2, 100, 38)), "the room less its first row");
+        assert_eq!(both.log, Some(Rect::new(120, 2, 54, 38)));
+        assert_eq!(both.region, Rect::new(17, 2, 157, 38));
+        assert!(between(&both, Position::new(118, 2)) && between(&both, Position::new(118, 39)), "the │ is the cells'");
+        assert!(between(&both, Position::new(117, 20)) && between(&both, Position::new(119, 20)));
+        assert!(!both.region.contains(Position::new(30, 1)), "the pick banner's row stays the GUI's");
+        let alone = egui_parts(&column, false, true).expect("the log");
+        assert_eq!(alone, Parts { region: Rect::new(120, 2, 54, 38), room: None, log: Some(Rect::new(120, 2, 54, 38)) }, "a room with no face is cells");
+
+        // Band, 136×52 with the footer off: the `─` row between.
+        let band = layout(136, 52, false, false, libraries);
+        let both = egui_parts(&band, true, true).expect("the room's face and the band");
+        assert_eq!(both.room, Some(Rect::new(17, 2, 119, 33)));
+        assert_eq!(both.log, Some(Rect::new(19, 36, 115, 11)));
+        assert_eq!(both.region, Rect::new(17, 2, 119, 45));
+        assert!((19..134).all(|x| between(&both, Position::new(x, 35))), "the rule's row is the cells'");
+        assert_eq!(egui_parts(&band, false, true).map(|p| p.region), Some(Rect::new(19, 36, 115, 11)));
+
+        // Room: the Log room is the log alone, whatever the room's face
+        // (no room is drawn there); a room shown has no log beside it.
+        let log_room = layout(136, 40, false, false, Hall::Log);
+        assert_eq!(egui_parts(&log_room, false, true), Some(Parts { region: Rect::new(19, 2, 115, 33), room: None, log: Some(Rect::new(19, 2, 115, 33)) }));
+        let middle = layout(136, 40, false, false, libraries);
+        assert_eq!(egui_parts(&middle, true, false).map(|p| (p.region, p.log)), Some((Rect::new(17, 2, 119, 33), None)));
+        assert_eq!(egui_parts(&middle, false, false), None, "nothing of egui's: every cell is the GUI's");
+        // `L` hid the docked log: the room takes its columns, the panel the room.
+        let hidden = layout(176, 46, true, true, libraries);
+        assert_eq!(egui_parts(&hidden, true, false).map(|p| p.region), Some(Rect::new(17, 2, 159, 38)));
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn a_rooms_modal_dims_the_guis_cells_beside_the_room_and_leaves_the_log_live() {
+        let libraries = Hall::Room(RoomId::Libraries);
+        // Column, 176×46: the banner's row over the room, and the three
+        // columns from the room to the log — its │ among them — all the
+        // room's rows down; the log's own columns are not touched.
+        let column = layout(176, 46, true, false, libraries);
+        assert_eq!(under_modal(&column, true), vec![Rect::new(17, 1, 100, 1), Rect::new(117, 1, 3, 39)]);
+        let both = egui_parts(&column, true, true).expect("both parts");
+        for rect in under_modal(&column, true) {
+            assert!(!both.room.is_some_and(|r| r.intersects(rect)) && !both.log.is_some_and(|r| r.intersects(rect)), "only what egui leaves: {rect:?}");
+        }
+        assert_eq!(under_modal(&column, false), vec![Rect::new(17, 1, 100, 1)], "no log, nothing between");
+        // Band, 136×52: the banner's row, and the `─` row over the band.
+        let band = layout(136, 52, false, false, libraries);
+        assert_eq!(under_modal(&band, true), vec![Rect::new(17, 1, 119, 1), Rect::new(17, 35, 119, 1)]);
+        // The Room placement: the banner's row alone.
+        assert_eq!(under_modal(&layout(136, 40, false, false, libraries), false), vec![Rect::new(17, 1, 119, 1)]);
+
+        // Dimmed as the scrim dims: a blank ground cell and the rule's ink
+        // seen through it, the cell beside untouched.
+        let ground = th_ground();
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 4, 1));
+        buf[(1, 0)].set_symbol("│").set_fg(ratatui::style::Color::Rgb(122, 130, 160));
+        dim_cells(&mut buf, Rect::new(0, 0, 2, 1));
+        let scrim = |(r, g, b): (u8, u8, u8)| {
+            let c = super::super::window::studio::under_scrim(egui::Color32::from_rgb(r, g, b));
+            ratatui::style::Color::Rgb(c.r(), c.g(), c.b())
+        };
+        assert_eq!(buf[(0, 0)].bg, scrim(ground), "the ground under the scrim");
+        assert_eq!((buf[(1, 0)].fg, buf[(1, 0)].symbol()), (scrim((122, 130, 160)), "│"), "the rule seen through it");
+        assert_eq!(buf[(2, 0)].bg, ratatui::style::Color::Reset, "past the rect, as it was");
+    }
+
+    /// The ground the GUI paints, as the dimming reads it.
+    #[cfg(feature = "window")]
+    fn th_ground() -> (u8, u8, u8) {
+        crate::kit::theme::th().ground_rgb.unwrap_or((0x12, 0x13, 0x1c))
+    }
+
+    /// One run of the panel's pass over `parts` headless, the region at 8×16
+    /// points a cell as the window would place it, with `events`: what it
+    /// saw, its hand, and the clip rects its shapes were drawn in.
+    #[cfg(feature = "window")]
+    fn panel_pass(ctx: &egui::Context, gui: &mut Gui, parts: &Parts, look: &Look, inert: bool, events: Vec<egui::Event>) -> (Pass, Vec<egui::Rect>) {
+        let input = egui::RawInput { screen_rect: Some(points_at(parts.region)), events, ..Default::default() };
+        let mut seen = Seen::default();
+        let mut out = ctx.run_ui(input, |ui| {
+            let focused = gui.admin.focus == Focus::Log;
+            let log = Some(LogFace { log: &mut gui.admin.log, look, key_hints: false, inert, focused });
+            seen = std::mem::take(&mut seen).and(run_parts(ui, parts, gui.admin.room.as_mut(), log));
+        });
+        out.textures_delta.clear();
+        let hand = out.platform_output.cursor_icon == egui::CursorIcon::PointingHand;
+        let clips = out.shapes.iter().map(|c| c.clip_rect).collect();
+        let pass = Pass { hand, caret: None, outcome: seen.outcome, room_pressed: seen.room_pressed, log_pressed: seen.log_pressed };
+        (pass, clips)
+    }
+
+    /// `cells` in points, 8×16 a cell.
+    #[cfg(feature = "window")]
+    fn points_at(cells: Rect) -> egui::Rect {
+        let (x, y) = (f32::from(cells.x) * 8.0, f32::from(cells.y) * 16.0);
+        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(f32::from(cells.width) * 8.0, f32::from(cells.height) * 16.0))
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn a_press_in_the_panel_hands_the_keys_to_the_part_it_lands_in() {
+        let _en = english();
+        let probe = Probe::default();
+        probe.0.borrow_mut().face = true;
+        let mut gui = hosting(&probe);
+        gui.admin.log.model.take(lines(1, 20));
+        render_at(&mut gui, 176, 46);
+        let lay = layout(176, 46, gui.footer(), false, gui.admin.showing);
+        let parts = egui_parts(&lay, true, true).expect("both parts");
+        let look = log_look(&lay, false);
+        let ctx = egui::Context::default();
+        super::super::window::panel::fonts(&ctx);
+        let button = |at: egui::Pos2, pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let centre = |cells: Rect| points_at(cells).center();
+        let log_at = centre(parts.log.unwrap());
+        let room_at = centre(parts.room.unwrap());
+        let rule = lay.rule.unwrap();
+        let rule_at = centre(Rect::new(rule.x, 20, 1, 1));
+
+        // Nothing egui paints reaches the rule: each part is clipped to its rect.
+        let (_, clips) = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![egui::Event::PointerMoved(log_at)]);
+        assert!(!clips.is_empty() && clips.iter().all(|clip| !clip.contains(rule_at)), "{clips:?}");
+        assert!(probe.0.borrow().egui_passes > 0, "the room drew in its part");
+
+        // The hand anywhere over the log, as over its cells.
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, Vec::new());
+        assert!(pass.hand, "the log's whole rect is a target");
+
+        // A press in the log hands it the keys.
+        gui.admin.focus = Focus::Hall;
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![button(log_at, true)]);
+        assert!(pass.log_pressed && !pass.room_pressed);
+        land(&mut gui.admin, &pass);
+        assert_eq!(gui.admin.focus, Focus::Log);
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![button(log_at, false)]);
+
+        // One in the room, the room.
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![egui::Event::PointerMoved(room_at)]);
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![button(room_at, true)]);
+        assert!(pass.room_pressed && !pass.log_pressed);
+        land(&mut gui.admin, &pass);
+        assert_eq!(gui.admin.focus, Focus::Room);
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![button(room_at, false)]);
+
+        // One on the rule between, nobody's.
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![egui::Event::PointerMoved(rule_at), button(rule_at, true)]);
+        assert!(!pass.room_pressed && !pass.log_pressed);
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![button(rule_at, false)]);
+
+        // Under the room's modal the log is inert: no keys, no hand.
+        gui.admin.focus = Focus::Room;
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, true, vec![egui::Event::PointerMoved(log_at)]);
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, true, vec![button(log_at, true)]);
+        assert!(!pass.log_pressed && !pass.hand);
+        land(&mut gui.admin, &pass);
+        assert_eq!(gui.admin.focus, Focus::Room);
+    }
+
+    /// The Admin tab at 176×46 with a probe room that has an egui face and
+    /// a log of `n` lines, and the panel's parts there: a context to pass
+    /// them in, the look, and the parts.
+    #[cfg(feature = "window")]
+    fn both_parts(n: u64) -> (Probe, Gui, egui::Context, Look, Parts) {
+        let probe = Probe::default();
+        probe.0.borrow_mut().face = true;
+        let mut gui = hosting(&probe);
+        gui.admin.log.model.take(lines(1, n));
+        render_at(&mut gui, 176, 46);
+        let lay = layout(176, 46, gui.footer(), false, gui.admin.showing);
+        let parts = egui_parts(&lay, true, true).expect("both parts");
+        let ctx = egui::Context::default();
+        super::super::window::panel::fonts(&ctx);
+        (probe, gui, ctx, log_look(&lay, false), parts)
+    }
+
+    #[cfg(feature = "window")]
+    fn primary(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() }
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn a_tap_whose_press_and_release_share_a_pass_still_hands_the_keys_on() {
+        let _en = english();
+        let (_probe, mut gui, ctx, look, parts) = both_parts(20);
+        let log_at = points_at(parts.log.unwrap()).center();
+        let room_at = points_at(parts.room.unwrap()).center();
+        let tap = |at| vec![egui::Event::PointerMoved(at), primary(at, true), primary(at, false)];
+
+        // A touchpad's tap sends its press and its release at once, so one
+        // pass hears both: the part it landed in takes the keys all the same.
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, tap(log_at));
+        assert!(pass.log_pressed && !pass.room_pressed, "the log");
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, tap(room_at));
+        assert!(pass.room_pressed && !pass.log_pressed, "the room");
+
+        // Two in one pass: the last one's part, as the last press in cells.
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, [tap(room_at), tap(log_at)].concat());
+        assert!(pass.log_pressed && !pass.room_pressed, "the log, pressed last");
+
+        // Only the primary button hands the keys on, as in cells.
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos: log_at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![secondary(true)]);
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![secondary(false)]);
+        assert!(!pass.log_pressed && !pass.room_pressed, "a right press is nobody's");
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn a_pass_egui_runs_twice_applies_the_logs_click_and_wheel_once() {
+        let _en = english();
+        let (probe, mut gui, ctx, look, parts) = both_parts(80);
+        let log_at = points_at(parts.log.unwrap()).center();
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![egui::Event::PointerMoved(log_at)]);
+        let copy = ctx.read_response(egui::Id::new("server-log").with("copy")).expect("the copy control").rect.center();
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![egui::Event::PointerMoved(copy)]);
+
+        // The room asks egui to run each pass again from here on.
+        probe.0.borrow_mut().discard = true;
+        crate::kit::clipboard::catch(crate::kit::clipboard::Copied::Clipboard);
+        let _ = crate::kit::clipboard::caught();
+        let before = probe.0.borrow().egui_passes;
+        let (pass, _) = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![primary(copy, true), primary(copy, false)]);
+        assert_eq!(probe.0.borrow().egui_passes - before, 2, "egui ran the pass twice");
+        assert_eq!(crate::kit::clipboard::caught().len(), 1, "one copy");
+        assert!(pass.log_pressed, "the press reached the host from the run that heard it");
+
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        };
+        let _ = panel_pass(&ctx, &mut gui, &parts, &look, false, vec![egui::Event::PointerMoved(log_at), wheel]);
+        assert_eq!(gui.admin.log.model.scroll, 1, "one notch, one line");
+    }
+
+    #[test]
+    fn a_log_the_panel_draws_leaves_its_cells_blank_and_its_rule_to_the_cells() {
+        let _en = english();
+        let mut gui = admin_gui();
+        gui.admin.log.model.take(lines(1, 20));
+        for (w, h) in [(176, 46), (136, 52)] {
+            gui.admin.focus = Focus::Log;
+            render_at(&mut gui, w, h);
+            let lay = layout(w, h, gui.footer(), false, gui.admin.showing);
+            let log = lay.log.expect("the log beside the room");
+            let look = log_look(&lay, false);
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            gui.ui.begin_frame();
+            gui.admin.log_at = None;
+            terminal.draw(|frame| draw_log(frame, &mut gui, &lay, &look, true)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            for y in log.y..log.bottom() {
+                let cells: String = (log.x..log.right()).map(|x| buf[(x, y)].symbol()).collect();
+                assert!(cells.trim().is_empty(), "{w}×{h}: row {y} is the panel's: {cells:?}");
+            }
+            let rule = lay.rule.unwrap();
+            let glyph = if lay.placement == Placement::Column { "│" } else { "─" };
+            assert_eq!(buf[(rule.x, rule.y)].symbol(), glyph, "{w}×{h}: the rule is the cells'");
+            assert_eq!(buf[(rule.x, rule.y)].fg, th().accent, "{w}×{h}: lit while the log has the keys");
+            assert_eq!(gui.admin.log_at, Some(log), "{w}×{h}: on screen, for the keys and the copy chord");
+            assert!(gui.ui.hit(Position::new(log.x + 3, log.y + 5)).is_none(), "{w}×{h}: no click of the cells' under it");
+        }
+    }
 
     #[test]
     fn layout_math_by_size() {
