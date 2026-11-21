@@ -508,7 +508,8 @@ fn install_fonts(ctx: &egui::Context, lang: &str) {
     let mut monospace = vec!["Hack".to_string(), "Ubuntu-Light".to_string()];
     let cjk = crate::viz_window::overlay::cjk_faces(lang).into_iter().find_map(|(path, index)| readable(&path, index));
     if let Some(mut face) = cjk {
-        face.tweak.y_offset_factor = 0.12;
+        let words = fonts.font_data.get(&proportional[0]);
+        face.tweak.y_offset_factor = words.and_then(|words| cjk_drop(words, &face)).unwrap_or(0.0);
         fonts.font_data.insert("system-cjk".into(), Arc::new(face));
         for list in [&mut proportional, &mut bold, &mut monospace] {
             list.push("system-cjk".into());
@@ -518,6 +519,54 @@ fn install_fonts(ctx: &egui::Context, lang: &str) {
     fonts.families.insert(FontFamily::Monospace, monospace);
     fonts.families.insert(FontFamily::Name(STRONG.into()), bold);
     ctx.set_fonts(fonts);
+}
+
+/// Ideographs that Japanese and Chinese share, whose ink together spans
+/// the square an ideograph is drawn in.
+const IDEOGRAPHS: &str = "日本語中文";
+
+/// How far the CJK face `cjk` is set down behind `words`, the face its
+/// glyphs share a line with, as a share of the size (its tweak's
+/// `y_offset_factor`), so that its ideographs stand centred on the capitals
+/// of `words`, as a Latin name and a CJK one stand on one row of a list.
+/// egui sets a fallback face's baseline where the two faces' line boxes
+/// share a middle, which stands each CJK face as high or as low as its line
+/// box is deep: Yu Gothic's ideographs rode 3 points over Segoe UI's
+/// capitals at 14 points and YaHei's 2 under them with the one share the
+/// panel used to give every face. Read off both faces' own metrics and
+/// outlines ([`ink_under_middle`]); none where either cannot say. One face
+/// takes one share, so the monospace's lines, Hack's, take the UI face's,
+/// which stands their ideographs about a point under Hack's capitals'
+/// middle at the 12.5 points the pages set paths in, a twelfth of the size
+/// (they stood over 2 points off before); a share of their own would take a
+/// second copy of the CJK collection, 14 megabytes for Yu Gothic and 20
+/// for YaHei.
+fn cjk_drop(words: &FontData, cjk: &FontData) -> Option<f32> {
+    Some(ink_under_middle(words, "H")? - ink_under_middle(cjk, IDEOGRAPHS)?)
+}
+
+/// How far under the middle of the line box egui gives `face` the middle
+/// of the ink of `sample`'s glyphs stands, as a share of the size: the
+/// line box from the face's ascent over its baseline to its descent and
+/// leading under it, the ink the outlines' control points (an outline's
+/// own reach, for the straight strokes of an "H" and an ideograph).
+fn ink_under_middle(face: &FontData, sample: &str) -> Option<f32> {
+    use skrifa::MetadataProvider;
+    use skrifa::instance::{LocationRef, Size};
+    use skrifa::outline::DrawSettings;
+    use skrifa::outline::pen::ControlBoundsPen;
+    let font = skrifa::FontRef::from_index(&face.font, face.index).ok()?;
+    let metrics = font.metrics(Size::unscaled(), LocationRef::default());
+    let em = f32::from(metrics.units_per_em);
+    let (charmap, outlines) = (font.charmap(), font.outline_glyphs());
+    let mut pen = ControlBoundsPen::new();
+    for c in sample.chars() {
+        let glyph = outlines.get(charmap.map(c)?)?;
+        glyph.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::default()), &mut pen).ok()?;
+    }
+    let ink = pen.bounding_box().filter(|_| em > 0.0)?;
+    let middle = (metrics.ascent + metrics.descent - metrics.leading) / 2.0;
+    Some((middle - (ink.y_min + ink.y_max) / 2.0) / em)
 }
 
 /// A face egui can read, from `path`'s `index`th.
@@ -567,6 +616,57 @@ mod tests {
     use super::*;
 
     const PPP: f32 = 2.0;
+    /// A scale whose pixels are an eighth of a point: what is laid out at
+    /// it lands on a grid too fine to blur what the faces' places are.
+    const FINE: f32 = 8.0;
+
+    /// Where the middle of `s`'s ink stands under the top of its line, laid
+    /// out alone in `font`.
+    fn ink_middle(ui: &egui::Ui, s: &str, font: egui::FontId) -> f32 {
+        let galley = ui.painter().layout_no_wrap(s.to_string(), font, egui::Color32::WHITE);
+        let row = &galley.rows[0];
+        let (mut top, mut foot) = (f32::MAX, f32::MIN);
+        for glyph in &row.row.glyphs {
+            let head = row.pos.y + glyph.pos.y + glyph.uv_rect.offset.y;
+            (top, foot) = (top.min(head), foot.max(head + glyph.uv_rect.size.y));
+        }
+        (top + foot) / 2.0
+    }
+
+    /// A CJK name stands centred on the capitals of a Latin one beside it,
+    /// whichever CJK face the system lends (Yu Gothic for Japanese, YaHei
+    /// for Chinese on Windows), as the language list's rows set 日本語 and
+    /// 中文 between Deutsch and English: in the UI face, regular and
+    /// semibold, within a quarter of a point on the fine grid (on the
+    /// window's, at a scale of 2, within the pixel and a half that each
+    /// ink's edges and the baseline landing on it leaves), where they stood
+    /// 3 points off with the share every face was given; in the monospace,
+    /// which takes the UI face's share, within a tenth of the size. A
+    /// system with no CJK face has nothing to check.
+    #[test]
+    fn a_cjk_name_stands_centred_on_the_capitals_beside_it() {
+        for lang in ["ja", "zh"] {
+            if !crate::viz_window::overlay::cjk_faces(lang).into_iter().any(|(path, index)| readable(&path, index).is_some()) {
+                continue;
+            }
+            let ctx = egui::Context::default();
+            install_fonts(&ctx, lang);
+            ctx.set_pixels_per_point(FINE);
+            ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+            let mut out = ctx.run_ui(Default::default(), |ui| {
+                let off = |font: egui::FontId| ink_middle(ui, IDEOGRAPHS, font.clone()) - ink_middle(ui, "H", font);
+                for size in [12.0, 12.5, 13.0, 14.0, 16.0, 22.0] {
+                    for font in [egui::FontId::proportional(size), egui::FontId::new(size, FontFamily::Name(STRONG.into()))] {
+                        let off = off(font.clone());
+                        assert!(off.abs() <= 0.25, "{lang} {font:?}: the ideographs' middle {off} under the capitals'");
+                    }
+                    let off = off(egui::FontId::monospace(size));
+                    assert!(off.abs() <= 0.1 * size, "{lang} the monospace at {size}: the ideographs' middle {off} under the capitals'");
+                }
+            });
+            out.textures_delta.clear();
+        }
+    }
 
     /// The pointer's events in order, the panel on screen or stood down for
     /// each, the pointer inside the region throughout: what egui was given
