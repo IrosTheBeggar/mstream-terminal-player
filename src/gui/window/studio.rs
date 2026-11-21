@@ -199,16 +199,70 @@ pub(crate) fn hand(response: Response) -> Response {
 
 // ── Text ──────────────────────────────────────────────────────────────────
 
+/// How egui sets a line in a face: its ascent (from the line's top to its
+/// baseline, as egui lays out with it), where a lone line's baseline
+/// stands under its top (the ascent as egui rounds it), its row's height,
+/// and how far over the baseline the ink of its small letters and of its
+/// capitals reaches (an "x"'s and an "H"'s).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Metrics {
+    pub ascent: f32,
+    pub baseline: f32,
+    pub row: f32,
+    pub small: f32,
+    pub capital: f32,
+}
+
+/// `font`'s [`Metrics`], read off a laid-out "xH" (egui keeps it). Where
+/// the face draws no ink for either letter, the UI face's usual shares of
+/// the size stand in.
+pub(crate) fn metrics(ui: &Ui, font: &FontId) -> Metrics {
+    let galley = ui.painter().layout_no_wrap("xH".to_string(), font.clone(), Color32::WHITE);
+    let glyphs = galley.rows.first().map_or(&[][..], |r| &r.row.glyphs[..]);
+    let ink = |k: usize, share: f32| glyphs.get(k).map(|g| -g.uv_rect.offset.y).filter(|h| *h > 0.0).unwrap_or(font.size * share);
+    let ascent = glyphs.first().map_or(font.size, |g| g.font_ascent);
+    Metrics {
+        ascent,
+        baseline: first_baseline(&galley).unwrap_or(ascent),
+        row: galley.size().y,
+        small: ink(0, 0.5),
+        capital: ink(1, 0.7),
+    }
+}
+
+/// Where a laid-out line's first glyph stands on its baseline, under the
+/// galley's top. None for an empty one.
+fn first_baseline(galley: &egui::Galley) -> Option<f32> {
+    galley.rows.first().and_then(|r| r.row.glyphs.first().map(|g| r.pos.y + g.pos.y))
+}
+
+/// How far under its own middle a line centred on a point has its baseline
+/// when it shares the UI face's: where egui stands a line of the UI face
+/// at `size` centred there. Every line the kit centres stands on it,
+/// whatever its face, so a figure in the monospace sits on the baseline of
+/// the words beside it rather than half its smaller descent higher.
+fn centred_baseline(ui: &Ui, size: f32) -> f32 {
+    let face = metrics(ui, &body(size));
+    face.baseline - face.row / 2.0
+}
+
 /// `s` in one line no wider than `max_w`, an ellipsis where it is cut,
-/// `spacing` points between letters, anchored at `pos` by `align`.
-/// Returns where it was drawn.
+/// `spacing` points between letters, anchored at `pos` by `align` — a line
+/// centred on `pos` standing on the UI face's baseline at its size
+/// ([`centred_baseline`]), whatever its own face. Returns where it was
+/// drawn.
 #[allow(clippy::too_many_arguments)]
 fn spaced(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, spacing: f32, max_w: f32, align: Align2) -> Rect {
+    let restand = font.family != FontFamily::Proportional && align.y() == Align::Center;
+    let size = font.size;
     let format = TextFormat { font_id: font, color, extra_letter_spacing: spacing, ..Default::default() };
     let mut job = LayoutJob::single_section(s.to_string(), format);
     job.wrap = TextWrapping::truncate_at_width(max_w.max(1.0));
     let galley = ui.painter().layout_job(job);
-    let rect = align.anchor_size(pos, galley.size());
+    let mut rect = align.anchor_size(pos, galley.size());
+    if restand && let Some(baseline) = first_baseline(&galley) {
+        rect = rect.translate(vec2(0.0, centred_baseline(ui, size) - (baseline - galley.size().y / 2.0)));
+    }
     ui.painter().galley(rect.min, galley, color);
     rect
 }
@@ -300,29 +354,54 @@ pub(crate) fn cut_start(ui: &Ui, s: &str, font: FontId, max_w: f32) -> (String, 
 /// and its colour.
 pub(crate) type Run = (String, FontId, Color32);
 
-/// `parts` as one job, each run in its own face and colour.
-fn run_job(parts: &[Run]) -> LayoutJob {
+/// The line heights that set runs in `fonts` on one baseline: egui stands
+/// each run's baseline its own ascent over its row's foot, so runs of
+/// faces with other descents ride above or below one another unless each
+/// run's line height is its ascent and one depth all share. The depth is
+/// the deepest descent, or what a line `line` tall leaves under the
+/// tallest ascent (a paragraph's leading), so the baseline stands that
+/// ascent under the line's top. A line of one face lays out as it always
+/// did.
+fn shared_baseline(ui: &Ui, fonts: &[&FontId], line: Option<f32>) -> Vec<f32> {
+    let all: Vec<Metrics> = fonts.iter().map(|f| metrics(ui, f)).collect();
+    let top = all.iter().map(|m| m.ascent).fold(0.0, f32::max);
+    let depth = line.map_or_else(|| all.iter().map(|m| m.row - m.ascent).fold(0.0, f32::max), |h| h - top);
+    all.iter().map(|m| (m.ascent + depth).max(1.0)).collect()
+}
+
+/// `parts` as one job, each run in its own face and colour, every run on
+/// one baseline ([`shared_baseline`]).
+fn run_job(ui: &Ui, parts: &[Run]) -> LayoutJob {
+    let parts: Vec<&Run> = parts.iter().filter(|(s, ..)| !s.is_empty()).collect();
+    let fonts: Vec<&FontId> = parts.iter().map(|(_, font, _)| font).collect();
+    let heights = shared_baseline(ui, &fonts, None);
     let mut job = LayoutJob::default();
-    for (s, font, color) in parts {
-        if !s.is_empty() {
-            job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, ..Default::default() });
-        }
+    for ((s, font, color), h) in parts.into_iter().zip(heights) {
+        job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, line_height: Some(h), ..Default::default() });
     }
     job
 }
 
 /// How wide `parts` lay out in one line.
 pub(crate) fn runs_width(ui: &Ui, parts: &[Run]) -> f32 {
-    ui.painter().layout_job(run_job(parts)).size().x
+    ui.painter().layout_job(run_job(ui, parts)).size().x
 }
 
 /// `parts` in one line no wider than `max_w`, cut with an ellipsis where
-/// they run long, anchored at `pos` by `align`. Returns where it was drawn.
+/// they run long, anchored at `pos` by `align`, on one baseline — a line
+/// centred on `pos` standing on the UI face's at its first run's size, as
+/// [`text`] stands one. Returns where it was drawn.
 pub(crate) fn runs(ui: &Ui, pos: Pos2, parts: &[Run], max_w: f32, align: Align2) -> Rect {
-    let mut job = run_job(parts);
+    let mut job = run_job(ui, parts);
     job.wrap = TextWrapping::truncate_at_width(max_w.max(1.0));
     let galley = ui.painter().layout_job(job);
-    let rect = align.anchor_size(pos, galley.size());
+    let mut rect = align.anchor_size(pos, galley.size());
+    if align.y() == Align::Center
+        && let Some((_, font, _)) = parts.iter().find(|(s, ..)| !s.is_empty())
+        && let Some(baseline) = first_baseline(&galley)
+    {
+        rect = rect.translate(vec2(0.0, centred_baseline(ui, font.size) - (baseline - galley.size().y / 2.0)));
+    }
     ui.painter().galley(rect.min, galley, Color32::WHITE);
     rect
 }
@@ -450,14 +529,24 @@ impl Para {
         rect
     }
 
-    /// Drawn from `at`, its top left, wrapped at `w`. Returns where.
+    /// Drawn from `at`, its top left, wrapped at `w`, every run of a line
+    /// on one baseline ([`shared_baseline`]) — a figure in the monospace
+    /// on its words' — the lead's too. Returns where.
     pub(crate) fn paint(self, ui: &Ui, at: Pos2, w: f32) -> Rect {
         let Some((_, font, color)) = self.parts.first().cloned() else { return Rect::from_min_size(at, Vec2::ZERO) };
         let line_h = font.size * self.line;
+        let parts: Vec<&Run> = self.parts.iter().filter(|(s, ..)| !s.is_empty()).collect();
+        let mut fonts: Vec<&FontId> = parts.iter().map(|(_, font, _)| font).collect();
+        fonts.push(&font);
+        let mut heights = shared_baseline(ui, &fonts, Some(line_h));
+        let lead_h = heights.pop().unwrap_or(line_h);
         let indent = match &self.lead {
             Some(mark) => {
-                let format = TextFormat { font_id: font.clone(), color, line_height: Some(line_h), ..Default::default() };
-                let galley = ui.painter().layout_job(LayoutJob::single_section(mark.clone(), format));
+                let format = TextFormat { font_id: font.clone(), color, line_height: Some(lead_h), ..Default::default() };
+                let mut job = LayoutJob::single_section(mark.clone(), format);
+                // A whole line tall, so the mark stands on the words' baseline.
+                job.first_row_min_height = line_h;
+                let galley = ui.painter().layout_job(job);
                 let indent = galley.size().x + 8.0;
                 if at.y + galley.size().y <= self.floor {
                     ui.painter().galley(at, galley, color);
@@ -467,10 +556,8 @@ impl Para {
             None => 0.0,
         };
         let mut job = LayoutJob::default();
-        for (s, font, color) in &self.parts {
-            if !s.is_empty() {
-                job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, line_height: Some(line_h), ..Default::default() });
-            }
+        for ((s, font, color), h) in parts.into_iter().zip(heights) {
+            job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, line_height: Some(h), ..Default::default() });
         }
         job.wrap = TextWrapping { max_width: (w - indent).max(1.0), max_rows: self.rows, break_anywhere: self.anywhere, overflow_character: Some('…') };
         let galley = ui.painter().layout_job(job);
@@ -529,7 +616,8 @@ pub(crate) const STATE_INDENT: f32 = 16.0;
 /// words were drawn.
 pub(crate) fn state_line(ui: &Ui, row: Rect, lamp: Color32, parts: &[Run], right: &[Run]) -> Rect {
     let mid = row.center().y;
-    led(ui, pos2(row.min.x + 3.0, mid), lamp);
+    let lead = parts.first().map_or_else(|| body(14.0), |(_, font, _)| font.clone());
+    led(ui, pos2(row.min.x + 3.0, led_mid(ui, mid, &lead, false)), lamp);
     let x = row.min.x + STATE_INDENT;
     let mut end = row.max.x;
     if !right.is_empty() {
@@ -554,7 +642,10 @@ pub(crate) fn verdict(ui: &Ui, at: Pos2, w: f32, words: &str, figures: &[&str], 
     let indent = if mark.is_some() { 20.0 } else { 0.0 };
     let parts = with_figures(words, figures, body(13.5), mono(12.5), tone);
     let drawn = Para::runs(&parts).rows(2).paint(ui, at + vec2(indent, 0.0), w - indent);
-    let centre = pos2(at.x + 6.0, at.y + drawn.height().min(19.0) / 2.0);
+    // On the middle of the first line's small letters, over the baseline
+    // its words and figures share (the words' ascent, the taller).
+    let face = metrics(ui, &body(13.5));
+    let centre = pos2(at.x + 6.0, at.y + face.ascent - face.small / 2.0);
     match mark {
         Some(true) => check(ui, centre, tone),
         Some(false) => {
@@ -566,11 +657,20 @@ pub(crate) fn verdict(ui: &Ui, at: Pos2, w: f32, words: &str, figures: &[&str], 
 }
 
 /// A room's reload cadence ("polls every 2 s"), for the right of its
-/// [`state_line`]: dim, its words in the UI face and its figure, from its
-/// first digit on, in the monospace, as the canvas's Backups board sets it.
+/// [`state_line`]: dim, its words in the UI face and its figure — its
+/// first number, its digits alone — in the monospace, as the canvas's
+/// Backups board sets it; the space before the unit stays the words', so
+/// it is no wider than theirs.
 pub(crate) fn cadence(s: &str, pal: &Pal) -> Vec<Run> {
-    let figure = s.find(|c: char| c.is_ascii_digit()).map_or("", |at| &s[at..]);
-    with_figures(s, &[figure], body(13.0), mono(12.0), pal.dim)
+    with_figures(s, &[figure_in(s)], body(13.0), mono(12.0), pal.dim)
+}
+
+/// The first number in `s`: its digits and the points, commas and colons
+/// between them, nothing after its last digit. Empty for none.
+fn figure_in(s: &str) -> &str {
+    let Some(from) = s.find(|c: char| c.is_ascii_digit()) else { return "" };
+    let run = s[from..].find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | ',' | ':'))).map_or(&s[from..], |end| &s[from..from + end]);
+    run.trim_end_matches(['.', ',', ':'])
 }
 
 // ── The room ──────────────────────────────────────────────────────────────
@@ -614,6 +714,17 @@ pub(crate) fn ring(ui: &Ui, rect: Rect, pal: &Pal) {
 /// by one, lit in `color`.
 pub(crate) fn led(ui: &Ui, at: Pos2, color: Color32) {
     ui.painter().rect_filled(Rect::from_center_size(at, vec2(6.0, 6.0)), CornerRadius::same(1), color);
+}
+
+/// Where an [`led`] leading words in `font` set centred on `mid` stands
+/// to centre on them: on the middle of their small letters, or of their
+/// capitals for words set in capitals, over the baseline [`text`] stands
+/// them on — not on the middle of their line, which their ascent's room
+/// for accents puts above the ink.
+pub(crate) fn led_mid(ui: &Ui, mid: f32, font: &FontId, capitals: bool) -> f32 {
+    let own = metrics(ui, font);
+    let ink = if capitals { own.capital } else { own.small };
+    mid + centred_baseline(ui, font.size) - ink / 2.0
 }
 
 /// A chevron, two strokes, centred on `at`, pointing down (or up).
@@ -1878,7 +1989,7 @@ pub(crate) fn led_cell(ui: &Ui, row: &RowCtx, at: usize, lamp: Option<Color32>, 
     let mid = row.rect.center().y;
     let from = match lamp {
         Some(lamp) => {
-            led(ui, pos2(x + 3.0, mid), lamp);
+            led(ui, pos2(x + 3.0, led_mid(ui, mid, &font, false)), lamp);
             x + 14.0
         }
         None => x,
@@ -2726,7 +2837,11 @@ mod tests {
         let parts = [("running".to_string(), strong(14.0), pal.ok), (" — music → /srv/backup".to_string(), body(14.0), pal.text)];
         let polls = cadence("polls every 2 s", &pal);
         let figure: Vec<(&str, bool)> = polls.iter().map(|(s, f, _)| (s.as_str(), *f == mono(12.0))).collect();
-        assert_eq!(figure, [("polls every ", false), ("2 s", true)], "the cadence's figure in the monospace");
+        assert_eq!(figure, [("polls every ", false), ("2", true), (" s", false)], "the figure alone in the monospace, the unit's space the words'");
+        assert_eq!(figure_in("reloads every 30 s"), "30");
+        assert_eq!(figure_in("every 1,5 s."), "1,5", "a decimal comma kept, the sentence's point not");
+        assert_eq!(figure_in("at 12:30, daily"), "12:30");
+        assert_eq!(figure_in("never"), "");
         let (wide, narrow) = (Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 20.0)), Rect::from_min_size(pos2(0.0, 40.0), vec2(220.0, 20.0)));
         let out = pass(&ctx, vec2(800.0, 200.0), Vec::new(), &mut |ui| {
             let _ = state_line(ui, wide, pal.ok, &parts, &polls);
@@ -2894,5 +3009,56 @@ mod tests {
         assert!((said.min.x - (440.0 + CELL_PAD)).abs() < 0.5, "on the first row's line, as a table's: {said:?}");
         let first_row = empty_at.get().min.y + 18.0 + 12.0;
         assert!((said.center().y - (first_row + FOLDER_ROW_H / 2.0)).abs() < 1.0, "{said:?} {:?}", empty_at.get());
+    }
+
+    /// Every glyph a pass drew, by the text it belongs to: its letter and
+    /// its baseline on the screen.
+    fn baselines(out: &egui::FullOutput) -> Vec<(String, Vec<(char, f32)>)> {
+        out.shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                Shape::Text(t) => {
+                    let glyphs = t.galley.rows.iter().flat_map(|row| row.row.glyphs.iter().map(move |g| (g.chr, t.pos.y + row.pos.y + g.pos.y)));
+                    Some((t.galley.text().to_string(), glyphs.collect()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn figures_stand_on_their_words_baseline_and_an_led_on_their_small_letters() {
+        let ctx = context();
+        let pal = Pal::now();
+        let mut leds = Vec::new();
+        let out = pass(&ctx, vec2(1200.0, 400.0), Vec::new(), &mut |ui| {
+            // A figure in its sentence, wrapped as a verdict wraps it.
+            let parts = with_figures("reachable — Transmission 4.0.6 · RPC 17", &["4.0.6", "17"], body(13.5), mono(12.5), pal.ok);
+            let _ = Para::runs(&parts).rows(2).paint(ui, pos2(10.0, 20.0), 900.0);
+            // And in one line of runs, centred on its row.
+            let _ = runs(ui, pos2(10.0, 100.0), &with_figures("polls every 30 s", &["30"], body(13.0), mono(12.0), pal.dim), 600.0, Align2::LEFT_CENTER);
+            // Two lines centred on one point, apart, at a size that shows
+            // a face's own centring.
+            let _ = text(ui, pos2(10.0, 200.0), "words", body(40.0), pal.text, 400.0, Align2::LEFT_CENTER);
+            let _ = text(ui, pos2(500.0, 200.0), "4096", mono(40.0), pal.text, 400.0, Align2::LEFT_CENTER);
+            leds = vec![led_mid(ui, 200.0, &body(40.0), false), led_mid(ui, 200.0, &strong(40.0), true)];
+        });
+        let lines = baselines(&out);
+        let all = |s: &str| lines.iter().find(|(t, _)| t == s).unwrap_or_else(|| panic!("{s:?} drawn: {lines:?}")).1.clone();
+        let spread = |glyphs: &[(char, f32)]| {
+            let ys = glyphs.iter().filter(|(c, _)| c.is_alphanumeric()).map(|(_, y)| *y);
+            ys.clone().fold(f32::MIN, f32::max) - ys.fold(f32::MAX, f32::min)
+        };
+        let verdict = all("reachable — Transmission 4.0.6 · RPC 17");
+        assert!(spread(&verdict) <= 1.0, "the version and the number on the words' baseline: {verdict:?}");
+        let cadence = all("polls every 30 s");
+        assert!(spread(&cadence) <= 1.0, "{cadence:?}");
+        let (words, figure) = (all("words"), all("4096"));
+        let (b_words, b_figure) = (words[0].1, figure[0].1);
+        assert!((b_words - b_figure).abs() <= 1.0, "a monospace line centred beside words sits on their baseline: {b_words} {b_figure}");
+        // The LED: under the line's middle, over the baseline, and higher
+        // on capitals than on small letters.
+        assert!(leds[0] > 200.0 + 2.0 && leds[0] < b_words - 5.0, "on the small letters' middle: {leds:?}, baseline {b_words}");
+        assert!(leds[1] < leds[0], "a capital's middle is higher: {leds:?}");
     }
 }

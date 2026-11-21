@@ -27,9 +27,9 @@ use super::super::{EguiShown, age_text, fmt_bytes, fmt_count, iso_unix, unix_now
 use super::*;
 use crate::gui::window::studio::{
     self, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, RowCtx, SEG_H, Seg, Table, add_card, bare, body, caps, caps_width, cell,
-    field, field_box, foot, form_button, gate, hand, ink, label, label_at, led, led_cell, line, list_row, mono, name_cell,
-    reveal, runs, runs_width, searching, segmented, segmented_width, small_caps, small_caps_width, square, strong, text,
-    tick_card, tick_row, unkeyed, width_of,
+    field, field_box, foot, form_button, gate, hand, ink, label, label_at, led, led_cell, led_mid, line, list_row, mono,
+    name_cell, reveal, runs, runs_width, searching, segmented, segmented_width, small_caps, small_caps_width, square, strong,
+    text, tick_card, tick_row, unkeyed, width_of,
 };
 use crate::input::KeyModifiers;
 
@@ -939,7 +939,8 @@ fn fact(ui: &mut Ui, label: &str, value: &[Run], lamp: Option<Color32>, pal: &Pa
     small_caps(ui, row.left_center(), label, pal.dim, FACT_COL - 12.0, Align2::LEFT_CENTER);
     let mut x = row.min.x + FACT_COL;
     if let Some(color) = lamp {
-        led(ui, pos2(x + 3.0, row.center().y), color);
+        let lead = value.first().map_or_else(|| body(13.5), |(_, font, _)| font.clone());
+        led(ui, pos2(x + 3.0, led_mid(ui, row.center().y, &lead, false)), color);
         x += LED_W;
     }
     runs(ui, pos2(x, row.center().y), value, row.max.x - x, Align2::LEFT_CENTER);

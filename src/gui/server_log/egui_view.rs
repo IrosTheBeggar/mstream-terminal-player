@@ -36,7 +36,7 @@ use rust_i18n::t;
 
 use super::{Drawn, Fit, LATER_LINES, Level, LogAct, LogUi, Look, clock, counted, needs_bar, view};
 use crate::gui::window::studio::{
-    Icon, Pal, TOOL_H, Tool, body, caps, caps_width, led, mono, panel, square, text, tool_button,
+    Icon, Pal, TOOL_H, Tool, body, caps, caps_width, led, led_mid, mono, panel, square, strong, text, tool_button,
     tool_button_width, width_of,
 };
 use crate::kit::Grip;
@@ -490,8 +490,10 @@ fn header(ui: &Ui, id: Id, head: Rect, log: &LogUi, look: &Look, key_hints: bool
 
     // The follow state, cut with an ellipsis where the row is narrower.
     let state_room = (if shown > 0 { controls_left - STATE_GAP } else { right } - left - 14.0).max(1.0);
+    // The LED centred on the state's capitals.
+    let lamp_y = led_mid(ui, mid, &strong(STATE_SIZE), true);
     if following {
-        led(ui, pos2(left + 3.0, mid), pal.ok);
+        led(ui, pos2(left + 3.0, lamp_y), pal.ok);
         caps(ui, pos2(left + 14.0, mid), &state, STATE_SIZE, pal.ok, state_room, Align2::LEFT_CENTER);
     } else {
         let rect = Rect::from_min_max(pos2(left - 8.0, mid - TOOL_H / 2.0), pos2(left + state_w.min(state_room + 14.0) + 8.0, mid + TOOL_H / 2.0));
@@ -508,7 +510,7 @@ fn header(ui: &Ui, id: Id, head: Rect, log: &LogUi, look: &Look, key_hints: bool
             ui.painter().rect_filled(rect, square(), pal.raised);
         }
         let ink = if hovered { pal.text } else { pal.dim };
-        led(ui, pos2(left + 3.0, mid), pal.unlit);
+        led(ui, pos2(left + 3.0, lamp_y), pal.unlit);
         caps(ui, pos2(left + 14.0, mid), &state, STATE_SIZE, ink, state_room, Align2::LEFT_CENTER);
     }
     acts

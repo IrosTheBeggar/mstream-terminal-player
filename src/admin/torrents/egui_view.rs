@@ -21,9 +21,9 @@ use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
     self, CELL_PAD, Col, Dialog, FIELD_H, FIELD_ROW_H, FORM_BUTTON_H, Glyph, HIT, Input as Field, Pal, Para, Run, RowCtx, SEG_H,
     Seg, TABLE_HEAD, Table, bare, body, cadence, caps, card, cell, cell_tipped, check_line, checkbox, chip, field_at,
-    field_box, foot, foot_line, form_button, form_button_width, gate, ink, led, led_cell, meter, meter_lit, mono, name_cell,
-    path_cell, pointer, radio, ring_since, room_rects, segmented, small_caps, small_caps_width, state_line, strong, text,
-    unkeyed, verdict, width_of, with_figures,
+    field_box, foot, foot_line, form_button, form_button_width, gate, ink, led, led_cell, led_mid, meter, meter_lit, mono,
+    name_cell, path_cell, pointer, radio, ring_since, room_rects, segmented, small_caps, small_caps_width, state_line, strong,
+    text, unkeyed, verdict, width_of, with_figures,
 };
 
 /// The room between the page's rows, and between the page and its note
@@ -834,7 +834,7 @@ fn client(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
         None => (t!("tor.status_unknown").to_string(), pal.dim),
     };
     let x = named.max.x + 20.0;
-    led(ui, pos2(x + 3.0, mid), tone);
+    led(ui, pos2(x + 3.0, led_mid(ui, mid, &body(13.5), false)), tone);
     text(ui, pos2(x + 14.0, mid), bare(&status), body(13.5), tone, (row.max.x - x - 14.0).max(1.0), Align2::LEFT_CENTER);
     ui.add_space(14.0);
 

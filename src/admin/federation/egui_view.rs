@@ -26,8 +26,9 @@ use super::*;
 use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
     self, Col, Dialog, FIELD_H, FIELD_ROW_H, Glyph, Pal, Para, Run, SEG_H, Seg, Table, Typed, bare, body, cadence, caps, card,
-    cell, cell_tipped, checkbox, field_at, field_box, fitted, foot, foot_line, gate, ink, label_at, led, led_cell, mono,
-    name_cell, reveal, room_rects, searching, segmented, state_line, strong, text, tick_card, tick_row, unkeyed, with_figures,
+    cell, cell_tipped, checkbox, field_at, field_box, fitted, foot, foot_line, gate, ink, label_at, led, led_cell, led_mid,
+    mono, name_cell, reveal, room_rects, searching, segmented, state_line, strong, text, tick_card, tick_row, unkeyed,
+    with_figures,
 };
 
 /// The room between the room's parts: the canvas's 18.
@@ -405,8 +406,9 @@ fn peers(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
             Some("ok") => (t!("fed.status_ok").to_string(), pal.ok, pal.ok),
             Some(other) => (printable(other, 200), pal.gold, pal.gold),
         };
-        // The cells' • is the desk's LED, in the status words' colour.
-        led(ui, row.cell(0).center(), lit);
+        // The cells' • is the desk's LED, in the status words' colour,
+        // centred on the name it leads.
+        led(ui, pos2(row.cell(0).center().x, led_mid(ui, row.rect.center().y, &body(14.0), false)), lit);
         name_cell(ui, row, 1, &printable(&p.name, NAME_MAX), pal);
         cell_tipped(ui, row, 2, &status, &status, body(13.0), ink(row, color, pal), Id::new("fed-status-tip").with(i));
         let (seen, color) = match p.last_seen.as_deref() {
