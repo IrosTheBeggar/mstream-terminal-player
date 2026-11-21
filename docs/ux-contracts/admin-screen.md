@@ -831,3 +831,13 @@ from every locale. The rooms' own strings (`admin.*`, `usr.*`, `bak.*`,
   - **The monospace falls back to the system's CJK face**, as the UI face
     does (window/panel.rs): the log sets whatever the server wrote, file
     names in any script, in the monospace, which had no CJK behind Hack.
+  - **One look per thing across the rooms' faces**, the kit's
+    (window/studio.rs), where the canvas's boards differ among themselves:
+    every gate is answered as the cells' are — gold, no close, Esc keeps —
+    600 points wide, its sentences 6 points apart and its foot 20 under
+    them; every state line starts its words 16 points after its LED and
+    sets its cadence dim with the figure in the monospace; a focused tick
+    wears the keyboard's look (the mint form's), Torrents' HTTPS tick as
+    much as a form's; Libraries and Backups share one folder browser; a
+    check's verdict hangs its words beside its mark; and a button carries
+    its word bare of the cells' key letters and arrows.
