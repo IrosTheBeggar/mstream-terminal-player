@@ -19,6 +19,10 @@
 /// The wizard in character cells: its drawing half, for a terminal and
 /// for the window's grid alike. This module is its model.
 mod cells;
+/// The wizard drawn by egui, in the desktop window's panel over the whole
+/// grid: its other drawing half, which face.rs hosts.
+#[cfg(feature = "window")]
+mod egui_view;
 #[cfg(feature = "window")]
 pub(crate) mod face;
 pub mod picker;
@@ -248,6 +252,21 @@ pub(crate) struct Folder {
     /// server would scan these files twice). Recomputed as folders come
     /// and go.
     pub nested_in: Option<String>,
+}
+
+impl Folder {
+    /// What is wrong with this folder, as its row says it: the LOCAL
+    /// filesystem's verdict, else that it sits inside another chosen
+    /// folder. Advisory only, as the check is. Both drawing halves wear it
+    /// the same way: the path in gold, these words in its tooltip.
+    pub(crate) fn problem(&self) -> Option<String> {
+        match self.check {
+            FolderCheck::Missing => Some(t!("folders.warn_missing").to_string()),
+            FolderCheck::NotADir => Some(t!("folders.warn_file").to_string()),
+            FolderCheck::Unreadable => Some(t!("folders.warn_unreadable").to_string()),
+            FolderCheck::Ok | FolderCheck::Pending => self.nested_in.is_some().then(|| t!("folders.warn_nested").to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1985,6 +2004,29 @@ pub(crate) fn frame<B>(
 where
     B: ratatui::backend::Backend<Error = std::io::Error>,
 {
+    frame_drawn(terminal, wizard, pointer, to_worker, from_worker, &mut |frame, wizard| {
+        cells::render(frame, wizard);
+        None
+    })
+}
+
+/// [`frame`] with its draw handed in: `draw` draws the one frame and says
+/// whether the pointer is over something clickable in what it drew, or
+/// None for the cells' surface to say, as it says for every frame drawn in
+/// cells. The window's face draws the wizard with egui through it
+/// (face.rs); the worker's answers, the dispatch, the checks, the poll, the
+/// held arrow and the tooltip's dwell are this one frame half's either way.
+pub(crate) fn frame_drawn<B>(
+    terminal: &mut ratatui::Terminal<B>,
+    wizard: &mut Wizard,
+    pointer: &mut dyn FnMut(bool),
+    to_worker: &Sender<(Arc<Client>, Job)>,
+    from_worker: &Receiver<Done>,
+    draw: &mut dyn FnMut(&mut ratatui::Frame, &mut Wizard) -> Option<bool>,
+) -> std::io::Result<Duration>
+where
+    B: ratatui::backend::Backend<Error = std::io::Error>,
+{
     // Fold in whatever the worker finished before the frame is drawn:
     // folded in after, an answer missed the frame it could have been on and
     // waited out a whole poll for the next (performance audit #82).
@@ -2003,8 +2045,9 @@ where
     }
     wizard.flight.track(wizard.in_flight);
 
+    let mut hand = None;
     if !wizard.gate || wizard.dirty || wizard.ui.stale() || wizard.drawn.elapsed() >= REDRAW_ANYWAY {
-        terminal.draw(|frame| cells::render(frame, wizard))?;
+        terminal.draw(|frame| hand = draw(frame, wizard))?;
         crate::tui::graphics::release_dropped();
         wizard.drawn = Instant::now();
         wizard.dirty = false;
@@ -2018,8 +2061,8 @@ where
     wizard.flight.track(wizard.in_flight);
 
     // The hand cursor follows whether the pointer is over anything
-    // clickable in the frame just drawn.
-    let over = wizard.ui.hovering_clickable();
+    // clickable in the frame just drawn: what the draw said, or the cells'.
+    let over = hand.unwrap_or_else(|| wizard.ui.hovering_clickable());
     if over != wizard.hand {
         wizard.hand = over;
         pointer(over);
@@ -2424,7 +2467,8 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
 // Kept here rather than in cells.rs, because the model or the crate reaches
 // them too: the pass names `apply` words the scan widget with, the glyph
 // fallback every cells view calls (`crate::setup::g`), and the wordmark
-// `adopt_graphics` builds.
+// `adopt_graphics` builds. The window's egui view (egui_view.rs) draws the
+// same wordmark and the same remove tip.
 
 /// An enrichment pass's display name, in the current language. Unknown
 /// kinds (a future server) show their wire name rather than nothing.
@@ -2449,6 +2493,15 @@ pub(crate) fn g(fancy: &'static str, plain: &'static str) -> &'static str {
     if crate::kit::theme::legacy_conhost() { plain } else { fancy }
 }
 
+/// The tooltip on a folder row's remove, in both drawing halves. English
+/// and untranslated, as it has always been: the owner rules on it apart.
+const REMOVE_TIP: &str = "Remove this folder";
+
+/// The wordmark's picture, with its alpha: [`logo_art`] flattens it for a
+/// terminal's protocols, and the window's egui view lays it over its ground
+/// as it is (egui_view.rs).
+const LOGO_PNG: &[u8] = include_bytes!("mstream-logo-dark.png");
+
 /// The real wordmark, for terminals that draw pixels: the webapp's vector
 /// logo recolored to this kit's palette (no official dark variant exists —
 /// the webapp's and the mobile app's marks are both navy, drawn for light
@@ -2457,8 +2510,7 @@ pub(crate) fn g(fancy: &'static str, plain: &'static str) -> &'static str {
 /// the flatten color is exactly what sits behind it — and sixel, which
 /// has no alpha, gets correct pixels for free.
 fn logo_art(ground: (u8, u8, u8)) -> Option<crate::tui::art::Art> {
-    let png = include_bytes!("mstream-logo-dark.png");
-    let img = image::load_from_memory(png).ok()?.to_rgba8();
+    let img = image::load_from_memory(LOGO_PNG).ok()?.to_rgba8();
     let (gr, gg, gb) = ground;
     let mut flat = image::RgbImage::new(img.width(), img.height());
     for (x, y, px) in img.enumerate_pixels() {

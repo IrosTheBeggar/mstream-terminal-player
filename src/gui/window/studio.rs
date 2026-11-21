@@ -2535,6 +2535,89 @@ pub(crate) fn reveal(ui: &Ui, modal: Id, at: usize, rect: Rect) {
     }
 }
 
+// ── Pictures, steps and a button at rest ─────────────────────────────────
+//
+// What the setup wizard's frame needed first (src/setup/egui_view.rs) and
+// nothing of which is the wizard's own: a picture made into a texture once
+// and drawn whole, a row of LEDs that says which step a page is at, and a
+// form's button that cannot be pressed yet.
+
+/// A picture as egui holds it, made once under `id` and kept in egui's
+/// memory: `make` is asked for its pixels only when nothing is kept under
+/// `id` yet or `key` (what the picture is of) has changed, so a page drawn
+/// every frame uploads it once, and a new picture under the same id lets
+/// the old texture go. A picture `make` cannot give is kept as none, and
+/// not asked for again until `key` changes. `crisp` samples it by nearest
+/// neighbour, so a code's modules stay square at any scale; else it is
+/// smoothed.
+pub(crate) fn texture(
+    ctx: &egui::Context,
+    id: Id,
+    key: u64,
+    crisp: bool,
+    make: impl FnOnce() -> Option<egui::ColorImage>,
+) -> Option<egui::TextureHandle> {
+    let kept: Option<(u64, Option<egui::TextureHandle>)> = ctx.data(|d| d.get_temp(id));
+    if let Some((was, handle)) = kept
+        && was == key
+    {
+        return handle;
+    }
+    let options = if crisp { egui::TextureOptions::NEAREST } else { egui::TextureOptions::LINEAR };
+    let handle = make().map(|image| ctx.load_texture(format!("picture {id:?}"), image, options));
+    ctx.data_mut(|d| d.insert_temp(id, (key, handle.clone())));
+    handle
+}
+
+/// `texture` drawn whole in `rect`: as large as fits with its shape kept,
+/// centred in it, never cropped and never stretched, laid over what is
+/// under it with its own alpha. Returns where it was drawn.
+pub(crate) fn picture(ui: &Ui, rect: Rect, texture: &egui::TextureHandle) -> Rect {
+    let size = texture.size_vec2();
+    if size.x <= 0.0 || size.y <= 0.0 || !rect.is_positive() {
+        return Rect::from_center_size(rect.center(), Vec2::ZERO);
+    }
+    let k = (rect.width() / size.x).min(rect.height() / size.y);
+    let at = Rect::from_center_size(rect.center(), size * k);
+    ui.painter().image(texture.id(), at, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+    at
+}
+
+/// The room between a step line's LEDs.
+const STEP_GAP: f32 = 4.0;
+
+/// Which step a page is at, as a row of `total` [`led`]s [`STEP_GAP`]
+/// points apart that ends at `right`, their middles on `mid`: the steps
+/// before `at` (counted from 1) lit in the ok green, `at` in the accent,
+/// the steps after it unlit. Returns where it was drawn.
+pub(crate) fn step_leds(ui: &Ui, right: f32, mid: f32, at: usize, total: usize, pal: &Pal) -> Rect {
+    let w = total as f32 * 6.0 + total.saturating_sub(1) as f32 * STEP_GAP;
+    let left = right - w;
+    for k in 0..total {
+        let step = k + 1;
+        let color = match step.cmp(&at) {
+            std::cmp::Ordering::Less => pal.ok,
+            std::cmp::Ordering::Equal => pal.accent,
+            std::cmp::Ordering::Greater => pal.unlit,
+        };
+        led(ui, pos2(left + 3.0 + k as f32 * (6.0 + STEP_GAP), mid), color);
+    }
+    Rect::from_min_max(pos2(left, mid - 3.0), pos2(right, mid + 3.0))
+}
+
+/// A form's button that cannot be pressed now (the canvas's dead primary):
+/// `label` [`bare`] in dim capitals on the panel's fill inside an edge
+/// hairline, with no hover look, no hand and no click. Its response senses
+/// the pointer only for the tooltip that says why, the one tooltip a
+/// disabled control keeps.
+pub(crate) fn form_button_off(ui: &Ui, id: Id, rect: Rect, label: &str, pal: &Pal) -> Response {
+    let response = ui.interact(rect, id, Sense::hover());
+    ui.painter().rect_filled(rect, square(), pal.panel);
+    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, pal.edge), StrokeKind::Inside);
+    caps(ui, rect.center(), bare(label), FORM_BUTTON_SIZE, pal.dim, rect.width(), Align2::CENTER_CENTER);
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -3508,5 +3591,128 @@ mod tests {
     fn a_scrim_over_the_ground_is_what_the_capture_measured() {
         assert_eq!(under_scrim(Color32::from_rgb(0x12, 0x13, 0x1c)), Color32::from_rgb(13, 13, 20));
         assert_eq!(under_scrim(Color32::BLACK), Color32::from_rgb(SCRIM.r(), SCRIM.g(), SCRIM.b()), "black shows the scrim alone");
+    }
+
+    // ── Pictures, steps and a button at rest ──────────────────────────────
+
+    /// One pass that says what it uploaded and freed, which the pass
+    /// helper lets go of unread: the uploads of an image `size` big, and
+    /// how many textures it freed. The rest is let go of as there.
+    fn pass_keeping(ctx: &egui::Context, size: [usize; 2], run: &mut dyn FnMut(&mut Ui)) -> (Vec<egui::epaint::ImageDelta>, usize) {
+        style_once(ctx, &Pal::now());
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| run(ui));
+        let set = out.textures_delta.set.values().flatten().filter(|d| d.image.size() == size).cloned().collect();
+        let freed = out.textures_delta.free.len();
+        out.textures_delta.clear();
+        (set, freed)
+    }
+
+    #[test]
+    fn a_picture_is_uploaded_once_and_let_go_when_it_changes() {
+        let ctx = context();
+        let made = Cell::new(0);
+        let key = Cell::new(1u64);
+        let id = Id::new("probe-picture");
+        let size = [8, 2];
+        let mut run = |ui: &mut Ui| {
+            let handle = texture(ui.ctx(), id, key.get(), true, || {
+                made.set(made.get() + 1);
+                Some(egui::ColorImage::filled(size, Color32::RED))
+            });
+            assert!(handle.is_some(), "the picture is there");
+        };
+        // Uploaded on its first pass, by nearest neighbour as a crisp one;
+        // never on the passes after it.
+        let (first, _) = pass_keeping(&ctx, size, &mut run);
+        assert_eq!(first.len(), 1, "uploaded on its first pass");
+        assert_eq!(first[0].options, egui::TextureOptions::NEAREST, "a crisp one by nearest neighbour");
+        for _ in 0..3 {
+            let (later, _) = pass_keeping(&ctx, size, &mut run);
+            assert!(later.is_empty(), "never again");
+        }
+        assert_eq!(made.get(), 1, "made once");
+        // Another picture under the same id: made, and the old one let go.
+        key.set(2);
+        let (changed, freed_then) = pass_keeping(&ctx, size, &mut run);
+        assert_eq!((made.get(), changed.len()), (2, 1), "the new one made and uploaded");
+        let (_, freed_after) = pass_keeping(&ctx, size, &mut run);
+        assert_eq!(freed_then + freed_after, 1, "and the old one freed");
+        // One that cannot be made is not asked for again.
+        let tries = Cell::new(0);
+        for _ in 0..3 {
+            let _ = pass_keeping(&ctx, size, &mut |ui| {
+                let none = texture(ui.ctx(), Id::new("probe-none"), 7, false, || {
+                    tries.set(tries.get() + 1);
+                    None
+                });
+                assert!(none.is_none());
+            });
+        }
+        assert_eq!(tries.get(), 1, "a picture that cannot be made is asked for once");
+    }
+
+    #[test]
+    fn a_picture_is_drawn_whole_and_centred_in_its_rect() {
+        let ctx = context();
+        let drawn = Cell::new(Rect::NOTHING);
+        let tall = Cell::new(Rect::NOTHING);
+        let _ = pass_keeping(&ctx, [400, 100], &mut |ui| {
+            let wide = texture(ui.ctx(), Id::new("probe-wide"), 1, false, || Some(egui::ColorImage::filled([400, 100], Color32::WHITE)));
+            let wide = wide.expect("made");
+            drawn.set(picture(ui, Rect::from_min_size(pos2(10.0, 10.0), vec2(200.0, 200.0)), &wide));
+            tall.set(picture(ui, Rect::from_min_size(pos2(10.0, 10.0), vec2(800.0, 50.0)), &wide));
+        });
+        assert_eq!(drawn.get(), Rect::from_min_size(pos2(10.0, 85.0), vec2(200.0, 50.0)), "the width it has, its shape kept, centred");
+        assert_eq!(tall.get(), Rect::from_min_size(pos2(310.0, 10.0), vec2(200.0, 50.0)), "the height it has, centred across");
+    }
+
+    #[test]
+    fn a_step_line_lights_the_steps_done_the_one_at_and_none_after() {
+        let ctx = context();
+        let pal = Pal::now();
+        let at = Cell::new(Rect::NOTHING);
+        let out = pass(&ctx, vec2(400.0, 100.0), Vec::new(), &mut |ui| at.set(step_leds(ui, 300.0, 50.0, 2, 4, &pal)));
+        let leds: Vec<(f32, Color32)> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::Rect(r) if (r.rect.width() - 6.0).abs() < 0.01 && (r.rect.height() - 6.0).abs() < 0.01 => Some((r.rect.center().x, r.fill)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(leds.iter().map(|(_, c)| *c).collect::<Vec<_>>(), [pal.ok, pal.accent, pal.unlit, pal.unlit]);
+        assert!(leds.windows(2).all(|w| (w[1].0 - w[0].0 - 10.0).abs() < 0.01), "6 points and 4 apart: {leds:?}");
+        assert_eq!(at.get(), Rect::from_min_max(pos2(300.0 - 36.0, 47.0), pos2(300.0, 53.0)), "ending at its right");
+    }
+
+    #[test]
+    fn a_button_at_rest_takes_no_click_and_shows_no_hand_but_is_hovered_for_its_tip() {
+        let ctx = context();
+        let size = vec2(400.0, 200.0);
+        let rect = Rect::from_min_size(pos2(100.0, 50.0), vec2(140.0, FORM_BUTTON_H));
+        let id = Id::new("probe-off");
+        let (clicked, hovered) = (Cell::new(false), Cell::new(false));
+        let mut run = |ui: &mut Ui| {
+            let response = form_button_off(ui, id, rect, "Continue ▸", &Pal::now());
+            clicked.set(clicked.get() || response.clicked());
+            hovered.set(response.hovered());
+        };
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let words = texts(&out);
+        let label = words.iter().find(|(t, _)| t == "CONTINUE").expect("the bare capitals");
+        let color = out.shapes.iter().find_map(|c| match &c.shape {
+            Shape::Text(t) if t.galley.text() == "CONTINUE" => t.galley.job.sections.first().map(|s| s.format.color),
+            _ => None,
+        });
+        assert!(rect.contains(label.1.center()), "{label:?}");
+        assert_eq!(color, Some(Pal::now().dim), "dim");
+        let mut last = None;
+        for events in click_events(rect.center()) {
+            last = Some(pass(&ctx, size, events, &mut run));
+        }
+        assert!(!clicked.get(), "no click");
+        assert!(hovered.get(), "hovered, for the tip");
+        assert_ne!(last.map(|o| o.platform_output.cursor_icon), Some(CursorIcon::PointingHand), "no hand");
     }
 }

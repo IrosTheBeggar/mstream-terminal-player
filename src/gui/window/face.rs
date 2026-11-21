@@ -54,6 +54,17 @@ pub(crate) trait Face {
     /// teardown does not ask it to flush again.
     fn input(&mut self, event: TermEvent) -> Flow;
 
+    /// Whether the face ended itself in its last frame half: a click its
+    /// egui pass took said so, and the pointer inside a panel is egui's
+    /// alone (panel.rs), so no input half heard it. The host ends the loop
+    /// after that frame as it does on a [`Flow::Quit`] from
+    /// [`Face::input`] (`App::redraw_inner`): the face has flushed whatever
+    /// a quit owes by then. A face whose every way out is a key or the
+    /// close button leaves it out.
+    fn ended(&self) -> bool {
+        false
+    }
+
     /// The cell of the field that has the keyboard, as the last frame
     /// noted it, or none. The host turns the input method on while one
     /// does and floats its candidates there (`App::sync_ime`), and a paste
@@ -206,8 +217,8 @@ mod tests {
 
     /// A face that answers only what it must gets the host's defaults for
     /// the rest: the window's own grid, a copy chord that changes nothing,
-    /// no hit or drag to report, a clean exit, and an early send and a
-    /// flush that leave it as it was.
+    /// no hit or drag to report, no end of its own in a frame, a clean
+    /// exit, and an early send and a flush that leave it as it was.
     #[test]
     fn the_faces_defaults_are_the_optional_surface() {
         let mut stub = StubFace { line: "stub" };
@@ -216,6 +227,7 @@ mod tests {
         face.flush();
         assert_eq!(face.title(), "stub");
         assert_eq!(face.grid(), GRID);
+        assert!(!face.ended());
         assert!(!face.copy());
         assert!(!face.drag_began());
         assert_eq!(face.hit_debug(Position { x: 1, y: 1 }), None);

@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use egui::epaint::{ClippedPrimitive, ImageDelta, TextureId};
 use egui::{FontData, FontDefinitions, FontFamily, pos2};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use winit::event::WindowEvent;
 use winit::window::Window;
 
@@ -39,6 +39,41 @@ use super::input::{Button, Raw, Wheel};
 /// The font family a panel's figures and headings are set in: the
 /// system's semibold UI face where there is one, else the regular.
 pub(crate) const STRONG: &str = "strong";
+
+/// Whether a page with an egui face draws it in the panel: unless
+/// `MSTREAM_WINDOW_CELLS` is set to anything but 0, which keeps every page
+/// in cells, the spike's way to put the two side by side. Every face that
+/// takes the panel asks the same.
+pub(crate) fn wanted() -> bool {
+    std::env::var_os("MSTREAM_WINDOW_CELLS").is_none_or(|v| v.is_empty() || v == "0")
+}
+
+/// The cell of `cells` under `at`, a point of an egui pass whose screen,
+/// `points`, is those cells: the region's size in cells and in points is
+/// the scale between the two.
+pub(crate) fn cell_under(at: egui::Pos2, points: egui::Rect, cells: Rect) -> Position {
+    let along = |v: f32, from: f32, span: f32, n: u16| -> u16 {
+        if n == 0 || span <= 0.0 {
+            return 0;
+        }
+        (((v - from) / span * f32::from(n)).floor().max(0.0) as u16).min(n - 1)
+    };
+    Position {
+        x: cells.x + along(at.x, points.min.x, points.width(), cells.width),
+        y: cells.y + along(at.y, points.min.y, points.height(), cells.height),
+    }
+}
+
+/// The cell a caret stands in, by its foot as a page's egui pass reports
+/// it (`crate::admin::EguiShown`, the setup wizard's view): the foot is the
+/// caret's bottom edge rather than a point of it, so the cell is the one
+/// under its last half-point. A foot on a cell's top edge is the cell
+/// above, and the candidates float right under the caret, not a row lower.
+/// The host notes it on its surface, where the window reads the field with
+/// the keyboard (`Face::caret_at`).
+pub(crate) fn caret_cell(foot: egui::Pos2, points: egui::Rect, cells: Rect) -> Position {
+    cell_under(foot - egui::vec2(0.0, 0.5), points, cells)
+}
 
 /// What one pass drew, for the face's frame: whether the pointer is over
 /// something egui would act on (the GUI shows the hand for it).
@@ -434,6 +469,23 @@ impl Painter {
 /// the way egui will read it, since egui panics on one it cannot parse. A
 /// page's tests lay it out with the same.
 pub(crate) fn fonts(ctx: &egui::Context) {
+    install_fonts(ctx, &rust_i18n::locale());
+}
+
+/// [`fonts`] with a CJK face behind the others whatever the language: for
+/// a page that names languages in their own scripts and may switch to one
+/// of them while it is up (the setup wizard's chip and list name 日本語 and
+/// 中文 in every language, as the window's cells do with their own
+/// fallbacks). The Chinese face in Chinese, else the Japanese one, whose
+/// Han draws Chinese's name too.
+pub(crate) fn fonts_every_script(ctx: &egui::Context) {
+    let lang = if &*rust_i18n::locale() == "zh" { "zh" } else { "ja" };
+    install_fonts(ctx, lang);
+}
+
+/// The faces [`fonts`] describes, with the CJK one for `lang` where it has
+/// one.
+fn install_fonts(ctx: &egui::Context, lang: &str) {
     let mut fonts = FontDefinitions::empty();
     fonts.font_data.insert("Ubuntu-Light".into(), Arc::new(FontData::from_static(epaint_default_fonts::UBUNTU_LIGHT)));
     fonts.font_data.insert("Hack".into(), Arc::new(FontData::from_static(epaint_default_fonts::HACK_REGULAR)));
@@ -454,8 +506,7 @@ pub(crate) fn fonts(ctx: &egui::Context) {
         list.push("Hack".into());
     }
     let mut monospace = vec!["Hack".to_string(), "Ubuntu-Light".to_string()];
-    let lang = rust_i18n::locale().to_string();
-    let cjk = crate::viz_window::overlay::cjk_faces(&lang).into_iter().find_map(|(path, index)| readable(&path, index));
+    let cjk = crate::viz_window::overlay::cjk_faces(lang).into_iter().find_map(|(path, index)| readable(&path, index));
     if let Some(mut face) = cjk {
         face.tweak.y_offset_factor = 0.12;
         fonts.font_data.insert("system-cjk".into(), Arc::new(face));
@@ -623,6 +674,23 @@ mod tests {
         step(button(false), false, off);
         assert_eq!(clicks.get(), 1, "a press dragged off its control is no click");
         assert!(!ctx.input(|i| i.pointer.any_down()), "and egui holds no button");
+    }
+
+    #[test]
+    fn an_egui_caret_lifts_to_the_cell_under_it() {
+        // The room's cells under its first row at 100×30, and the same
+        // region in points at 8×16 points a cell, starting at 136,32.
+        let cells = Rect::new(17, 2, 83, 22);
+        let points = egui::Rect::from_min_size(egui::pos2(136.0, 32.0), egui::vec2(83.0 * 8.0, 22.0 * 16.0));
+        assert_eq!(cell_under(egui::pos2(136.0, 32.0), points, cells), Position { x: 17, y: 2 });
+        assert_eq!(cell_under(egui::pos2(136.0 + 8.0 * 10.0 + 3.0, 32.0 + 16.0 * 5.0 + 15.9), points, cells), Position { x: 27, y: 7 });
+        // A point on the region's far edge is in its last cell, never past.
+        assert_eq!(cell_under(points.max, points, cells), Position { x: 99, y: 23 });
+        assert_eq!(cell_under(egui::pos2(0.0, 0.0), points, cells), Position { x: 17, y: 2 }, "before it, its first");
+        // A caret whose foot is the top edge of row 8 stands in row 7.
+        let foot = egui::pos2(136.0 + 8.0 * 10.0 + 3.0, 32.0 + 16.0 * 6.0);
+        assert_eq!(caret_cell(foot, points, cells), Position { x: 27, y: 7 }, "the caret's own row, not the one under it");
+        assert_eq!(caret_cell(foot + egui::vec2(0.0, 1.0), points, cells), Position { x: 27, y: 8 });
     }
 
     #[test]

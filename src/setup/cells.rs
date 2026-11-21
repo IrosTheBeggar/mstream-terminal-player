@@ -517,15 +517,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         // The LOCAL filesystem's verdict, worn by the row: problems paint
         // the path gold, the tooltip says why. Advisory only — Continue
         // still works, the server has final say at commit.
-        let problem: Option<String> = match folder.check {
-            FolderCheck::Missing => Some(t!("folders.warn_missing").to_string()),
-            FolderCheck::NotADir => Some(t!("folders.warn_file").to_string()),
-            FolderCheck::Unreadable => Some(t!("folders.warn_unreadable").to_string()),
-            FolderCheck::Ok | FolderCheck::Pending => folder
-                .nested_in
-                .is_some()
-                .then(|| t!("folders.warn_nested").to_string()),
-        };
+        let problem: Option<String> = folder.problem();
         let path_style = match problem {
             Some(_) if !selected => Style::default().fg(th().gold),
             _ => row_bg,
@@ -560,7 +552,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         };
         frame.render_widget(Paragraph::new(Span::styled("[X]", x_style)), x_rect);
         wizard.ui.click(x_rect, Act::RemoveAt(i));
-        wizard.ui.tip(x_rect, "Remove this folder");
+        wizard.ui.tip(x_rect, REMOVE_TIP);
         y += 1;
     }
 

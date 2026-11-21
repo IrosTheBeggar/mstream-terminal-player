@@ -105,10 +105,15 @@ const FONT_PT: f64 = 16.0;
 /// The grid the window opens at unless `MSTREAM_WINDOW_SIZE` or the face
 /// says otherwise: the installer's own terminal window, and the size the
 /// render tests draw at.
-const GRID: (u16, u16) = (100, 30);
+pub(crate) const GRID: (u16, u16) = (100, 30);
 /// Hack at 16 points is eight points wide: the guess the window opens on,
 /// before the backend exists to say what a cell really is.
 const CELL_GUESS_PT: f64 = 8.0;
+/// What a window leaves of the screen it opens on for the platform's own,
+/// in points: a little either side, and its title bar with a taskbar or a
+/// dock under it. A face's own grid larger than [`GRID`] is fitted to the
+/// rest (`on_screen`).
+const SCREEN_CHROME: (f64, f64) = (64.0, 128.0);
 /// How long a redraw that was asked for may stay undelivered before the
 /// loop stops spinning on it and sleeps between checks instead.
 const STALLED_REDRAW: Duration = Duration::from_millis(100);
@@ -198,7 +203,7 @@ pub(crate) fn run(mut face: Box<dyn Face>, instance: Option<Instance>) -> i32 {
     // The faces first, on their own thread, so the search overlaps all of
     // the event loop's start and the window's creation.
     let faces = Early::faces(rust_i18n::locale().to_string());
-    let grid = opening_grid(face.grid());
+    let (grid, fit_screen) = opening_grid(face.grid());
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
         Err(e) => {
@@ -235,6 +240,7 @@ pub(crate) fn run(mut face: Box<dyn Face>, instance: Option<Instance>) -> i32 {
     let mut app = App {
         face,
         grid,
+        fit_screen,
         hand: false,
         board,
         panel,
@@ -413,29 +419,53 @@ fn panic_log_note(log: Option<&Path>) -> Option<String> {
 }
 
 /// The grid to open at: `MSTREAM_WINDOW_SIZE=<cols>,<rows>`, or the face's
-/// own (`grid`, [`GRID`] unless the face says otherwise). A value that does
-/// not read as two sizes of at least one cell is said so and ignored.
-fn opening_grid(grid: (u16, u16)) -> (u16, u16) {
-    let Some(raw) = std::env::var_os("MSTREAM_WINDOW_SIZE") else { return grid };
+/// own (`grid`, [`GRID`] unless the face says otherwise), and whether it is
+/// the face's own, which `App::open` fits to the screen ([`on_screen`]); a
+/// grid the lever names opens as named. A value that does not read as two
+/// sizes of at least one cell is said so and ignored.
+fn opening_grid(grid: (u16, u16)) -> ((u16, u16), bool) {
+    let Some(raw) = std::env::var_os("MSTREAM_WINDOW_SIZE") else { return (grid, true) };
     let raw = raw.to_string_lossy();
     let parsed = raw.split_once(',').and_then(|(cols, rows)| {
         let cols: u16 = cols.trim().parse().ok()?;
         let rows: u16 = rows.trim().parse().ok()?;
         (cols > 0 && rows > 0).then_some((cols, rows))
     });
-    parsed.unwrap_or_else(|| {
-        eprintln!(
-            "gui --window: MSTREAM_WINDOW_SIZE={raw} is not <cols>,<rows>; opening at {},{}",
-            grid.0, grid.1
-        );
-        grid
-    })
+    match parsed {
+        Some(named) => (named, false),
+        None => {
+            eprintln!(
+                "gui --window: MSTREAM_WINDOW_SIZE={raw} is not <cols>,<rows>; opening at {},{}",
+                grid.0, grid.1
+            );
+            (grid, true)
+        }
+    }
+}
+
+/// A face's own grid fitted to `screen`, the size in points of the screen
+/// the window opens on: narrowed and shortened, in whole cells at the
+/// opening guess, to what the screen holds less [`SCREEN_CHROME`], and
+/// never below [`GRID`]. A grid no larger than [`GRID`] (the GUI's, the
+/// installer's) opens as it always has, and so does any grid on a screen
+/// that is not known. The setup wizard's egui face asks for the canvas's
+/// 1280 by 800 points (setup/face.rs), which a laptop's screen at 125% or
+/// 150% has no room for.
+fn on_screen(grid: (u16, u16), screen: Option<LogicalSize<f64>>) -> (u16, u16) {
+    let Some(screen) = screen else { return grid };
+    let most = |room: f64, chrome: f64, cell: f64| ((room - chrome) / cell).floor().clamp(0.0, f64::from(u16::MAX)) as u16;
+    let cols = most(screen.width, SCREEN_CHROME.0, CELL_GUESS_PT);
+    let rows = most(screen.height, SCREEN_CHROME.1, FONT_PT);
+    (grid.0.min(cols.max(GRID.0)), grid.1.min(rows.max(GRID.1)))
 }
 
 struct App {
     /// What the window shows (face.rs).
     face: Box<dyn Face>,
     grid: (u16, u16),
+    /// The grid is the face's own, to be fitted to the screen the window
+    /// opens on ([`on_screen`]); false for one `MSTREAM_WINDOW_SIZE` names.
+    fit_screen: bool,
     /// The pointer is the platform's hand: what the face last asked of the
     /// window's cursor, for the script's dumps.
     hand: bool,
@@ -765,6 +795,15 @@ impl App {
     /// the loop (`about_to_wait`), which goes on answering the window
     /// meanwhile.
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+        // A face's own grid larger than the window's usual is fitted to the
+        // screen it opens on: the primary one, or on Wayland, which names
+        // none, the first listed. Fitted once, here: `install` then sizes
+        // the window to it.
+        if self.fit_screen {
+            let monitor = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next());
+            let screen = monitor.map(|monitor| monitor.size().to_logical::<f64>(monitor.scale_factor()));
+            self.grid = on_screen(self.grid, screen);
+        }
         let (cols, rows) = self.grid;
         let opening = LogicalSize::new(f64::from(cols) * CELL_GUESS_PT, f64::from(rows) * FONT_PT);
         let attributes =
@@ -1173,6 +1212,15 @@ impl App {
             }
         }
         self.frames += 1;
+        // A face that ended itself in this frame (a click its egui pass
+        // took, which no input half heard) leaves as a quit through the
+        // input half does, `feed`'s way: it has flushed what a quit owes.
+        if self.face.ended() {
+            self.quit_flushed = true;
+            self.quit_at = self.stats.is_some().then(Instant::now);
+            event_loop.exit();
+            return;
+        }
         if self.frames == DUMP_AT_FRAME
             && let Some(dir) = &self.dump
             && let Err(e) = dump(dir, terminal, &mut *self.face)
@@ -2851,6 +2899,24 @@ mod tests {
         assert_eq!(fit((8, 16), GRID), PhysicalSize::new(800, 480));
         assert_eq!(fit((16, 32), GRID), PhysicalSize::new(1600, 960));
         assert_eq!(fit((12, 24), (70, 20)), PhysicalSize::new(840, 480));
+    }
+
+    /// A face's own grid larger than the window's usual opens whole where
+    /// the screen has the room, and is fitted in whole cells where it has
+    /// not, leaving the platform its title bar and taskbar; never below the
+    /// usual grid, which itself opens as it always has, on a screen known
+    /// or not.
+    #[test]
+    fn a_faces_large_grid_is_fitted_to_the_screen_and_the_usual_one_never() {
+        let boards = (160, 50);
+        let screen = |w: f64, h: f64| Some(LogicalSize::new(w, h));
+        assert_eq!(on_screen(boards, screen(1920.0, 1080.0)), boards, "room for the canvas's 1280 by 800");
+        assert_eq!(on_screen(boards, screen(1536.0, 864.0)), (160, 46), "1080p at 125%: shortened");
+        assert_eq!(on_screen(boards, screen(1280.0, 720.0)), (152, 37), "1080p at 150%: both");
+        assert_eq!(on_screen(boards, screen(640.0, 400.0)), GRID, "never below the usual grid");
+        assert_eq!(on_screen(boards, None), boards, "a screen not known");
+        assert_eq!(on_screen(GRID, screen(640.0, 400.0)), GRID, "the usual grid as it always was");
+        assert_eq!(on_screen((70, 20), screen(1920.0, 1080.0)), (70, 20));
     }
 
     /// On a Mac the fallback is always there: Menlo ships with the system
