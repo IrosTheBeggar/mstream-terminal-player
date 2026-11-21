@@ -26,7 +26,7 @@ use egui::{Align2, Id, Rect, Response, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use rust_i18n::t;
 
 use super::super::cells::done_buttons;
-use super::super::{DONE_ACTIONS, Wizard, done_action};
+use super::super::{APP_STORE_URL, DONE_ACTIONS, PLAY_STORE_URL, Wizard, done_action};
 use super::{Drawn, LINE_H, Page, ROOMY, SIDE, logo_size, logo_texture, parts, scan_widget, status_line, strip, tip, tips_line};
 use crate::gui::window::studio::{self, HIT, Pal, Para, Run, body, mono, strong};
 use crate::tui::art::Art;
@@ -121,9 +121,35 @@ pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, page: &Page) -> Drawn {
         }
     }
 
-    status_line(ui, at.status, wizard, pal);
+    status(ui, at.status, wizard, pal);
     tips_line(ui, at.tips, wizard, pal);
     drawn
+}
+
+/// The status line as the frame draws it ([`status_line`]), but for the
+/// note that gives a link to copy where no browser could be launched
+/// (`note.link_headless`): its link set in the monospace, a point under
+/// its words and dim as they are, as the DoneRest board sets it, so it
+/// reads as the thing to copy. Busy words win over it, as over any note,
+/// and an error's gold line is the frame's.
+fn status(ui: &Ui, rect: Rect, wizard: &Wizard, pal: &Pal) {
+    let busy = wizard.busy.as_deref().is_some_and(|busy| !busy.is_empty());
+    if !busy
+        && let Some((note, false)) = &wizard.note
+        && let Some(link) = links(wizard).into_iter().find(|link| note.contains(link.as_str()))
+    {
+        let parts = studio::with_figures(note, &[&link], body(13.0), mono(12.5), pal.dim);
+        studio::runs(ui, rect.left_center(), &parts, rect.width(), Align2::LEFT_CENTER);
+        return;
+    }
+    status_line(ui, rect, wizard, pal);
+}
+
+/// The links the cards open, in their order, as the model's acts open them
+/// (`Wizard::act`): the two stores, and the server's admin panel.
+fn links(wizard: &Wizard) -> [String; DONE_ACTIONS] {
+    let admin = format!("{}/admin", wizard.client.server().trim_end_matches('/'));
+    [PLAY_STORE_URL.to_string(), APP_STORE_URL.to_string(), admin]
 }
 
 /// The message and its figure, in the cells' words: where the server
@@ -683,7 +709,27 @@ mod tests {
             assert_eq!(wizard.done_sel, None, "a click selects nothing");
             let (out, _) = probe.settle(&mut wizard);
             assert_eq!(color_of(&out, &note), Some(pal.dim), "the link to copy, dim");
+            // The link in the monospace, a point under the words, as the
+            // DoneRest board sets it; the label in the words' face.
+            let job = out.shapes.iter().find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == note => Some(t.galley.job.clone()),
+                _ => None,
+            });
+            let job = job.expect("the note");
+            let font = |s: &str| job.sections.iter().find(|x| &job.text[x.byte_range.start.0..x.byte_range.end.0] == s).map(|x| x.format.font_id.clone());
+            assert_eq!(font(url), Some(crate::gui::window::studio::mono(12.5)), "card {i}: the link in the monospace");
+            assert_eq!(job.sections.first().map(|x| x.format.font_id.clone()), Some(crate::gui::window::studio::body(13.0)), "card {i}");
+            assert!(job.sections.iter().all(|x| x.format.color == pal.dim), "card {i}: dim throughout");
         }
+        // Busy words win over the note, as over any.
+        wizard.busy = Some(t!("busy.fetching_qc").to_string());
+        let (out, _) = probe.settle(&mut wizard);
+        assert_eq!(color_of(&out, &t!("busy.fetching_qc")), Some(pal.accent));
+        assert!(!drawn(&out).iter().any(|w| w.contains("/admin")), "the note gave way");
+        wizard.busy = Some(String::new());
+        let (out, _) = probe.settle(&mut wizard);
+        assert!(drawn(&out).iter().any(|w| w.ends_with("/admin")), "a quiet op's busy line hides no note");
+        wizard.busy = None;
         key(&mut wizard, KeyCode::Up);
         let _ = probe.settle(&mut wizard);
         probe.click(&mut wizard, card(0));
