@@ -961,7 +961,7 @@ mod tests {
             let words = drawn(&out);
             assert!(has(&words, &t!(title)), "{title} drawn: {words:?}");
             assert!(has(&words, &footer_hint(&wizard)), "the modal's hint on the tips line: {words:?}");
-            assert!(shown.caret.is_none(), "{title}: no field drawn yet, no caret");
+            assert_eq!(shown.caret.is_some(), matches!(wizard.modal, Modal::PathEntry(_)), "{title}: a caret for the path's field alone");
             // The page beneath is inert: a click on its control is lost.
             probe.press(&mut wizard, beneath);
             assert!(wizard.queued.is_none() && wizard.note.is_none() && wizard.modal != Modal::None, "{title}: the scrim took it");
