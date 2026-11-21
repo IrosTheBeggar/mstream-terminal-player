@@ -122,15 +122,17 @@ impl WizardFace {
 /// One egui pass of the wizard over `grid`, the whole of it, the cells
 /// under it left blank: the hand, or None when `runs` has no window to run
 /// it in. What the host reads of a frame is left where the cells leave it:
-/// the cells' registries emptied first (nothing of a frame drawn in cells
-/// is hit, tipped or noted under the view), then the caret of the field
-/// with the keyboard lifted to the cell under its foot and noted on the
-/// wizard's surface, where `Face::caret_at` reads it, as the GUI lifts an
-/// admin room's (gui/admin.rs). The input method's composition is handed
-/// down from the same surface. A click that ended the wizard is kept in
-/// `ended`.
+/// once the pass has run, the cells' frame begun and its registries
+/// emptied (nothing of a frame drawn in cells is hit, tipped or noted under
+/// the view), then the caret of the field with the keyboard lifted to the
+/// cell under its foot and noted on the wizard's surface, where
+/// `Face::caret_at` reads it, as the GUI lifts an admin room's
+/// (gui/admin.rs). With no pass the surface is left to the cells' own
+/// draw, which begins the frame itself: begun twice, it would forget the
+/// footprints of last frame's modal that the wordmark is drawn by. The
+/// input method's composition is handed down from the same surface. A
+/// click that ended the wizard is kept in `ended`.
 fn egui_frame(runs: &dyn Runs, grid: Rect, wizard: &mut Wizard, view: &View, ended: &mut Option<Outcome>) -> Option<bool> {
-    wizard.ui.begin_frame();
     let composition = wizard.ui.composition().to_string();
     let key_hints = wizard.ui.key_hints;
     let mut seen: Option<egui_view::Shown> = None;
@@ -141,6 +143,7 @@ fn egui_frame(runs: &dyn Runs, grid: Rect, wizard: &mut Wizard, view: &View, end
             None => next,
         });
     })?;
+    wizard.ui.begin_frame();
     if let Some(seen) = seen {
         if let Some(foot) = seen.caret {
             wizard.ui.note_caret(caret_cell(foot, seen.points, grid));
@@ -756,7 +759,11 @@ mod tests {
     }
 
     /// Before there is a window the panel runs no pass, and the cells draw
-    /// as they always have. In cells the face takes no panel at all.
+    /// as they always have, their frame begun once: a modal over the
+    /// wordmark stands the picture down by last frame's footprints and the
+    /// figlet stands in, and the frame after that is the poll's, as in a
+    /// window drawn in cells
+    /// (`a_modal_over_the_wordmark_stands_it_down_and_the_figlet_stands_in`).
     #[test]
     fn with_no_pass_to_run_the_cells_draw_as_today() {
         let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
@@ -766,6 +773,26 @@ mod tests {
         let text = rows(&buf).join("\n");
         assert!(text.contains(&t!("folders.add_card").to_string()), "the cells' card: {text}");
         assert!(!face.wizard.ui.clicks.is_empty(), "and the cells' clicks");
+
+        // At the window's usual grid, where the browser crosses the band.
+        let host = on_a_recording_host(&mut face);
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
+        let mut frame = |face: &mut WizardFace| {
+            let wait = face.frame_on(&mut terminal, &mut |_| {}).unwrap();
+            (wait, terminal.backend().0.buffer().clone())
+        };
+        let _ = frame(&mut face);
+        let told = host.told();
+        let [Told::Placed(band)] = told[..] else { panic!("the wordmark alone: {told:?}") };
+        face.open_the_browser();
+        let (wait, _) = frame(&mut face);
+        assert_eq!(wait, Duration::ZERO, "the frame drawn by the browser's footprint, now");
+        let _ = host.told();
+        let (wait, buf) = frame(&mut face);
+        let told = host.told();
+        assert!(matches!(told[..], [Told::Over(_)]), "no picture under the browser: {told:?}");
+        assert!(row_text(&buf, band.y).contains(LOGO[0].trim()), "the figlet stands in: {:#?}", rows(&buf));
+        assert_eq!(wait, POLL, "and nothing more to draw at once");
     }
 
     /// A key pressed is the egui view's news (its tooltips hide for the
