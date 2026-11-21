@@ -19,6 +19,7 @@
 
 use std::ops::Range;
 
+use egui::emath::GuiRounding;
 use egui::epaint::{CornerRadius, Shadow, Shape, StrokeKind};
 use egui::text::{CCursor, LayoutJob, TextFormat, TextWrapping};
 use egui::{
@@ -2484,7 +2485,10 @@ struct BodyView {
 /// `over` allows.
 ///
 /// The window takes the height its body asked for on the last pass (egui
-/// runs the pass again when that changed, so it never shows misplaced). A
+/// runs the pass again when that changed, so it never shows misplaced).
+/// Its body has the same room on every pass, to the 32nd of a point,
+/// wherever that height moves the window, so a body that fits itself to
+/// its room ([`folder_browser`]) asks for one height and keeps it. A
 /// press anywhere in `over` outside the window is swallowed: what is under
 /// the scrim is inert. A modal comes up with its body at its top, as the
 /// cells draw a modal afresh each time, wherever it was scrolled to when it
@@ -2574,12 +2578,16 @@ impl<'a> Dialog<'a> {
                 icon_button(ui, id.with("close"), at, Icon::Close, pal.dim, pal).clicked()
             };
             ui.painter().galley(pos2(inner.min.x, title_row.center().y - line_h / 2.0), galley, title_color);
-            let budget = (max_h - fixed).max(0.0);
+            // The body's view starts where its content does, on the pixel
+            // egui puts that on, and is a whole number of 32nds of a point
+            // tall (egui's grid), so it is as tall on every pass, wherever
+            // the height the window last took has moved it.
+            let budget = (max_h - fixed).max(0.0).floor_ui();
+            let top = (inner.min.y + title_h + MODAL_GAP).round_to_pixels(ui.pixels_per_point()).round_ui();
             // The scrolled area reaches into the window's padding, where its
             // thumb stands 8 points in from the window's edge, clear of the
             // body, which keeps the inner width.
-            let body_rect =
-                Rect::from_min_size(pos2(inner.min.x, inner.min.y + title_h + MODAL_GAP), vec2(inner.width() + BODY_BAR, budget));
+            let body_rect = Rect::from_min_size(pos2(inner.min.x, top), vec2(inner.width() + BODY_BAR, budget));
             let mut child =
                 ui.new_child(UiBuilder::new().id_salt(id.with("body")).max_rect(body_rect).layout(Layout::top_down(Align::Min)));
             let mut scroll = ScrollArea::vertical().id_salt(id.with("scroll")).max_height(budget).auto_shrink([false, true]);
@@ -2592,7 +2600,13 @@ impl<'a> Dialog<'a> {
                 ui.set_max_width(inner.width());
                 let view = BodyView { origin: ui.max_rect().min.y, view: ui.clip_rect(), opened };
                 ui.ctx().data_mut(|d| d.insert_temp(id.with("view"), view));
-                body(ui)
+                // The body laid out in a room exactly as tall as its view.
+                // egui rounds the scrolled rect it hands the body to pixels
+                // at its top and its bottom apart, so that rect's height
+                // moves by up to a pixel with where the window stands and
+                // how far the body is scrolled.
+                let room = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), budget));
+                ui.scope_builder(UiBuilder::new().max_rect(room), body).inner
             });
             let wanted = fixed + out.content_size.y.min(budget);
             (closed, out.inner, wanted.min(max_h))
@@ -4164,8 +4178,6 @@ mod tests {
         assert_eq!(browser_gaps(18.0 + 12.0 + 20.0 + rest, rest), (12.0, 20.0));
         assert_eq!(browser_gaps(300.0, 30.0 + 78.0), (12.0, 20.0));
         assert_eq!(browser_gaps(f32::INFINITY, 30.0 + 34.0), (12.0, 20.0));
-        // No folders and no words: no row, so 30 points less will do.
-        assert_eq!(browser_gaps(18.0 + 12.0 + 20.0 + 34.0, 34.0), (12.0, 20.0));
         // Two points short (a modal at the cells' floor, 200 points of body):
         // a point from each.
         assert_eq!(browser_gaps(200.0, rest), (11.0, 19.0));
@@ -4205,6 +4217,79 @@ mod tests {
         assert!((foot(0).min.y - row.max.y - 18.0).abs() < 0.01, "18 over the foot: {row:?} {:?}", foot(0));
         let last = (0..4).map(foot).fold(f32::MIN, |y, r| y.max(r.max.y));
         assert!(last <= bottom + 0.01 && ended.get() <= bottom + 0.01, "the whole foot in the body: {last} {} {bottom}", ended.get());
+    }
+
+    /// With no folders and no words for none, the list draws no row and
+    /// takes no room, so a body just tall enough for the path and the foot
+    /// with the 12 and the 20 keeps them both.
+    #[test]
+    fn a_browser_with_no_row_keeps_its_gaps_in_a_body_just_tall_enough_without_one() {
+        let ctx = context();
+        let buttons = [("up", false), ("open", false), ("Add this very folder here", true), ("close it", false)];
+        let (left, w) = (20.0, 300.0);
+        let foot_h = Cell::new(0.0);
+        let mut run = |ui: &mut Ui| {
+            foot_h.set(foot_rects(ui, &buttons, &[], w).1);
+            let body = Rect::from_min_size(pos2(left, 20.0), vec2(w, 18.0 + 12.0 + 20.0 + foot_h.get()));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)));
+            let _ = folder_browser(&mut child, Id::new("probe-bare"), "/srv/bare", &[], 0, "", 9, &buttons, &Pal::now());
+        };
+        let _ = pass(&ctx, vec2(400.0, 400.0), Vec::new(), &mut run);
+        let foot = |k: usize| ctx.read_response(Id::new("probe-bare").with("foot").with(k)).expect("drawn").rect;
+        assert!((foot(0).min.y - (20.0 + 18.0 + 12.0 + 20.0)).abs() < 0.01, "the foot 12 and 20 under the path: {:?}", foot(0));
+        let last = (0..4).map(foot).fold(f32::MIN, |y, r| y.max(r.max.y));
+        assert!((last - (20.0 + 18.0 + 12.0 + 20.0 + foot_h.get())).abs() < 0.01, "the whole foot in the body, to its end: {last}");
+    }
+
+    /// A folder browser in a modal over a room that stands off the pixels
+    /// (an admin room's, its cells' rect in points) settles wherever it
+    /// stands and however far its gaps close, at 100% and at 125%: a
+    /// further pass asks for no other height, and the whole foot stands in
+    /// the body's view. The height the modal remembers moves its window by
+    /// fractions of a pixel, and the body has the same room wherever the
+    /// window stands.
+    #[test]
+    fn a_browser_in_a_modal_off_the_pixels_settles_with_its_whole_foot() {
+        let names: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        let buttons = [("up", false), ("open", false), ("Add this very folder here", true), ("close it", false)];
+        let size = vec2(800.0, 700.0);
+        // A window 400 wide with a one-line title: 88 points of padding
+        // and title over and under its body.
+        let (width, fixed) = (400.0, 2.0 * MODAL_PAD + TITLE_H + MODAL_GAP);
+        for zoom in [1.0, 1.25] {
+            let ctx = context();
+            ctx.set_zoom_factor(zoom);
+            let mut foot_h = 0.0;
+            let _ = pass(&ctx, size, Vec::new(), &mut |ui| foot_h = foot_rects(ui, &buttons, &[], width - 2.0 * MODAL_PAD).1);
+            // The body too short for the path, a row and the foot with the
+            // 12 and the 20 by a fraction of a point, by a point and more,
+            // by half the two gaps, and by all of them but a fraction.
+            for (case, short) in [0.3, 1.3, 16.7, 31.3].into_iter().enumerate() {
+                for step in 0..6 {
+                    let id = Id::new("probe-off-pixels").with(case).with(step);
+                    let budget = 18.0 + 12.0 + 30.0 + 20.0 + foot_h - short;
+                    let over = Rect::from_min_size(pos2(0.0, 30.519 + 0.13 * step as f32), vec2(600.0, budget + fixed + 32.0));
+                    let mut run = |ui: &mut Ui| {
+                        let pal = Pal::now();
+                        let _ = Dialog::new(id, over, width, "Folders").show(ui, &pal, |ui| {
+                            folder_browser(ui, id, "/srv", &names, 5, "", 9, &buttons, &pal)
+                        });
+                    };
+                    for _ in 0..4 {
+                        let _ = pass(&ctx, size, Vec::new(), &mut run);
+                    }
+                    let out = pass(&ctx, size, Vec::new(), &mut run);
+                    let at = format!("at {zoom}, over from {} and {} tall", over.min.y, over.height());
+                    let settled = out.platform_output.num_completed_passes == 1 && !out.platform_output.requested_discard();
+                    assert!(settled, "{at}: settled, not {:?}", out.platform_output.request_discard_reasons);
+                    let view = ctx.data(|d| d.get_temp::<BodyView>(id.with("view"))).expect("the body").view;
+                    for k in 0..4usize {
+                        let b = ctx.read_response(id.with("foot").with(k)).expect("drawn").rect;
+                        assert!(b.min.y >= view.min.y - 0.01 && b.max.y <= view.max.y + 0.01, "{at}: button {k} whole in view, {b:?} in {view:?}");
+                    }
+                }
+            }
+        }
     }
 
     // ── Cards, headings and pictures halved ──────────────────────────────

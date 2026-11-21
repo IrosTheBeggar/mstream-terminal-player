@@ -458,9 +458,19 @@ mod tests {
         let open = |w: &mut Wizard| w.apply(Done::Browsed(Ok(listing("/home/anna", &["Musik"]))));
         open(&mut wizard);
         let (out, _) = probe.settle(&mut wizard);
-        // The window's inside: from the foot's left to the close's right,
+        // The window's inside: from its title's left to the close's right,
         // which stands 8 past the close's middle.
-        let (left, right) = (probe.rect(foot(0)).min.x, probe.rect(Id::new(BROWSE).with("close")).center().x + 8.0);
+        let title = t!("browse.title");
+        let left = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == title.as_ref() => Some(t.pos.x),
+                _ => None,
+            })
+            .expect("the title");
+        let right = probe.rect(Id::new(BROWSE).with("close")).center().x + 8.0;
+        assert!((right - left - 420.0).abs() < 0.01, "420 inside: {left} to {right}");
         let buttons: Vec<Rect> = (0..4).map(|k| probe.rect(foot(k))).collect();
         for (k, b) in buttons.iter().enumerate() {
             assert!(b.min.x >= left - 0.5 && b.max.x <= right + 0.5, "button {k} inside the window: {b:?}, {left} to {right}");
