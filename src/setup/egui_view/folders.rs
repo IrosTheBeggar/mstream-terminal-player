@@ -82,7 +82,9 @@ pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, page: &Page) -> Drawn {
                     drawn.acts.push(Act::RenameFolder(i));
                 }
                 drawn.caret = typed.caret;
-                field = Some(rect);
+                // Where it shows: a row the wheel has half scrolled under
+                // the headings shows the rest of its field to no press.
+                field = Some(rect.intersect(ui.clip_rect()));
             }
             None => {
                 if name(ui, row, i, folder, page) {
@@ -391,6 +393,34 @@ mod tests {
         key(&mut wizard, KeyCode::Esc);
         let _ = probe.settle(&mut wizard);
         assert_eq!(wizard.folders[0].name, "music");
+    }
+
+    /// The name being edited keeps a press only where its field shows: over
+    /// the part of it the wheel has scrolled under the headings, a press is
+    /// one anywhere else, which keeps the draft and ends the edit, as the
+    /// cells' press off their chip does.
+    #[test]
+    fn a_press_over_the_name_field_scrolled_out_of_view_ends_the_edit() {
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        let probe = Probe::new(BOARD);
+        let mut wizard = wizard();
+        for i in 0..40 {
+            wizard.add_folder(format!("/srv/music/{i:02}"));
+        }
+        let _ = probe.settle(&mut wizard);
+        wheel(&probe, &mut wizard, probe.rect(nth("setup-path", 39)).center(), 4000.0);
+        wizard.act(Act::RenameFolder(0));
+        let _ = probe.settle(&mut wizard);
+        // Half a row down: the field's top half under the headings.
+        wheel(&probe, &mut wizard, probe.rect(Id::new("setup-rename")).center(), -20.0);
+        for _ in 0..10 {
+            let _ = probe.pass_after(&mut wizard, Vec::new(), 0.1);
+        }
+        let field = probe.ctx.read_response(Id::new("setup-rename")).expect("the field, half in view");
+        assert!(field.rect.min.y < field.interact_rect.min.y - 8.0, "half under the headings: {field:?}");
+        probe.press(&mut wizard, pos2(field.rect.center().x, field.rect.min.y + 2.0));
+        assert!(wizard.editing.is_none(), "a press where the field does not show is no press on it");
+        assert_eq!(wizard.folders[0].name, "00", "the draft kept");
     }
 
     #[test]
