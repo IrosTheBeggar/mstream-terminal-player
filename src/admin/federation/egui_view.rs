@@ -10,8 +10,8 @@
 //!
 //! Every click is one of the room's own [`Act`]s — the one the cells view
 //! registers where the click lands — applied through [`Room::act`] in the
-//! pass. The gates' close button, which the cells do not draw, is Esc sent
-//! to [`Room::key`], as their tips name it. Keys never reach egui: the
+//! pass. A gate has no close, as the cells draw it: it is answered with its
+//! buttons or its keys. Keys never reach egui: the
 //! room's key handler edits its fields as it always has, and each field is
 //! drawn from the room's own value and caret. Where the cells draw a glyph
 //! — the state line's bullet, the claimed tick, a peer's status dot, the
@@ -20,132 +20,49 @@
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
-use egui::epaint::{Shape, StrokeKind};
-use egui::style::ScrollAnimation;
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align, Align2, Color32, CursorIcon, FontId, Id, LayerId, Layout, Order, Pos2, Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
 use super::*;
 use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
-    self, Col, FIELD_H, FORM_BUTTON_H, Pal, RowCtx, SEG_H, Seg, Table, Typed, begin, body, caps, cell, checkbox, field_box,
-    form_button, form_button_width, ink, led, lift, meter, modal, mono, note_line, ring, segmented, small_caps, square,
-    strong, text, width_of,
+    self, Col, Dialog, FIELD_H, FIELD_ROW_H, Glyph, Pal, Para, Run, SEG_H, Seg, Table, Typed, bare, body, caps, card, cell,
+    cell_tipped, checkbox, field_at, field_box, fitted, foot, foot_line, ink, label_at, led, led_cell, mono, name_cell,
+    reveal, room_rects, searching, segmented, state_line, strong, text, tick_card, tick_row, unkeyed, with_figures,
 };
-use crate::input::KeyModifiers;
 
-/// The room's margin inside the panel, in points: the canvas's 24 at the
-/// sides and 14 at the foot; at the top the area's first row (the host's
-/// pick banner's) already stands between the room and the bar.
-const PAD_X: f32 = 24.0;
-const PAD_TOP: f32 = 8.0;
-const PAD_FOOT: f32 = 14.0;
 /// The room between the room's parts: the canvas's 18.
-const GAP: f32 = 18.0;
-/// The note line along the room's foot.
-const NOTE_H: f32 = 18.0;
-/// A card's height: the canvas's Mint card, the kit's add card.
-const CARD_H: f32 = 56.0;
-/// The inbox's card: a line and its hint.
-const INBOX_H: f32 = 60.0;
+const GAP: f32 = studio::ROOM_GAP;
 /// A table's headings and the room under them, and its rows.
-const TABLE_HEAD: f32 = 34.0;
+const TABLE_HEAD: f32 = studio::TABLE_HEAD;
 const ROW_H: f32 = 40.0;
 /// The forms' window (the canvas's 640) and the gates', narrower.
 const FORM_W: f32 = 640.0;
 const GATE_W: f32 = 560.0;
 /// The room between a modal's parts: the canvas's 22.
 const SECTION: f32 = 22.0;
-/// A modal window's padding and its title row, as the kit lays them out:
-/// where a gate paints its own gold title.
-const MODAL_PAD: f32 = 24.0;
-const TITLE_H: f32 = 20.0;
-/// A field with its label over it.
-const LABELLED_H: f32 = 20.0 + FIELD_H;
 /// The gap between the forms' columns (their fields, their tick boxes).
 const FORM_GAP: f32 = 16.0;
 /// A tick box's row in a form.
 const CHOICE_H: f32 = 32.0;
-
-/// Where egui's memory keeps the form's focus as the last pass drew it.
-fn form_focus() -> Id {
-    Id::new("fed-form").with("focus")
-}
-
-/// Where egui's memory keeps which of the room's modals the last pass drew
-/// ([`opened`]).
-fn modal_shown() -> Id {
-    Id::new("fed-modal").with("shown")
-}
-
-/// Whether `modal` is up and was not on the last pass. egui keeps a scroll
-/// area's offset in its memory for good, so a modal opened again would come
-/// up where it was scrolled to the last time it was up (a form with its
-/// first heading above its window); a new one opens at its top instead
-/// ([`from_top`]), as the cells' do.
-fn opened(ctx: &egui::Context, modal: &Modal) -> bool {
-    let which: u8 = match modal {
-        Modal::None => 0,
-        Modal::Form(f) => match f.kind {
-            FormKind::Mint => 1,
-            FormKind::Accept => 2,
-            FormKind::Limits => 3,
-        },
-        Modal::Minted { .. } => 4,
-        Modal::PeerName { .. } => 5,
-        Modal::Decline(_) => 6,
-        Modal::Revoke(_) => 7,
-        Modal::Forget(_) => 8,
-        Modal::TurnOff => 9,
-    };
-    let last = ctx.data(|d| d.get_temp::<u8>(modal_shown())).unwrap_or(0);
-    ctx.data_mut(|d| d.insert_temp(modal_shown(), which));
-    which != 0 && which != last
-}
-
-/// A modal's body scrolled to its top on the pass it opened ([`opened`]).
-fn from_top(ui: &Ui, fresh: bool) {
-    if fresh {
-        scroll_to(ui, Rect::from_min_size(ui.next_widget_position(), Vec2::ZERO), Some(Align::Min));
-    }
-}
-
-/// Where egui's memory notes that the last pass moved a modal's scroll.
-fn scroll_asked() -> Id {
-    Id::new("fed-modal").with("scroll-asked")
-}
-
-/// `rect` of a modal's body brought into view at once, its top to the
-/// view's with `Align::Min`, just into view with None. egui's scroll area
-/// lands the move on the next pass, but draws that pass where it stood
-/// before and asks for no other: the note left in egui's memory has
-/// [`show`] ask on the next pass, or the body would stand where it was
-/// until something else woke the panel.
-fn scroll_to(ui: &Ui, rect: Rect, align: Option<Align>) {
-    ui.scroll_to_rect_animation(rect, align, ScrollAnimation::none());
-    ui.ctx().data_mut(|d| d.insert_temp(scroll_asked(), true));
-}
+/// The least a table's flexible column keeps where the default window is
+/// narrower than the canvas, and the least share its fixed ones narrow to.
+const FLEX_LEAST: f32 = 120.0;
+const NARROWEST: f32 = 0.4;
 
 /// What a pass gathers as it draws: the room's acts its clicks asked for,
-/// the keys sent in a click's stead, and the foot of the focused field's
-/// caret.
+/// and the foot of the focused field's caret.
 struct Gathered<'a> {
     acts: Vec<Act>,
-    keys: Vec<KeyCode>,
     caret: Option<Pos2>,
     /// The input method's composition, for the field with the keyboard.
     composition: &'a str,
-    /// The modal up this pass was not up on the last ([`opened`]).
-    fresh: bool,
 }
 
-/// What a modal's body gathers: its acts, its caret, and the part of it to
-/// bring into view.
+/// What a modal's body gathers: its acts and its caret.
 #[derive(Default)]
 struct Out {
     acts: Vec<Act>,
     caret: Option<Pos2>,
-    reveal: Option<Rect>,
 }
 
 /// One pass of the room over the whole of `ui` — the room's area less its
@@ -153,25 +70,11 @@ struct Out {
 /// drawn from its state, each click turned into the room's act and applied,
 /// and what the host must know handed back.
 pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown {
-    let pal = begin(ui);
-    // A modal's scroll the last pass moved lands on this one, drawn where
-    // it stood ([`scroll_to`]): this pass runs again at once to draw it
-    // where it went, or, where egui runs no more this frame, the next
-    // frame comes.
-    if ui.ctx().data_mut(|d| d.remove_temp::<bool>(scroll_asked())).unwrap_or(false) {
-        ui.ctx().request_discard("a modal's scroll landed");
-        if !ui.ctx().will_discard() {
-            ui.ctx().request_repaint();
-        }
-    }
+    let pal = Pal::now();
     let full = ui.max_rect();
-    let column = Rect::from_min_max(full.min + vec2(PAD_X, PAD_TOP), full.max - vec2(PAD_X, PAD_FOOT));
-    let note_rect = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
-    let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, note_rect.min.y - GAP));
+    let (body_rect, note_rect) = room_rects(full);
     let modal_open = room.modal_open();
-    let fresh = opened(ui.ctx(), &room.modal);
-    let mut got =
-        Gathered { acts: Vec::new(), keys: Vec::new(), caret: None, composition: if modal_open { "" } else { composition }, fresh };
+    let mut got = Gathered { acts: Vec::new(), caret: None, composition: if modal_open { "" } else { composition } };
 
     let mut ui_body = ui.new_child(UiBuilder::new().max_rect(body_rect).layout(Layout::top_down(Align::Min)));
     ui_body.set_clip_rect(body_rect.expand(1.0));
@@ -180,7 +83,7 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
         Some(p) if !p.enabled => off(&mut ui_body, room, &p, &pal, &mut got),
         Some(p) => on(&mut ui_body, room, &p, &pal, &mut got),
     }
-    foot(ui, note_rect, room, &pal);
+    note(ui, note_rect, room, &pal);
 
     // A modal makes the room beneath inert: what was clicked under it this
     // pass is dropped, as the cells drop the room's registrations, and the
@@ -189,10 +92,6 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
         got.acts.clear();
         got.caret = None;
         got.composition = composition;
-    }
-    if !matches!(room.modal, Modal::Form(_)) {
-        // No form up: the next one is new, and opens at its focus.
-        ui.ctx().data_mut(|d| d.remove::<usize>(form_focus()));
     }
     match room.modal.clone() {
         Modal::None => {}
@@ -233,9 +132,6 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
     for act in got.acts {
         outcome = outcome.or(room.act(act));
     }
-    for code in got.keys {
-        outcome = outcome.or(room.key(KeyEvent::new(code, KeyModifiers::NONE)));
-    }
     EguiShown { caret: got.caret, outcome }
 }
 
@@ -248,28 +144,29 @@ fn off(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal, got: &mut Gath
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
     if p.available {
-        led_line(ui, row, pal.unlit, &[(bare(&t!("fed.state_off")).to_string(), body(14.0), pal.dim)], None, pal);
+        state_line(ui, row, pal.unlit, 16.0, &[(bare(&t!("fed.state_off")).to_string(), body(14.0), pal.dim)], None);
     } else {
-        led_line(ui, row, pal.gold, &[(bare(&t!("fed.state_unavailable")).to_string(), body(14.0), pal.gold)], None, pal);
+        state_line(ui, row, pal.gold, 16.0, &[(bare(&t!("fed.state_unavailable")).to_string(), body(14.0), pal.gold)], None);
     }
     ui.add_space(GAP);
     if p.available {
         let label = if room.starting { t!("fed.turning_on") } else { t!("fed.turn_on") };
-        if card(ui, Id::new("fed-turn-on"), &label, false, !room.starting, pal).clicked() {
+        if card(ui, Id::new("fed-turn-on"), &label, Glyph::None, pal.ok, !room.starting, pal).clicked() {
             got.acts.push(Act::TurnOn);
         }
         ui.add_space(GAP);
     }
-    let mut pitch = LayoutJob::default();
-    append(&mut pitch, &t!("fed.pitch_1a"), body(14.0), pal.text);
-    append(&mut pitch, &t!("fed.pitch_1b"), strong(14.0), pal.text);
-    append(&mut pitch, &t!("fed.pitch_1c"), body(14.0), pal.text);
-    para(ui, pitch, pal);
+    let pitch = [
+        (t!("fed.pitch_1a").to_string(), body(14.0), pal.text),
+        (t!("fed.pitch_1b").to_string(), strong(14.0), pal.text),
+        (t!("fed.pitch_1c").to_string(), body(14.0), pal.text),
+    ];
+    Para::runs(&pitch).show(ui);
     ui.add_space(GAP);
     let (head, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
-    small_caps(ui, head.left_center(), &t!("fed.pitch_credentials"), pal.dim, w, Align2::LEFT_CENTER);
+    label_at(ui, head.left_center(), &t!("fed.pitch_credentials"), w, pal);
     ui.add_space(4.0);
-    para(ui, plain(&t!("fed.pitch_2"), body(14.0), pal.text), pal);
+    Para::new(&t!("fed.pitch_2"), body(14.0), pal.text).show(ui);
 }
 
 // ── On ────────────────────────────────────────────────────────────────────
@@ -277,15 +174,11 @@ fn off(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal, got: &mut Gath
 /// On: the state line (and the connecting strip while the endpoint comes
 /// up), the tabs, the active tab's card and table.
 fn on(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal, got: &mut Gathered) {
-    state_line(ui, room, p, pal);
+    state(ui, room, p, pal);
     if p.available && !(p.running && p.online) {
         ui.add_space(4.0);
-        let w = ui.available_width();
-        let (row, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
         // The cells' ▱▱▱▱▱▱▱▱▱▱: the desk's meter, every segment unlit.
-        let strip = meter(ui, row.left_center(), 10, 0, vec2(5.0, 10.0), 2.0, pal.accent, pal);
-        let x = strip.max.x + 10.0;
-        text(ui, pos2(x, row.center().y), &t!("fed.connecting_note"), body(13.0), pal.accent, row.max.x - x, Align2::LEFT_CENTER);
+        searching(ui, &t!("fed.connecting_note"), pal);
     }
     ui.add_space(GAP);
     tabs(ui, room, pal, got);
@@ -300,7 +193,7 @@ fn on(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal, got: &mut Gathe
 /// The state row: its LED lit green while connected, gold while the relay
 /// connects or Iroh is unavailable; the cells' words after it, the endpoint
 /// in figures; "polls every 30 s" dim at the end when it fits.
-fn state_line(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal) {
+fn state(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
     let connected = p.running && p.online;
@@ -315,11 +208,12 @@ fn state_line(ui: &mut Ui, room: &Room, p: &FederationParams, pal: &Pal) {
     };
     if let Some(id) = &p.endpoint_id {
         let short = short_id(id);
-        parts.extend(with_figure(&t!("fed.state_endpoint", id = short), &short, body(14.0), 12.5, pal.text));
+        parts.extend(with_figures(&t!("fed.state_endpoint", id = short), &[&short], body(14.0), mono(12.5), pal.text));
     }
     let inbox = if room.accept_requests { t!("fed.state_inbox_open") } else { t!("fed.state_inbox_closed") };
     parts.push((inbox.to_string(), body(14.0), pal.text));
-    led_line(ui, row, lit, &parts, Some(t!("fed.polls").as_ref()), pal);
+    let polls = (t!("fed.polls").to_string(), body(13.0), pal.dim);
+    state_line(ui, row, lit, 16.0, &parts, Some(&polls));
 }
 
 /// The tabs, one segmented group with the open one lit (Requests carrying
@@ -359,7 +253,7 @@ fn tabs(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
 /// Requests: the inbox's card, then the table. Accept, decline, withdraw
 /// and dismiss are keys only, as in the cells: no row carries a button.
 fn requests(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
-    if inbox_card(ui, Id::new("fed-inbox"), room.accept_requests, pal).clicked() {
+    if tick_card(ui, Id::new("fed-inbox"), room.accept_requests, &t!("fed.inbox_label"), &t!("fed.inbox_hint"), pal).clicked() {
         got.acts.push(Act::ToggleInbox);
     }
     ui.add_space(GAP);
@@ -374,17 +268,17 @@ fn requests(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
             Col::left(t!("fed.col_status"), 170.0),
             Col::right(t!("fed.col_age"), 56.0),
         ],
+        FLEX_LEAST,
+        NARROWEST,
     );
-    if room.requests.is_empty() {
-        let words = if room.accept_requests { t!("fed.empty_requests") } else { t!("fed.empty_requests_closed") };
-        empty(ui, Id::new("fed-requests"), &cols, &words, pal);
-        return;
-    }
+    let empty = if room.accept_requests { t!("fed.empty_requests") } else { t!("fed.empty_requests_closed") };
     let now = unix_now();
-    let shown = Table::new(Id::new("fed-requests"), &cols, room.requests.len()).cursor(room.sel).show(ui, pal, |ui, i, row| {
+    let table = Table::new(Id::new("fed-requests"), &cols, room.requests.len()).cursor(room.sel).empty(&empty);
+    let shown = table.show(ui, pal, |ui, i, row| {
         let r = &room.requests[i];
         name_cell(ui, row, 0, &request_name(r), pal);
-        tipped(ui, row, 1, &request_offer(r), body(13.5), ink(row, pal.soft, pal), Id::new("fed-offer-tip").with(i));
+        let offer = request_offer(r);
+        cell_tipped(ui, row, 1, &offer, &offer, body(13.5), ink(row, pal.soft, pal), Id::new("fed-offer-tip").with(i));
         let (words, family) = request_status(r);
         let (font, color) = match family {
             Family::Theirs => (strong(13.0), pal.gold),
@@ -403,7 +297,7 @@ fn requests(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
 /// Tickets: the Mint card, then the table. Copy, limits, reset and revoke
 /// are keys only, as in the cells.
 fn tickets(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
-    if card(ui, Id::new("fed-mint"), &t!("fed.mint_card"), true, true, pal).clicked() {
+    if card(ui, Id::new("fed-mint"), &t!("fed.mint_card"), Glyph::Ticket, pal.ok, true, pal).clicked() {
         got.acts.push(Act::Mint);
     }
     ui.add_space(GAP);
@@ -420,16 +314,17 @@ fn tickets(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
             Col::left(t!("fed.col_last_used"), 96.0),
             Col::left(t!("fed.col_claimed"), 112.0),
         ],
+        FLEX_LEAST,
+        NARROWEST,
     );
-    if room.keys.is_empty() {
-        empty(ui, Id::new("fed-tickets"), &cols, &t!("fed.empty_tickets"), pal);
-        return;
-    }
+    let empty = t!("fed.empty_tickets");
     let now = unix_now();
-    let shown = Table::new(Id::new("fed-tickets"), &cols, room.keys.len()).cursor(room.sel).show(ui, pal, |ui, i, row| {
+    let table = Table::new(Id::new("fed-tickets"), &cols, room.keys.len()).cursor(room.sel).empty(&empty);
+    let shown = table.show(ui, pal, |ui, i, row| {
         let k = &room.keys[i];
         name_cell(ui, row, 0, &printable(&k.name, NAME_MAX), pal);
-        tipped(ui, row, 1, &k.library_names.join(", "), body(13.5), ink(row, pal.soft, pal), Id::new("fed-libs-tip").with(i));
+        let libs = k.library_names.join(", ");
+        cell_tipped(ui, row, 1, &libs, &libs, body(13.5), ink(row, pal.soft, pal), Id::new("fed-libs-tip").with(i));
         let (limits, color) = if k.expired { (t!("fed.exp_expired").to_string(), pal.gold) } else { (limits_words(k), pal.text) };
         cell(ui, row, 2, &limits, mono(12.5), ink(row, color, pal), false);
         // The webapp's fmtBytes drops a trailing .0 ("218 MB", not "218.0 MB").
@@ -450,9 +345,7 @@ fn tickets(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
         } else {
             (t!("fed.not_claimed").to_string(), pal.dim, pal.unlit)
         };
-        let at = row.cell(5);
-        led(ui, pos2(at.min.x + 3.0, at.center().y), lit);
-        text(ui, pos2(at.min.x + 14.0, at.center().y), &word, body(13.0), ink(row, color, pal), at.width() - 14.0, Align2::LEFT_CENTER);
+        led_cell(ui, row, 5, Some(lit), &word, body(13.0), ink(row, color, pal));
     });
     if let Some(i) = shown.row {
         got.acts.push(Act::Select(i));
@@ -464,13 +357,12 @@ fn tickets(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
 /// the one control a row draws.
 fn peers(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
     let w = ui.available_width();
-    let (head, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-    let label = small_caps(ui, head.left_center(), &t!("fed.paste_label"), pal.dim, w, Align2::LEFT_CENTER);
-    text(ui, pos2(label.max.x, head.center().y), &t!("fed.paste_hint"), body(13.0), pal.dim, head.max.x - label.max.x, Align2::LEFT_CENTER);
+    // The label and its hint a space apart, as every label's.
+    studio::label(ui, &format!("{}{}", t!("fed.paste_label"), t!("fed.paste_hint")), pal);
     ui.add_space(6.0);
     let (rect, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
     let focused = room.ticket_focus && !room.modal_open();
-    let typed = field_box(ui, Id::new("fed-ticket"), rect, &input_of(&room.ticket, focused, got.composition).mono(), pal);
+    let typed = field_box(ui, Id::new("fed-ticket"), rect, &studio::Input::of(&room.ticket).focused(focused, got.composition).mono(), pal);
     if typed.response.clicked() {
         got.acts.push(Act::TicketFocus);
     }
@@ -501,14 +393,14 @@ fn peers(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
             Col::left(t!("fed.col_last_seen"), 100.0),
             Col::left(t!("fed.col_discovery"), 100.0),
         ],
+        FLEX_LEAST,
+        NARROWEST,
     );
-    if room.peers.is_empty() {
-        empty(ui, Id::new("fed-peers"), &cols, &t!("fed.empty_peers"), pal);
-        return;
-    }
+    let empty = t!("fed.empty_peers");
     let now = unix_now();
     let mut picked = None;
-    let shown = Table::new(Id::new("fed-peers"), &cols, room.peers.len()).cursor(room.sel).show(ui, pal, |ui, i, row| {
+    let table = Table::new(Id::new("fed-peers"), &cols, room.peers.len()).cursor(room.sel).empty(&empty);
+    let shown = table.show(ui, pal, |ui, i, row| {
         let p = &room.peers[i];
         let (status, color, lit) = match p.last_status.as_deref() {
             None => (t!("fed.never_tested").to_string(), pal.dim, pal.unlit),
@@ -518,7 +410,7 @@ fn peers(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
         // The cells' • is the desk's LED, in the status words' colour.
         led(ui, row.cell(0).center(), lit);
         name_cell(ui, row, 1, &printable(&p.name, NAME_MAX), pal);
-        tipped(ui, row, 2, &status, body(13.0), ink(row, color, pal), Id::new("fed-status-tip").with(i));
+        cell_tipped(ui, row, 2, &status, &status, body(13.0), ink(row, color, pal), Id::new("fed-status-tip").with(i));
         let (seen, color) = match p.last_seen.as_deref() {
             Some(ts) => (age_of(Some(ts), now), pal.text),
             None => (t!("fed.never").to_string(), pal.dim),
@@ -542,15 +434,14 @@ fn peers(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
 /// The room's foot: what it is busy with in the accent, else its note; with
 /// neither, the cursor row's story — or, on Requests with no cursor, the
 /// full inbox in gold.
-fn foot(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
-    if room.busy.is_some() || room.note.is_some() {
-        note_line(ui, rect, room.busy.as_deref(), room.note.as_ref(), pal);
-        return;
-    }
-    let Some((words, figure, color)) = story(room, pal) else { return };
-    let parts = with_figure(&words, figure.as_deref().unwrap_or(""), body(13.0), 12.0, color);
-    runs(ui, rect.left_center(), &parts, rect.width());
+fn note(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
+    let parts: Vec<Run> = match story(room, pal) {
+        Some((words, figure, color)) => with_figures(&words, &[figure.as_deref().unwrap_or("")], body(13.0), mono(12.0), color),
+        None => Vec::new(),
+    };
+    foot_line(ui, rect, room.busy.as_deref(), room.note.as_ref(), &parts, pal);
 }
+
 
 /// The cursor row's whole story in the cells' words, the short endpoint id
 /// it names (drawn in figures), and its colour.
@@ -618,51 +509,47 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
     let focused = f.focused();
     let index_of = |field: Field| fields.iter().position(|x| *x == field).unwrap_or(0);
     let composition = got.composition;
-    let fresh = got.fresh;
-    // The focus moved since the last pass: the focused field, its label
-    // with it, is brought into view at once, as a table's cursor row is,
-    // where the form is taller than the room. A new form opens at its top.
-    let moved = !fresh && ui.ctx().data(|d| d.get_temp::<usize>(form_focus())) != Some(f.focus);
-    ui.ctx().data_mut(|d| d.insert_temp(form_focus(), f.focus));
-    let shown = modal(ui, Id::new("fed-form"), over, FORM_W, &title, pal, |ui| {
-        from_top(ui, fresh);
+    // The focused field, its label with it, is brought into view at once on
+    // the pass the focus moved to it, where the form is taller than the
+    // room; the form opens at its top.
+    let form_id = Id::new("fed-form");
+    let shown = Dialog::new(form_id, over, FORM_W, &title).show(ui, pal, |ui| {
         let mut out = Out::default();
         let w = ui.available_width();
         // A text field's click focuses it, and its caret is the pass's
         // while the form's focus is on it; `whole` is the field with its
         // label.
-        let take = |out: &mut Out, typed: Typed, field: Field, whole: Rect| {
+        let take = |ui: &Ui, out: &mut Out, typed: Typed, field: Field, whole: Rect| {
             if typed.response.clicked() {
                 out.acts.push(Act::FormFocus(index_of(field)));
             }
             if focused == field {
                 out.caret = typed.caret;
-                if moved {
-                    out.reveal = Some(whole);
-                }
+                reveal(ui, form_id, f.focus, whole);
             }
         };
         match f.kind {
             FormKind::Mint => {
-                let (row, _) = ui.allocate_exact_size(vec2(w, LABELLED_H), Sense::hover());
-                let rect = Rect::from_min_size(row.min, vec2(320.0_f32.min(w), LABELLED_H));
-                let input = input_of(&f.name, focused == Field::Name, composition);
+                let (row, _) = ui.allocate_exact_size(vec2(w, FIELD_ROW_H), Sense::hover());
+                let rect = Rect::from_min_size(row.min, vec2(320.0_f32.min(w), FIELD_ROW_H));
+                let input = studio::Input::of(&f.name).focused(focused == Field::Name, composition);
                 let id = Id::new("fed-form-field").with(index_of(Field::Name));
-                let shown = labelled(ui, id, rect, &t!("fed.mint_name"), Head::Section, &input, pal);
-                take(&mut out, shown, Field::Name, rect);
+                let shown = section_field(ui, id, rect, &t!("fed.mint_name"), &input, pal);
+                take(ui, &mut out, shown, Field::Name, rect);
             }
             FormKind::Accept => {
-                let short = format!("{} · ", short_id(&f.endpoint_id));
+                // The id in the figures, the separator in the words' face.
                 let said = if f.message.is_empty() {
                     (t!("fed.no_message").to_string(), body(14.0), pal.dim)
                 } else {
                     (format!("\u{201c}{}\u{201d}", f.message), body(14.0), pal.text)
                 };
+                let parts = [(short_id(&f.endpoint_id), mono(12.5), pal.dim), (" · ".to_string(), body(14.0), pal.dim), said];
                 let (row, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-                runs(ui, row.left_center(), &[(short, mono(12.5), pal.dim), said], w);
+                studio::runs(ui, row.left_center(), &parts, w, Align2::LEFT_CENTER);
             }
             FormKind::Limits => {
-                para(ui, plain(&t!("fed.limits_note"), body(13.5), pal.dim), pal);
+                Para::new(&t!("fed.limits_note"), body(13.5), pal.dim).show(ui);
             }
         }
         ui.add_space(SECTION);
@@ -670,7 +557,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
         if f.kind != FormKind::Limits {
             let head = if f.kind == FormKind::Mint { t!("fed.mint_libraries") } else { t!("fed.accept_libraries") };
             let (row, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-            caption(ui, row.left_center(), &head, Head::Section, None, w, pal);
+            section(ui, row.left_center(), &head, None, w, pal);
             ui.add_space(6.0);
             if f.libraries.is_empty() {
                 let (row, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
@@ -684,9 +571,9 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
                     let at = pos2(grid.min.x + (i % 3) as f32 * (col_w + 8.0), grid.min.y + (i / 3) as f32 * (CHOICE_H + 4.0));
                     let rect = Rect::from_min_size(at, vec2(col_w, CHOICE_H));
                     let here = focused == Field::Library(i);
-                    let response = choice(ui, Id::new("fed-form-lib").with(i), rect, *on, here, name, pal);
-                    if here && moved {
-                        out.reveal = Some(rect);
+                    let response = tick_row(ui, Id::new("fed-form-lib").with(i), rect, *on, name, here, pal);
+                    if here {
+                        reveal(ui, form_id, f.focus, rect);
                     }
                     if response.clicked() {
                         out.acts.push(Act::FormToggle(first + i));
@@ -697,7 +584,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
         }
 
         let (row, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-        caption(ui, row.left_center(), &t!("fed.limits_label"), Head::Section, None, w, pal);
+        section(ui, row.left_center(), &t!("fed.limits_label"), None, w, pal);
         ui.add_space(10.0);
         let col_w = (w - 3.0 * FORM_GAP) / 4.0;
         let mut limits = vec![
@@ -708,26 +595,26 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
         if f.kind != FormKind::Limits {
             limits.push((Field::Expires, t!("fed.field_expires"), &f.expires));
         }
-        let (row, _) = ui.allocate_exact_size(vec2(w, LABELLED_H), Sense::hover());
+        let (row, _) = ui.allocate_exact_size(vec2(w, FIELD_ROW_H), Sense::hover());
         for (k, (field, label, value)) in limits.into_iter().enumerate() {
-            let rect = Rect::from_min_size(pos2(row.min.x + k as f32 * (col_w + FORM_GAP), row.min.y), vec2(col_w, LABELLED_H));
-            let input = input_of(value, focused == field, composition).mono();
-            let shown = labelled(ui, Id::new("fed-form-field").with(index_of(field)), rect, &label, Head::Field, &input, pal);
-            take(&mut out, shown, field, rect);
+            let rect = Rect::from_min_size(pos2(row.min.x + k as f32 * (col_w + FORM_GAP), row.min.y), vec2(col_w, FIELD_ROW_H));
+            let input = studio::Input::of(value).focused(focused == field, composition).mono();
+            let shown = field_at(ui, Id::new("fed-form-field").with(index_of(field)), rect, &label, &input, pal);
+            take(ui, &mut out, shown, field, rect);
         }
 
         match f.kind {
             FormKind::Limits => {
                 ui.add_space(SECTION);
                 let (row, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-                caption(ui, row.left_center(), &t!("fed.expiry_current"), Head::Section, Some(&f.current_expiry), w, pal);
+                section(ui, row.left_center(), &t!("fed.expiry_current"), Some(&f.current_expiry), w, pal);
                 ui.add_space(10.0);
-                let (row, _) = ui.allocate_exact_size(vec2(w, LABELLED_H), Sense::hover());
-                let rect = Rect::from_min_size(row.min, vec2(col_w, LABELLED_H));
-                let input = input_of(&f.expires, focused == Field::Expires, composition).mono();
+                let (row, _) = ui.allocate_exact_size(vec2(w, FIELD_ROW_H), Sense::hover());
+                let rect = Rect::from_min_size(row.min, vec2(col_w, FIELD_ROW_H));
+                let input = studio::Input::of(&f.expires).focused(focused == Field::Expires, composition).mono();
                 let id = Id::new("fed-form-field").with(index_of(Field::Expires));
-                let shown = labelled(ui, id, rect, &t!("fed.field_new_expiry"), Head::Field, &input, pal);
-                take(&mut out, shown, Field::Expires, rect);
+                let shown = field_at(ui, id, rect, &t!("fed.field_new_expiry"), &input, pal);
+                take(ui, &mut out, shown, Field::Expires, rect);
                 let x = rect.max.x + FORM_GAP;
                 let mid = rect.max.y - FIELD_H / 2.0;
                 text(ui, pos2(x, mid), &t!("fed.expiry_hint"), body(13.0), pal.dim, row.max.x - x, Align2::LEFT_CENTER);
@@ -737,9 +624,9 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
                 let (rect, _) = ui.allocate_exact_size(vec2(w, CHOICE_H), Sense::hover());
                 let words = t!("fed.accept_their_offer", libraries = f.their_offer.join(", "));
                 let here = focused == Field::TheirOffer;
-                let response = choice(ui, Id::new("fed-form-offer"), rect, f.accept_their_offer, here, &words, pal);
-                if here && moved {
-                    out.reveal = Some(rect);
+                let response = tick_row(ui, Id::new("fed-form-offer"), rect, f.accept_their_offer, &words, here, pal);
+                if here {
+                    reveal(ui, form_id, f.focus, rect);
                 }
                 if response.clicked() {
                     out.acts.push(Act::FormToggle(index_of(Field::TheirOffer)));
@@ -749,10 +636,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
         }
 
         ui.add_space(SECTION);
-        let (line, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-        if let Some(err) = &f.error {
-            text(ui, line.left_center(), err, body(13.0), pal.gold, w, Align2::LEFT_CENTER);
-        }
+        studio::line(ui, 18.0, f.error.as_deref().unwrap_or(""), body(13.0), pal.gold);
         ui.add_space(8.0);
         let submit = match f.kind {
             FormKind::Mint => t!("fed.mint_submit"),
@@ -761,11 +645,8 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
         };
         // Lit while the form could be sent; an outline before, which still
         // takes the click and shows why not.
-        if buttons(ui, Id::new("fed-form-buttons"), &[(bare(&submit), f.can_submit())], pal) == Some(0) {
+        if foot(ui, Id::new("fed-form-buttons"), &[], &[(&submit, f.can_submit())], None, pal) == Some(0) {
             out.acts.push(Act::FormSubmit);
-        }
-        if let Some(rect) = out.reveal {
-            scroll_to(ui, rect, None);
         }
         out
     });
@@ -782,38 +663,38 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
 #[allow(clippy::too_many_arguments)]
 fn minted(ui: &Ui, name: &str, ticket: Option<&str>, libraries: &[String], over: Rect, pal: &Pal, got: &mut Gathered) {
     let title = t!("fed.minted_title", name = name);
-    let fresh = got.fresh;
-    let shown = modal(ui, Id::new("fed-minted"), over, FORM_W, &title, pal, |ui| {
-        from_top(ui, fresh);
-        para(ui, plain(&t!("fed.minted_text", libraries = libraries.join(", ")), body(14.0), pal.text), pal);
+    let shown = Dialog::new(Id::new("fed-minted"), over, FORM_W, &title).show(ui, pal, |ui| {
+        Para::new(&t!("fed.minted_text", libraries = libraries.join(", ")), body(14.0), pal.text).show(ui);
         ui.add_space(SECTION);
         match ticket {
             Some(ticket) => {
+                // In figures on the ground in a strong-edged box, 12 points
+                // in, broken anywhere: a ticket has no spaces.
                 let w = ui.available_width();
-                let mut job = plain(&printable(ticket, 4096), mono(12.5), pal.text);
-                job.wrap = TextWrapping { max_width: w - 24.0, break_anywhere: true, ..Default::default() };
-                let galley = ui.painter().layout_job(job);
-                let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y + 24.0), Sense::hover());
-                ui.painter().rect_filled(rect, square(), pal.ground);
-                ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
-                ui.painter().galley(rect.min + vec2(12.0, 12.0), galley, pal.text);
+                let back = ui.painter().add(egui::Shape::Noop);
+                let at = ui.cursor().min + vec2(12.0, 12.0);
+                let drawn = Para::new(&printable(ticket, 4096), mono(12.5), pal.text).paint(ui, at, w - 24.0);
+                let (rect, _) = ui.allocate_exact_size(vec2(w, drawn.height() + 24.0), Sense::hover());
+                ui.painter().set(back, egui::Shape::rect_filled(rect, studio::square(), pal.ground));
+                ui.painter().rect_stroke(rect, studio::square(), egui::Stroke::new(1.0, pal.edge_strong), egui::StrokeKind::Inside);
             }
             None => {
-                para(ui, plain(&t!("fed.minted_no_ticket"), body(14.0), pal.gold), pal);
+                Para::new(&t!("fed.minted_no_ticket"), body(14.0), pal.gold).show(ui);
             }
         }
         ui.add_space(SECTION);
-        para(ui, plain(&t!("fed.minted_note"), body(13.0), pal.dim), pal);
+        Para::new(&t!("fed.minted_note"), body(13.0), pal.dim).show(ui);
         ui.add_space(SECTION);
-        let copy = t!("fed.minted_copy").to_string();
-        let done = t!("fed.minted_done").to_string();
+        let copy = t!("fed.minted_copy");
+        let (copy, _) = unkeyed(&copy);
+        let done = t!("fed.minted_done");
         match ticket {
-            Some(_) => match buttons(ui, Id::new("fed-minted-buttons"), &[(copy.as_str(), false), (done.as_str(), true)], pal) {
+            Some(_) => match foot(ui, Id::new("fed-minted-buttons"), &[], &[(copy, false), (&done, true)], None, pal) {
                 Some(0) => Some(Act::MintedCopy),
                 Some(_) => Some(Act::MintedDone),
                 None => None,
             },
-            None => buttons(ui, Id::new("fed-minted-buttons"), &[(done.as_str(), true)], pal).map(|_| Act::MintedDone),
+            None => foot(ui, Id::new("fed-minted-buttons"), &[], &[(&done, true)], None, pal).map(|_| Act::MintedDone),
         }
     });
     if shown.closed {
@@ -825,23 +706,22 @@ fn minted(ui: &Ui, name: &str, ticket: Option<&str>, libraries: &[String], over:
 /// The pasted ticket's preview and the peer's name, then Add. The field
 /// always has the keyboard; a click on it adds, as the cells register it.
 fn peer_name(ui: &Ui, name: &tui_input::Input, preview: &TicketPreview, over: Rect, pal: &Pal, got: &mut Gathered) {
-    let (composition, fresh) = (got.composition, got.fresh);
-    let shown = modal(ui, Id::new("fed-peer-name"), over, FORM_W, &t!("fed.peer_name_title"), pal, |ui| {
-        from_top(ui, fresh);
+    let composition = got.composition;
+    let shown = Dialog::new(Id::new("fed-peer-name"), over, FORM_W, &t!("fed.peer_name_title")).show(ui, pal, |ui| {
         let mut out = Out::default();
-        para(ui, plain(&preview_words(preview), body(14.0), pal.ok), pal);
+        Para::new(&preview_words(preview), body(14.0), pal.ok).show(ui);
         ui.add_space(SECTION);
         let w = ui.available_width();
-        let (row, _) = ui.allocate_exact_size(vec2(w, LABELLED_H), Sense::hover());
-        let rect = Rect::from_min_size(row.min, vec2(400.0_f32.min(w), LABELLED_H));
-        let input = input_of(name, true, composition);
-        let typed = labelled(ui, Id::new("fed-peer-name-field"), rect, &t!("fed.peer_name_label"), Head::Section, &input, pal);
+        let (row, _) = ui.allocate_exact_size(vec2(w, FIELD_ROW_H), Sense::hover());
+        let rect = Rect::from_min_size(row.min, vec2(400.0_f32.min(w), FIELD_ROW_H));
+        let input = studio::Input::of(name).focused(true, composition);
+        let typed = section_field(ui, Id::new("fed-peer-name-field"), rect, &t!("fed.peer_name_label"), &input, pal);
         if typed.response.clicked() {
             out.acts.push(Act::PeerNameAdd);
         }
         out.caret = typed.caret;
         ui.add_space(SECTION);
-        if buttons(ui, Id::new("fed-peer-name-buttons"), &[(bare(&t!("fed.peer_name_add")), true)], pal) == Some(0) {
+        if foot(ui, Id::new("fed-peer-name-buttons"), &[], &[(&t!("fed.peer_name_add"), true)], None, pal) == Some(0) {
             out.acts.push(Act::PeerNameAdd);
         }
         out
@@ -853,197 +733,42 @@ fn peer_name(ui: &Ui, name: &tui_input::Input, preview: &TicketPreview, over: Re
     got.caret = shown.inner.caret;
 }
 
-/// A warning gate: its title and its consequences in gold before its
-/// verbs, the safe choice lit and the destructive one an outline, the
-/// window's edge gold. The cells draw no close button on a gate; the kit's
-/// window has one, and a click on it is Esc, which keeps.
+/// A warning gate, answered as the cells' (gold, no close; Esc keeps): its
+/// consequences in gold before its verbs, the safe choice lit and the
+/// destructive one an outline.
 #[allow(clippy::too_many_arguments)]
 fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (String, Act), go: (String, Act), pal: &Pal, got: &mut Gathered) {
-    // The kit's window titles itself in the text colour: the gate leaves
-    // its title blank and paints its own in gold where the kit's would be.
-    let fresh = got.fresh;
-    let shown = modal(ui, id, over, GATE_W, "", pal, |ui| {
-        from_top(ui, fresh);
+    let shown = Dialog::new(id, over, GATE_W, title).gate(pal).show(ui, pal, |ui| {
         for (i, line) in lines.iter().enumerate() {
             if i > 0 {
                 ui.add_space(6.0);
             }
-            para(ui, plain(line, body(14.0), pal.gold), pal);
+            Para::new(line, body(14.0), pal.gold).show(ui);
         }
         ui.add_space(SECTION);
-        buttons(ui, id.with("buttons"), &[(bare(&safe.0), true), (bare(&go.0), false)], pal)
+        foot(ui, id.with("buttons"), &[], &[(&safe.0, true), (&go.0, false)], None, pal)
     });
-    // Over the kit's edge and its blank title, on the window's own layer.
-    let layer = ui.ctx().layer_painter(LayerId::new(Order::Foreground, id));
-    layer.rect_stroke(shown.window, square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
-    let inner = shown.window.shrink(MODAL_PAD);
-    let mut head = plain(title, strong(16.0), pal.gold);
-    head.wrap = TextWrapping::truncate_at_width((inner.width() - 40.0).max(1.0));
-    let galley = ui.painter().layout_job(head);
-    let at = Align2::LEFT_CENTER.anchor_size(pos2(inner.min.x, inner.min.y + TITLE_H / 2.0), galley.size());
-    layer.galley(at.min, galley, pal.gold);
     match shown.inner {
         Some(0) => got.acts.push(safe.1),
         Some(_) => got.acts.push(go.1),
         None => {}
     }
-    if shown.closed {
-        got.keys.push(KeyCode::Esc);
-    }
 }
+
 
 // ── Pieces the kit does not have ──────────────────────────────────────────
 
-/// A room's call to act, the column wide and [`CARD_H`] tall, as the canvas
-/// draws the Mint card (the kit's add card, with the ticket's glyph where
-/// `ticket` and none otherwise): an ok-green hairline with `label` in
-/// semibold green at its centre, washed green under the pointer. While not
-/// `live` it is dim and takes no click: the start on its way.
-fn card(ui: &mut Ui, id: Id, label: &str, ticket: bool, live: bool, pal: &Pal) -> Response {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, CARD_H), Sense::hover());
-    let response = if live {
-        ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand)
-    } else {
-        ui.interact(rect, id, Sense::hover())
-    };
-    let tone = if live { pal.ok } else { pal.dim };
-    if live && response.hovered() {
-        ui.painter().rect_filled(rect, square(), pal.ok.gamma_multiply(0.10));
-    }
-    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, tone), StrokeKind::Inside);
-    let font = strong(14.0);
-    let glyph = if ticket { 26.0 } else { 0.0 };
-    let words = width_of(ui, label, font.clone()).min((w - 60.0 - glyph).max(0.0));
-    let left = rect.center().x - (glyph + words) / 2.0;
-    if ticket {
-        ticket_glyph(ui, pos2(left + 8.0, rect.center().y), tone);
-    }
-    text(ui, pos2(left + glyph, rect.center().y), label, font, tone, words + 1.0, Align2::LEFT_CENTER);
-    response
-}
-
-/// The canvas's 16-point ticket, centred on `at`: a card notched at either
-/// side, its stub's perforation dashed.
-fn ticket_glyph(ui: &Ui, at: Pos2, color: Color32) {
-    let o = at - vec2(8.0, 8.0);
-    let p = |x: f32, y: f32| o + vec2(x, y);
-    // A notch of radius 1.6 into the side at x, from its top to its foot,
-    // bulging toward `inward`.
-    let notch = |x: f32, inward: f32| -> Vec<Pos2> {
-        (0..=8)
-            .map(|k| {
-                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / 8.0;
-                p(x + inward * 1.6 * a.cos(), 8.0 + 1.6 * a.sin())
-            })
-            .collect()
-    };
-    let mut outline = vec![p(1.5, 4.0), p(14.5, 4.0)];
-    outline.extend(notch(14.5, -1.0));
-    outline.extend([p(14.5, 12.0), p(1.5, 12.0)]);
-    outline.extend(notch(1.5, 1.0).into_iter().rev());
-    let stroke = Stroke::new(1.5, color);
-    ui.painter().add(Shape::closed_line(outline, stroke));
-    ui.painter().extend(Shape::dashed_line(&[p(10.5, 5.0), p(10.5, 11.0)], stroke, 1.5, 1.5));
-}
-
-/// The inbox's card on the Requests tab, the column wide: a hairline panel
-/// holding a tick box with the label beside it and the hint under the
-/// label, all of it the one click that flips the inbox, as in the cells.
-fn inbox_card(ui: &mut Ui, id: Id, open: bool, pal: &Pal) -> Response {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, INBOX_H), Sense::hover());
-    let response = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-    let hovered = response.hovered();
-    ui.painter().rect_filled(rect, square(), if hovered { pal.raised } else { pal.panel });
-    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, if hovered { pal.dim } else { pal.edge }), StrokeKind::Inside);
-    let top = rect.min.y + 20.0;
-    let mark = Rect::from_center_size(pos2(rect.min.x + 24.0, top), Vec2::splat(16.0));
-    tick(ui, mark, open, hovered, pal.ground, pal);
-    let x = mark.max.x + 12.0;
-    let room_w = rect.max.x - x - 16.0;
-    text(ui, pos2(x, top), &t!("fed.inbox_label"), strong(14.0), pal.text, room_w, Align2::LEFT_CENTER);
-    text(ui, pos2(x, top + 21.0), &t!("fed.inbox_hint"), body(13.0), pal.dim, room_w, Align2::LEFT_CENTER);
-    response
-}
-
-/// A tick box at `rect` on `fill`, as the kit draws its own (which it
-/// keeps to itself): a dim edge when off, the ok green's edge and check
-/// when on, each brighter under the pointer.
-fn tick(ui: &Ui, rect: Rect, on: bool, hovered: bool, fill: Color32, pal: &Pal) {
-    let edge = if on { pal.ok } else { pal.dim };
-    let edge = if hovered { lift(edge, 40) } else { edge };
-    ui.painter().rect_filled(rect, square(), fill);
-    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, edge), StrokeKind::Inside);
-    if on {
-        // The canvas's check in its 10-point box: M1.5 5.2 l2.4 2.4 L8.6 2.6.
-        let o = rect.center() - vec2(5.0, 5.0);
-        let points = vec![o + vec2(1.5, 5.2), o + vec2(3.9, 7.6), o + vec2(8.6, 2.6)];
-        let check = if hovered { lift(pal.ok, 40) } else { pal.ok };
-        ui.painter().add(Shape::line(points, Stroke::new(1.7, check)));
-    }
-}
-
-/// One of a form's tick boxes in a row `rect` of its own (a library of the
-/// grid, their offer): the box on the panel's fill and `label` beside it,
-/// cut to the row. The form's focus wears the keyboard's look — the raised
-/// fill, the accent ring, a semibold label — and the pointer raises it. The
-/// whole row takes the click.
-fn choice(ui: &Ui, id: Id, rect: Rect, on: bool, focused: bool, label: &str, pal: &Pal) -> Response {
-    let response = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-    let hovered = response.hovered();
-    if focused || hovered {
-        ui.painter().rect_filled(rect, square(), pal.raised);
-    }
-    if focused {
-        ring(ui, rect, pal);
-    }
-    let mark = Rect::from_min_size(pos2(rect.min.x + 8.0, rect.center().y - 8.0), Vec2::splat(16.0));
-    tick(ui, mark, on, hovered, pal.panel, pal);
-    let x = mark.max.x + 10.0;
-    let font = if focused { strong(14.0) } else { body(14.0) };
-    text(ui, pos2(x, rect.center().y), label, font, pal.text, rect.max.x - x - 8.0, Align2::LEFT_CENTER);
-    response
-}
-
-/// A field's label over its box, in `rect`: the label's 14 points, 6 of
-/// room, the box.
-fn labelled(ui: &Ui, id: Id, rect: Rect, label: &str, head: Head, input: &studio::Input, pal: &Pal) -> Typed {
-    caption(ui, pos2(rect.min.x, rect.min.y + 7.0), label, head, None, rect.width(), pal);
-    let at = Rect::from_min_size(pos2(rect.min.x, rect.max.y - FIELD_H), vec2(rect.width(), FIELD_H));
-    field_box(ui, id, at, input, pal)
-}
-
-/// What a field draws of one of the room's own inputs: its value and its
-/// caret, the keyboard's look while `focused`, and the composition only
-/// then.
-fn input_of<'a>(value: &'a tui_input::Input, focused: bool, composition: &'a str) -> studio::Input<'a> {
-    studio::Input::new(value.value(), value.cursor()).focused(focused, if focused { composition } else { "" })
-}
-
-/// How a form's caption sets its head, as the canvas's mint form does.
-#[derive(Clone, Copy, PartialEq)]
-enum Head {
-    /// A part of the form (who it is for, the libraries, the limits): the
-    /// desk's capitals at 11 points.
-    Section,
-    /// A field of a row (STREAM KBPS): the small capitals.
-    Field,
-}
-
-/// A caption in the desk's capitals (`head` says which) up to its first
-/// `·`, the rest dim in the UI face 8 points after it (the canvas's
-/// "LIMITS · 0 = unlimited …"), and `tail` after that in the text colour.
-fn caption(ui: &Ui, pos: Pos2, s: &str, head: Head, tail: Option<&str>, max_w: f32, pal: &Pal) {
+/// A form's section head, as the canvas's mint form sets one: the desk's
+/// capitals at 11 points up to its first `·`, the rest dim in the UI face
+/// 8 points after it (the canvas's "LIMITS · 0 = unlimited …"), and `tail`
+/// after that in the text colour.
+fn section(ui: &Ui, pos: Pos2, s: &str, tail: Option<&str>, max_w: f32, pal: &Pal) {
     let (first, rest) = match s.find('·') {
         Some(at) => (s[..at].trim_end(), &s[at..]),
         None => (s, ""),
     };
     let end = pos.x + max_w;
-    let mut drawn = match head {
-        Head::Section => caps(ui, pos, first, 11.0, pal.dim, max_w, Align2::LEFT_CENTER),
-        Head::Field => small_caps(ui, pos, first, pal.dim, max_w, Align2::LEFT_CENTER),
-    };
+    let mut drawn = caps(ui, pos, first, 11.0, pal.dim, max_w, Align2::LEFT_CENTER);
     if !rest.is_empty() && end - drawn.max.x > 16.0 {
         let x = drawn.max.x + 8.0;
         drawn = text(ui, pos2(x, pos.y), rest, body(13.0), pal.dim, end - x, Align2::LEFT_CENTER);
@@ -1055,146 +780,18 @@ fn caption(ui: &Ui, pos: Pos2, s: &str, head: Head, tail: Option<&str>, max_w: f
     }
 }
 
-/// A modal's buttons at the right of a row of their own, in order, each as
-/// wide as its words, the lit one where `primary`: which was clicked.
-fn buttons(ui: &mut Ui, id: Id, items: &[(&str, bool)], pal: &Pal) -> Option<usize> {
-    let w = ui.available_width();
-    let (row, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
-    let widths: Vec<f32> = items.iter().map(|(label, _)| form_button_width(ui, label)).collect();
-    let total = widths.iter().sum::<f32>() + 10.0 * items.len().saturating_sub(1) as f32;
-    let mut x = (row.max.x - total).max(row.min.x);
-    let mut clicked = None;
-    for (i, ((label, primary), bw)) in items.iter().zip(widths).enumerate() {
-        let rect = Rect::from_min_size(pos2(x, row.min.y), vec2(bw, FORM_BUTTON_H));
-        if form_button(ui, id.with(i), rect, label, *primary, pal).clicked() {
-            clicked = Some(i);
-        }
-        x += bw + 10.0;
-    }
-    clicked
-}
-
-/// A row's name: semibold on the cursor's row (the canvas's), white under
-/// the pointer.
-fn name_cell(ui: &Ui, row: &RowCtx, at: usize, name: &str, pal: &Pal) {
-    let font = if row.selected { strong(14.0) } else { body(14.0) };
-    cell(ui, row, at, name, font, ink(row, pal.text, pal), false);
-}
-
-/// A cell whose words may not fit: cut with an ellipsis, and whole in a
-/// tooltip only when they were cut, as the cells register one.
-fn tipped(ui: &Ui, row: &RowCtx, at: usize, s: &str, font: FontId, color: Color32, id: Id) {
-    cell(ui, row, at, s, font.clone(), color, false);
-    let rect = row.cell(at);
-    if width_of(ui, s, font) > rect.width() {
-        let _ = ui.interact(rect, id, Sense::hover()).on_hover_text(s);
-    }
-}
-
-/// An empty table: its headings, and under them the cells' sentence dim.
-fn empty(ui: &mut Ui, id: Id, cols: &[Col], words: &str, pal: &Pal) {
-    let top = ui.cursor().min;
-    let w = ui.available_width();
-    let _ = Table::new(id, cols, 0).inert().show(ui, pal, |_, _, _| {});
-    text(ui, pos2(top.x + 10.0, top.y + TABLE_HEAD + ROW_H / 2.0), words, body(14.0), pal.dim, w - 20.0, Align2::LEFT_CENTER);
-}
-
-/// The table's columns, the canvas's widths narrowed together where `w`
-/// is too narrow for them and a flexible column's least: the default
-/// window's room is narrower than the canvas's.
-fn fitted(w: f32, cols: Vec<Col>) -> Vec<Col> {
-    // The kit's gap between columns, and a row's padding either side.
-    let gaps = 16.0 * cols.len().saturating_sub(1) as f32 + 20.0;
-    let fixed: f32 = cols.iter().map(|c| c.w).sum();
-    let room = w - gaps - 120.0;
-    if fixed <= room || fixed <= 0.0 {
-        return cols;
-    }
-    let k = (room / fixed).max(0.4);
-    cols.into_iter().map(|c| Col { w: (c.w * k).floor(), ..c }).collect()
-}
-
-/// A line led by its LED: `parts` in a run after it, cut with an ellipsis
-/// where they run long, and `right` dim at the line's end when the room
-/// left holds it whole.
-fn led_line(ui: &Ui, row: Rect, lit: Color32, parts: &[(String, FontId, Color32)], right: Option<&str>, pal: &Pal) {
-    led(ui, pos2(row.min.x + 3.0, row.center().y), lit);
-    let x = row.min.x + 16.0;
-    let natural = ui.painter().layout_job(run_job(parts)).size().x;
-    let mut end = row.max.x;
-    if let Some(right) = right {
-        let right_w = width_of(ui, right, body(13.0));
-        if x + natural + 16.0 + right_w <= row.max.x {
-            text(ui, pos2(row.max.x, row.center().y), right, body(13.0), pal.dim, right_w + 1.0, Align2::RIGHT_CENTER);
-            end = row.max.x - right_w - 16.0;
-        }
-    }
-    runs(ui, pos2(x, row.center().y), parts, end - x);
-}
-
-/// `parts` in one line from `pos` (its left middle), no wider than `max_w`,
-/// an ellipsis where it is cut.
-fn runs(ui: &Ui, pos: Pos2, parts: &[(String, FontId, Color32)], max_w: f32) {
-    let mut job = run_job(parts);
-    job.wrap = TextWrapping::truncate_at_width(max_w.max(1.0));
-    let galley = ui.painter().layout_job(job);
-    let rect = Align2::LEFT_CENTER.anchor_size(pos, galley.size());
-    ui.painter().galley(rect.min, galley, Color32::WHITE);
-}
-
-fn run_job(parts: &[(String, FontId, Color32)]) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    for (s, font, color) in parts {
-        append(&mut job, s, font.clone(), *color);
-    }
-    job
-}
-
-/// `s` split around the first `figure` in it, the figure in the grid's
-/// monospace at `figure_size` (the canvas's 12.5 in the state line, 12 on
-/// the note line): an endpoint's short id in its sentence.
-fn with_figure(s: &str, figure: &str, font: FontId, figure_size: f32, color: Color32) -> Vec<(String, FontId, Color32)> {
-    match s.find(figure).filter(|_| !figure.is_empty()) {
-        Some(at) => vec![
-            (s[..at].to_string(), font.clone(), color),
-            (figure.to_string(), mono(figure_size), color),
-            (s[at + figure.len()..].to_string(), font, color),
-        ],
-        None => vec![(s.to_string(), font, color)],
-    }
-}
-
-fn append(job: &mut LayoutJob, s: &str, font: FontId, color: Color32) {
-    if !s.is_empty() {
-        job.append(s, 0.0, TextFormat { font_id: font, color, ..Default::default() });
-    }
-}
-
-fn plain(s: &str, font: FontId, color: Color32) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    append(&mut job, s, font, color);
-    job
-}
-
-/// `job` wrapped to the layout's width, laid out top-down.
-fn para(ui: &mut Ui, mut job: LayoutJob, pal: &Pal) {
-    let w = ui.available_width();
-    job.wrap = TextWrapping::wrap_at_width(w);
-    let galley = ui.painter().layout_job(job);
-    let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
-    ui.painter().galley(rect.min, galley, pal.text);
-}
-
-/// A cells label without its glyphs — the bullet, the tick and the arrows
-/// the terminal draws with — which the desk draws as an LED, a tick box or
-/// a button instead.
-fn bare(s: &str) -> &str {
-    s.trim_matches(|c: char| matches!(c, '•' | '✓' | '◂' | '▸') || c.is_whitespace())
+/// A field under a [`section`] head, in `slot` (a [`FIELD_ROW_H`] rect): the
+/// mint's name, the peer's.
+fn section_field(ui: &Ui, id: Id, slot: Rect, label: &str, input: &studio::Input, pal: &Pal) -> Typed {
+    section(ui, pos2(slot.min.x, slot.min.y + 7.0), label, None, slot.width(), pal);
+    let at = Rect::from_min_size(pos2(slot.min.x, slot.max.y - FIELD_H), vec2(slot.width(), FIELD_H));
+    field_box(ui, id, at, input, pal)
 }
 
 #[cfg(test)]
 mod tests {
-    use egui::{Event, Modifiers, PointerButton};
+    use egui::epaint::Shape;
+    use egui::{Event, Modifiers, PointerButton, Vec2};
 
     use super::super::tests::{english, loaded, new_room, on, params_off, params_on, press, ticket_for, type_text};
     use super::*;
@@ -1254,6 +851,8 @@ mod tests {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), events, ..Default::default() };
         let (mut caret, mut outcome) = (None, None);
         let mut out = ctx.run_ui(input, |ui| {
+            // The host styles egui and paints the ground first.
+            let _ = studio::begin(ui);
             let shown = show(ui, room, composing);
             caret = shown.caret;
             outcome = outcome.or(shown.outcome);
@@ -1622,7 +1221,7 @@ mod tests {
         let short = vec2(640.0, 340.0);
         // Where the form's body starts: under the title row, whose middle
         // the close button stands on, and the kit's 20 points under it.
-        let body_top = |ctx: &egui::Context| rect_of(ctx, Id::new("fed-form").with("close")).center().y + TITLE_H / 2.0 + 20.0;
+        let body_top = |ctx: &egui::Context| rect_of(ctx, Id::new("fed-form").with("close")).center().y + 20.0 / 2.0 + 20.0;
         let mut room = on();
         room.act(Act::Mint);
         let _ = settle(&ctx, &mut room, short);
@@ -1704,7 +1303,7 @@ mod tests {
         let ticket = "mstrfed1:eyJ0IjoibmV3In0".to_string();
         let minted = Modal::Minted { name: "Bob's NAS".into(), ticket: Some(ticket.clone()), libraries: vec!["music".into()] };
         room.modal = minted.clone();
-        settle(&ctx, &mut room, SMALL).shows(&["Ticket for Bob's NAS", "can read music until", &ticket, "The first server to use it", "Y COPY", "DONE"]);
+        settle(&ctx, &mut room, SMALL).shows(&["Ticket for Bob's NAS", "can read music until", &ticket, "The first server to use it", "COPY", "DONE"]);
         catch(Copied::Clipboard);
         let _ = caught();
         let _ = click_on(&ctx, &mut room, SMALL, Id::new("fed-minted-buttons").with(0));
@@ -1719,7 +1318,7 @@ mod tests {
         room.modal = Modal::Minted { name: "x".into(), ticket: None, libraries: vec!["music".into()] };
         let seen = settle(&ctx, &mut room, SMALL);
         seen.shows(&["the key was minted, but no ticket"]);
-        assert!(!seen.has("Y COPY"), "nothing to copy");
+        assert!(!seen.has("COPY"), "nothing to copy");
         let _ = click_on(&ctx, &mut room, SMALL, Id::new("fed-minted-buttons").with(0));
         assert!(matches!(room.modal, Modal::None), "Done alone");
 
@@ -1747,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gate_keeps_on_its_lit_button_and_its_close_and_acts_on_the_other() {
+    fn a_gate_is_answered_keep_on_its_lit_button_or_esc_and_act_on_the_other() {
         let _en = english();
         let ctx = context();
         let mut room = on();
@@ -1769,8 +1368,9 @@ mod tests {
             assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "{kind}: the lit button keeps");
             room.modal = gate.clone();
             let _ = settle(&ctx, &mut room, SMALL);
-            assert_eq!(click_on(&ctx, &mut room, SMALL, id.with("close")), None);
-            assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "{kind}: the close is Esc, which keeps");
+            assert!(ctx.read_response(id.with("close")).is_none(), "{kind}: a gate has no close, as the cells draw it");
+            press(&mut room, KeyCode::Esc);
+            assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "{kind}: Esc keeps");
             room.modal = gate;
             let _ = settle(&ctx, &mut room, SMALL);
             let _ = click_on(&ctx, &mut room, SMALL, id.with("buttons").with(1));

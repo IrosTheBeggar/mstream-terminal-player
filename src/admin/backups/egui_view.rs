@@ -13,31 +13,20 @@
 //! Built only with the window: the terminal build has no panel to draw in.
 
 use egui::epaint::StrokeKind;
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{
-    Align, Align2, Color32, CursorIcon, FontId, Id, LayerId, Layout, Order, Pos2, Rect, ScrollArea, Sense, Shape, Stroke,
-    Ui, UiBuilder, pos2, vec2,
-};
+use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
 
 use super::super::{EguiShown, age_text, iso_unix, unix_now};
 use super::*;
 use crate::api::types::ActiveBackup;
 use crate::gui::window::studio::{
-    self, Col, FIELD_H, FORM_BUTTON_H, Pal, Table, add_card, begin, body, cell, checkbox, chip, field_box, form_button,
-    form_button_width, ink, led, meter, meter_lit, modal, mono, note_line, radio, ring, small_caps, square, strong, text,
-    width_of,
+    self, Col, Dialog, FIELD_H, FORM_BUTTON_H, Glyph, Pal, Para, Run, Table, add_card, bare, body, cell, check, checkbox,
+    chip, cut_start, field_box, foot, foot_line, form_button, form_button_width, hand, ink, label, led, led_cell, line,
+    meter, meter_lit, mono, name_cell, path_cell, pointer, radio, reveal, ring, ring_since, room_rects, small_caps, square,
+    strong, text, width_of, with_figures,
 };
 
-/// The room's margins inside its region, in points: the canvas's 24 at the
-/// sides and 14 at the foot; at the head less than its 20, the host's
-/// banner row standing above the region already.
-const PAD_X: f32 = 24.0;
-const PAD_TOP: f32 = 10.0;
-const PAD_FOOT: f32 = 14.0;
 /// The canvas's room between the room's blocks, the note line's among them.
-const GAP: f32 = 18.0;
-/// The note line along the room's foot.
-const NOTE_H: f32 = 18.0;
+const GAP: f32 = studio::ROOM_GAP;
 /// The form's room between its blocks, and between a label and its field.
 const FORM_GAP: f32 = 20.0;
 const LABEL_GAP: f32 = 8.0;
@@ -58,33 +47,32 @@ const NUMBER_W: f32 = 120.0;
 /// One pass of the room over the whole of `ui`, the region its host hands
 /// it, `composition` the input method's uncommitted text for the field that
 /// has the keyboard. The pass's clicks are applied after it through
-/// [`Room::act`] (the remove gate's close as the Esc it stands for), and
-/// what the host must know comes back: the focused field's caret, and an
-/// outcome a click brought, which none in this room does.
+/// [`Room::act`], and what the host must know comes back: the focused
+/// field's caret, and an outcome a click brought, which none in this room
+/// does.
 pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown {
-    let pal = begin(ui);
+    let pal = Pal::now();
     let full = ui.max_rect();
-    let column = Rect::from_min_max(pos2(full.min.x + PAD_X, full.min.y + PAD_TOP), pos2(full.max.x - PAD_X, full.max.y - PAD_FOOT));
-    let note_rect = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
-    let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, note_rect.min.y - GAP));
+    let (body_rect, note_rect) = room_rects(full);
 
     let mut acts: Vec<Act> = Vec::new();
-    let mut base = ui.new_child(UiBuilder::new().id_salt("backups-body").max_rect(body_rect).layout(Layout::top_down(Align::Min)));
+    let mut base = ui.new_child(
+        egui::UiBuilder::new().id_salt("backups-body").max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)),
+    );
     base.set_clip_rect(body_rect.expand(1.0).intersect(ui.clip_rect()));
     state(&mut base, room, &pal);
     if room.loaded {
         base.add_space(GAP);
-        if add_card(&mut base, Id::new("backups-add"), &t!("bak.add_card"), &pal).clicked() {
+        if add_card(&mut base, Id::new("backups-add"), &t!("bak.add_card"), Glyph::Tray, &pal).clicked() {
             acts.push(Act::Add);
         }
         base.add_space(GAP);
         table(&mut base, room, &pal, &mut acts);
     }
-    foot(ui, note_rect, room, &pal);
+    note(ui, note_rect, room, &pal);
 
     // A modal makes the room beneath inert: what was clicked under it this
     // pass is dropped, as the cells view drops its registrations.
-    let mut keys: Vec<KeyCode> = Vec::new();
     let mut caret = None;
     if !matches!(room.modal, Modal::None) {
         acts.clear();
@@ -94,18 +82,13 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
         Modal::Form(f) => caret = form(ui, room, f, full, composition, &pal, &mut acts),
         Modal::Browser { browse, .. } => browser(ui, browse, full, &pal, &mut acts),
         Modal::History { dest, runs, loaded, sel } => history(ui, dest, runs, *loaded, *sel, full, &pal, &mut acts),
-        &Modal::Remove(id) => gate(ui, room, id, full, &pal, &mut acts, &mut keys),
+        &Modal::Remove(id) => gate(ui, room, id, full, &pal, &mut acts),
     }
 
-    let acted = !acts.is_empty() || !keys.is_empty();
+    let acted = !acts.is_empty();
     let mut outcome = None;
     for act in acts {
         if let Some(out) = room.act(act) {
-            outcome.get_or_insert(out);
-        }
-    }
-    for code in keys {
-        if let Some(out) = room.key(KeyEvent::new(code, KeyModifiers::NONE)) {
             outcome.get_or_insert(out);
         }
     }
@@ -123,22 +106,10 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
             caret = None;
         }
     }
-    if !matches!(room.modal, Modal::Browser { .. }) {
-        // The browser is down (or a click just closed it): what its list
-        // last showed goes, so the browser opened again opens on its
-        // cursor's row.
-        ui.ctx().data_mut(|d| d.remove::<DirsView>(dirs_memory()));
-    }
     EguiShown { caret, outcome }
 }
 
 // ── The state line ────────────────────────────────────────────────────────
-
-/// A state's word without the bullet the cells set before it: the LED
-/// stands there instead.
-fn unbullet(word: &str) -> &str {
-    word.trim_start_matches('•').trim_start()
-}
 
 /// The state line: what the room is doing behind its LED (a run in flight,
 /// tasks queued, or idle), the cadence where it fits, and the gold BETA
@@ -155,51 +126,93 @@ fn state(ui: &mut Ui, room: &Room, pal: &Pal) {
     let now = unix_now();
     // The word in the semibold face and its colour while something runs or
     // waits, as the cells set it bold; idle, plain and dim.
-    let (word, detail, tone, lamp, polls) = match &room.status.active {
+    // The detail's figures (the path, the time it has run) in the grid's
+    // monospace, and the cadence's, as the canvas sets them.
+    let (word, detail, tone, lamp, figures, polls) = match &room.status.active {
         Some(a) => {
             let elapsed = a.started_at.as_deref().and_then(iso_unix).map(|t| elapsed_text(now - t)).unwrap_or_default();
             let trigger = a.trigger_reason.as_deref().map(trigger_words).unwrap_or_default();
+            let path = a.dest_path.clone().unwrap_or_default();
             let detail = t!(
                 "bak.state_running_detail",
                 library = printable(a.library_name.as_deref().unwrap_or(""), 64),
-                path = a.dest_path.clone().unwrap_or_default(),
+                path = path.clone(),
                 trigger = trigger,
-                elapsed = elapsed
+                elapsed = elapsed.clone()
             );
-            (t!("bak.state_running"), detail, pal.ok, pal.ok, t!("bak.polls_2"))
+            (t!("bak.state_running"), detail, pal.ok, pal.ok, vec![path, elapsed], t!("bak.polls_2"))
         }
         None if room.status.queue_length > 0 => {
             let n = room.status.queue_length;
             let word = if n == 1 { t!("bak.state_queued_one") } else { t!("bak.state_queued", n = n) };
-            (word, t!("bak.state_queued_detail"), pal.gold, pal.gold, t!("bak.polls_2"))
+            (word, t!("bak.state_queued_detail"), pal.gold, pal.gold, Vec::new(), t!("bak.polls_2"))
         }
         None => {
             let on = room.dests.iter().filter(|d| d.enabled).count();
             let detail = t!("bak.state_idle_detail", on = on, total = room.dests.len());
-            (t!("bak.state_idle"), detail, pal.dim, pal.unlit, t!("bak.polls_5"))
+            (t!("bak.state_idle"), detail, pal.dim, pal.unlit, Vec::new(), t!("bak.polls_5"))
         }
     };
-    let (word, detail) = (unbullet(&word), detail.trim_start());
+    let (word, detail) = (bare(&word), detail.trim_start());
     let font = if room.status.active.is_some() || room.status.queue_length > 0 { strong(14.0) } else { body(14.0) };
+    let figures: Vec<&str> = figures.iter().map(String::as_str).collect();
+    let detail = with_figures(detail, &figures, body(14.0), mono(12.5), pal.text);
+    let polls = cadence(&polls, pal);
     let x = row.min.x + 16.0;
-    let state_w = 16.0 + width_of(ui, word, font.clone()) + 10.0 + width_of(ui, detail, body(14.0));
+    let state_w = 16.0 + width_of(ui, word, font.clone()) + 10.0 + studio::runs_width(ui, &detail);
     let mut right = beta.min.x - 16.0;
     // The cadence only where the whole state fits beside it, as the cells
     // show it.
-    let polls_w = width_of(ui, &polls, body(13.0));
+    let polls_w = studio::runs_width(ui, &polls);
     if state_w + 16.0 + polls_w <= right - row.min.x {
-        text(ui, pos2(right, y), &polls, body(13.0), pal.dim, polls_w + 1.0, Align2::RIGHT_CENTER);
+        studio::runs(ui, pos2(right, y), &polls, polls_w + 1.0, Align2::RIGHT_CENTER);
         right -= polls_w + 16.0;
     }
     led(ui, pos2(row.min.x + 3.0, y), lamp);
+    // The board's 10 points between the word and its detail.
     let said = text(ui, pos2(x, y), word, font, tone, (right - x).max(1.0), Align2::LEFT_CENTER);
     let from = said.max.x + 10.0;
     if from < right {
-        text(ui, pos2(from, y), detail, body(14.0), pal.text, right - from, Align2::LEFT_CENTER);
+        studio::runs(ui, pos2(from, y), &detail, right - from, Align2::LEFT_CENTER);
     }
     if let Some(a) = &room.status.active {
         progress(ui, a, pal);
     }
+}
+
+/// A cadence ("polls every 2 s") dim, its figure in the monospace.
+fn cadence(s: &str, pal: &Pal) -> Vec<Run> {
+    let figure = s.find(|c: char| c.is_ascii_digit()).map_or("", |at| &s[at..]);
+    with_figures(s, &[figure], body(13.0), mono(12.0), pal.dim)
+}
+
+/// The figures of a line of counts, each run of digits with the marks that
+/// join them (1,341 · 45% · 3.9) in the monospace, the words between them
+/// in `font`: the canvas's progress line.
+fn counts(s: &str, font: FontId, color: Color32) -> Vec<Run> {
+    let mut parts: Vec<Run> = Vec::new();
+    let (mut word, mut digits) = (String::new(), String::new());
+    for c in s.chars() {
+        let figure = c.is_ascii_digit() || (!digits.is_empty() && matches!(c, ',' | '.' | '%'));
+        if figure {
+            if !word.is_empty() {
+                parts.push((std::mem::take(&mut word), font.clone(), color));
+            }
+            digits.push(c);
+        } else {
+            if !digits.is_empty() {
+                parts.push((std::mem::take(&mut digits), mono(12.0), color));
+            }
+            word.push(c);
+        }
+    }
+    if !digits.is_empty() {
+        parts.push((digits, mono(12.0), color));
+    }
+    if !word.is_empty() {
+        parts.push((word, font, color));
+    }
+    parts
 }
 
 /// A run's progress under the state line: the ten-segment meter, a segment
@@ -241,10 +254,11 @@ fn progress(ui: &mut Ui, a: &ActiveBackup, pal: &Pal) {
     };
     let from = bar.max.x + 12.0;
     let room_w = row.max.x - from;
-    while !groups.is_empty() && width_of(ui, &line(&groups), body(13.0)) > room_w {
+    let said = |groups: &[String]| counts(&line(groups), body(13.0), pal.dim);
+    while !groups.is_empty() && studio::runs_width(ui, &said(&groups)) > room_w {
         groups.pop();
     }
-    text(ui, pos2(from, row.center().y), &line(&groups), body(13.0), pal.dim, room_w.max(1.0), Align2::LEFT_CENTER);
+    studio::runs(ui, pos2(from, row.center().y), &said(&groups), room_w.max(1.0), Align2::LEFT_CENTER);
 }
 
 // ── The destinations ──────────────────────────────────────────────────────
@@ -260,26 +274,6 @@ fn status_tone(status: &str, pal: &Pal) -> Color32 {
     }
 }
 
-/// `s` cut from its start to fit `max_w` in `font`, an ellipsis where it
-/// was cut, so a path keeps its leaf in view; and whether it was cut.
-fn tail_fit(ui: &Ui, s: &str, font: FontId, max_w: f32) -> (String, bool) {
-    if width_of(ui, s, font.clone()) <= max_w {
-        return (s.to_string(), false);
-    }
-    let chars: Vec<char> = s.chars().collect();
-    let cut = |drop: usize| -> String { std::iter::once('…').chain(chars[drop..].iter().copied()).collect() };
-    // The fewest characters dropped that make it fit.
-    let (mut lo, mut hi) = (1, chars.len());
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if width_of(ui, &cut(mid), font.clone()) <= max_w {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    (cut(lo), true)
-}
 
 /// The destinations under their headings, in server order: the library,
 /// the path cut from its start (the whole of it in a tooltip where it was
@@ -303,25 +297,22 @@ fn table(ui: &mut Ui, room: &Room, pal: &Pal, acts: &mut Vec<Act>) {
         Col::left(t!("bak.col_last_run"), want[3] * k),
         Col::center(t!("bak.col_on"), on_w),
     ];
-    let top = ui.cursor().min;
     let now = unix_now();
     let running = room.running_id();
     let pct = room.status.active.as_ref().and_then(|a| {
         a.expected_files.filter(|e| *e > 0).map(|e| ((a.files_copied + a.files_unchanged + a.files_trashed) * 100 / e).min(100))
     });
     let mut toggled = None;
-    let shown = Table::new(Id::new("backups-table"), &cols, room.dests.len()).cursor(room.sel).show(ui, pal, |ui, i, row| {
+    let empty = t!("bak.empty");
+    let table = Table::new(Id::new("backups-table"), &cols, room.dests.len()).cursor(room.sel).empty(&empty);
+    let shown = table.show(ui, pal, |ui, i, row| {
         let d = &room.dests[i];
-        let y = row.rect.center().y;
-        let name = if row.selected { strong(14.0) } else { body(14.0) };
-        cell(ui, row, 0, &printable(&d.library_name, 64), name, ink(row, pal.text, pal), false);
-        let (x, cw) = row.cells[1];
-        let (path, cut) = tail_fit(ui, &d.dest_path, mono(12.5), cw);
-        text(ui, pos2(x, y), &path, mono(12.5), ink(row, pal.soft, pal), cw + 1.0, Align2::LEFT_CENTER);
-        if cut {
-            let _ = ui.interact(row.cell(1), Id::new("backups-path").with(d.id), Sense::hover()).on_hover_text(d.dest_path.as_str());
-        }
-        cell(ui, row, 2, &trigger_cell(d), body(13.5), ink(row, pal.soft, pal), false);
+        name_cell(ui, row, 0, &printable(&d.library_name, 64), pal);
+        path_cell(ui, row, 1, &d.dest_path, mono(12.5), ink(row, pal.soft, pal), Id::new("backups-path").with(d.id));
+        // A daily run's hour is a figure, in the monospace.
+        let trigger = trigger_cell(d);
+        let trigger_font = if trigger.starts_with(|c: char| c.is_ascii_digit()) { mono(12.5) } else { body(13.5) };
+        cell(ui, row, 2, &trigger, trigger_font, ink(row, pal.soft, pal), false);
         if d.retention_days == 0 {
             cell(ui, row, 3, &t!("bak.no_trash"), body(13.5), ink(row, pal.dim, pal), false);
         } else {
@@ -343,18 +334,11 @@ fn table(ui: &mut Ui, room: &Room, pal: &Pal, acts: &mut Vec<Act>) {
                 }
             }
         };
-        let (x, cw) = row.cells[4];
-        led(ui, pos2(x + 3.0, y), lamp);
-        text(ui, pos2(x + 14.0, y), &words, body(13.5), ink(row, tone, pal), (cw - 14.0).max(1.0), Align2::LEFT_CENTER);
+        led_cell(ui, row, 4, Some(lamp), &words, body(13.5), ink(row, tone, pal));
         if checkbox(ui, Id::new("backups-on").with(d.id), row.cell(5).center(), d.enabled, pal).clicked() {
             toggled = Some(d.id);
         }
     });
-    if room.dests.is_empty() {
-        // Under the headings and their hairline, where the first row goes.
-        let at = pos2(top.x + 10.0, top.y + 34.0 + 20.0);
-        text(ui, at, &t!("bak.empty"), body(14.0), pal.dim, w, Align2::LEFT_CENTER);
-    }
     if let Some(i) = shown.row {
         acts.push(Act::Select(i));
     }
@@ -365,13 +349,18 @@ fn table(ui: &mut Ui, room: &Room, pal: &Pal, acts: &mut Vec<Act>) {
 
 /// The room's foot: what it is busy with in the accent, else its note,
 /// else the cursor row's extras (its path, its throttle, its patterns and
-/// its last run's word), as the cells ride them on the note line.
-fn foot(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
-    if room.busy.is_some() || room.note.is_some() {
-        note_line(ui, rect, room.busy.as_deref(), room.note.as_ref(), pal);
-        return;
-    }
-    let Some(d) = room.selected().filter(|_| room.loaded) else { return };
+/// its last run's word), as the cells ride them on the note line, in one
+/// run.
+fn note(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
+    let story: Vec<Run> = match room.selected().filter(|_| room.loaded) {
+        Some(d) => story(room, d, pal).into_iter().map(|(s, color)| (s, body(13.0), color)).collect(),
+        None => Vec::new(),
+    };
+    foot_line(ui, rect, room.busy.as_deref(), room.note.as_ref(), &story, pal);
+}
+
+/// The cursor row's extras for the foot, in their colours.
+fn story(room: &Room, d: &BackupDestination, pal: &Pal) -> Vec<(String, Color32)> {
     let mut spans: Vec<(String, Color32)> = vec![(d.dest_path.clone(), pal.text)];
     if d.inter_file_delay_ms > 0 {
         spans.push((format!(" · {}", t!("bak.note_throttle", ms = d.inter_file_delay_ms)), pal.text));
@@ -393,51 +382,10 @@ fn foot(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
             _ => spans.push((format!(" · {}", run_summary(run)), pal.dim)),
         }
     }
-    let mut x = rect.min.x;
-    for (words, color) in spans {
-        if x >= rect.max.x {
-            break;
-        }
-        x = text(ui, pos2(x, rect.center().y), &words, body(13.0), color, rect.max.x - x, Align2::LEFT_CENTER).max.x;
-    }
+    spans
 }
 
 // ── Pieces the kit has not got ────────────────────────────────────────────
-
-/// `s` wrapped to the layout's width in at most `rows` lines, the last cut
-/// with an ellipsis, laid in as a row of its own: the server's sentences.
-fn prose(ui: &mut Ui, s: &str, font: FontId, color: Color32, rows: usize) {
-    let w = ui.available_width();
-    let mut job = LayoutJob::single_section(s.to_string(), TextFormat { font_id: font, color, ..Default::default() });
-    job.wrap = TextWrapping { max_width: w, max_rows: rows, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
-    ui.painter().galley(rect.min, galley, color);
-}
-
-/// A field's label, a 14-point row of the layout: its words up to the first
-/// " · " in the desk's small capitals, the rest after them dim in the UI
-/// face (the canvas's "DESTINATION · another drive, …").
-fn label_row(ui: &mut Ui, s: &str, pal: &Pal) {
-    let w = ui.available_width();
-    let (row, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-    let (head, tail) = match s.find(" · ") {
-        Some(at) => (&s[..at], s[at..].trim_start()),
-        None => (s, ""),
-    };
-    let drawn = small_caps(ui, row.left_center(), head, pal.dim, w, Align2::LEFT_CENTER);
-    let from = drawn.max.x + 6.0;
-    if !tail.is_empty() && from < row.max.x {
-        text(ui, pos2(from, row.center().y), tail, body(13.0), pal.dim, row.max.x - from, Align2::LEFT_CENTER);
-    }
-}
-
-/// The canvas's check mark in its 10-point box, centred on `at`.
-fn tick(ui: &Ui, at: Pos2, color: Color32) {
-    let o = at - vec2(5.0, 5.0);
-    let points = vec![o + vec2(1.5, 5.2), o + vec2(3.9, 7.6), o + vec2(8.6, 2.6)];
-    ui.painter().add(Shape::line(points, Stroke::new(1.7, color)));
-}
 
 /// The canvas's folder in its 12-point box, centred on `at`: the browse
 /// button's icon.
@@ -472,11 +420,6 @@ fn browse_button(ui: &Ui, id: Id, rect: Rect, label: &str, pal: &Pal) -> egui::R
     response
 }
 
-/// A small solid triangle pointing right, centred on `at`: a folder's mark.
-fn folder_mark(ui: &Ui, at: Pos2, color: Color32) {
-    let points = vec![at + vec2(-2.5, -4.0), at + vec2(3.5, 0.0), at + vec2(-2.5, 4.0)];
-    ui.painter().add(Shape::convex_polygon(points, color, Stroke::NONE));
-}
 
 /// The LIBRARY choice as the canvas draws it: the names joined in one
 /// hairline group, wrapped to more rows where the column is narrow, in the
@@ -507,7 +450,8 @@ fn choices(ui: &mut Ui, id: Id, names: &[String], chosen: usize, pal: &Pal) -> (
     let mut clicked = None;
     for (i, (name, (x, row, nw))) in names.iter().zip(spots).enumerate() {
         let seg = Rect::from_min_size(pos2(group.min.x + x, group.min.y + row as f32 * H), vec2(nw, H));
-        let response = ui.interact(seg, id.with(i), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        let response = hand(ui.interact(seg, id.with(i), Sense::click()));
+
         let ink = if i == chosen {
             ui.painter().rect_filled(seg.shrink(1.0), egui::CornerRadius::same(2), pal.accent);
             pal.on_accent
@@ -529,71 +473,26 @@ fn choices(ui: &mut Ui, id: Id, names: &[String], chosen: usize, pal: &Pal) -> (
     (group, clicked)
 }
 
-/// The folder browser's list, and where it keeps what it last showed.
-fn dirs_id() -> Id {
-    Id::new("backups-browser").with("dirs")
-}
-
-fn dirs_memory() -> Id {
-    dirs_id().with("view")
-}
-
-/// What the folder list last showed, kept from pass to pass: the listing
-/// (its path's id) and its cursor, then the scroll offset and the view's
-/// height.
-type DirsView = (Option<(Id, usize)>, f32, f32);
-
 /// A listing's folders with no headings, [`DIR_ROW`] points a row and at
-/// most [`DIRS_SHOWN`] on screen, scrolled by egui: the row the keys hold
-/// raised and ringed as a table's cursor row is, and brought into view on
-/// the pass it moved and on a new `listing`'s first (a folder opened, its
-/// parent, the browser opened again), which would otherwise open where the
-/// wheel left the last; a row under the pointer raised. Returns the row a
-/// click landed on.
+/// most [`DIRS_SHOWN`] on screen: the kit's list, a new listing (a folder
+/// opened, its parent, the browser opened again) starting at its top and
+/// bringing the keys' row in from there, as the cells' list opens. Returns
+/// the row a click landed on.
 fn dirs(ui: &mut Ui, listing: &str, names: &[String], sel: usize, pal: &Pal) -> Option<usize> {
-    let id = dirs_id();
-    let w = ui.available_width();
     let h = names.len().min(DIRS_SHOWN) as f32 * DIR_ROW;
-    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-    let mut child = ui.new_child(UiBuilder::new().id_salt(id).max_rect(rect).layout(Layout::top_down(Align::Min)));
-    let memory = dirs_memory();
-    let now = (Id::new(listing), sel);
-    let (last, offset, height): DirsView = ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((None, 0.0, 0.0));
-    let mut scroll = ScrollArea::vertical().id_salt(id).auto_shrink([false, false]);
-    if last != Some(now) {
-        let (top, bottom) = (sel as f32 * DIR_ROW, (sel + 1) as f32 * DIR_ROW);
-        // No view measured yet (the browser just opened): the cursor's row
-        // at the top.
-        if height <= 0.0 || top < offset {
-            scroll = scroll.vertical_scroll_offset(top);
-        } else if bottom > offset + height {
-            scroll = scroll.vertical_scroll_offset(bottom - height);
-        }
-    }
-    let mut picked = None;
-    let out = scroll.show_rows(&mut child, DIR_ROW, names.len(), |ui, range| {
-        for i in range {
-            let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), DIR_ROW), Sense::click());
-            let response = response.on_hover_cursor(CursorIcon::PointingHand);
-            let on = i == sel;
-            if on || response.hovered() {
-                ui.painter().rect_filled(row, square(), pal.raised);
-            }
-            if on {
-                ring(ui, row, pal);
-            }
-            let y = row.center().y;
-            folder_mark(ui, pos2(row.min.x + 14.0, y), if on { pal.accent } else { pal.dim });
-            let ink = if response.hovered() && !on { Color32::WHITE } else { pal.text };
-            text(ui, pos2(row.min.x + 28.0, y), &names[i], body(14.0), ink, row.width() - 38.0, Align2::LEFT_CENTER);
-            if response.clicked() {
-                picked = Some(i);
-            }
-        }
+    let list = Table::new(Id::new("backups-browser").with("dirs"), &[], names.len())
+        .headless()
+        .row_height(DIR_ROW)
+        .height(h)
+        .cursor(Some(sel))
+        .content(Id::new(listing));
+    let shown = list.show(ui, pal, |ui, i, row| {
+        let y = row.rect.center().y;
+        pointer(ui, pos2(row.rect.min.x + 14.0, y), if row.selected { pal.accent } else { pal.dim });
+        let ink = if row.hovered { Color32::WHITE } else { pal.text };
+        text(ui, pos2(row.rect.min.x + 28.0, y), &names[i], body(14.0), ink, row.rect.width() - 38.0, Align2::LEFT_CENTER);
     });
-    let shown: DirsView = (Some(now), out.state.offset.y, out.inner_rect.height());
-    ui.ctx().data_mut(|d| d.insert_temp(memory, shown));
-    picked
+    shown.row
 }
 
 // ── The add and edit form ─────────────────────────────────────────────────
@@ -617,19 +516,14 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
     let fields = f.fields();
     let focused = f.focused();
     let index_of = |field: Field| fields.iter().position(|x| *x == field).unwrap_or(0);
-    let composing = |field: Field| if focused == field { composition } else { "" };
     let id = Id::new("backups-form");
-    // The keys moved since the last pass: what they moved to is brought
-    // into view, the form being taller than a short room.
-    let memory = id.with("focus");
-    let moved = ui.ctx().data(|d| d.get_temp::<usize>(memory)) != Some(f.focus);
-    ui.ctx().data_mut(|d| d.insert_temp(memory, f.focus));
-
-    let shown = modal(ui, id, over, FORM_W, &title, pal, |ui| {
+    // What the keys move to is brought into view on the pass they moved,
+    // the form being taller than a short room.
+    let shown = Dialog::new(id, over, FORM_W, &title).show(ui, pal, |ui| {
         let mut caret = None;
 
         // 1. The library: a choice while adding, fixed while editing.
-        label_row(ui, &t!("bak.field_library"), pal);
+        label(ui, &t!("bak.field_library"), pal);
         ui.add_space(LABEL_GAP);
         let w = ui.available_width();
         if editing {
@@ -647,9 +541,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
             let (group, picked) = choices(ui, id.with("library"), &names, f.library, pal);
             if focused == Field::Library {
                 ring(ui, group, pal);
-                if moved {
-                    ui.scroll_to_rect(group, None);
-                }
+                reveal(ui, id, f.focus, group);
             }
             if let Some(i) = picked {
                 acts.push(Act::FormPick(index_of(Field::Library), i));
@@ -658,7 +550,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         ui.add_space(FORM_GAP);
 
         // 2. The trigger: three radio rows, each its description after it.
-        label_row(ui, &t!("bak.field_trigger"), pal);
+        label(ui, &t!("bak.field_trigger"), pal);
         ui.add_space(6.0);
         let top = ui.cursor().min.y;
         for (i, trigger) in Trigger::ALL.iter().enumerate() {
@@ -671,33 +563,27 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
             }
         }
         if focused == Field::Trigger {
-            // The rows' own reach: the kit's radio takes 8 points either side.
-            let group = Rect::from_min_max(pos2(ui.max_rect().min.x, top), pos2(ui.max_rect().max.x, ui.cursor().min.y)).expand2(vec2(8.0, 0.0));
-            ring(ui, group, pal);
-            if moved {
-                ui.scroll_to_rect(group, None);
-            }
+            let group = ring_since(ui, top + 2.0, pal);
+            reveal(ui, id, f.focus, group);
         }
         ui.add_space(FORM_GAP);
 
         // 3. The destination, its browse button, and the server's verdict.
-        label_row(ui, &t!("bak.field_dest"), pal);
+        label(ui, &t!("bak.field_dest"), pal);
         ui.add_space(LABEL_GAP);
         let w = ui.available_width();
         let (line, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
         let browse = t!("bak.browse_button").to_string();
         let bw = browse_button_width(ui, &browse).min(w * 0.5);
         let boxed = Rect::from_min_max(line.min, pos2(line.max.x - bw - 8.0, line.max.y));
-        let input = studio::Input::new(f.dest.value(), f.dest.cursor()).mono().focused(focused == Field::Dest, composing(Field::Dest));
+        let input = studio::Input::of(&f.dest).mono().focused(focused == Field::Dest, composition);
         let typed = field_box(ui, id.with("dest"), boxed, &input, pal);
         if typed.response.clicked() {
             acts.push(Act::FormFocus(index_of(Field::Dest)));
         }
         if focused == Field::Dest {
             caret = typed.caret;
-            if moved {
-                typed.response.scroll_to_me(None);
-            }
+            reveal(ui, id, f.focus, typed.response.rect);
         }
         let at = Rect::from_min_max(pos2(line.max.x - bw, line.min.y), line.max);
         if browse_button(ui, id.with("browse"), at, &browse, pal).clicked() {
@@ -722,35 +608,31 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
             small_caps(ui, pos2(x, band.min.y + 7.0), label, pal.dim, col_w, Align2::LEFT_CENTER);
             let boxed = Rect::from_min_size(pos2(x, band.min.y + 14.0 + LABEL_GAP), vec2(NUMBER_W.min(col_w), FIELD_H));
             let on = focused == *field && !*muted;
-            let input = studio::Input::new(value.value(), value.cursor()).mono().enabled(!*muted).focused(on, composing(*field));
+            let input = studio::Input::of(value).mono().enabled(!*muted).focused(on, composition);
             let typed = field_box(ui, id.with("number").with(i), boxed, &input, pal);
             if !*muted && typed.response.clicked() {
                 acts.push(Act::FormFocus(index_of(*field)));
             }
             if on {
                 caret = typed.caret;
-                if moved {
-                    ui.scroll_to_rect(boxed, None);
-                }
+                reveal(ui, id, f.focus, boxed);
             }
             text(ui, pos2(x, boxed.max.y + LABEL_GAP + 8.0), hint, body(13.0), pal.dim, col_w, Align2::LEFT_CENTER);
         }
         ui.add_space(FORM_GAP);
 
         // 5. The exclude patterns.
-        label_row(ui, &t!("bak.field_excludes"), pal);
+        label(ui, &t!("bak.field_excludes"), pal);
         ui.add_space(LABEL_GAP);
         let (boxed, _) = ui.allocate_exact_size(vec2(ui.available_width(), FIELD_H), Sense::hover());
-        let input = studio::Input::new(f.excludes.value(), f.excludes.cursor()).mono().focused(focused == Field::Excludes, composing(Field::Excludes));
+        let input = studio::Input::of(&f.excludes).mono().focused(focused == Field::Excludes, composition);
         let typed = field_box(ui, id.with("excludes"), boxed, &input, pal);
         if typed.response.clicked() {
             acts.push(Act::FormFocus(index_of(Field::Excludes)));
         }
         if focused == Field::Excludes {
             caret = typed.caret;
-            if moved {
-                typed.response.scroll_to_me(None);
-            }
+            reveal(ui, id, f.focus, typed.response.rect);
         }
         ui.add_space(FORM_GAP + 4.0);
 
@@ -760,8 +642,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         // the error sits at the row's left, as the canvas has it.
         let w = ui.available_width();
         if editing && let Some(err) = &f.error {
-            let (row, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-            text(ui, row.left_center(), err, body(13.0), pal.gold, w, Align2::LEFT_CENTER);
+            studio::line(ui, 18.0, err, body(13.0), pal.gold);
             ui.add_space(LABEL_GAP);
         }
         let (line, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
@@ -773,13 +654,13 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         }
         if editing {
             let reset = t!("bak.reset_patterns").to_string();
-            let rw = form_button_width(ui, &reset).min((go.min.x - 12.0 - line.min.x).max(0.0));
+            let rw = form_button_width(ui, &reset).min((go.min.x - 10.0 - line.min.x).max(0.0));
             let at = Rect::from_min_size(line.min, vec2(rw, line.height()));
             if rw > 0.0 && form_button(ui, id.with("reset"), at, &reset, false, pal).clicked() {
                 acts.push(Act::FormResetExcludes);
             }
         } else if let Some(err) = &f.error {
-            let room_w = go.min.x - 12.0 - line.min.x;
+            let room_w = go.min.x - 16.0 - line.min.x;
             if room_w > 0.0 {
                 text(ui, line.left_center(), err, body(13.0), pal.gold, room_w, Align2::LEFT_CENTER);
             }
@@ -820,25 +701,26 @@ fn verdict(ui: &mut Ui, f: &Form, pal: &Pal) {
         }
         Some((words, color, true)) => {
             let (row, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-            tick(ui, pos2(row.min.x + 5.0, row.center().y), color);
+            check(ui, pos2(row.min.x + 5.0, row.center().y), color);
             text(ui, pos2(row.min.x + 18.0, row.center().y), &words, body(13.0), color, w - 18.0, Align2::LEFT_CENTER);
         }
-        Some((words, color, false)) => prose(ui, &words, body(13.0), color, 2),
+        Some((words, color, false)) => {
+            Para::new(&words, body(13.0), color).rows(2).show(ui);
+        }
     }
 }
 
 // ── The folder browser, the history, the gate ────────────────────────────
 
 /// The server's folder browser, over the form that waits beneath: the path
-/// listed, its folders (a click picks one), and the buttons, up, open, use
-/// this folder and close.
+/// listed, its folders (a click picks one), and the buttons in the cells'
+/// order from the left, up, open, use this folder (lit) and close.
 fn browser(ui: &Ui, browse: &Browse, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let id = Id::new("backups-browser");
-    let shown = modal(ui, id, over, BROWSER_W, &t!("bak.browser_title"), pal, |ui| {
+    let shown = Dialog::new(id, over, BROWSER_W, &t!("bak.browser_title")).show(ui, pal, |ui| {
         let w = ui.available_width();
-        let (line, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-        let (path, _) = tail_fit(ui, &browse.path, mono(12.5), w);
-        text(ui, line.left_center(), &path, mono(12.5), pal.dim, w + 1.0, Align2::LEFT_CENTER);
+        let (path, _) = cut_start(ui, &browse.path, mono(12.5), w);
+        line(ui, 18.0, &path, mono(12.5), pal.dim);
         ui.add_space(12.0);
         if browse.dirs.is_empty() {
             let (row, _) = ui.allocate_exact_size(vec2(w, DIR_ROW), Sense::hover());
@@ -847,24 +729,11 @@ fn browser(ui: &Ui, browse: &Browse, over: Rect, pal: &Pal, acts: &mut Vec<Act>)
             acts.push(Act::BrowseRow(i));
         }
         ui.add_space(FORM_GAP);
-        let (line, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
-        let buttons = [
-            (t!("browse.up"), false, Act::BrowseUp),
-            (t!("browse.open"), false, Act::BrowseEnter),
-            (t!("bak.browse_use"), true, Act::BrowseChoose),
-            (t!("browse.close"), false, Act::BrowseCancel),
-        ];
-        let mut x = line.min.x;
-        for (i, (label, primary, act)) in buttons.into_iter().enumerate() {
-            if x >= line.max.x {
-                break;
-            }
-            let bw = form_button_width(ui, &label).min(line.max.x - x);
-            let at = Rect::from_min_size(pos2(x, line.min.y), vec2(bw, line.height()));
-            if form_button(ui, id.with("button").with(i), at, &label, primary, pal).clicked() {
-                acts.push(act);
-            }
-            x += bw + 8.0;
+        let (up, open, choose, close) = (t!("browse.up"), t!("browse.open"), t!("bak.browse_use"), t!("browse.close"));
+        let start = [(up.as_ref(), false), (open.as_ref(), false), (choose.as_ref(), true), (close.as_ref(), false)];
+        let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseChoose, Act::BrowseCancel];
+        if let Some(k) = foot(ui, id.with("button"), &start, &[], None, pal) {
+            acts.push(meant[k].clone());
         }
     });
     if shown.closed {
@@ -880,7 +749,7 @@ fn browser(ui: &Ui, browse: &Browse, over: Rect, pal: &Pal, acts: &mut Vec<Act>)
 fn history(ui: &Ui, dest: &BackupDestination, runs: &[BackupRun], loaded: bool, sel: usize, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let title = t!("bak.history_title", library = printable(&dest.library_name, 64), path = dest.dest_path);
     let id = Id::new("backups-history");
-    let shown = modal(ui, id, over, HISTORY_W, &title, pal, |ui| {
+    let shown = Dialog::new(id, over, HISTORY_W, &title).show(ui, pal, |ui| {
         if !loaded {
             return;
         }
@@ -901,13 +770,15 @@ fn history(ui: &Ui, dest: &BackupDestination, runs: &[BackupRun], loaded: bool, 
         ];
         let now = unix_now();
         // The table's own room, so its rows scroll inside it and not with
-        // the window's body; and its own per destination, so one opened
-        // after another's starts on its cursor, not where the wheel left
-        // the other's runs.
-        let (rect, _) = ui.allocate_exact_size(vec2(w, 34.0 + runs.len().min(RUNS_SHOWN) as f32 * RUN_ROW), Sense::hover());
-        let runs_id = id.with("runs").with(dest.id);
-        let mut room = ui.new_child(UiBuilder::new().id_salt(runs_id).max_rect(rect).layout(Layout::top_down(Align::Min)));
-        let table = Table::new(runs_id, &cols, runs.len()).cursor(Some(sel)).row_height(RUN_ROW).show(&mut room, pal, |ui, i, row| {
+        // the window's body; each destination's runs a listing of their
+        // own, so one opened after another's starts on its cursor, not
+        // where the wheel left the other's runs.
+        let table = Table::new(id.with("runs"), &cols, runs.len())
+            .cursor(Some(sel))
+            .row_height(RUN_ROW)
+            .height(runs.len().min(RUNS_SHOWN) as f32 * RUN_ROW)
+            .content(Id::new(dest.id));
+        let table = table.show(ui, pal, |ui, i, row| {
             let run = &runs[i];
             let started = iso_unix(&run.started_at).map(|t| age_text(now - t)).unwrap_or_default();
             cell(ui, row, 0, &started, mono(12.5), ink(row, pal.text, pal), false);
@@ -927,8 +798,7 @@ fn history(ui: &Ui, dest: &BackupDestination, runs: &[BackupRun], loaded: bool, 
             acts.push(Act::HistoryPick(i));
         }
         ui.add_space(12.0);
-        let (row, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-        text(ui, row.left_center(), &t!("bak.history_note", n = HISTORY_LIMIT), body(13.0), pal.dim, w, Align2::LEFT_CENTER);
+        line(ui, 18.0, &t!("bak.history_note", n = HISTORY_LIMIT), body(13.0), pal.dim);
         let Some(run) = runs.get(sel) else { return };
         ui.add_space(14.0);
         let started = iso_unix(&run.started_at).map(|t| age_text(now - t)).unwrap_or_default();
@@ -940,7 +810,9 @@ fn history(ui: &Ui, dest: &BackupDestination, runs: &[BackupRun], loaded: bool, 
         let (row, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
         let head = format!("{started} · {}", status_word(&run.status));
         let said = text(ui, row.left_center(), &head, strong(14.0), tone, w, Align2::LEFT_CENTER);
-        let tail = format!(" · {} · {duration}", trigger_words(run.trigger_reason.as_deref().unwrap_or("")));
+        // A run still going has no duration yet: no separator left hanging.
+        let trigger = trigger_words(run.trigger_reason.as_deref().unwrap_or(""));
+        let tail = if duration.is_empty() { format!(" · {trigger}") } else { format!(" · {trigger} · {duration}") };
         if said.max.x < row.max.x {
             text(ui, pos2(said.max.x, row.center().y), &tail, body(14.0), pal.dim, row.max.x - said.max.x, Align2::LEFT_CENTER);
         }
@@ -949,65 +821,35 @@ fn history(ui: &Ui, dest: &BackupDestination, runs: &[BackupRun], loaded: bool, 
             Some(m) => printable(m, 400),
             None => run_summary(run),
         };
-        prose(ui, &notes, body(13.5), if run.status == "success" { pal.dim } else { pal.gold }, usize::MAX);
+        Para::new(&notes, body(13.5), if run.status == "success" { pal.dim } else { pal.gold }).show(ui);
     });
     if shown.closed {
         acts.push(Act::HistoryClose);
     }
 }
 
-/// The kit modal's padding and title row (studio.rs), where the gate puts
-/// its own gold title.
-const MODAL_PAD: f32 = 24.0;
-const TITLE_H: f32 = 20.0;
-
-/// The remove gate, gold because it is destructive, as the cells draw it:
-/// its edge and its title, then the consequences, then Keep, the safe
-/// choice and the primary, and Remove after it. Its close is the Esc that
-/// keeps, sent as the key.
-fn gate(ui: &Ui, room: &Room, id: i64, over: Rect, pal: &Pal, acts: &mut Vec<Act>, keys: &mut Vec<KeyCode>) {
+/// The remove gate, answered as the cells' (gold, no close; Esc keeps):
+/// the consequences, then Keep, the safe choice and the primary, and
+/// Remove after it.
+fn gate(ui: &Ui, room: &Room, id: i64, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let (library, path) = room.dest(id).map(|d| (printable(&d.library_name, 64), d.dest_path.clone())).unwrap_or_default();
     let title = t!("bak.remove_title", library = library, path = path);
     let gate_id = Id::new("backups-remove");
-    // The kit's title is in the text colour: the gate's goes on after, in
-    // gold, where the kit would have put it.
-    let shown = modal(ui, gate_id, over, GATE_W, "", pal, |ui| {
+    let _ = Dialog::new(gate_id, over, GATE_W, &title).gate(pal).show(ui, pal, |ui| {
         for key in ["bak.remove_1", "bak.remove_2"] {
-            prose(ui, &t!(key), body(14.0), pal.gold, usize::MAX);
+            Para::new(&t!(key), body(14.0), pal.gold).show(ui);
             ui.add_space(6.0);
         }
         ui.add_space(14.0);
-        let w = ui.available_width();
-        let (line, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
-        let keep = t!("bak.remove_keep").to_string();
-        let go = t!("bak.remove_confirm").to_string();
-        let go_w = form_button_width(ui, &go).min(w / 2.0);
-        let keep_w = form_button_width(ui, &keep).min(w / 2.0 - 12.0);
-        let go_at = Rect::from_min_max(pos2(line.max.x - go_w, line.min.y), line.max);
-        let keep_at = Rect::from_min_size(pos2(go_at.min.x - 12.0 - keep_w, line.min.y), vec2(keep_w, line.height()));
-        if form_button(ui, gate_id.with("keep"), keep_at, &keep, true, pal).clicked() {
-            acts.push(Act::RemoveCancel);
-        }
-        if form_button(ui, gate_id.with("go"), go_at, &go, false, pal).clicked() {
-            acts.push(Act::RemoveConfirm);
+        let (keep, go) = (t!("bak.remove_keep"), t!("bak.remove_confirm"));
+        match foot(ui, gate_id.with("foot"), &[], &[(keep.as_ref(), true), (go.as_ref(), false)], None, pal) {
+            Some(0) => acts.push(Act::RemoveCancel),
+            Some(_) => acts.push(Act::RemoveConfirm),
+            None => {}
         }
     });
-    // The warning's gold edge over the kit's hairline, and its gold title,
-    // in the window's own layer.
-    let layer = ui.ctx().layer_painter(LayerId::new(Order::Foreground, gate_id));
-    layer.rect_stroke(shown.window, square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
-    let inner = shown.window.shrink(MODAL_PAD);
-    let row = Rect::from_min_size(inner.min, vec2(inner.width(), TITLE_H));
-    let format = TextFormat { font_id: strong(16.0), color: pal.gold, ..Default::default() };
-    let mut job = LayoutJob::single_section(title.to_string(), format);
-    job.wrap = TextWrapping::truncate_at_width((inner.width() - 40.0).max(1.0));
-    let galley = layer.layout_job(job);
-    let at = Align2::LEFT_CENTER.anchor_size(row.left_center(), galley.size());
-    layer.galley(at.min, galley, pal.gold);
-    if shown.closed {
-        keys.push(KeyCode::Esc);
-    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1172,11 +1014,9 @@ mod tests {
         press(&mut room, KeyCode::Down);
         press(&mut room, KeyCode::Down);
         let (out, _) = pass(&ctx, &mut room, LARGE);
+        // In one run, as the room's other stories.
         assert_drew(&out, &[
-            "/Volumes/Backup/podcasts",
-            " · 200 ms/file",
-            " · default excludes",
-            " · failed: EACCES: permission denied, mkdir '/Volumes/Backup/podcasts/.mstream-trash'",
+            "/Volumes/Backup/podcasts · 200 ms/file · default excludes · failed: EACCES: permission denied, mkdir '/Volumes/Backup/podcasts/.mstream-trash'",
         ]);
 
         // An error note in gold, on the foot.
@@ -1285,7 +1125,7 @@ mod tests {
             "HOUR (0–23)",
             "EXCLUDE PATTERNS",
             "Thumbs.db, desktop.ini, .DS_Store, ._*",
-            "ADD DESTINATION ▸",
+            "ADD DESTINATION",
         ]);
         let id = Id::new("backups-form");
 
@@ -1356,7 +1196,7 @@ mod tests {
             "podcasts",
             "  — fixed: remove and re-add to retarget",
             "^P RESET PATTERNS TO THE DEFAULTS",
-            "SAVE ▸",
+            "SAVE",
         ]);
         let id = Id::new("backups-form");
         let _ = click_id(&ctx, &mut room, LARGE, id.with("excludes"));
@@ -1391,7 +1231,7 @@ mod tests {
         room.apply(listing("/Volumes", &["Backup", "NAS"]));
         let (out, shown) = pass(&ctx, &mut room, LARGE);
         assert!(shown.caret.is_none(), "the browser has no field");
-        assert_drew(&out, &["Choose the destination folder", "/Volumes", "Backup", "NAS", "◂ UP", "OPEN", "USE THIS FOLDER ▸", "CLOSE"]);
+        assert_drew(&out, &["Choose the destination folder", "/Volumes", "Backup", "NAS", "UP", "OPEN", "USE THIS FOLDER", "CLOSE"]);
         let id = Id::new("backups-browser");
 
         let _ = click(&ctx, &mut room, LARGE, find(&out, "NAS").center());
@@ -1475,6 +1315,8 @@ mod tests {
         assert!(!drawn(&out).iter().any(|t| t == "root00"), "the wheel took the list down");
         let _ = click_id(&ctx, &mut room, LARGE, Id::new("backups-browser").with("button").with(3));
         assert!(matches!(room.modal, Modal::Form(_)), "Act::BrowseCancel");
+        // The frame the close brings, the form back under no browser.
+        let _ = pass(&ctx, &mut room, LARGE);
         ctrl(&mut room, 'b');
         room.queued = None;
         room.apply(listing("/", "root"));
@@ -1533,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn the_remove_gate_keeps_on_its_primary_and_its_close_and_removes_on_its_word() {
+    fn the_remove_gate_is_answered_keep_on_its_primary_or_esc_and_removes_on_its_word() {
         let _en = english();
         let ctx = context();
         let mut room = idle();
@@ -1544,7 +1386,7 @@ mod tests {
             "Remove music → /Volumes/Backup/music?",
             "The files on disk are NOT deleted; only the schedule and its history go.",
             "You can add the same path again later.",
-            "◂ KEEP",
+            "KEEP",
             "REMOVE",
         ]);
         let title = "Remove music → /Volumes/Backup/music?";
@@ -1558,19 +1400,20 @@ mod tests {
             .collect();
         assert_eq!(inks, vec![Pal::now().gold], "the title once, in gold, as the cells' gate");
         let id = Id::new("backups-remove");
-        let _ = click_id(&ctx, &mut room, LARGE, id.with("keep"));
+        assert!(ctx.read_response(id.with("close")).is_none(), "a gate has no close, as the cells draw it");
+        let _ = click_id(&ctx, &mut room, LARGE, id.with("foot").with(0usize));
         assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "Act::RemoveCancel");
 
-        // Its close is the Esc that keeps.
+        // Esc keeps.
         press(&mut room, KeyCode::Char('r'));
         let _ = pass(&ctx, &mut room, LARGE);
-        let _ = click_id(&ctx, &mut room, LARGE, id.with("close"));
+        press(&mut room, KeyCode::Esc);
         assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "Esc kept it");
         assert_eq!(room.sel, Some(0), "the cursor stays: Esc reached the gate, not the room's base");
 
         press(&mut room, KeyCode::Char('r'));
         let _ = pass(&ctx, &mut room, LARGE);
-        let _ = click_id(&ctx, &mut room, LARGE, id.with("go"));
+        let _ = click_id(&ctx, &mut room, LARGE, id.with("foot").with(1usize));
         assert_eq!(room.queued, Some(Op::Remove(1)), "Act::RemoveConfirm");
     }
 

@@ -15,28 +15,15 @@
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
-use egui::epaint::{Shadow, StrokeKind};
-use egui::style::ScrollAnimation;
-use egui::text::{LayoutJob, TextFormat};
-use egui::{Align, Align2, Color32, CursorIcon, FontId, Id, Layout, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
-use unicode_segmentation::UnicodeSegmentation;
+use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Ui, pos2, vec2};
 
 use super::*;
 use crate::admin::EguiShown;
 use crate::gui::window::studio::{
-    self, Col, FIELD_H, FORM_BUTTON_H, Icon, Pal, SCRIM, Table, add_card, body, checkbox, field_box, form_button,
-    form_button_width, icon_button, ink, led, modal, mono, note_line, ring, small_caps, square, strong, style_once, text,
-    width_of,
+    self, Col, Dialog, FIELD_H, Glyph, Icon, Pal, Para, Table, add_card, body, checkbox, cut_start, field_beside,
+    field_box, foot, icon_button, ink, label, line, mono, path_cell, pointer, room_rects, strong, text,
 };
 
-/// The room's margins inside its area, as the canvas pads the room.
-const PAD_X: f32 = 24.0;
-const PAD_TOP: f32 = 20.0;
-const PAD_BOTTOM: f32 = 14.0;
-/// The room between the add card, the table and the note line.
-const GAP: f32 = 18.0;
-/// The note line along the room's foot.
-const NOTE_H: f32 = 18.0;
 /// The table's NAME and SYMLINKS columns (FOLDER takes the rest), and the
 /// remove column beyond the selection area with the gap before it.
 const NAME_W: f32 = 220.0;
@@ -46,11 +33,6 @@ const TRAIL: f32 = REMOVE_W + 8.0;
 /// The table's rows, and a modal list's.
 const ROW_H: f32 = 40.0;
 const LIST_ROW_H: f32 = 30.0;
-/// Where the kit's table starts a row's first cell, and how far its first
-/// row stands under the table's top (the headings and the room under
-/// them): the empty list says so there.
-const CELL_PAD: f32 = 10.0;
-const HEAD_H: f32 = 34.0;
 /// The modals' widths: the canvas's Name window, and the wider one the
 /// lists of folders and the typed path get.
 const NARROW: f32 = 560.0;
@@ -60,32 +42,23 @@ const NAME_BOX_W: f32 = 264.0;
 /// The most rows a modal list shows: the cells' browser and suggestions.
 const BROWSE_ROWS: usize = 11;
 const SUGGEST_ROWS: usize = 6;
-/// The kit's window, which the gate's copies: its padding, the room under
-/// its title, and the title's row.
-const MODAL_PAD: f32 = 24.0;
-const MODAL_GAP: f32 = 20.0;
-const TITLE_H: f32 = 20.0;
 
 /// One pass of the room over the whole of `ui`, the room's area less its
 /// first row, with `composition` the input method's uncommitted text for
 /// the focused field. What it returns is the focused field's caret and a
 /// click that ended the room (none can: leaving is a key's).
 pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown {
-    // The host has painted the ground and styled egui; styling again is a
-    // no-op there, and all a bare context needs.
     let pal = Pal::now();
-    style_once(ui.ctx(), &pal);
     let full = ui.max_rect();
-    let column = Rect::from_min_max(full.min + vec2(PAD_X, PAD_TOP), full.max - vec2(PAD_X, PAD_BOTTOM));
-    let note_rect = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
-    let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, (note_rect.min.y - GAP).max(column.min.y)));
+    let (body_rect, note_rect) = room_rects(full);
 
     let mut acts: Vec<Act> = Vec::new();
-    let mut ui_body =
-        ui.new_child(UiBuilder::new().id_salt("libraries-body").max_rect(body_rect).layout(Layout::top_down(Align::Min)));
+    let mut ui_body = ui.new_child(
+        egui::UiBuilder::new().id_salt("libraries-body").max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)),
+    );
     ui_body.set_clip_rect(body_rect.expand(1.0).intersect(ui.clip_rect()));
     libraries(&mut ui_body, room, &pal, &mut acts);
-    note_line(ui, note_rect, room.busy.as_deref(), room.note.as_ref(), &pal);
+    studio::note_line(ui, note_rect, room.busy.as_deref(), room.note.as_ref(), &pal);
 
     // A modal makes the room beneath inert: what was clicked under it this
     // pass is dropped, as the cells view drops what the room registered.
@@ -117,97 +90,82 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
 /// The add card, then the table: NAME · FOLDER · SYMLINKS, the remove
 /// button in a column of its own past the selection area. Rows take no
 /// click as a whole, only the tick box and the remove; the cursor's ring
-/// is the keys'.
+/// is the keys'. A fresh add's row is brought into view, not selected, as
+/// the cells view takes the same note when it draws; an empty list keeps
+/// its headings and says so where the first row would be.
 fn libraries(ui: &mut Ui, room: &mut Room, pal: &Pal, acts: &mut Vec<Act>) {
-    if add_card(ui, Id::new("libraries-add"), &t!("folders.add_card"), pal).clicked() {
+    if add_card(ui, Id::new("libraries-add"), &t!("folders.add_card"), Glyph::Folder, pal).clicked() {
         acts.push(Act::Add);
     }
-    ui.add_space(GAP);
+    ui.add_space(studio::ROOM_GAP);
 
     let cols = [
         Col::left(t!("folders.col_name"), NAME_W),
         Col::left(t!("folders.col_folder"), 0.0),
         Col::center(t!("admin.col_symlinks"), SYM_W),
     ];
-    let top = ui.cursor().min;
-    // A fresh add's row is brought into view, not selected; the cells view
-    // takes the same note when it draws. egui moves the table on the pass
-    // after this one and shows the move on the pass after that, and asks
-    // its host for both.
-    let reveal = room.reveal.take();
-    let mut revealed = false;
+    let nothing = t!("folders.nothing_yet");
     let libs = &room.libs;
-    let table = Table::new(Id::new("libraries-table"), &cols, libs.len()).cursor(room.sel).row_height(ROW_H).trail(TRAIL).inert();
+    let table = Table::new(Id::new("libraries-table"), &cols, libs.len())
+        .cursor(room.sel)
+        .row_height(ROW_H)
+        .trail(TRAIL)
+        .inert()
+        .reveal(room.reveal.take())
+        .empty(&nothing);
     table.show(ui, pal, |ui, i, row| {
-        if let Some(j) = reveal
-            && !revealed
-        {
-            revealed = true;
-            let to = row.rect.translate(vec2(0.0, (j as f32 - i as f32) * ROW_H));
-            ui.scroll_to_rect_animation(to, None, ScrollAnimation::none());
-        }
         let lib = &libs[i];
-        let y = row.rect.center().y;
         // The vpath, plain: the server has no rename, so nothing here
         // offers one. A long one is cut at its column with no ellipsis, as
         // the canvas and the cells cut it.
         let font = if row.selected { strong(14.0) } else { body(14.0) };
         clipped(ui, row.cell(0), &lib.name, font, ink(row, pal.text, pal));
         // The folder keeps its leaf; the whole path rides a tip when cut.
-        let (x, w) = row.cells[1];
-        let (shown, cut) = cut_start(ui, &lib.root, mono(12.5), w);
-        text(ui, pos2(x, y), &shown, mono(12.5), ink(row, pal.soft, pal), w, Align2::LEFT_CENTER);
-        if cut {
-            let _ = ui.interact(row.cell(1), Id::new("libraries-root").with(i), Sense::hover()).on_hover_text(lib.root.as_str());
-        }
+        path_cell(ui, row, 1, &lib.root, mono(12.5), ink(row, pal.soft, pal), Id::new("libraries-root").with(i));
         if checkbox(ui, Id::new("libraries-symlinks").with(i), row.cell(2).center(), lib.follow_symlinks, pal).clicked() {
             acts.push(Act::ToggleSymlinks(i));
         }
-        let at = pos2(row.trail.max.x - REMOVE_W / 2.0, y);
+        let at = pos2(row.trail.max.x - REMOVE_W / 2.0, row.rect.center().y);
         if icon_button(ui, Id::new("libraries-remove").with(i), at, Icon::Remove, pal.dim, pal).clicked() {
             acts.push(Act::RemoveAt(i));
         }
     });
-    // The table's headings stay; an empty list says so where the first row
-    // would be.
-    if libs.is_empty() {
-        let at = pos2(top.x + CELL_PAD, top.y + HEAD_H + ROW_H / 2.0);
-        text(ui, at, &t!("folders.nothing_yet"), body(14.0), pal.dim, ui.max_rect().width() - CELL_PAD, Align2::LEFT_CENTER);
-    }
 }
 
 // ── Modals ────────────────────────────────────────────────────────────────
 
 /// The server's folders: the listed path, its folders (a click moves the
-/// cursor, as in the cells), and the four acts — up and open on the left,
-/// close and the add on the right, the add lit.
+/// cursor, as in the cells), and the four acts in the cells' order from
+/// the left — up, open, the add (lit) and close.
 fn browser(ui: &Ui, over: Rect, browse: &Browse, pal: &Pal, acts: &mut Vec<Act>) {
     let id = Id::new("libraries-browse");
-    let shown = modal(ui, id, over, WIDE, &t!("browse.title"), pal, |ui| {
+    let shown = Dialog::new(id, over, WIDE, &t!("browse.title")).show(ui, pal, |ui| {
         let w = ui.available_width();
-        let (line, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
         let (path, _) = cut_start(ui, &browse.path, mono(12.5), w);
-        text(ui, line.left_center(), &path, mono(12.5), pal.dim, w, Align2::LEFT_CENTER);
+        line(ui, 18.0, &path, mono(12.5), pal.dim);
         ui.add_space(10.0);
         let rows = browse.dirs.len().clamp(1, BROWSE_ROWS) as f32;
-        let h = (rows * LIST_ROW_H).min(ui.available_height() - 16.0 - FORM_BUTTON_H).max(LIST_ROW_H);
+        let h = (rows * LIST_ROW_H).min(ui.available_height() - 16.0 - studio::FORM_BUTTON_H).max(LIST_ROW_H);
         let mut act = None;
         if browse.dirs.is_empty() {
-            let (region, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-            let at = pos2(region.min.x + CELL_PAD, region.min.y + LIST_ROW_H / 2.0);
-            text(ui, at, &t!("browse.empty"), body(14.0), pal.dim, w - CELL_PAD, Align2::LEFT_CENTER);
+            let (region, _) = ui.allocate_exact_size(vec2(w, h), egui::Sense::hover());
+            let at = pos2(region.min.x + studio::CELL_PAD, region.min.y + LIST_ROW_H / 2.0);
+            text(ui, at, &t!("browse.empty"), body(14.0), pal.dim, w - studio::CELL_PAD, Align2::LEFT_CENTER);
         } else {
-            let content = Id::new(&browse.path);
-            let picked = list(ui, id.with("list"), h, browse.dirs.len(), Some(browse.sel), content, pal, |ui, i, rect, on, _| {
-                folder_row(ui, rect, &browse.dirs[i], on, pal.text, pal);
-            });
-            act = picked.map(Act::BrowseRow);
+            let list = Table::new(id.with("list"), &[], browse.dirs.len())
+                .headless()
+                .row_height(LIST_ROW_H)
+                .height(h)
+                .cursor(Some(browse.sel))
+                .content(Id::new(&browse.path));
+            let picked = list.show(ui, pal, |ui, i, row| folder_row(ui, row.rect, &browse.dirs[i], row.selected, pal.text, pal));
+            act = picked.row.map(Act::BrowseRow);
         }
         ui.add_space(16.0);
-        let start = [(t!("browse.up").to_string(), false), (t!("browse.open").to_string(), false)];
-        let end = [(t!("browse.close").to_string(), false), (t!("browse.add").to_string(), true)];
-        let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseCancel, Act::BrowseAdd];
-        foot(ui, id.with("foot"), &start, &end, pal).map(|k| meant[k].clone()).or(act)
+        let (up, open, add, close) = (t!("browse.up"), t!("browse.open"), t!("browse.add"), t!("browse.close"));
+        let start = [(up.as_ref(), false), (open.as_ref(), false), (add.as_ref(), true), (close.as_ref(), false)];
+        let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseAdd, Act::BrowseCancel];
+        foot(ui, id.with("foot"), &start, &[], None, pal).map(|k| meant[k].clone()).or(act)
     });
     if shown.closed {
         acts.push(Act::BrowseCancel);
@@ -217,39 +175,47 @@ fn browser(ui: &Ui, over: Rect, browse: &Browse, pal: &Pal, acts: &mut Vec<Act>)
 
 /// The typed path: the field (the room's, its value and caret, never
 /// edited here) and under it the server's suggestions, a click taking
-/// one, or the gold reason the directory could not be listed. The list's
-/// room is kept whether or not there is anything in it, so the window
-/// holds still as the suggestions come and go (the cells anchor theirs).
+/// one, or the gold reason the directory could not be listed. The window
+/// holds its top where it stands with the most suggestions it shows, and
+/// the list grows down from the field as the suggestions come and go, as
+/// the cells anchor theirs.
 fn path_entry(ui: &Ui, over: Rect, draft: &PathDraft, composition: &str, pal: &Pal, acts: &mut Vec<Act>) -> Option<Pos2> {
     let id = Id::new("libraries-path");
-    let shown = modal(ui, id, over, WIDE, &t!("path_modal.title"), pal, |ui| {
+    let most = FIELD_H + 12.0 + SUGGEST_ROWS as f32 * LIST_ROW_H;
+    let shown = Dialog::new(id, over, WIDE, &t!("path_modal.title")).hold(most).show(ui, pal, |ui| {
         let w = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
-        let input = studio::Input::new(draft.text.value(), draft.text.cursor()).focused(true, composition).mono();
+        let (rect, _) = ui.allocate_exact_size(vec2(w, FIELD_H), egui::Sense::hover());
+        let input = studio::Input::of(&draft.text).focused(true, composition).mono();
         let typed = field_box(ui, id.with("field"), rect, &input, pal);
-        ui.add_space(12.0);
-        let h = (SUGGEST_ROWS as f32 * LIST_ROW_H).min(ui.available_height()).max(LIST_ROW_H);
         let mut picked = None;
         if let Some(err) = &draft.error {
-            let (region, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-            let at = pos2(region.min.x, region.min.y + LIST_ROW_H / 2.0);
-            text(ui, at, err, body(13.0), pal.gold, w, Align2::LEFT_CENTER);
-        } else {
+            ui.add_space(12.0);
+            line(ui, LIST_ROW_H, err, body(13.0), pal.gold);
+        } else if draft.suggestion_count() > 0 {
+            ui.add_space(12.0);
+            let rows = draft.suggestion_count().min(SUGGEST_ROWS);
+            let h = (rows as f32 * LIST_ROW_H).min(ui.available_height()).max(LIST_ROW_H);
             // The suggestions are the listing filtered: walked once a pass
             // for the rows on screen, never collected whole (a listing can
             // run to thousands).
             let (mut from, mut window): (usize, Vec<&str>) = (0, Vec::new());
-            let content = Id::new(draft.text.value());
-            picked = list(ui, id.with("list"), h, draft.suggestion_count(), draft.sel, content, pal, |ui, i, rect, on, hovered| {
+            let list = Table::new(id.with("list"), &[], draft.suggestion_count())
+                .headless()
+                .row_height(LIST_ROW_H)
+                .height(h)
+                .cursor(draft.sel)
+                .content(Id::new(draft.text.value()));
+            let shown = list.show(ui, pal, |ui, i, row| {
                 if i < from || i >= from + window.len() {
                     from = i;
                     window = draft.suggestions().skip(i).take(4 * SUGGEST_ROWS).collect();
                 }
                 // Dim, the pointer's brighter, as the cells draw them.
                 if let Some(entry) = window.get(i - from) {
-                    folder_row(ui, rect, entry, on, if hovered { pal.text } else { pal.dim }, pal);
+                    folder_row(ui, row.rect, entry, row.selected, if row.hovered { pal.text } else { pal.dim }, pal);
                 }
             });
+            picked = shown.row;
         }
         (typed.caret, picked)
     });
@@ -266,47 +232,31 @@ fn path_entry(ui: &Ui, over: Rect, draft: &PathDraft, composition: &str, pal: &P
 /// and the add.
 fn name(ui: &Ui, over: Rect, draft: &NameDraft, composition: &str, pal: &Pal, acts: &mut Vec<Act>) -> Option<Pos2> {
     let id = Id::new("libraries-name");
-    let shown = modal(ui, id, over, NARROW, &t!("admin.name_title"), pal, |ui| {
+    let shown = Dialog::new(id, over, NARROW, &t!("admin.name_title")).show(ui, pal, |ui| {
         let w = ui.available_width();
         ui.add_space(2.0);
         label(ui, &t!("admin.name_folder"), pal);
         ui.add_space(6.0);
-        let (line, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
         let (folder, _) = cut_start(ui, &draft.directory, mono(12.5), w);
-        text(ui, line.left_center(), &folder, mono(12.5), pal.text, w, Align2::LEFT_CENTER);
+        line(ui, 18.0, &folder, mono(12.5), pal.text);
         ui.add_space(18.0);
 
-        label(ui, &t!("admin.name_label"), pal);
-        ui.add_space(6.0);
-        let charset = t!("admin.name_charset").to_string();
-        let charset_w = width_of(ui, &charset, body(13.0));
-        let box_w = NAME_BOX_W.min(w);
-        let (row, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
-        let input = studio::Input::new(draft.name.value(), draft.name.cursor()).focused(true, composition);
-        let typed = field_box(ui, id.with("field"), Rect::from_min_size(row.min, vec2(box_w, FIELD_H)), &input, pal);
-        // Beside the box where it fits, as the canvas sets it; under it
-        // where it does not.
-        if box_w + 16.0 + charset_w <= w {
-            let at = pos2(row.min.x + box_w + 16.0, row.center().y);
-            text(ui, at, &charset, body(13.0), pal.dim, charset_w + 1.0, Align2::LEFT_CENTER);
-        } else {
-            ui.add_space(6.0);
-            let (line, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-            text(ui, line.left_center(), &charset, body(13.0), pal.dim, w, Align2::LEFT_CENTER);
-        }
+        let input = studio::Input::of(&draft.name).focused(true, composition);
+        let typed = field_beside(ui, id.with("field"), &t!("admin.name_label"), &input, NAME_BOX_W, &t!("admin.name_charset"), pal);
         ui.add_space(18.0);
 
-        para(ui, &t!("admin.name_permanent_1"), 13.0, pal.gold);
-        para(ui, &t!("admin.name_permanent_2"), 13.0, pal.gold);
+        // One paragraph, as the canvas sets it: the cells' two lines, the
+        // second indented under the first's words in their grid, joined and
+        // hung beside the dash.
+        let permanent = format!("{} {}", t!("admin.name_permanent_1").trim(), t!("admin.name_permanent_2").trim());
+        listed(&permanent, pal.gold).line(1.45).show(ui);
         ui.add_space(12.0);
         // The refusal's line is kept empty until there is one, so the
         // window does not grow under the hand that pressed Add.
-        let (line, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-        if let Some(err) = &draft.error {
-            text(ui, line.left_center(), err, body(13.0), pal.gold, w, Align2::LEFT_CENTER);
-        }
+        line(ui, 18.0, draft.error.as_deref().unwrap_or(""), body(13.0), pal.gold);
         ui.add_space(12.0);
-        let add = foot(ui, id.with("foot"), &[], &[(t!("admin.name_add").to_string(), true)], pal).is_some();
+        let add = t!("admin.name_add");
+        let add = foot(ui, id.with("foot"), &[], &[(add.as_ref(), true)], None, pal).is_some();
         (typed.caret, add)
     });
     if shown.closed {
@@ -319,86 +269,38 @@ fn name(ui: &Ui, over: Rect, draft: &NameDraft, composition: &str, pal: &Pal, ac
     caret
 }
 
-/// The warning gate before a remove, in its gold window with no close (a
-/// gate is answered, as the cells draw it): what stays and what goes, then
-/// Keep (the safe choice, lit) and Remove.
+/// The warning gate before a remove, answered (no close, as every gate):
+/// what stays and what goes, then Keep (the safe choice, lit) and Remove.
 fn remove(ui: &Ui, over: Rect, room: &Room, i: usize, pal: &Pal, acts: &mut Vec<Act>) {
     let id = Id::new("libraries-gate");
     let name = room.libs.get(i).map(|l| l.name.clone()).unwrap_or_default();
-    let picked = gate(ui, id, over, NARROW, &t!("admin.remove_title", name = name), pal, |ui| {
-        para(ui, &t!("admin.remove_files_stay"), 13.0, pal.ok);
+    let title = t!("admin.remove_title", name = name);
+    let shown = Dialog::new(id, over, NARROW, &title).gate(pal).show(ui, pal, |ui| {
+        listed(&t!("admin.remove_files_stay"), pal.ok).line(1.45).show(ui);
         ui.add_space(6.0);
-        para(ui, &t!("admin.remove_users", name = name), 13.0, pal.gold);
-        para(ui, &t!("admin.remove_tracks"), 13.0, pal.gold);
+        listed(&t!("admin.remove_users", name = name), pal.gold).line(1.45).show(ui);
+        listed(&t!("admin.remove_tracks"), pal.gold).line(1.45).show(ui);
         ui.add_space(20.0);
-        let end = [(t!("admin.remove_keep").to_string(), true), (t!("admin.remove_confirm").to_string(), false)];
-        match foot(ui, id.with("foot"), &[], &end, pal) {
+        let (keep, go) = (t!("admin.remove_keep"), t!("admin.remove_confirm"));
+        match foot(ui, id.with("foot"), &[], &[(keep.as_ref(), true), (go.as_ref(), false)], None, pal) {
             Some(0) => Some(Act::RemoveCancel),
             Some(_) => Some(Act::RemoveConfirm),
             None => None,
         }
     });
-    acts.extend(picked);
-}
-
-/// The kit's [`modal`] as a warning gate draws it: the same scrim
-/// swallowing presses beside the window, the same window sized to its
-/// body, but no close (the cells draw a gate no [X]: it forces an explicit
-/// choice, its keys and its two buttons), and its title and frame in the
-/// warning's gold, as the cells frame it. What the body returned.
-fn gate<R>(ui: &Ui, id: Id, over: Rect, width: f32, title: &str, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> R {
-    let ctx = ui.ctx().clone();
-    let width = width.min(over.width() - 32.0).max(over.width().min(160.0));
-    let max_h = (over.height() - 32.0).max(2.0 * MODAL_PAD + TITLE_H);
-    let size_key = id.with("height");
-    let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
-    let window = Rect::from_center_size(over.center(), vec2(width, known.unwrap_or(max_h).min(max_h)));
-    let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false);
-    let shown = area.show(&ctx, |ui| {
-        let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
-        ui.painter().rect_filled(over, 0.0, SCRIM);
-        let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
-        ui.painter().add(shadow.as_shape(window, square()));
-        ui.painter().rect_filled(window, square(), pal.panel);
-        ui.painter().rect_stroke(window, square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
-        let inner = window.shrink(MODAL_PAD);
-        let title_row = Rect::from_min_size(inner.min, vec2(inner.width(), TITLE_H));
-        text(ui, title_row.left_center(), title, strong(16.0), pal.gold, inner.width(), Align2::LEFT_CENTER);
-        let budget = (max_h - 2.0 * MODAL_PAD - TITLE_H - MODAL_GAP).max(0.0);
-        let body_rect = Rect::from_min_size(pos2(inner.min.x, title_row.max.y + MODAL_GAP), vec2(inner.width(), budget));
-        let mut child =
-            ui.new_child(UiBuilder::new().id_salt(id.with("body")).max_rect(body_rect).layout(Layout::top_down(Align::Min)));
-        let out = ScrollArea::vertical().id_salt(id.with("scroll")).max_height(budget).auto_shrink([false, true]).show(&mut child, body);
-        let wanted = 2.0 * MODAL_PAD + TITLE_H + MODAL_GAP + out.content_size.y.min(budget);
-        (out.inner, wanted.min(max_h))
-    });
-    let (inner, wanted) = shown.inner;
-    if known.is_none_or(|h| (h - wanted).abs() > 0.5) {
-        ctx.data_mut(|d| d.insert_temp(size_key, wanted));
-        ctx.request_discard("a gate took its body's height");
-    }
-    inner
+    acts.extend(shown.inner);
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────
 
-/// A field's label: the kit's small capitals, dim, a 14-point row.
-fn label(ui: &mut Ui, s: &str, pal: &Pal) {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-    small_caps(ui, rect.left_center(), s, pal.dim, w, Align2::LEFT_CENTER);
-}
-
-/// Words wrapped to the column in the UI face at `size`, the canvas's
-/// 1.45 lines apart, a row of the layout as tall as they run.
-fn para(ui: &mut Ui, s: &str, size: f32, color: Color32) {
-    let w = ui.available_width();
-    let format = TextFormat { font_id: body(size), color, line_height: Some(size * 1.45), ..Default::default() };
-    let mut job = LayoutJob::single_section(s.to_string(), format);
-    job.wrap.max_width = w;
-    let galley = ui.painter().layout_job(job);
-    let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
-    ui.painter().galley(rect.min, galley, color);
+/// A sentence of the room's in 13-point `color`, wrapped to the column; one
+/// the cells lead with a dash ("− …") hangs its lines beside the dash, as
+/// a list item does, rather than under it.
+fn listed(s: &str, color: Color32) -> Para {
+    match s.strip_prefix('−') {
+        Some(rest) => Para::new(rest.trim_start(), body(13.0), color).lead("−"),
+        None => Para::new(s, body(13.0), color),
+    }
 }
 
 /// `s` in one line from `rect`'s left, its middle on `rect`'s, cut plainly
@@ -409,135 +311,12 @@ fn clipped(ui: &Ui, rect: Rect, s: &str, font: FontId, color: Color32) {
     ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(at, galley, color);
 }
 
-/// A folder in a modal list: an LED, lit on the keyboard's row as the
-/// hallway lights its open room's, and the name.
+/// A folder in a modal list: the cells' "▸" before the name, in the accent
+/// on the keyboard's row, and the name.
 fn folder_row(ui: &Ui, rect: Rect, name: &str, on: bool, color: Color32, pal: &Pal) {
-    led(ui, pos2(rect.min.x + 13.0, rect.center().y), if on { pal.accent } else { pal.unlit });
+    pointer(ui, pos2(rect.min.x + 13.0, rect.center().y), if on { pal.accent } else { pal.dim });
     let color = if on { pal.text } else { color };
     text(ui, pos2(rect.min.x + 26.0, rect.center().y), name, body(14.0), color, rect.width() - 36.0, Align2::LEFT_CENTER);
-}
-
-/// `path` cut at its start to fit `max_w` in `font`, an ellipsis standing
-/// for what went, so the leaf stays in view (the canvas's paths, and the
-/// cells'): the line, and whether it was cut.
-fn cut_start(ui: &Ui, path: &str, font: FontId, max_w: f32) -> (String, bool) {
-    if width_of(ui, path, font.clone()) <= max_w {
-        return (path.to_string(), false);
-    }
-    // The fewest graphemes dropped from the head that let the rest fit:
-    // the narrower the tail the likelier, so a binary search finds it.
-    let starts: Vec<usize> = path.grapheme_indices(true).map(|(at, _)| at).collect();
-    let fits = |k: usize| {
-        let tail = starts.get(k).map_or("", |&at| &path[at..]);
-        width_of(ui, &format!("…{tail}"), font.clone()) <= max_w
-    };
-    let (mut lo, mut hi) = (1, starts.len());
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if fits(mid) {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    let tail = starts.get(lo).map_or("", |&at| &path[at..]);
-    (format!("…{tail}"), true)
-}
-
-/// A modal's foot: form buttons in a row, `start` laid from its left edge
-/// and `end` ending at its right, 10 points apart, each its label's width.
-/// The one clicked, counting `start` first.
-fn foot(ui: &mut Ui, id: Id, start: &[(String, bool)], end: &[(String, bool)], pal: &Pal) -> Option<usize> {
-    let w = ui.available_width();
-    let (row, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
-    let mut clicked = None;
-    let mut x = row.min.x;
-    for (k, (label, primary)) in start.iter().enumerate() {
-        let bw = form_button_width(ui, label);
-        let rect = Rect::from_min_size(pos2(x, row.min.y), vec2(bw, FORM_BUTTON_H));
-        if form_button(ui, id.with(k), rect, label, *primary, pal).clicked() {
-            clicked = Some(k);
-        }
-        x += bw + 10.0;
-    }
-    let mut x = row.max.x;
-    for (k, (label, primary)) in end.iter().enumerate().rev() {
-        let bw = form_button_width(ui, label);
-        let rect = Rect::from_min_size(pos2(x - bw, row.min.y), vec2(bw, FORM_BUTTON_H));
-        if form_button(ui, id.with(start.len() + k), rect, label, *primary, pal).clicked() {
-            clicked = Some(start.len() + k);
-        }
-        x -= bw + 10.0;
-    }
-    clicked
-}
-
-/// A list of folders in a modal, `h` points of its body: `len` rows
-/// scrolled by egui with only those on screen drawn (a listing can run to
-/// thousands), the keyboard's row raised and ringed and brought into view
-/// on the pass it moved, a row under the pointer raised. A new `content`
-/// (another directory, another draft) starts at the top, as the cells'
-/// lists do, and so does a list whose window was down on the last pass:
-/// a window opened again on the listing it last showed shows its cursor,
-/// not where the wheel left it. `draw` paints a row's words, told whether
-/// it is the cursor's and whether the pointer is on it; returns the row a
-/// click landed on.
-#[allow(clippy::too_many_arguments)]
-fn list(
-    ui: &mut Ui,
-    id: Id,
-    h: f32,
-    len: usize,
-    cursor: Option<usize>,
-    content: Id,
-    pal: &Pal,
-    mut draw: impl FnMut(&Ui, usize, Rect, bool, bool),
-) -> Option<usize> {
-    let w = ui.available_width();
-    let (region, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-    let mut inner = ui.new_child(UiBuilder::new().id_salt(id).max_rect(region).layout(Layout::top_down(Align::Min)));
-    let memory = id.with("view");
-    let now = ui.ctx().cumulative_pass_nr();
-    let (last_pass, last_content, last_cursor, last_offset): (u64, Id, Option<usize>, f32) =
-        ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((0, Id::NULL, None, 0.0));
-    let fresh = last_content != content || last_pass + 1 != now;
-    let mut offset = if fresh { 0.0 } else { last_offset };
-    let mut moved = fresh;
-    if let Some(s) = cursor
-        && (fresh || cursor != last_cursor)
-    {
-        let (top, bottom) = (s as f32 * LIST_ROW_H, (s + 1) as f32 * LIST_ROW_H);
-        if top < offset {
-            (offset, moved) = (top, true);
-        } else if bottom > offset + h {
-            (offset, moved) = (bottom - h, true);
-        }
-    }
-    let mut scroll = ScrollArea::vertical().id_salt(id.with("scroll")).auto_shrink([false, false]);
-    if moved {
-        scroll = scroll.vertical_scroll_offset(offset);
-    }
-    let mut clicked = None;
-    let out = scroll.show_rows(&mut inner, LIST_ROW_H, len, |ui, range| {
-        for i in range {
-            let (_, rect) = ui.allocate_space(vec2(ui.available_width(), LIST_ROW_H));
-            let response = ui.interact(rect, id.with("row").with(i), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-            let on = cursor == Some(i);
-            let hovered = response.hovered();
-            if on || hovered {
-                ui.painter().rect_filled(rect, square(), pal.raised);
-            }
-            if on {
-                ring(ui, rect, pal);
-            }
-            draw(ui, i, rect, on, hovered);
-            if response.clicked() {
-                clicked = Some(i);
-            }
-        }
-    });
-    ui.ctx().data_mut(|d| d.insert_temp(memory, (now, content, cursor, out.state.offset.y)));
-    clicked
 }
 
 #[cfg(test)]
@@ -564,6 +343,8 @@ mod tests {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)), events, ..Default::default() };
         let mut shown = None;
         let mut out = ctx.run_ui(input, |ui| {
+            // The host styles egui and paints the ground first.
+            let _ = studio::begin(ui);
             let this = show(ui, room, composition);
             // A discarded pass's click stands, as the host keeps it.
             let outcome = shown.as_ref().and_then(|s: &EguiShown| s.outcome).or(this.outcome);
@@ -693,7 +474,7 @@ mod tests {
 
         // A row takes no click as a whole: the cursor is the keys'.
         let row = ctx.read_response(nth(Id::new("libraries-symlinks"), 0)).expect("row 0 drawn").rect;
-        assert_eq!(press(&ctx, &mut room, pos2(PAD_X + 2.0 * CELL_PAD, row.center().y)).outcome, None);
+        assert_eq!(press(&ctx, &mut room, pos2(24.0 + 2.0 * studio::CELL_PAD, row.center().y)).outcome, None);
         assert_eq!(room.sel, None, "a click on a row selects nothing");
         assert!(room.queued.is_none() && matches!(room.modal, Modal::None));
 
@@ -725,7 +506,7 @@ mod tests {
         // Where the table's rows stop: the note line's gap above it. A row
         // is whole in view when its foot, half a row under its tick box's
         // middle, stands no lower.
-        let floor = SIZE.y - PAD_BOTTOM - NOTE_H - GAP;
+        let floor = room_rects(Rect::from_min_size(Pos2::ZERO, SIZE)).0.max.y;
         let foot = |tick: Rect| tick.center().y + ROW_H / 2.0;
         let tick = nth(Id::new("libraries-symlinks"), 30);
         assert!(ctx.read_response(tick).is_none(), "row 30 starts off screen");
@@ -756,14 +537,8 @@ mod tests {
         let _ = settle(&ctx, &mut room);
         let tick = nth(Id::new("libraries-symlinks"), 36);
         assert!(ctx.read_response(tick).is_none(), "row 36 is off screen with the cursor gone home");
-        // egui moves the table on the pass after the ask and shows it on
-        // the pass after that, and asks the host for both.
+        // On the pass it is asked for, with no other to wait on.
         room.reveal = Some(36);
-        for _ in 0..2 {
-            let (out, _) = pass(&ctx, &mut room, Vec::new(), "");
-            let again = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
-            assert_eq!(again, Some(std::time::Duration::ZERO), "egui asks for the next pass");
-        }
         let _ = pass(&ctx, &mut room, Vec::new(), "");
         let row = ctx.read_response(tick).expect("the revealed row is drawn").rect;
         assert!(foot(row) <= floor + 0.5, "and whole above the note line: {row:?}");
@@ -780,7 +555,7 @@ mod tests {
         room.act(Act::RemoveAt(1));
         let (out, shown) = settle(&ctx, &mut room);
         let words = drawn(&out);
-        for w in ["Remove vinyl from mStream?", "The folder and its files stay on disk.", "− Users who hold vinyl lose it; playlists into it break.", "◂ KEEP IT", "REMOVE"] {
+        for w in ["Remove vinyl from mStream?", "The folder and its files stay on disk.", "−", "Users who hold vinyl lose it; playlists into it break.", "KEEP IT", "REMOVE"] {
             assert!(has(&words, w), "{w} drawn: {words:?}");
         }
         assert!(shown.caret.is_none(), "a gate has no field");
@@ -811,10 +586,12 @@ mod tests {
         room.open_name("/Volumes/NAS/Field Recordings 2024".into());
         let (out, shown) = settle(&ctx, &mut room);
         let words = drawn(&out);
-        for w in ["Name this library", "FOLDER", "NAME", "/Volumes/NAS/Field Recordings 2024", "field-recordings-2024", "a-z, 0-9 and dashes", "ADD FOLDER ▸"] {
+        for w in ["Name this library", "FOLDER", "NAME", "/Volumes/NAS/Field Recordings 2024", "field-recordings-2024", "a-z, 0-9 and dashes", "ADD FOLDER"] {
             assert!(has(&words, w), "{w} drawn: {words:?}");
         }
-        assert!(has(&words, &t!("admin.name_permanent_1")), "the permanence, in its own words: {words:?}");
+        // The cells' two lines, one paragraph hung beside its dash.
+        let permanent = format!("{} {}", t!("admin.name_permanent_1").trim_start_matches('−').trim(), t!("admin.name_permanent_2").trim());
+        assert!(has(&words, &permanent), "the permanence, in its own words: {words:?}");
         let field = ctx.read_response(Id::new("libraries-name").with("field")).expect("the field").rect;
         let caret = shown.caret.expect("the field has the keyboard");
         assert!(field.contains(caret - vec2(0.0, 1.0)), "the caret's foot is in the box: {caret:?} {field:?}");
@@ -889,7 +666,7 @@ mod tests {
         room.apply(home());
         let (out, shown) = settle(&ctx, &mut room);
         let words = drawn(&out);
-        for w in ["Browse the server's folders", "/home/sherika", "Audiobooks", "Videos", "◂ UP", "OPEN", "CLOSE", "ADD THIS FOLDER ▸"] {
+        for w in ["Browse the server's folders", "/home/sherika", "Audiobooks", "Videos", "UP", "OPEN", "CLOSE", "ADD THIS FOLDER"] {
             assert!(has(&words, w), "{w} drawn: {words:?}");
         }
         assert!(shown.caret.is_none());
@@ -907,14 +684,16 @@ mod tests {
         click(&ctx, &mut room, nth(foot, 0));
         assert_eq!(room.queued, Some(Op::BrowseTo("/home".into())), "up");
         room.queued = None;
-        click(&ctx, &mut room, nth(foot, 3));
+        // The cells' order: up, open, the add, close.
+        click(&ctx, &mut room, nth(foot, 2));
         let Modal::Name(draft) = &room.modal else { panic!("the add names the folder listed") };
         assert_eq!(draft.directory, "/home/sherika");
 
         room.apply(home());
         let _ = settle(&ctx, &mut room);
-        click(&ctx, &mut room, nth(foot, 2));
+        click(&ctx, &mut room, nth(foot, 3));
         assert!(matches!(room.modal, Modal::None), "close");
+
         room.apply(home());
         let _ = settle(&ctx, &mut room);
         click(&ctx, &mut room, browse.with("close"));

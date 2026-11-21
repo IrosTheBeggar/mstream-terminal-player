@@ -19,39 +19,25 @@
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
-use egui::epaint::{Shape, StrokeKind};
-use egui::{
-    Align, Align2, Color32, CursorIcon, FontId, Id, Layout, Pos2, Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2,
-    pos2, vec2,
-};
+use egui::{Align, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use super::super::EguiShown;
 use super::*;
 use crate::gui::window::studio::{
-    self, Col, FIELD_H, FORM_BUTTON_H, HIT, Icon, Pal, Table, add_card, body, cell, check_line, field, form_button,
-    form_button_width, icon_button, ink, led, lift, modal, note_line, ring, small_caps, small_caps_width, square,
-    strong, text, width_of,
+    self, BOX, CELL_PAD, COL_GAP, Col, Dialog, FIELD_ROW_H, Glyph, HIT, Icon, Pal, Para, Table, add_card, bare, body,
+    cell, check_line, field, field_at, foot, foot_line, icon_button, ink, label_at, line, list_row_at, name_cell,
+    reveal, room_rects, small_caps_width, state_line, strong, text, tick_box, tick_row, width_of,
 };
-use crate::input::KeyModifiers;
 
-/// The room's margin inside its region, as the canvas pads it: the sides,
-/// the top and the foot.
-const PAD_X: f32 = 24.0;
-const PAD_TOP: f32 = 20.0;
-const PAD_FOOT: f32 = 14.0;
-/// The canvas's gap between the room's blocks, and between a form's.
-const GAP: f32 = 18.0;
+/// The canvas's gap between a form's blocks.
 const FORM_GAP: f32 = 20.0;
-/// The state line's height, and the note line's along the foot.
+/// The state line's height.
 const STATE_H: f32 = 20.0;
-const NOTE_H: f32 = 18.0;
 /// The table's trail: the remove column, then the slot egui's scroll bar
 /// floats in at the table's edge.
 const REMOVE_W: f32 = 36.0;
 const BAR_SLOT: f32 = 14.0;
 const TRAIL: f32 = REMOVE_W + BAR_SLOT;
-/// The headings' row and the room under it, as the kit's table lays them.
-const HEAD_H: f32 = 34.0;
 /// The USER column: the canvas's 180 points where the room has them, and
 /// half of what the flags leave where it has not, never under 72.
 const USER_W: f32 = 180.0;
@@ -59,14 +45,6 @@ const USER_MIN: f32 = 72.0;
 /// The flag columns on the canvas, in the table's order: ADMIN, then
 /// FOLDERS, UPLOAD, AUDIO and MODIFY.
 const FLAG_W: [f32; 5] = [60.0, 72.0, 64.0, 56.0, 64.0];
-/// The kit's table spacing (studio.rs): the gap between columns, and a
-/// row's padding either side.
-const COL_GAP: f32 = 16.0;
-const CELL_PAD: f32 = 10.0;
-/// A tick box's side, as the kit draws one.
-const BOX: f32 = 16.0;
-/// A field with its label over it, as the kit's `field` lays one out.
-const FIELD_ROW_H: f32 = 14.0 + 6.0 + FIELD_H;
 /// The modals' widths: the canvas's add form, the grant and the password,
 /// and the remove gate.
 const FORM_W: f32 = 640.0;
@@ -74,19 +52,6 @@ const SMALL_W: f32 = 480.0;
 const GATE_W: f32 = 520.0;
 /// A row of the grant's list.
 const GRANT_ROW_H: f32 = 32.0;
-/// Where each modal keeps, from pass to pass, the control its keyboard
-/// was on ([`moved`]): the add form's focus, the grant's cursor, the
-/// password modal's field.
-const KEYS_AT: [&str; 3] = ["users-add-focus", "users-libs-cursor", "users-pw-focus"];
-
-/// What a click in the pass asks of the room, applied once it is drawn.
-enum Step {
-    /// One of the room's own acts, as the cells view registers it.
-    Act(Act),
-    /// A key, for a control the canvas draws where the cells name only the
-    /// key: the remove gate's close is its Esc.
-    Key(KeyCode),
-}
 
 /// One pass of the room over the whole of `ui`: the room's area less its
 /// first row, which is the host's pick banner's. `composition` is the
@@ -96,34 +61,24 @@ enum Step {
 pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown {
     let pal = Pal::now();
     let full = ui.max_rect();
-    let column = Rect::from_min_max(full.min + vec2(PAD_X, PAD_TOP), (full.max - vec2(PAD_X, PAD_FOOT)).max(full.min));
-    let note_rect = Rect::from_min_max(pos2(column.min.x, (column.max.y - NOTE_H).max(column.min.y)), column.max);
-    let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, (note_rect.min.y - GAP).max(column.min.y)));
+    let (body_rect, note_rect) = room_rects(full);
 
-    let mut steps = Vec::new();
+    let mut acts = Vec::new();
     let mut base = ui.new_child(UiBuilder::new().id_salt("users-base").max_rect(body_rect).layout(Layout::top_down(Align::Min)));
     base.set_clip_rect(body_rect.expand(1.0).intersect(ui.clip_rect()));
-    draw_base(&mut base, room, &pal, &mut steps);
+    draw_base(&mut base, room, &pal, &mut acts);
     note(ui, note_rect, room, &pal);
 
     let mut caret = None;
-    if matches!(room.modal, Modal::None) {
-        // The next modal to open scrolls its keyboard's control into view,
-        // wherever its body stood when it last closed.
-        ui.ctx().data_mut(|d| KEYS_AT.iter().for_each(|at| d.remove::<usize>(Id::new(*at))));
-    } else {
+    if !matches!(room.modal, Modal::None) {
         // A modal makes the room beneath inert: what was clicked under it
         // this pass is dropped, as the cells view drops what it registered.
-        steps.clear();
-        caret = draw_modal(ui, room, composition, full, &pal, &mut steps);
+        acts.clear();
+        caret = draw_modal(ui, room, composition, full, &pal, &mut acts);
     }
     let mut outcome = None;
-    for step in steps {
-        let ended = match step {
-            Step::Act(act) => room.act(act),
-            Step::Key(code) => room.key(KeyEvent::new(code, KeyModifiers::NONE)),
-        };
-        outcome = outcome.or(ended);
+    for act in acts {
+        outcome = outcome.or(room.act(act));
     }
     // A click that closed the modal, or took its focus off the fields,
     // leaves no field with the keyboard.
@@ -146,21 +101,21 @@ fn field_has_keys(room: &Room) -> bool {
 
 /// The state line, the add card, the table — and on a server with no
 /// users, the sentences about public mode under its headings.
-fn draw_base(ui: &mut Ui, room: &Room, pal: &Pal, steps: &mut Vec<Step>) {
-    state_line(ui, room, pal);
-    ui.add_space(GAP);
+fn draw_base(ui: &mut Ui, room: &Room, pal: &Pal, acts: &mut Vec<Act>) {
+    state(ui, room, pal);
+    ui.add_space(studio::ROOM_GAP);
     let label = if room.loaded && room.users.is_empty() { t!("usr.add_first_card") } else { t!("usr.add_card") };
-    if add_card(ui, Id::new("users-add-card"), bare(&label), pal).clicked() {
-        steps.push(Step::Act(Act::Add));
+    if add_card(ui, Id::new("users-add-card"), &label, Glyph::User, pal).clicked() {
+        acts.push(Act::Add);
     }
-    ui.add_space(GAP);
-    table(ui, room, pal, steps);
+    ui.add_space(studio::ROOM_GAP);
+    table(ui, room, pal, acts);
 }
 
 /// Public mode in gold, else the count — or, once the room signed itself
 /// in, who it is signed in as — after the state's LED, and the reload's
 /// cadence dim at the right. Blank until the first load answers.
-fn state_line(ui: &mut Ui, room: &Room, pal: &Pal) {
+fn state(ui: &mut Ui, room: &Room, pal: &Pal) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, STATE_H), Sense::hover());
     if !room.loaded {
@@ -182,18 +137,9 @@ fn state_line(ui: &mut Ui, room: &Room, pal: &Pal) {
         let tail = if admins == 1 { t!("usr.state_admins_one") } else { t!("usr.state_admins", n = admins) };
         (pal.ok, head, pal.text, tail.to_string(), pal.text)
     };
-    let mid = row.center().y;
-    let mut right = row.max.x;
-    if !public {
-        let polls = text(ui, row.right_center(), &t!("usr.polls"), body(13.0), pal.dim, w * 0.4, Align2::RIGHT_CENTER);
-        right = polls.min.x - 16.0;
-    }
-    led(ui, pos2(row.min.x + 3.0, mid), lamp);
-    let x = row.min.x + 16.0;
-    let drawn = text(ui, pos2(x, mid), unbullet(&head), strong(14.0), head_color, (right - x).max(1.0), Align2::LEFT_CENTER);
-    if right - drawn.max.x > 12.0 {
-        text(ui, pos2(drawn.max.x, mid), &tail, body(14.0), tail_color, right - drawn.max.x, Align2::LEFT_CENTER);
-    }
+    let parts = [(bare(&head).to_string(), strong(14.0), head_color), (tail, body(14.0), tail_color)];
+    let polls = (t!("usr.polls").to_string(), body(13.0), pal.dim);
+    state_line(ui, row, lamp, 16.0, &parts, (!public).then_some(&polls));
 }
 
 /// The table's columns across `w`: USER, ADMIN, the libraries taking what
@@ -223,31 +169,20 @@ fn columns(ui: &Ui, w: f32) -> Vec<Col> {
 }
 
 /// The users, one row each in the server's order, the keyboard's cursor
-/// ringed; a row's five flags as tick boxes, and its remove in the trail.
-/// A click on a row selects it, its boxes included, as in the cells; the
-/// cross opens the remove gate.
-fn table(ui: &mut Ui, room: &Room, pal: &Pal, steps: &mut Vec<Step>) {
+/// ringed; a row's five flags as tick boxes, and its remove in the trail,
+/// outside the row's target as the cells' remove column is. A click on a
+/// row selects it, its boxes included, as in the cells; the cross opens
+/// the remove gate. With no users the headings stand over nothing, as the
+/// cells draw them in every state, and public mode says why under them.
+fn table(ui: &mut Ui, room: &Room, pal: &Pal, acts: &mut Vec<Act>) {
     let w = ui.available_width();
     let cols = columns(ui, w);
-    let id = Id::new("users-table");
-    if room.users.is_empty() {
-        // The headings and their rule over no rows, as the cells draw them
-        // in every state.
-        let (head, _) = ui.allocate_exact_size(vec2(w, HEAD_H), Sense::hover());
-        let mut child = ui.new_child(UiBuilder::new().max_rect(head).layout(Layout::top_down(Align::Min)));
-        let _ = Table::new(id, &cols, 0).trail(TRAIL).show(&mut child, pal, |_, _, _| {});
-        if room.loaded {
-            public(ui, pal);
-        }
-        return;
-    }
     let rows: Vec<(&String, &AdminUser)> = room.users.iter().collect();
-    let mut trails: Vec<Rect> = Vec::new();
     let flags = [(1, Flag::Admin), (3, Flag::Mkdir), (4, Flag::Upload), (5, Flag::Audio), (6, Flag::Modify)];
-    let shown = Table::new(id, &cols, rows.len()).cursor(room.sel).trail(TRAIL).show(ui, pal, |ui, i, row| {
+    let table = Table::new(Id::new("users-table"), &cols, rows.len()).cursor(room.sel).trail(TRAIL).empty("");
+    let shown = table.show(ui, pal, |ui, i, row| {
         let (name, u) = rows[i];
-        let font = if row.selected { strong(14.0) } else { body(14.0) };
-        cell(ui, row, 0, &printable(name, NAME_MAX), font, ink(row, pal.text, pal), false);
+        name_cell(ui, row, 0, &printable(name, NAME_MAX), pal);
         let (libs, own) = if u.vpaths.is_empty() { ("—".to_string(), pal.dim) } else { (u.vpaths.join(" · "), pal.soft) };
         cell(ui, row, 2, &libs, body(13.5), ink(row, own, pal), false);
         for (at, flag) in flags {
@@ -256,17 +191,14 @@ fn table(ui: &mut Ui, room: &Room, pal: &Pal, steps: &mut Vec<Step>) {
         }
         let at = pos2(row.trail.min.x + REMOVE_W / 2.0, row.rect.center().y);
         if icon_button(ui, Id::new("users-remove").with(i), at, Icon::Remove, pal.dim, pal).clicked() {
-            steps.push(Step::Act(Act::Remove(name.clone())));
+            acts.push(Act::Remove(name.clone()));
         }
-        trails.push(row.trail);
     });
-    // The trail is outside the selection, as the cells' remove column is:
-    // a click there beside the cross selects nothing.
     if let Some(i) = shown.row {
-        let at = ui.ctx().input(|input| input.pointer.interact_pos());
-        if !at.is_some_and(|p| trails.iter().any(|t| t.contains(p))) {
-            steps.push(Step::Act(Act::Select(i)));
-        }
+        acts.push(Act::Select(i));
+    }
+    if rows.is_empty() && room.loaded {
+        public(ui, pal);
     }
 }
 
@@ -279,50 +211,50 @@ fn public(ui: &mut Ui, pal: &Pal) {
     // warnings, one to the last sentence) tight enough that all of it fits
     // the GUI's default window, as it does in cells.
     let floor = ui.clip_rect().max.y;
+    let said = |ui: &mut Ui, key: &str, color| Para::new(&t!(key), body(14.0), color).floor(floor).show(ui);
     ui.add_space(6.0);
-    lines_above(ui, &t!("usr.empty_users"), body(14.0), pal.dim, floor);
+    said(ui, "usr.empty_users", pal.dim);
     ui.add_space(18.0);
-    lines_above(ui, &t!("usr.public_1"), body(14.0), pal.gold, floor);
+    said(ui, "usr.public_1", pal.gold);
     ui.add_space(2.0);
-    lines_above(ui, &t!("usr.public_2"), body(14.0), pal.gold, floor);
+    said(ui, "usr.public_2", pal.gold);
     ui.add_space(10.0);
-    lines_above(ui, &t!("usr.public_3_hosted"), body(14.0), pal.dim, floor);
+    said(ui, "usr.public_3_hosted", pal.dim);
 }
 
 /// The room's foot: what it is busy with, its note, or — with a row under
 /// the cursor and no modal up — what that user sees, as the cells word it.
 fn note(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
-    let row_note = match (&room.note, &room.busy, room.selected_name()) {
-        (None, None, Some(name)) if matches!(room.modal, Modal::None) => room.users.get(&name).map(|u| {
+    let story = match room.selected_name() {
+        Some(name) if matches!(room.modal, Modal::None) => room.users.get(&name).map(|u| {
             let user = printable(&name, NAME_MAX);
             let text = if u.vpaths.is_empty() {
                 t!("usr.note_sees_none", user = user).to_string()
             } else {
                 t!("usr.note_sees", user = user, libs = u.vpaths.join(" · ")).to_string()
             };
-            (format!("{text}{}", t!("usr.note_flags")), false)
+            vec![(format!("{text}{}", t!("usr.note_flags")), body(13.0), pal.dim)]
         }),
         _ => None,
     };
-    let note = room.note.clone().or(row_note);
-    note_line(ui, rect, room.busy.as_deref(), note.as_ref(), pal);
+    foot_line(ui, rect, room.busy.as_deref(), room.note.as_ref(), story.as_deref().unwrap_or(&[]), pal);
 }
 
 // ── Modals ────────────────────────────────────────────────────────────────
 
 /// The room's modal over `over`, the room's whole rect. Returns the caret
 /// of its focused field, if it has one.
-fn draw_modal(ui: &Ui, room: &Room, composition: &str, over: Rect, pal: &Pal, steps: &mut Vec<Step>) -> Option<Pos2> {
+fn draw_modal(ui: &Ui, room: &Room, composition: &str, over: Rect, pal: &Pal, acts: &mut Vec<Act>) -> Option<Pos2> {
     match &room.modal {
         Modal::None => None,
-        Modal::Add(f) => add_form(ui, f, composition, over, pal, steps),
+        Modal::Add(f) => add_form(ui, f, composition, over, pal, acts),
         Modal::Libraries(d) => {
-            grant(ui, d, over, pal, steps);
+            grant(ui, d, over, pal, acts);
             None
         }
-        Modal::Password(d) => password(ui, d, composition, over, pal, steps),
+        Modal::Password(d) => password(ui, d, composition, over, pal, acts),
         Modal::Remove(name) => {
-            gate(ui, room, name, over, pal, steps);
+            gate(ui, room, name, over, pal, acts);
             None
         }
     }
@@ -331,22 +263,22 @@ fn draw_modal(ui: &Ui, room: &Room, composition: &str, over: Rect, pal: &Pal, st
 /// The kit's field for one of the room's inputs: its value and caret, the
 /// keyboard and the composition when `on`, masked where the cells mask.
 fn entry<'a>(input: &'a Input, on: bool, composition: &'a str, masked: bool) -> studio::Input<'a> {
-    let field = studio::Input::new(input.value(), input.cursor()).focused(on, if on { composition } else { "" });
+    let field = studio::Input::of(input).focused(on, composition);
     if masked { field.masked() } else { field }
 }
 
 /// The add form: the two fields side by side, the libraries in one row of
 /// ticks (those with no room left off, as the cells leave them), the four
 /// permissions, the name's note and the error, and the one button. The
-/// control with the keyboard is ringed, and scrolled into view when the
-/// keyboard moved to it.
-fn add_form(ui: &Ui, f: &AddForm, composition: &str, over: Rect, pal: &Pal, steps: &mut Vec<Step>) -> Option<Pos2> {
+/// control with the keyboard wears the keyboard's look, and is brought
+/// into view on the pass the keyboard moved to it.
+fn add_form(ui: &Ui, f: &AddForm, composition: &str, over: Rect, pal: &Pal, acts: &mut Vec<Act>) -> Option<Pos2> {
     let fields = f.fields();
     let index_of = |field: AField| fields.iter().position(|x| *x == field).unwrap_or(0);
     let focused = f.focused();
-    let shown = modal(ui, Id::new("users-add-form"), over, FORM_W, &t!("usr.form_title"), pal, |ui| {
+    let id = Id::new("users-add-form");
+    let shown = Dialog::new(id, over, FORM_W, &t!("usr.form_title")).show(ui, pal, |ui| {
         let mut caret = None;
-        let jump = moved(ui, Id::new(KEYS_AT[0]), f.focus);
         let w = ui.available_width();
 
         let half = ((w - 24.0) / 2.0).max(0.0);
@@ -356,55 +288,51 @@ fn add_form(ui: &Ui, f: &AddForm, composition: &str, over: Rect, pal: &Pal, step
             (AField::Password, t!("usr.field_password"), &f.password, true),
         ];
         for (k, (which, label, value, masked)) in texts.into_iter().enumerate() {
-            let rect = Rect::from_min_size(pos2(row.min.x + k as f32 * (half + 24.0), row.min.y), vec2(half, row.height()));
-            let mut child = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+            let slot = Rect::from_min_size(pos2(row.min.x + k as f32 * (half + 24.0), row.min.y), vec2(half, row.height()));
             let on = focused == which;
-            let typed = field(&mut child, Id::new("users-add-field").with(k), &label, &entry(value, on, composition, masked), pal);
+            let typed = field_at(ui, Id::new("users-add-field").with(k), slot, &label, &entry(value, on, composition, masked), pal);
             if typed.response.clicked() {
-                steps.push(Step::Act(Act::FormFocus(index_of(which))));
+                acts.push(Act::FormFocus(index_of(which)));
             }
             if on {
                 caret = typed.caret;
-                if jump {
-                    // The label with its box: the field, not its box alone.
-                    ui.scroll_to_rect(rect, None);
-                }
+                // The label with its box: the field, not its box alone.
+                reveal(ui, id, f.focus, slot);
             }
         }
 
         ui.add_space(FORM_GAP);
         let (head, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
-        let hint = text(ui, head.right_center(), &t!("usr.form_libraries_hint"), body(13.0), pal.dim, w * 0.6, Align2::RIGHT_CENTER);
-        small_caps(ui, head.left_center(), &t!("usr.form_libraries"), pal.dim, (hint.min.x - 16.0 - head.min.x).max(1.0), Align2::LEFT_CENTER);
+        let hint = text(ui, head.right_center(), &t!("usr.form_libraries_hint"), body(13.0), pal.dim, w * 0.6, egui::Align2::RIGHT_CENTER);
+        label_at(ui, head.left_center(), &t!("usr.form_libraries"), (hint.min.x - 16.0 - head.min.x).max(1.0), pal);
         ui.add_space(8.0);
-        let (line, _) = ui.allocate_exact_size(vec2(w, HIT), Sense::hover());
+        let (line_rect, _) = ui.allocate_exact_size(vec2(w, HIT), Sense::hover());
         if f.libraries.is_empty() {
-            text(ui, line.left_center(), &t!("usr.form_no_libraries"), body(13.5), pal.dim, w, Align2::LEFT_CENTER);
+            text(ui, line_rect.left_center(), &t!("usr.form_no_libraries"), body(13.5), pal.dim, w, egui::Align2::LEFT_CENTER);
         }
-        let mut x = line.min.x;
+        let mut x = line_rect.min.x - 8.0;
         for (i, (name, on)) in f.libraries.iter().enumerate() {
             // The first is drawn however long, cut at the row's end; a
             // later one with no room left is left off, as in the cells.
             let label = printable(name, NAME_MAX);
-            let want = BOX + 8.0 + width_of(ui, &label, body(14.0));
-            if x + want > line.max.x && x > line.min.x {
+            let which = AField::Lib(i);
+            let font = if focused == which { strong(14.0) } else { body(14.0) };
+            let want = 8.0 + BOX + 10.0 + width_of(ui, &label, font) + 8.0;
+            if x + want > line_rect.max.x + 8.0 && i > 0 {
                 break;
             }
-            let rect = Rect::from_min_max(pos2(x, line.min.y), pos2((x + want).min(line.max.x), line.max.y));
-            let which = AField::Lib(i);
-            let response = inline_tick(ui, Id::new("users-add-lib").with(i), rect, *on, &label, focused == which, pal);
-            if response.clicked() {
-                steps.push(Step::Act(Act::FormToggle(index_of(which))));
+            let rect = Rect::from_min_max(pos2(x, line_rect.min.y), pos2((x + want).min(line_rect.max.x + 8.0), line_rect.max.y));
+            if tick_row(ui, Id::new("users-add-lib").with(i), rect, *on, &label, focused == which, pal).clicked() {
+                acts.push(Act::FormToggle(index_of(which)));
             }
-            if focused == which && jump {
-                response.scroll_to_me(None);
+            if focused == which {
+                reveal(ui, id, f.focus, rect);
             }
-            x = rect.max.x + 20.0;
+            x = rect.max.x + 4.0;
         }
 
         ui.add_space(FORM_GAP);
-        let (head, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-        small_caps(ui, head.left_center(), &t!("usr.form_permissions"), pal.dim, w, Align2::LEFT_CENTER);
+        studio::label(ui, &t!("usr.form_permissions"), pal);
         ui.add_space(8.0);
         let perms = [
             (AField::Admin, t!("usr.perm_admin").to_string(), t!("usr.perm_admin_desc").to_string()),
@@ -416,83 +344,88 @@ fn add_form(ui: &Ui, f: &AddForm, composition: &str, over: Rect, pal: &Pal, step
             if k > 0 {
                 ui.add_space(2.0);
             }
-            let response = check_line(ui, Id::new("users-add-perm").with(k), f.checked(which), &label, &desc, pal);
+            let response = check_line(ui, Id::new("users-add-perm").with(k), f.checked(which), &label, &desc, focused == which, pal);
             if response.clicked() {
-                steps.push(Step::Act(Act::FormToggle(index_of(which))));
+                acts.push(Act::FormToggle(index_of(which)));
             }
             if focused == which {
-                ring(ui, response.rect.expand2(vec2(4.0, 0.0)), pal);
-                if jump {
-                    response.scroll_to_me(None);
-                }
+                reveal(ui, id, f.focus, response.rect);
             }
         }
 
         ui.add_space(FORM_GAP);
-        let (line, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-        text(ui, line.left_center(), &t!("usr.form_permanent"), body(13.0), pal.dim, w, Align2::LEFT_CENTER);
+        line(ui, 18.0, &t!("usr.form_permanent"), body(13.0), pal.dim);
         ui.add_space(4.0);
-        let (line, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-        if let Some(err) = &f.error {
-            text(ui, line.left_center(), err, body(13.0), pal.gold, w, Align2::LEFT_CENTER);
-        }
+        line(ui, 18.0, f.error.as_deref().unwrap_or(""), body(13.0), pal.gold);
         ui.add_space(FORM_GAP);
-        if button_row(ui, Id::new("users-add-submit"), &t!("usr.form_add"), true, pal).clicked() {
-            steps.push(Step::Act(Act::FormSubmit));
+        let add = t!("usr.form_add");
+        if foot(ui, Id::new("users-add-submit"), &[], &[(add.as_ref(), true)], None, pal).is_some() {
+            acts.push(Act::FormSubmit);
         }
         caret
     });
     if shown.closed {
-        steps.push(Step::Act(Act::FormCancel));
+        acts.push(Act::FormCancel);
     }
     shown.inner
 }
 
 /// The library grant: a row a library, ticked where the user holds it,
-/// the keyboard's cursor ringed; the two notes; Save.
-fn grant(ui: &Ui, d: &LibsDraft, over: Rect, pal: &Pal, steps: &mut Vec<Step>) {
+/// the keyboard's cursor in the keyboard's look and brought into view when
+/// it moves, a row under the pointer raised; the two notes; Save.
+fn grant(ui: &Ui, d: &LibsDraft, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let title = t!("usr.libs_title", user = printable(&d.username, NAME_MAX));
-    let shown = modal(ui, Id::new("users-libraries"), over, SMALL_W, &title, pal, |ui| {
+    let id = Id::new("users-libraries");
+    let shown = Dialog::new(id, over, SMALL_W, &title).show(ui, pal, |ui| {
         let w = ui.available_width();
         if d.libraries.is_empty() {
-            let (line, _) = ui.allocate_exact_size(vec2(w, GRANT_ROW_H), Sense::hover());
-            text(ui, line.left_center(), &t!("usr.form_no_libraries"), body(13.5), pal.dim, w, Align2::LEFT_CENTER);
+            line(ui, GRANT_ROW_H, &t!("usr.form_no_libraries"), body(13.5), pal.dim);
         }
-        let jump = moved(ui, Id::new(KEYS_AT[1]), d.cursor);
         for (i, (name, on)) in d.libraries.iter().enumerate() {
             // Every row takes its room, but only the rows in view are drawn:
             // a long list costs the pass its height, not each row's words.
             let (_, rect) = ui.allocate_space(vec2(w, GRANT_ROW_H));
             let cursor = i == d.cursor;
-            if cursor && jump {
-                ui.scroll_to_rect(rect, None);
+            if cursor {
+                reveal(ui, id, i, rect);
             }
-            if ui.is_rect_visible(rect) && grant_row(ui, Id::new("users-libs-row").with(i), rect, *on, &printable(name, NAME_MAX), cursor, pal).clicked() {
-                steps.push(Step::Act(Act::LibsRow(i)));
+            if !ui.is_rect_visible(rect) {
+                continue;
             }
+            let response = list_row_at(ui, Id::new("users-libs-row").with(i), rect, cursor, pal);
+            if response.clicked() {
+                acts.push(Act::LibsRow(i));
+            }
+            let mark = Rect::from_center_size(pos2(rect.min.x + 10.0 + BOX / 2.0, rect.center().y), Vec2::splat(BOX));
+            tick_box(ui, mark, *on, response.hovered(), pal.ground, pal);
+            let x = mark.max.x + 10.0;
+            let font = if cursor { strong(14.0) } else { body(14.0) };
+            let name = printable(name, NAME_MAX);
+            text(ui, pos2(x, rect.center().y), &name, font, pal.text, (rect.max.x - 10.0 - x).max(1.0), egui::Align2::LEFT_CENTER);
         }
         ui.add_space(16.0);
-        paragraph(ui, &t!("usr.libs_note_1"), body(13.0), pal.dim);
+        Para::new(&t!("usr.libs_note_1"), body(13.0), pal.dim).show(ui);
         ui.add_space(2.0);
-        paragraph(ui, &t!("usr.libs_note_2"), body(13.0), pal.dim);
+        Para::new(&t!("usr.libs_note_2"), body(13.0), pal.dim).show(ui);
         ui.add_space(FORM_GAP);
-        if button_row(ui, Id::new("users-libs-save"), &t!("usr.libs_save"), true, pal).clicked() {
-            steps.push(Step::Act(Act::LibsSubmit));
+        let save = t!("usr.libs_save");
+        if foot(ui, Id::new("users-libs-save"), &[], &[(save.as_ref(), true)], None, pal).is_some() {
+            acts.push(Act::LibsSubmit);
         }
     });
     if shown.closed {
-        steps.push(Step::Act(Act::LibsCancel));
+        acts.push(Act::LibsCancel);
     }
 }
 
 /// A new password, typed twice, both masked; the error at the foot's left
 /// and the button at its right, lit only while the two agree, as the
 /// cells' waits, though a click is the submit either way.
-fn password(ui: &Ui, d: &PwDraft, composition: &str, over: Rect, pal: &Pal, steps: &mut Vec<Step>) -> Option<Pos2> {
+fn password(ui: &Ui, d: &PwDraft, composition: &str, over: Rect, pal: &Pal, acts: &mut Vec<Act>) -> Option<Pos2> {
     let title = t!("usr.pw_title", user = printable(&d.username, NAME_MAX));
-    let shown = modal(ui, Id::new("users-password"), over, SMALL_W, &title, pal, |ui| {
+    let id = Id::new("users-password");
+    let shown = Dialog::new(id, over, SMALL_W, &title).show(ui, pal, |ui| {
         let mut caret = None;
-        let jump = moved(ui, Id::new(KEYS_AT[2]), d.focus);
         let pairs = [(t!("usr.field_password"), &d.password), (t!("usr.field_again"), &d.again)];
         for (k, (label, value)) in pairs.into_iter().enumerate() {
             if k > 0 {
@@ -502,181 +435,63 @@ fn password(ui: &Ui, d: &PwDraft, composition: &str, over: Rect, pal: &Pal, step
             let top = ui.cursor().min.y;
             let typed = field(ui, Id::new("users-pw-field").with(k), &label, &entry(value, on, composition, true), pal);
             if typed.response.clicked() {
-                steps.push(Step::Act(Act::PwFocus(k)));
+                acts.push(Act::PwFocus(k));
             }
             if on {
                 caret = typed.caret;
-                if jump {
-                    // The label with its box: the field, not its box alone.
-                    ui.scroll_to_rect(typed.response.rect.with_min_y(top), None);
-                }
+                // The label with its box: the field, not its box alone.
+                reveal(ui, id, k, typed.response.rect.with_min_y(top));
             }
         }
         ui.add_space(FORM_GAP);
-        let w = ui.available_width();
-        let (row, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
-        let label = t!("usr.pw_set");
-        let label = bare(&label);
-        let at = Rect::from_min_max(pos2(row.max.x - form_button_width(ui, label).min(w), row.min.y), row.max);
-        if let Some(err) = &d.error {
-            text(ui, row.left_center(), err, body(13.0), pal.gold, (at.min.x - 16.0 - row.min.x).max(1.0), Align2::LEFT_CENTER);
-        }
-        if form_button(ui, Id::new("users-pw-set"), at, label, d.ready(), pal).clicked() {
-            steps.push(Step::Act(Act::PwSubmit));
+        let set = t!("usr.pw_set");
+        if foot(ui, Id::new("users-pw-set"), &[], &[(set.as_ref(), d.ready())], d.error.as_deref(), pal).is_some() {
+            acts.push(Act::PwSubmit);
         }
         caret
     });
     if shown.closed {
-        steps.push(Step::Act(Act::PwCancel));
+        acts.push(Act::PwCancel);
     }
     shown.inner
 }
 
-/// The remove gate: what goes with the user in gold, what stays in green,
-/// the last admin's warning where it applies; Keep lit, Remove not.
-fn gate(ui: &Ui, room: &Room, name: &str, over: Rect, pal: &Pal, steps: &mut Vec<Step>) {
+/// The remove gate, answered as every gate (no close; Esc keeps): what
+/// goes with the user in gold, what stays in green, the last admin's
+/// warning where it applies; Keep lit, Remove not.
+fn gate(ui: &Ui, room: &Room, name: &str, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let user = printable(name, NAME_MAX);
     let title = t!("usr.remove_title", user = user.clone());
     let last_admin = room.last_admin(name);
-    let shown = modal(ui, Id::new("users-remove-gate"), over, GATE_W, &title, pal, |ui| {
-        paragraph(ui, &t!("usr.remove_1"), body(14.0), pal.gold);
+    let id = Id::new("users-remove-gate");
+    let _ = Dialog::new(id, over, GATE_W, &title).gate(pal).show(ui, pal, |ui| {
+        Para::new(&t!("usr.remove_1"), body(14.0), pal.gold).show(ui);
         ui.add_space(4.0);
-        paragraph(ui, &t!("usr.remove_2"), body(14.0), pal.ok);
+        Para::new(&t!("usr.remove_2"), body(14.0), pal.ok).show(ui);
         if last_admin {
             ui.add_space(12.0);
-            paragraph(ui, &t!("usr.remove_last_admin", user = user.clone()), strong(14.0), pal.gold);
+            Para::new(&t!("usr.remove_last_admin", user = user.clone()), strong(14.0), pal.gold).show(ui);
         }
         ui.add_space(FORM_GAP);
-        let w = ui.available_width();
-        let (row, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
         let (keep, go) = (t!("usr.remove_keep"), t!("usr.remove_confirm"));
-        let (keep, go) = (bare(&keep), bare(&go));
-        let go_at = Rect::from_min_max(pos2(row.max.x - form_button_width(ui, go), row.min.y), row.max);
-        let keep_left = go_at.min.x - 10.0 - form_button_width(ui, keep);
-        let keep_at = Rect::from_min_max(pos2(keep_left, row.min.y), pos2(go_at.min.x - 10.0, row.max.y));
-        if form_button(ui, Id::new("users-remove-keep"), keep_at, keep, true, pal).clicked() {
-            steps.push(Step::Act(Act::RemoveCancel));
-        }
-        if form_button(ui, Id::new("users-remove-go"), go_at, go, false, pal).clicked() {
-            steps.push(Step::Act(Act::RemoveConfirm));
+        match foot(ui, id.with("foot"), &[], &[(keep.as_ref(), true), (go.as_ref(), false)], None, pal) {
+            Some(0) => acts.push(Act::RemoveCancel),
+            Some(_) => acts.push(Act::RemoveConfirm),
+            None => {}
         }
     });
-    // The cells' gate draws no close, and its tips name Esc for Keep; the
-    // kit's window always has one, so it is that Esc.
-    if shown.closed {
-        steps.push(Step::Key(KeyCode::Esc));
-    }
-}
-
-// ── Pieces the kit has no widget for ─────────────────────────────────────
-
-/// A label bare of the arrow the cells mark a button with, at its end (or
-/// its start): the kit's button is its own mark.
-fn bare(s: &str) -> &str {
-    s.trim().trim_end_matches('▸').trim_start_matches('◂').trim()
-}
-
-/// A state's words bare of the bullet the cells lead them with: the kit
-/// draws it as the state's LED.
-fn unbullet(s: &str) -> &str {
-    s.trim_start().trim_start_matches('•').trim_start()
-}
-
-/// Whether `now` differs from what `id` held on the last pass; it holds
-/// `now` from here on. The keyboard's control is scrolled into view on the
-/// pass it moved, as the kit's table follows its cursor.
-fn moved(ui: &Ui, id: Id, now: usize) -> bool {
-    let last = ui.ctx().data(|d| d.get_temp::<usize>(id));
-    ui.ctx().data_mut(|d| d.insert_temp(id, now));
-    last != Some(now)
-}
-
-/// `s` wrapped at the layout's width, a row of the layout as tall as its
-/// lines.
-fn paragraph(ui: &mut Ui, s: &str, font: FontId, color: Color32) {
-    lines_above(ui, s, font, color, f32::INFINITY);
-}
-
-/// [`paragraph`], its lines drawn only where they end above `floor`: a line
-/// with no room left for it is left out rather than cut through, as the
-/// cells leave out a row past the column's end.
-fn lines_above(ui: &mut Ui, s: &str, font: FontId, color: Color32, floor: f32) {
-    let w = ui.available_width();
-    let galley = ui.painter().layout(s.to_string(), font, color, w.max(1.0));
-    let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
-    let fits = galley.rows.iter().map(|row| rect.min.y + row.rect().max.y).filter(|foot| *foot <= floor).fold(rect.min.y, f32::max);
-    if fits > rect.min.y {
-        ui.painter().with_clip_rect(rect.with_max_y(fits).intersect(ui.clip_rect())).galley(rect.min, galley, color);
-    }
-}
-
-/// A tick box at `rect` on `fill`, as the kit draws one: a dim edge when
-/// off, the ok green's edge and check when on, each brighter under the
-/// pointer. Alone it takes no click: a table's flags show their state, and
-/// the row is what a click there selects.
-fn tick_box(ui: &Ui, rect: Rect, on: bool, hovered: bool, fill: Color32, pal: &Pal) {
-    let edge = if on { pal.ok } else { pal.dim };
-    let edge = if hovered { lift(edge, 40) } else { edge };
-    ui.painter().rect_filled(rect, square(), fill);
-    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, edge), StrokeKind::Inside);
-    if on {
-        // The canvas's check in its 10-point box: M1.5 5.2 l2.4 2.4 L8.6 2.6.
-        let o = rect.center() - vec2(5.0, 5.0);
-        let points = vec![o + vec2(1.5, 5.2), o + vec2(3.9, 7.6), o + vec2(8.6, 2.6)];
-        let check = if hovered { lift(pal.ok, 40) } else { pal.ok };
-        ui.painter().add(Shape::line(points, Stroke::new(1.7, check)));
-    }
-}
-
-/// One tick of a row of them at `rect` (the add form's libraries): the box
-/// on the ground's fill and `label` after it, the whole rect the click's,
-/// ringed while it has the keyboard.
-fn inline_tick(ui: &Ui, id: Id, rect: Rect, on: bool, label: &str, focused: bool, pal: &Pal) -> Response {
-    let response = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-    let mark = Rect::from_min_size(pos2(rect.min.x, rect.center().y - BOX / 2.0), Vec2::splat(BOX));
-    tick_box(ui, mark, on, response.hovered(), pal.ground, pal);
-    let x = mark.max.x + 8.0;
-    text(ui, pos2(x, rect.center().y), label, body(14.0), pal.text, (rect.max.x - x).max(1.0), Align2::LEFT_CENTER);
-    if focused {
-        ring(ui, rect.expand2(vec2(4.0, 0.0)), pal);
-    }
-    response
-}
-
-/// A row of the grant's list at `rect`: a tick box on the ground's fill
-/// and the library's name, the keyboard's cursor raised and ringed as a
-/// table's row is. The whole row takes the click; as in the cells, it has
-/// no look of its own under the pointer.
-fn grant_row(ui: &Ui, id: Id, rect: Rect, on: bool, name: &str, cursor: bool, pal: &Pal) -> Response {
-    let response = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-    if cursor {
-        ui.painter().rect_filled(rect, square(), pal.raised);
-        ring(ui, rect, pal);
-    }
-    let mark = Rect::from_center_size(pos2(rect.min.x + 10.0 + BOX / 2.0, rect.center().y), Vec2::splat(BOX));
-    tick_box(ui, mark, on, false, pal.ground, pal);
-    let x = mark.max.x + 10.0;
-    let font = if cursor { strong(14.0) } else { body(14.0) };
-    text(ui, pos2(x, rect.center().y), name, font, pal.text, (rect.max.x - 10.0 - x).max(1.0), Align2::LEFT_CENTER);
-    response
-}
-
-/// A form's foot: its one button at the right end of a row of the layout,
-/// `label` bare of its arrow.
-fn button_row(ui: &mut Ui, id: Id, label: &str, primary: bool, pal: &Pal) -> Response {
-    let w = ui.available_width();
-    let (row, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
-    let label = bare(label);
-    let at = Rect::from_min_max(pos2(row.max.x - form_button_width(ui, label).min(w), row.min.y), row.max);
-    form_button(ui, id, at, label, primary, pal)
 }
 
 #[cfg(test)]
 mod tests {
+    use egui::epaint::Shape;
     use egui::{Event, FullOutput, Modifiers, PointerButton};
 
     use super::super::tests::{english, libs, loaded, press, room, type_text};
     use super::*;
+
+    /// The canvas's side margin round the room.
+    const PAD_X: f32 = 24.0;
 
     /// The room's region in the GUI's default 100×30 window (83×22 cells
     /// under the pick banner's row), and in a large one, in points.
@@ -769,8 +584,8 @@ mod tests {
             let mut r = loaded();
             let words = drawn(&settle(&ctx, &mut r, size).out);
             let has = |s: &str| words.iter().any(|w| w == s);
-            assert!(has("3 users"), "the count, its bullet an LED: {words:?}");
-            assert!(has(&t!("usr.state_admins_one")) && has(&t!("usr.polls")), "{words:?}");
+            assert!(has(&format!("3 users{}", t!("usr.state_admins_one"))), "the count, its bullet an LED, in one run: {words:?}");
+            assert!(has(&t!("usr.polls")), "{words:?}");
             assert!(has("Add a user"), "the card's words, bare of their arrow: {words:?}");
             for heading in ["USER", "ADMIN", "LIBRARIES", "FOLDERS", "UPLOAD", "AUDIO", "MODIFY"] {
                 assert!(has(heading), "{heading} at {size:?}: {words:?}");
@@ -796,7 +611,7 @@ mod tests {
         r.apply(Done::Loaded(Ok((BTreeMap::new(), libs()))));
         let words = drawn(&settle(&ctx, &mut r, LARGE).out);
         let has = |s: &str| words.iter().any(|w| w == s);
-        assert!(has("public") && has(&t!("usr.state_public_detail")), "{words:?}");
+        assert!(has(&format!("public{}", t!("usr.state_public_detail"))), "{words:?}");
         assert!(!has(&t!("usr.polls")), "public mode names no cadence: {words:?}");
         assert!(has("Add the first user") && has(&t!("usr.empty_users")), "{words:?}");
         for key in ["usr.public_1", "usr.public_2", "usr.public_3_hosted"] {
@@ -827,11 +642,11 @@ mod tests {
         let _ = click(&ctx, &mut r, SMALL, at);
         assert_eq!(r.sel, Some(1));
         assert!(r.queued.is_none(), "nothing sent");
-        // guest's trail right of its cross: the row's own target (its hand
-        // shows), but outside the selection, as the cells' remove column is.
+        // guest's trail right of its cross: outside the row's target, as the
+        // cells' remove column is, so no hand and no selection.
         let cross = ctx.read_response(Id::new("users-remove").with(2)).expect("guest's cross").rect;
         let shown = click(&ctx, &mut r, SMALL, pos2(cross.max.x + 9.0, cross.center().y));
-        assert_eq!(shown.out.platform_output.cursor_icon, egui::CursorIcon::PointingHand, "on the row");
+        assert_ne!(shown.out.platform_output.cursor_icon, egui::CursorIcon::PointingHand, "no row's hand in the trail");
         assert_eq!(r.sel, Some(1), "the trail selects nothing");
         assert!(matches!(r.modal, Modal::None), "nor removes");
         let _ = click_on(&ctx, &mut r, SMALL, Id::new("users-remove").with(0));
@@ -871,7 +686,7 @@ mod tests {
         let Modal::Add(f) = &r.modal else { panic!("the form") };
         assert!(!f.libraries[1].1 && f.focused() == AField::Lib(1), "audiobooks unticked and focused");
         let _ = pass(&ctx, &mut r, LARGE);
-        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-add-submit"));
+        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-add-submit").with(0usize));
         let Modal::Add(f) = &r.modal else { panic!("the form stays") };
         assert_eq!(f.error.as_deref(), Some("a username is needed"), "the button is the form's Enter");
         let words = drawn(&pass(&ctx, &mut r, LARGE).out);
@@ -923,7 +738,7 @@ mod tests {
         let Modal::Libraries(d) = &r.modal else { panic!("the grant") };
         assert!(d.libraries[1].1 && d.cursor == 1, "audiobooks ticked under the cursor");
         let _ = pass(&ctx, &mut r, LARGE);
-        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-libs-save"));
+        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-libs-save").with(0usize));
         assert_eq!(r.queued, Some(Op::Vpaths { username: "ben".into(), vpaths: libs() }), "the whole list");
         let _ = pass(&ctx, &mut r, LARGE);
         let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-libraries").with("close"));
@@ -944,7 +759,7 @@ mod tests {
         let Modal::Password(d) = &r.modal else { panic!("the password modal") };
         assert_eq!(d.focus, 1, "a click on AGAIN focuses it");
         let _ = pass(&ctx, &mut r, LARGE);
-        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-pw-set"));
+        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-pw-set").with(0usize));
         let Modal::Password(d) = &r.modal else { panic!("the password modal") };
         assert_eq!((d.error.as_deref(), d.focus), (Some("a password is needed"), 0), "refused as on Enter");
         let words = drawn(&pass(&ctx, &mut r, LARGE).out);
@@ -953,7 +768,7 @@ mod tests {
         press(&mut r, KeyCode::Tab);
         type_text(&mut r, "pw");
         let _ = pass(&ctx, &mut r, LARGE);
-        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-pw-set"));
+        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-pw-set").with(0usize));
         assert_eq!(r.queued, Some(Op::Password { username: "ben".into(), password: "pw".into() }));
         r.queued = None;
         let _ = pass(&ctx, &mut r, LARGE);
@@ -962,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn the_remove_gate_keeps_removes_and_its_close_is_esc() {
+    fn the_remove_gate_is_answered_keep_or_remove_with_no_close() {
         let _en = english();
         let ctx = context();
         let mut r = loaded();
@@ -975,18 +790,21 @@ mod tests {
             assert!(words.iter().any(|w| *w == t!(key)), "{key}: {words:?}");
         }
         assert!(words.iter().any(|w| *w == t!("usr.remove_last_admin", user = "anna")), "the only admin: {words:?}");
-        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-remove-keep"));
+        let gate = Id::new("users-remove-gate");
+        assert!(ctx.read_response(gate.with("close")).is_none(), "a gate has no close, as the cells draw it");
+        let _ = click_on(&ctx, &mut r, LARGE, gate.with("foot").with(0usize));
         assert!(matches!(r.modal, Modal::None) && r.queued.is_none(), "Keep keeps");
 
         r.act(Act::Remove("ben".into()));
         let words = drawn(&settle(&ctx, &mut r, LARGE).out);
         assert!(!words.iter().any(|w| w.contains("only admin")), "{words:?}");
-        let _ = click_on(&ctx, &mut r, LARGE, Id::new("users-remove-gate").with("close"));
-        assert!(matches!(r.modal, Modal::None) && r.queued.is_none(), "the close is Esc, which keeps");
+        press(&mut r, KeyCode::Esc);
+        assert!(matches!(r.modal, Modal::None) && r.queued.is_none(), "Esc keeps");
 
         r.act(Act::Remove("ben".into()));
         let _ = settle(&ctx, &mut r, LARGE);
-        let shown = click_on(&ctx, &mut r, LARGE, Id::new("users-remove-go"));
+        let shown = click_on(&ctx, &mut r, LARGE, gate.with("foot").with(1usize));
+
         assert_eq!(r.queued, Some(Op::Remove("ben".into())));
         assert!(matches!(r.modal, Modal::None));
         assert!(shown.outcome.is_none(), "no click ends the room");

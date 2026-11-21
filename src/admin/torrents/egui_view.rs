@@ -13,37 +13,31 @@
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
-use egui::epaint::{Shape, StrokeKind};
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align, Align2, Color32, CursorIcon, FontId, Id, Layout, Pos2, Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::epaint::StrokeKind;
+use egui::{Align, Align2, Color32, FontId, Id, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 
 use super::*;
-use crate::admin::{EguiShown, fmt_bytes, host_of};
+use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
-    self, Col, FIELD_H, FORM_BUTTON_H, HIT, Input as Field, Pal, RowCtx, SEG_H, Seg, Table, Typed, add_card, begin, body, caps,
-    cell, check_line, checkbox, chip, field_box, form_button, form_button_width, ink, led, meter, meter_lit, modal, mono,
-    note_line, radio, ring, segmented, small_caps, small_caps_width, square, strong, text, width_of,
+    self, CELL_PAD, Col, Dialog, FIELD_H, FIELD_ROW_H, FORM_BUTTON_H, Glyph, HIT, Input as Field, Pal, Para, Run, RowCtx, SEG_H,
+    Seg, TABLE_HEAD, Table, bare, body, caps, card, cell, cell_tipped, check, check_line, checkbox, chip, field_at,
+    field_box, foot, foot_line, form_button, form_button_width, ink, led, led_cell, meter, meter_lit, mono, name_cell, path_cell,
+    pointer, radio, ring_since, room_rects, segmented, small_caps, small_caps_width, square, state_line, strong, text,
+    unkeyed, width_of, with_figures,
 };
 
-/// The room's margin inside its region, in points: the canvas's sides and
-/// foot (above, the host's first row stands in for most of its top).
-const PAD: Vec2 = vec2(24.0, 14.0);
 /// The room between the page's rows, and between the page and its note
 /// line: the canvas's.
-const GAP: f32 = 18.0;
-/// The note line along the region's foot: the canvas's.
-const NOTE_H: f32 = 18.0;
+const GAP: f32 = studio::ROOM_GAP;
 /// A line of prose.
 const LINE_H: f32 = 20.0;
 /// A table's headings and one row: with less room than this a table is
 /// not drawn, as the cells leave off a table with under three rows.
-const TABLE_MIN: f32 = 74.0;
-/// How far under a table's top its first row's middle stands: the
-/// headings' 30 points, the 4 under them, half a 40-point row.
-const FIRST_ROW: f32 = 54.0;
-/// The modals' widths: an entry's, a gate's.
+const TABLE_MIN: f32 = TABLE_HEAD + 40.0;
+/// The modals' widths: an entry's, and a gate's, as wide, so a gate's two
+/// sentences break into whole lines rather than leave a word alone.
 const ENTRY_W: f32 = 600.0;
-const GATE_W: f32 = 560.0;
+const GATE_W: f32 = 600.0;
 /// The connect form's width, its wide fields' and the port's, the room
 /// between its rows, and the few points more over its first row and over
 /// its verdict (the canvas's).
@@ -53,20 +47,15 @@ const PORT_W: f32 = 128.0;
 const FORM_GAP: f32 = 20.0;
 const FORM_NUDGE: f32 = 4.0;
 /// A labelled field's height: its label, the room under it, its box.
-const SLOT_H: f32 = 20.0 + FIELD_H;
+const SLOT_H: f32 = FIELD_ROW_H;
 /// The key column of the Client tab's saved fields.
 const KEY_W: f32 = 120.0;
 
-/// One run of a line of words: its text, its face, its tone.
-type Part = (String, FontId, Color32);
-
 /// What a pass gathers for the room: the acts its clicks asked for, in
-/// order; the keys a control stands in for (a gate's close is its Esc);
-/// and the caret of the field that has the keyboard.
+/// order, and the caret of the field that has the keyboard.
 #[derive(Default)]
 struct Out {
     acts: Vec<Act>,
-    keys: Vec<KeyEvent>,
     caret: Option<Pos2>,
 }
 
@@ -78,11 +67,9 @@ struct Out {
 /// host must know: the focused field's caret, and an outcome a click ended
 /// the room with (none of the room's clicks does).
 pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown {
-    let pal = begin(ui);
+    let pal = Pal::now();
     let full = ui.max_rect();
-    let column = full.shrink2(PAD);
-    let note_rect = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
-    let page_rect = Rect::from_min_max(column.min, pos2(column.max.x, note_rect.min.y - GAP));
+    let (page_rect, note_rect) = room_rects(full);
     let modal_up = room.modal_open();
     // The filter runs over the daemon's whole list once a pass, as the
     // cells run it once a frame: the Torrents tab's rows and the note
@@ -93,7 +80,7 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
     // A radio row's hover reaches 8 points past the column, as the canvas's does.
     page.set_clip_rect(page_rect.expand2(vec2(9.0, 1.0)).intersect(ui.clip_rect()));
     draw_page(&mut page, room, &filtered, &pal, if modal_up { "" } else { composition }, &mut out);
-    foot(ui, note_rect, room, &filtered, &pal);
+    note(ui, note_rect, room, &filtered, &pal);
     if modal_up {
         // The room beneath a modal is inert, as the cells drop what it
         // registered: no click under it counts, and its field has not the
@@ -104,9 +91,6 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str) -> EguiShown
     let mut outcome = None;
     for act in out.acts {
         outcome = outcome.or(room.act(act));
-    }
-    for key in out.keys {
-        outcome = outcome.or(room.key(key));
     }
     EguiShown { caret: out.caret, outcome }
 }
@@ -133,64 +117,79 @@ fn draw_page(ui: &mut Ui, room: &Room, filtered: &[usize], pal: &Pal, compositio
 
 /// The state line in parts: its head with the cells' bullet left off (an
 /// LED stands in for it), whether the head is set bold, the detail after
-/// it, the tone of the LED and the head, and the poll note.
+/// it and the figures in it (the version, the host), the tone of the LED
+/// and the head, and the poll note.
 struct StateLine {
     head: String,
     bold: bool,
     detail: String,
+    figures: Vec<String>,
     tone: Color32,
     polls: Option<String>,
 }
 
 /// The webapp's status card in one row, in the words the cells' state
 /// line uses.
-fn state_line(room: &Room, pal: &Pal) -> StateLine {
+fn state_words(room: &Room, pal: &Pal) -> StateLine {
     let kind = room.kind();
     if kind == Kind::Disabled {
-        let head = unbullet(&t!("tor.state_off"));
-        return StateLine { head, bold: false, detail: t!("tor.state_off_detail").to_string(), tone: pal.dim, polls: None };
+        let head = bare(&t!("tor.state_off")).to_string();
+        let detail = t!("tor.state_off_detail").to_string();
+        return StateLine { head, bold: false, detail, figures: Vec::new(), tone: pal.dim, polls: None };
     }
     if !room.config().is_some_and(|c| c.configured) {
         return StateLine {
-            head: unbullet(&t!("tor.state_picked", client = kind.as_str())),
+            head: bare(&t!("tor.state_picked", client = kind.as_str())).to_string(),
             bold: true,
             detail: t!("tor.state_picked_detail").to_string(),
+            figures: Vec::new(),
             tone: pal.gold,
             polls: None,
         };
     }
     let polls = if room.tab == Tab::Torrents && room.list_live() { t!("tor.polls") } else { t!("tor.polls_slow") };
-    let (head, detail, tone) = match &room.status {
+    let (head, detail, figures, tone) = match &room.status {
         None => (
             t!("tor.state_asking", client = kind.as_str()).to_string(),
             t!("tor.state_asking_detail").to_string(),
+            Vec::new(),
             pal.dim,
         ),
         Some(s) if s.connected => {
-            let host = room.config().map(|c| format!("{}:{}", c.host, c.port)).unwrap_or_default();
+            let host = printable(&room.config().map(|c| format!("{}:{}", c.host, c.port)).unwrap_or_default(), 80);
+            let version = version_words(s);
             let detail = t!(
                 "tor.state_connected_detail",
                 client = kind.label(),
-                version = version_words(s),
-                host = printable(&host, 80),
+                version = version.clone(),
+                host = host.clone(),
                 reachable = room.reachable(),
                 total = room.libraries.len()
             );
-            (t!("tor.state_connected").to_string(), detail.to_string(), pal.ok)
+            (t!("tor.state_connected").to_string(), detail.to_string(), vec![version, host], pal.ok)
         }
         Some(s) => (
             t!("tor.state_down").to_string(),
             t!("tor.state_down_detail", reason = printable(s.reason.as_deref().unwrap_or(""), 120)).to_string(),
+            Vec::new(),
             pal.gold,
         ),
     };
-    StateLine { head: unbullet(&head), bold: true, detail, tone, polls: Some(polls.to_string()) }
+    StateLine { head: bare(&head).to_string(), bold: true, detail, figures, tone, polls: Some(polls.to_string()) }
 }
 
-/// `s` without the cells' leading bullet: the LED drawn before it is the
-/// mark.
-fn unbullet(s: &str) -> String {
-    s.trim_start_matches(['•', '●']).trim_start().to_string()
+/// Where users add torrents from a phone: the server's host and its port,
+/// as the address must be typed (the shared `host_of` names the host
+/// alone, for a header).
+fn phone_host(room: &Room) -> String {
+    let server = room.client.server();
+    url::Url::parse(&server)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| match u.port() {
+            Some(port) => format!("{h}:{port}"),
+            None => h.to_string(),
+        }))
+        .unwrap_or(server)
 }
 
 /// The page's first row: the state line on the left behind its LED, the
@@ -200,7 +199,6 @@ fn unbullet(s: &str) -> String {
 fn state_row(ui: &mut Ui, room: &Room, pal: &Pal) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
-    let mid = row.center().y;
     let beta = chip(ui, row.right_center(), Align2::RIGHT_CENTER, &t!("tor.beta"), pal.gold);
     let paged = match room.phase() {
         Phase::Loading => false,
@@ -210,85 +208,48 @@ fn state_row(ui: &mut Ui, room: &Room, pal: &Pal) {
     if !paged {
         return;
     }
-    let state = state_line(room, pal);
+    let state = state_words(room, pal);
     let head_font = if state.bold { strong(13.5) } else { body(13.5) };
-    let mut right = beta.min.x - 16.0;
-    if let Some(polls) = &state.polls {
-        let wanted = 14.0 + width_of(ui, &state.head, head_font.clone()) + width_of(ui, &state.detail, body(13.5));
-        let polls_w = width_of(ui, polls, body(12.5));
-        if row.min.x + wanted + 16.0 + polls_w <= right {
-            text(ui, pos2(right, mid), polls, body(12.5), pal.dim, polls_w + 1.0, Align2::RIGHT_CENTER);
-            right -= polls_w + 16.0;
-        }
-    }
-    led(ui, pos2(row.min.x + 3.0, mid), state.tone);
-    let x = row.min.x + 14.0;
-    let head = text(ui, pos2(x, mid), &state.head, head_font, state.tone, (right - x).max(1.0), Align2::LEFT_CENTER);
-    text(ui, pos2(head.max.x, mid), &state.detail, body(13.5), pal.soft, (right - head.max.x).max(1.0), Align2::LEFT_CENTER);
+    let figures: Vec<&str> = state.figures.iter().map(String::as_str).collect();
+    let mut parts = vec![(state.head.clone(), head_font, state.tone)];
+    parts.extend(with_figures(&state.detail, &figures, body(13.5), mono(12.5), pal.soft));
+    let polls = state.polls.map(|p| (p, body(12.5), pal.dim));
+    let line = Rect::from_min_max(row.min, pos2((beta.min.x - 16.0).max(row.min.x), row.max.y));
+    state_line(ui, line, state.tone, 14.0, &parts, polls.as_ref());
+
 }
 
 // ── Painting helpers ──────────────────────────────────────────────────────
 
 /// One line of words, a row of the layout, cut where it runs long.
 fn line(ui: &mut Ui, s: &str, font: FontId, color: Color32) {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, LINE_H), Sense::hover());
-    text(ui, rect.left_center(), s, font, color, w, Align2::LEFT_CENTER);
+    studio::line(ui, LINE_H, s, font, color);
 }
 
-/// A group's label in dim small capitals, a row of the layout, and the
-/// room under it.
+/// A group's label, a row of the layout, and the room under it.
 fn label(ui: &mut Ui, s: &str, pal: &Pal) {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-    small_caps(ui, rect.left_center(), s, pal.dim, w, Align2::LEFT_CENTER);
+    studio::label(ui, s, pal);
     ui.add_space(6.0);
-}
-
-/// `s` wrapped to `width` from `at`, its top left, in at most `rows`
-/// lines, the last cut with an ellipsis. Returns where it was drawn.
-#[allow(clippy::too_many_arguments)]
-fn wrapped(ui: &Ui, at: Pos2, width: f32, s: &str, font: FontId, color: Color32, rows: usize) -> Rect {
-    let mut job = LayoutJob::single_section(s.to_string(), TextFormat { font_id: font, color, ..Default::default() });
-    job.wrap = TextWrapping { max_width: width.max(1.0), max_rows: rows, ..Default::default() };
-    let galley = ui.painter().layout_job(job);
-    let rect = Rect::from_min_size(at, galley.size());
-    ui.painter().galley(at, galley, color);
-    rect
-}
-
-/// The runs of a line laid end to end across `rect`, each in its own face
-/// and tone, cut where the line runs out.
-fn run(ui: &Ui, rect: Rect, parts: &[Part]) {
-    let mid = rect.center().y;
-    let mut x = rect.min.x;
-    for (words, font, tone) in parts {
-        if x >= rect.max.x - 1.0 {
-            break;
-        }
-        x = text(ui, pos2(x, mid), words, font.clone(), *tone, rect.max.x - x, Align2::LEFT_CENTER).max.x;
-    }
 }
 
 /// The cells' tick (`ok`) or dash, drawn as a mark in `tone` centred on
 /// `at`: the canvas's check, or a short rule.
 fn mark(ui: &Ui, at: Pos2, ok: bool, tone: Color32) {
-    let stroke = Stroke::new(1.7, tone);
     if ok {
-        // The canvas's check in its 10-point box: M1.5 5.2 l2.4 2.4 L8.6 2.6.
-        let o = at - vec2(5.0, 5.0);
-        ui.painter().add(Shape::line(vec![o + vec2(1.5, 5.2), o + vec2(3.9, 7.6), o + vec2(8.6, 2.6)], stroke));
+        check(ui, at, tone);
     } else {
-        ui.painter().line_segment([at - vec2(4.0, 0.0), at + vec2(4.0, 0.0)], stroke);
+        ui.painter().line_segment([at - vec2(4.0, 0.0), at + vec2(4.0, 0.0)], Stroke::new(1.7, tone));
     }
 }
 
 /// A verdict or an error: its mark when it has one, then its words wrapped
-/// beside the mark in up to two lines. Returns where it was drawn.
-fn verdict(ui: &Ui, at: Pos2, width: f32, words: &str, tone: Color32, marked: Option<bool>) -> Rect {
+/// beside the mark in up to two lines, `figures` in them (a version, an
+/// RPC number) in the monospace. Returns where it was drawn.
+fn verdict(ui: &Ui, at: Pos2, width: f32, words: &str, figures: &[&str], tone: Color32, marked: Option<bool>) -> Rect {
     // The canvas's 12-point mark and the 8 points after it.
     let indent = if marked.is_some() { 20.0 } else { 0.0 };
-    let drawn = wrapped(ui, at + vec2(indent, 0.0), width - indent, words, body(13.5), tone, 2);
+    let parts = with_figures(words, figures, body(13.5), mono(12.5), tone);
+    let drawn = Para::runs(&parts).rows(2).paint(ui, at + vec2(indent, 0.0), width - indent);
     if let Some(ok) = marked {
         mark(ui, pos2(at.x + 6.0, at.y + drawn.height().min(19.0) / 2.0), ok, tone);
     }
@@ -300,77 +261,25 @@ fn verdict(ui: &Ui, at: Pos2, width: f32, words: &str, tone: Color32, marked: Op
 fn error_row(ui: &mut Ui, words: &str, pal: &Pal) {
     let w = ui.available_width();
     let at = ui.cursor().min;
-    let drawn = verdict(ui, at, w, words, pal.gold, Some(false));
+    let drawn = verdict(ui, at, w, words, &[], pal.gold, Some(false));
     ui.allocate_exact_size(vec2(w, drawn.height().max(18.0)), Sense::hover());
 }
 
-/// A tooltip with `tip` over `rect` where `shown`, drawn there in `font`,
-/// was cut: the cells' tip over a clipped cell.
-fn tip_if_cut(ui: &Ui, id: Id, rect: Rect, shown: &str, font: FontId, tip: String) {
-    if width_of(ui, shown, font) > rect.width() {
-        let _ = ui.interact(rect, id, Sense::hover()).on_hover_text(tip);
-    }
+/// A button's label bare of the key the cells lead it with, the key left
+/// to the room's tips row: the canvas's buttons carry the word alone.
+fn word_of(label: &str) -> &str {
+    unkeyed(label).0
 }
 
-/// `s` cut at its start to fit `max_w` in `font`, an ellipsis where it was
-/// cut: a path keeps its leaf. The fewest characters are cut that let the
-/// rest fit, found by halving, as the rest only narrows the more is cut.
-fn clip_start(ui: &Ui, s: &str, font: &FontId, max_w: f32) -> String {
-    if width_of(ui, s, font.clone()) <= max_w {
-        return s.to_string();
-    }
-    let starts: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
-    let kept = |cut: usize| format!("…{}", starts.get(cut).map_or("", |&i| &s[i..]));
-    let (mut lo, mut hi) = (1, starts.len());
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if width_of(ui, &kept(mid), font.clone()) <= max_w {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    kept(lo)
-}
-
-/// A cell that is a word behind its LED (a status, a confidence, an
-/// outcome): the LED in the word's tone where the cells draw a glyph, the
-/// word after it.
-fn led_cell(ui: &Ui, row: &RowCtx, at: usize, words: &str, tone: Color32, lit: bool) {
-    let (x, w) = row.cells[at];
-    let mid = row.rect.center().y;
-    let from = if lit {
-        led(ui, pos2(x + 3.0, mid), tone);
-        x + 14.0
+/// A flag that is information, not a lever, as an LED: lit `on` in `tone`,
+/// or, off, the LED's outline in the dim, so an off flag still shows.
+fn flag_led(ui: &Ui, at: Pos2, on: bool, tone: Color32, pal: &Pal) {
+    if on {
+        led(ui, at, tone);
     } else {
-        x
-    };
-    text(ui, pos2(from, mid), words, body(13.0), tone, (x + w - from).max(1.0), Align2::LEFT_CENTER);
-}
-
-/// A full-width card that is one act, 56 points tall: a hairline in
-/// `tone`, `label` in its semibold at the centre, washed in the tone under
-/// the pointer — the kit's add card in a tone of the room's and without
-/// its plus (the client page's Connect and Turn off cards).
-fn card(ui: &mut Ui, id: Id, label: &str, tone: Color32) -> Response {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 56.0), Sense::hover());
-    let response = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-    if response.hovered() {
-        ui.painter().rect_filled(rect, square(), tone.gamma_multiply(0.10));
+        let rect = Rect::from_center_size(at, vec2(6.0, 6.0));
+        ui.painter().rect_stroke(rect, egui::CornerRadius::same(1), Stroke::new(1.0, pal.dim), StrokeKind::Inside);
     }
-    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, tone), StrokeKind::Inside);
-    text(ui, rect.center(), label, strong(14.0), tone, (w - 32.0).max(1.0), Align2::CENTER_CENTER);
-    response
-}
-
-/// The ring round a radio group that has the keys (the client page's Tab
-/// walks two of them), from `top` to where the layout stands, as wide as
-/// the rows' hover.
-fn group_ring(ui: &Ui, top: f32, pal: &Pal) {
-    let column = ui.max_rect();
-    let rect = Rect::from_min_max(pos2(column.min.x - 8.0, top - 2.0), pos2(column.max.x + 8.0, ui.cursor().min.y + 2.0));
-    ring(ui, rect, pal);
 }
 
 // ── The client page ───────────────────────────────────────────────────────
@@ -381,7 +290,7 @@ fn group_ring(ui: &Ui, top: f32, pal: &Pal) {
 fn choose(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
     line(ui, &t!("tor.pitch_1"), body(14.0), pal.text);
     line(ui, &t!("tor.pitch_2"), body(14.0), pal.text);
-    line(ui, &t!("tor.mobile_note", host = host_of(&room.client)), body(13.0), pal.dim);
+    line(ui, &t!("tor.mobile_note", host = phone_host(room)), body(13.0), pal.dim);
     ui.add_space(GAP);
     let groups = room.many_users();
     label(ui, &t!("tor.client_label"), pal);
@@ -393,7 +302,7 @@ fn choose(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
         }
     }
     if groups && room.group == 0 {
-        group_ring(ui, top, pal);
+        ring_since(ui, top, pal);
     }
     ui.add_space(14.0);
     let pick = Kind::ALL[room.client_pick.min(Kind::ALL.len() - 1)];
@@ -405,7 +314,7 @@ fn choose(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
         None
     };
     if let Some((words, tone)) = offer {
-        if card(ui, Id::new("tor-card"), &words, tone).clicked() {
+        if card(ui, Id::new("tor-card"), &words, Glyph::None, tone, true, pal).clicked() {
             out.acts.push(Act::ApplyClient);
         }
         ui.add_space(GAP);
@@ -424,7 +333,7 @@ fn choose(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
             }
         }
         if room.group == 1 {
-            group_ring(ui, top, pal);
+            ring_since(ui, top, pal);
         }
     }
 }
@@ -468,25 +377,27 @@ fn connect(ui: &mut Ui, c: &Connect, pal: &Pal, composition: &str, out: &mut Out
     https(ui, c, https_at, pal, out);
 
     // The form's own complaint, the probe's answer, or qBittorrent's caveat.
+    // The version and the RPC number the probe found are figures.
     let said = if let Some(e) = &c.error {
-        Some((e.clone(), pal.gold, Some(false)))
+        Some((e.clone(), Vec::new(), pal.gold, Some(false)))
     } else {
         match &c.probe {
             Some(Ok((version, rpc))) => {
-                let rpc = if rpc.is_empty() { String::new() } else { t!("tor.probe_rpc", n = rpc).to_string() };
-                let words = t!("tor.probe_ok", client = c.kind.label(), version = version, rpc = rpc);
-                Some((words.to_string(), pal.ok, Some(true)))
+                let rpc_words = if rpc.is_empty() { String::new() } else { t!("tor.probe_rpc", n = rpc).to_string() };
+                let words = t!("tor.probe_ok", client = c.kind.label(), version = version, rpc = rpc_words);
+                Some((words.to_string(), vec![version.clone(), rpc.clone()], pal.ok, Some(true)))
             }
-            Some(Err(e)) => Some((t!("tor.probe_failed", err = e).to_string(), pal.gold, Some(false))),
-            None if c.kind == Kind::Qbittorrent => Some((t!("tor.csrf_note").to_string(), pal.gold, None)),
+            Some(Err(e)) => Some((t!("tor.probe_failed", err = e).to_string(), Vec::new(), pal.gold, Some(false))),
+            None if c.kind == Kind::Qbittorrent => Some((t!("tor.csrf_note").to_string(), Vec::new(), pal.gold, None)),
             None => None,
         }
     };
     // Left off when the page has no room left for it, as in the cells.
-    if let Some((words, tone, marked)) = said
+    if let Some((words, figures, tone, marked)) = said
         && y + FORM_NUDGE < area.max.y
     {
-        y = verdict(ui, pos2(x, y + FORM_NUDGE), form_w, &words, tone, marked).max.y + FORM_GAP;
+        let figures: Vec<&str> = figures.iter().map(String::as_str).collect();
+        y = verdict(ui, pos2(x, y + FORM_NUDGE), form_w, &words, &figures, tone, marked).max.y + FORM_GAP;
     }
 
     // The page's last row, unless the form above leaves the buttons none:
@@ -499,21 +410,15 @@ fn connect(ui: &mut Ui, c: &Connect, pal: &Pal, composition: &str, out: &mut Out
     let connect_w = form_button_width(ui, &connect);
     let connect_at = Rect::from_min_size(pos2(area.max.x - connect_w, by), vec2(connect_w, FORM_BUTTON_H));
     let test = t!("tor.test_button");
-    let test_w = form_button_width(ui, &test);
+    let test = word_of(&test);
+    let test_w = form_button_width(ui, test);
     let test_at = Rect::from_min_size(pos2(connect_at.min.x - 10.0 - test_w, by), vec2(test_w, FORM_BUTTON_H));
-    if form_button(ui, Id::new("tor-test"), test_at, &test, false, pal).clicked() {
+    if form_button(ui, Id::new("tor-test"), test_at, test, false, pal).clicked() {
         out.acts.push(Act::ConnectTest);
     }
     if form_button(ui, Id::new("tor-connect"), connect_at, &connect, true, pal).clicked() {
         out.acts.push(Act::ConnectSubmit);
     }
-}
-
-/// A field's label over its box in `slot`, the box drawn from `input`.
-fn labelled(ui: &Ui, id: Id, slot: Rect, label: &str, input: &Field, pal: &Pal) -> Typed {
-    small_caps(ui, pos2(slot.min.x, slot.min.y + 7.0), label, pal.dim, slot.width(), Align2::LEFT_CENTER);
-    let rect = Rect::from_min_size(pos2(slot.min.x, slot.max.y - FIELD_H), vec2(slot.width(), FIELD_H));
-    field_box(ui, id, rect, input, pal)
 }
 
 /// One text field of the connect form in `slot`, drawn from the draft's
@@ -531,7 +436,7 @@ fn place(ui: &Ui, c: &Connect, field: CField, slot: Rect, fields: &[CField], com
     };
     let index = fields.iter().position(|f| *f == field).unwrap_or(0);
     let on = c.focused() == field;
-    let mut drawn = Field::new(input.value(), input.cursor()).focused(on, if on { composition } else { "" });
+    let mut drawn = Field::of(input).focused(on, composition);
     if matches!(field, CField::Host | CField::Port | CField::RpcPath) {
         drawn = drawn.mono();
     }
@@ -542,7 +447,7 @@ fn place(ui: &Ui, c: &Connect, field: CField, slot: Rect, fields: &[CField], com
     if field == CField::Host && !on {
         drawn = drawn.placeholder("127.0.0.1");
     }
-    let typed = labelled(ui, Id::new("tor-connect-field").with(index), slot, &label, &drawn, pal);
+    let typed = field_at(ui, Id::new("tor-connect-field").with(index), slot, &label, &drawn, pal);
     if typed.response.clicked() {
         out.acts.push(Act::ConnectFocus(index));
     }
@@ -555,7 +460,7 @@ fn place(ui: &Ui, c: &Connect, field: CField, slot: Rect, fields: &[CField], com
 /// flips it.
 fn https(ui: &mut Ui, c: &Connect, at: Rect, pal: &Pal, out: &mut Out) {
     let mut row = ui.new_child(UiBuilder::new().id_salt("tor-https-row").max_rect(at).layout(Layout::top_down(Align::Min)));
-    let response = check_line(&mut row, Id::new("tor-https"), c.https, &t!("tor.https"), "", pal);
+    let response = check_line(&mut row, Id::new("tor-https"), c.https, &t!("tor.https"), "", false, pal);
     if response.clicked() {
         out.acts.push(Act::ConnectHttps);
     }
@@ -622,10 +527,6 @@ fn tabs(ui: &mut Ui, room: &Room, filtered: &[usize], pal: &Pal, composition: &s
     }
 }
 
-/// What a tab's table says in place of rows, on its first row's line.
-fn in_place_of_rows(ui: &Ui, top: Pos2, width: f32, words: &str, pal: &Pal) {
-    text(ui, pos2(top.x + 10.0, top.y + FIRST_ROW), words, body(13.5), pal.dim, (width - 20.0).max(1.0), Align2::LEFT_CENTER);
-}
 
 // ── Torrents ──────────────────────────────────────────────────────────────
 
@@ -639,9 +540,7 @@ fn torrents(ui: &mut Ui, room: &Room, filtered: &[usize], pal: &Pal, composition
     let focused = room.filter_focus;
     // The hint stands while the filter is empty and has not the caret, as in the cells.
     let hint = if focused { String::new() } else { t!("tor.filter_hint").to_string() };
-    let input = Field::new(room.filter.value(), room.filter.cursor())
-        .focused(focused, if focused { composition } else { "" })
-        .placeholder(&hint);
+    let input = Field::of(&room.filter).focused(focused, composition).placeholder(&hint).search();
     let typed = field_box(ui, Id::new("tor-filter"), field_at, &input, pal);
     if typed.response.clicked() {
         out.acts.push(Act::FilterFocus);
@@ -674,19 +573,22 @@ fn torrents(ui: &mut Ui, room: &Room, filtered: &[usize], pal: &Pal, composition
     ];
     let len = if listed { filtered.len() } else { 0 };
     let top = ui.cursor().min;
-    let table = Table::new(Id::new("tor-torrents"), &cols, len).cursor(room.sel);
+    let empty = if room.list_error.is_some() || !room.list_loaded {
+        String::new()
+    } else if room.torrents.is_empty() {
+        t!("tor.empty_list").to_string()
+    } else {
+        t!("tor.empty_filter").to_string()
+    };
+    let table = Table::new(Id::new("tor-torrents"), &cols, len).cursor(room.sel).empty(&empty);
     let shown = table.show(ui, pal, |ui, i, row| torrent_row(ui, &room.torrents[filtered[i]], i, row, pal));
     if let Some(i) = shown.row {
         out.acts.push(Act::Select(i));
     }
     if let Some(err) = &room.list_error {
+        // Where the rows would be, in two lines at most.
         let words = t!("tor.list_error", err = printable(err, 200));
-        wrapped(ui, pos2(top.x + 10.0, top.y + FIRST_ROW - 10.0), w - 20.0, &words, body(13.5), pal.gold, 2);
-    } else if !room.list_loaded {
-    } else if room.torrents.is_empty() {
-        in_place_of_rows(ui, top, w, &t!("tor.empty_list"), pal);
-    } else if filtered.is_empty() {
-        in_place_of_rows(ui, top, w, &t!("tor.empty_filter"), pal);
+        Para::new(&words, body(13.5), pal.gold).rows(2).paint(ui, pos2(top.x + CELL_PAD, top.y + TABLE_HEAD + 10.0), w - 2.0 * CELL_PAD);
     }
 }
 
@@ -708,9 +610,10 @@ fn torrent_row(ui: &Ui, t: &Torrent, i: usize, row: &RowCtx, pal: &Pal) {
     let mid = row.rect.center().y;
     let name = printable(&t.name, 300);
     let font = if row.selected { strong(14.0) } else { body(14.0) };
-    cell(ui, row, 0, &name, font.clone(), ink(row, pal.text, pal), false);
-    tip_if_cut(ui, Id::new("tor-tip-name").with(i), row.cell(0), &name, font, format!("{name} · {}", t.info_hash));
-    led_cell(ui, row, 1, &status_word(&t.status), status_tone(&t.status, pal), true);
+    let tip = format!("{name} · {}", t.info_hash);
+    cell_tipped(ui, row, 0, &name, &tip, font, ink(row, pal.text, pal), Id::new("tor-tip-name").with(i));
+    let tone = status_tone(&t.status, pal);
+    led_cell(ui, row, 1, Some(tone), &status_word(&t.status), body(13.0), tone);
     let pct = (t.percent * 100.0).round().clamp(0.0, 100.0) as u64;
     let lit = if t.status == "seeding" { pal.ok } else { pal.accent };
     let (x, w) = row.cells[2];
@@ -745,15 +648,11 @@ fn libraries(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
         Col::left(t!("tor.col_path", client = client.to_uppercase()), 0.0),
         Col::left(t!("tor.col_template"), 260.0),
     ];
-    let w = ui.available_width();
-    let top = ui.cursor().min;
-    let table = Table::new(Id::new("tor-libraries"), &cols, room.libraries.len()).cursor(room.sel);
+    let empty = t!("tor.empty_libraries");
+    let table = Table::new(Id::new("tor-libraries"), &cols, room.libraries.len()).cursor(room.sel).empty(&empty);
     let shown = table.show(ui, pal, |ui, i, row| library_row(ui, room, i, row, pal));
     if let Some(i) = shown.row {
         out.acts.push(Act::Select(i));
-    }
-    if room.libraries.is_empty() {
-        in_place_of_rows(ui, top, w, &t!("tor.empty_libraries"), pal);
     }
 }
 
@@ -771,18 +670,15 @@ fn confidence_tone(confidence: &str, pal: &Pal) -> Color32 {
 /// the daemon sees and its template, each cut with a tip.
 fn library_row(ui: &Ui, room: &Room, i: usize, row: &RowCtx, pal: &Pal) {
     let name = &room.libraries[i];
-    let font = if row.selected || row.hovered { strong(14.0) } else { body(14.0) };
-    cell(ui, row, 0, &printable(name, NAME_MAX), font, ink(row, pal.text, pal), false);
+    name_cell(ui, row, 0, &printable(name, NAME_MAX), pal);
     let access = room.access.get(name);
     let confidence = access.map(|a| a.confidence.as_str()).unwrap_or("unconfirmed");
-    led_cell(ui, row, 1, &confidence_words(confidence), confidence_tone(confidence, pal), true);
+    let tone = confidence_tone(confidence, pal);
+    led_cell(ui, row, 1, Some(tone), &confidence_words(confidence), body(13.0), tone);
     match access.and_then(|a| a.daemon_path.clone()).filter(|p| !p.is_empty()) {
         Some(path) if confidence != "pending" => {
             // Cut at its start, so its leaf stays, as the canvas cuts paths.
-            let path = printable(&path, 300);
-            let shown = clip_start(ui, &path, &mono(12.5), row.cell(2).width());
-            cell(ui, row, 2, &shown, mono(12.5), ink(row, pal.text, pal), false);
-            tip_if_cut(ui, Id::new("tor-tip-path").with(i), row.cell(2), &path, mono(12.5), path.clone());
+            path_cell(ui, row, 2, &printable(&path, 300), mono(12.5), ink(row, pal.text, pal), Id::new("tor-tip-path").with(i));
         }
         _ if confidence == "pending" => {
             cell(ui, row, 2, &t!("tor.path_probing"), body(13.0), ink(row, pal.dim, pal), false);
@@ -794,8 +690,7 @@ fn library_row(ui: &Ui, room: &Room, i: usize, row: &RowCtx, pal: &Pal) {
     match room.templates.vpaths.get(name).and_then(|t| t.template.clone()).filter(|t| !t.trim().is_empty()) {
         Some(template) => {
             let template = printable(&template, 300);
-            cell(ui, row, 3, &template, mono(12.5), ink(row, pal.text, pal), false);
-            tip_if_cut(ui, Id::new("tor-tip-template").with(i), row.cell(3), &template, mono(12.5), template.clone());
+            cell_tipped(ui, row, 3, &template, &template, mono(12.5), ink(row, pal.text, pal), Id::new("tor-tip-template").with(i));
         }
         None => {
             cell(ui, row, 3, &t!("tor.tmpl_none"), body(13.0), ink(row, pal.dim, pal), false);
@@ -810,7 +705,7 @@ fn seeding(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
     line(ui, &t!("tor.seed_intro_1"), body(13.0), pal.dim);
     line(ui, &t!("tor.seed_intro_2"), body(13.0), pal.dim);
     ui.add_space(14.0);
-    if add_card(ui, Id::new("tor-seed-card"), &t!("tor.seed_card"), pal).clicked() {
+    if card(ui, Id::new("tor-seed-card"), &t!("tor.seed_card"), Glyph::None, pal.ok, true, pal).clicked() {
         out.acts.push(Act::SeedAdd);
     }
     ui.add_space(14.0);
@@ -825,15 +720,11 @@ fn seeding(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
         Col::left(t!("tor.col_details"), 0.0),
     ];
     let client = room.kind().label();
-    let w = ui.available_width();
-    let top = ui.cursor().min;
-    let table = Table::new(Id::new("tor-seeding"), &cols, room.seeds.len()).cursor(room.sel);
+    let empty = t!("tor.seed_empty");
+    let table = Table::new(Id::new("tor-seeding"), &cols, room.seeds.len()).cursor(room.sel).empty(&empty);
     let shown = table.show(ui, pal, |ui, i, row| seed_row(ui, &room.seeds[i], &client, i, row, pal));
     if let Some(i) = shown.row {
         out.acts.push(Act::Select(i));
-    }
-    if room.seeds.is_empty() {
-        in_place_of_rows(ui, top, w, &t!("tor.seed_empty"), pal);
     }
 }
 
@@ -858,7 +749,7 @@ fn ticks(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
         let id = Id::new("tor-tick").with(i);
         let tick = checkbox(ui, id, pos2(x + 8.0, mid), *on, pal);
         let words_at = Rect::from_min_max(pos2(x + 22.0, row.min.y), pos2((x + tick_w).min(row.max.x).max(x + 23.0), row.max.y));
-        let words = ui.interact(words_at, id.with("name"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        let words = studio::hand(ui.interact(words_at, id.with("name"), Sense::click()));
         let tone = if tick.hovered() || words.hovered() {
             pal.text
         } else if *on {
@@ -902,17 +793,17 @@ fn outcome_look(outcome: &str, pal: &Pal) -> (String, Color32, bool) {
 /// One `.torrent` handed in: its file, its outcome behind its LED (in the
 /// accent while it is checked), and the details sentence, cut with a tip.
 fn seed_row(ui: &Ui, s: &SeedRow, client: &str, i: usize, row: &RowCtx, pal: &Pal) {
-    cell(ui, row, 0, &printable(&s.file, 200), body(14.0), ink(row, pal.text, pal), false);
+    name_cell(ui, row, 0, &printable(&s.file, 200), pal);
     let (word, tone, lit) = match (&s.outcome, &s.error) {
         (Some(o), _) => outcome_look(&o.outcome, pal),
         (None, Some(_)) => outcome_look("daemon_error", pal),
         (None, None) => (t!("tor.seed_checking").to_string(), pal.accent, true),
     };
-    led_cell(ui, row, 1, &word, tone, lit);
+    led_cell(ui, row, 1, lit.then_some(tone), &word, body(13.0), tone);
     let details = outcome_details(s, client);
     let quiet = s.outcome.as_ref().is_some_and(|o| matches!(o.outcome.as_str(), "no_match" | "already_in_daemon"));
-    cell(ui, row, 2, &details, body(13.0), ink(row, if quiet { pal.dim } else { pal.text }, pal), false);
-    tip_if_cut(ui, Id::new("tor-tip-details").with(i), row.cell(2), &details, body(13.0), details.clone());
+    let color = ink(row, if quiet { pal.dim } else { pal.text }, pal);
+    cell_tipped(ui, row, 2, &details, &details, body(13.0), color, Id::new("tor-tip-details").with(i));
 }
 
 // ── Access ────────────────────────────────────────────────────────────────
@@ -937,36 +828,29 @@ fn access(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
     if ui.available_height() < TABLE_MIN {
         return;
     }
+    // The name a fixed column, as the Users board's, the flags beside it.
     let cols = [
-        Col::left(t!("tor.col_user"), 0.0),
+        Col::left(t!("tor.col_user"), 180.0),
         Col::left(t!("tor.col_admin"), 120.0),
-        Col::left(t!("tor.col_torrents"), 120.0),
+        Col::left(t!("tor.col_torrents"), 0.0),
     ];
     let users: Vec<(&String, &AdminUser)> = room.users.iter().collect();
-    let w = ui.available_width();
-    let top = ui.cursor().min;
-    let table = Table::new(Id::new("tor-access"), &cols, users.len()).cursor(room.sel);
+    let empty = t!("tor.empty_users");
+    let table = Table::new(Id::new("tor-access"), &cols, users.len()).cursor(room.sel).empty(&empty);
     let shown = table.show(ui, pal, |ui, i, row| user_row(ui, users[i].0, users[i].1, whitelist, row, pal));
     if let Some(i) = shown.row {
         out.acts.push(Act::Select(i));
     }
-    if users.is_empty() {
-        in_place_of_rows(ui, top, w, &t!("tor.empty_users"), pal);
-    }
 }
 
 fn user_row(ui: &Ui, name: &str, user: &AdminUser, whitelist: bool, row: &RowCtx, pal: &Pal) {
-    let font = if row.selected || row.hovered { strong(14.0) } else { body(14.0) };
+    let font = if row.selected { strong(14.0) } else { body(14.0) };
     let own = if whitelist { pal.text } else { pal.dim };
     cell(ui, row, 0, &printable(name, NAME_MAX), font, ink(row, own, pal), false);
     let admin = if user.admin { t!("tor.admin_yes").to_string() } else { "—".to_string() };
     cell(ui, row, 1, &admin, body(13.0), ink(row, pal.dim, pal), false);
-    let tone = match (user.allow_torrent, whitelist) {
-        (true, true) => pal.ok,
-        (true, false) => pal.dim,
-        (false, _) => pal.unlit,
-    };
-    led(ui, pos2(row.cells[2].0 + 3.0, row.rect.center().y), tone);
+    let tone = if whitelist { pal.ok } else { pal.dim };
+    flag_led(ui, pos2(row.cells[2].0 + 3.0, row.rect.center().y), user.allow_torrent, tone, pal);
 }
 
 // ── Client ────────────────────────────────────────────────────────────────
@@ -989,33 +873,30 @@ fn client(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
     };
     let x = named.max.x + 20.0;
     led(ui, pos2(x + 3.0, mid), tone);
-    text(ui, pos2(x + 14.0, mid), &unbullet(&status), body(13.5), tone, (row.max.x - x - 14.0).max(1.0), Align2::LEFT_CENTER);
+    text(ui, pos2(x + 14.0, mid), bare(&status), body(13.5), tone, (row.max.x - x - 14.0).max(1.0), Align2::LEFT_CENTER);
     ui.add_space(14.0);
 
     let cfg = room.config().cloned().unwrap_or_default();
     let mut saved = vec![(t!("tor.field_host").to_string(), cfg.host.clone()), (t!("tor.field_port").to_string(), cfg.port.to_string())];
+    // The cells' saved fields: an empty one's word dim, HTTPS a yes or a no.
+    let none = |s: String| if s.is_empty() { ("(none)".to_string(), false) } else { (s, true) };
     if kind.has_username() {
         saved.push((t!("tor.field_username").to_string(), cfg.username.trim().to_string()));
     }
     if kind.has_rpc_path() {
         saved.push((t!("tor.field_rpc").to_string(), cfg.rpc_path.clone().unwrap_or_default()));
     }
-    for (key, value) in saved {
+    let mut rows: Vec<(String, String, bool, bool)> =
+        saved.into_iter().map(|(key, value)| { let (value, set) = none(value); (key, value, set, true) }).collect();
+    rows.push(("HTTPS".to_string(), if cfg.use_https { "yes" } else { "no" }.to_string(), cfg.use_https, false));
+    for (key, value, set, figure) in rows {
         let (row, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
         let mid = row.center().y;
         small_caps(ui, row.left_center(), &key, pal.dim, KEY_W - 8.0, Align2::LEFT_CENTER);
         let at = pos2(row.min.x + KEY_W, mid);
-        if value.is_empty() {
-            text(ui, at, "—", body(13.5), pal.dim, w - KEY_W, Align2::LEFT_CENTER);
-        } else {
-            text(ui, at, &printable(&value, 200), mono(12.5), pal.text, w - KEY_W, Align2::LEFT_CENTER);
-        }
+        let font = if set && figure { mono(12.5) } else { body(13.5) };
+        text(ui, at, &printable(&value, 200), font, if set { pal.text } else { pal.dim }, w - KEY_W, Align2::LEFT_CENTER);
     }
-    // HTTPS, lit while the saved connection uses it.
-    let (row, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
-    let (lamp, words) = if cfg.use_https { (pal.ok, pal.text) } else { (pal.unlit, pal.dim) };
-    led(ui, pos2(row.min.x + KEY_W + 3.0, row.center().y), lamp);
-    text(ui, pos2(row.min.x + KEY_W + 14.0, row.center().y), &t!("tor.https"), body(13.5), words, w - KEY_W - 14.0, Align2::LEFT_CENTER);
     ui.add_space(14.0);
 
     let others: Vec<String> = room
@@ -1033,12 +914,12 @@ fn client(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
         let at = ui.cursor().min;
         small_caps(ui, pos2(at.x, at.y + 9.0), &t!("tor.also_saved"), pal.dim, KEY_W - 8.0, Align2::LEFT_CENTER);
         let words = t!("tor.also_saved_line", clients = others.join(", "));
-        let drawn = wrapped(ui, pos2(at.x + KEY_W, at.y), w - KEY_W, &words, body(13.5), pal.text, 2);
+        let drawn = Para::new(&words, body(13.5), pal.text).rows(2).paint(ui, pos2(at.x + KEY_W, at.y), w - KEY_W);
         ui.allocate_exact_size(vec2(w, drawn.height().max(18.0)), Sense::hover());
         ui.add_space(14.0);
     }
     if ui.available_height() >= 2.0 * LINE_H + 10.0 + FORM_BUTTON_H {
-        line(ui, &t!("tor.mobile_note", host = host_of(&room.client)), body(13.0), pal.dim);
+        line(ui, &t!("tor.mobile_note", host = phone_host(room)), body(13.0), pal.dim);
         line(ui, &t!("tor.disconnect_note"), body(13.0), pal.dim);
     }
 
@@ -1054,9 +935,10 @@ fn client(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
     ];
     let mut right = rest.max.x;
     for (id, label, primary, act) in buttons {
-        let bw = form_button_width(ui, &label);
+        let label = word_of(&label);
+        let bw = form_button_width(ui, label);
         let at = Rect::from_min_size(pos2(right - bw, by), vec2(bw, FORM_BUTTON_H));
-        if form_button(ui, Id::new(id), at, &label, primary, pal).clicked() {
+        if form_button(ui, Id::new(id), at, label, primary, pal).clicked() {
             out.acts.push(act);
         }
         right = at.min.x - 10.0;
@@ -1068,29 +950,23 @@ fn client(ui: &mut Ui, room: &Room, pal: &Pal, out: &mut Out) {
 /// The region's foot: what the room is busy with in the accent, else its
 /// note (an error in gold), else on the tabs the cursor row's story, as
 /// the cells tell it (`filtered`, the Torrents tab's rows).
-fn foot(ui: &Ui, rect: Rect, room: &Room, filtered: &[usize], pal: &Pal) {
-    if room.busy.is_some() || room.note.is_some() {
-        note_line(ui, rect, room.busy.as_deref(), room.note.as_ref(), pal);
-        return;
-    }
-    if room.phase() != Phase::Tabs {
-        return;
-    }
+fn note(ui: &Ui, rect: Rect, room: &Room, filtered: &[usize], pal: &Pal) {
     let parts = match room.tab {
+        _ if room.phase() != Phase::Tabs => Vec::new(),
         Tab::Torrents => torrent_story(room, filtered, pal),
         Tab::Libraries => library_story(room, pal),
         Tab::Seeding => seed_story(room, pal),
         Tab::Access => user_story(room, pal),
         Tab::Client => client_story(room, pal),
     };
-    run(ui, rect, &parts);
+    foot_line(ui, rect, room.busy.as_deref(), room.note.as_ref(), &parts, pal);
 }
 
 /// The cursor torrent's short hash, its error, who added it and when —
 /// while the rows are drawn, as in the cells: a failed list read keeps the
 /// torrents and the cursor it had, but its error stands in place of the
 /// rows, and no row on screen has a story to tell.
-fn torrent_story(room: &Room, filtered: &[usize], pal: &Pal) -> Vec<Part> {
+fn torrent_story(room: &Room, filtered: &[usize], pal: &Pal) -> Vec<Run> {
     if !room.list_loaded || room.list_error.is_some() {
         return Vec::new();
     }
@@ -1113,7 +989,7 @@ fn torrent_story(room: &Room, filtered: &[usize], pal: &Pal) -> Vec<Part> {
 
 /// The cursor library's probe story: its last error or how it was
 /// verified, whether it was set by hand, when it was last probed.
-fn library_story(room: &Room, pal: &Pal) -> Vec<Part> {
+fn library_story(room: &Room, pal: &Pal) -> Vec<Run> {
     let Some(name) = room.selected_library() else { return Vec::new() };
     let mut said: Vec<(String, Color32)> = Vec::new();
     match room.access.get(name) {
@@ -1141,14 +1017,14 @@ fn library_story(room: &Room, pal: &Pal) -> Vec<Part> {
 }
 
 /// The cursor file and its details sentence.
-fn seed_story(room: &Room, pal: &Pal) -> Vec<Part> {
+fn seed_story(room: &Room, pal: &Pal) -> Vec<Run> {
     let Some(s) = room.sel.and_then(|i| room.seeds.get(i)) else { return Vec::new() };
     let details = outcome_details(s, &room.kind().label());
     vec![(printable(&s.file, NAME_MAX), strong(13.0), pal.text), (format!(" — {details}"), body(13.0), pal.text)]
 }
 
 /// Whether the cursor user may add torrents, and how to flip it.
-fn user_story(room: &Room, pal: &Pal) -> Vec<Part> {
+fn user_story(room: &Room, pal: &Pal) -> Vec<Run> {
     let Some(name) = room.selected_user() else { return Vec::new() };
     let allowed = room.users.get(name).is_some_and(|u| u.allow_torrent);
     let user = printable(name, NAME_MAX);
@@ -1157,7 +1033,7 @@ fn user_story(room: &Room, pal: &Pal) -> Vec<Part> {
 }
 
 /// When the daemon last answered, or why it did not.
-fn client_story(room: &Room, pal: &Pal) -> Vec<Part> {
+fn client_story(room: &Room, pal: &Pal) -> Vec<Run> {
     match (&room.status, room.status_at) {
         (Some(s), Some(at)) if s.connected => vec![(ago_words("reachable", at.elapsed().as_secs() as i64), body(13.0), pal.dim)],
         (Some(s), _) => {
@@ -1194,8 +1070,8 @@ fn draw_modal(ui: &Ui, room: &Room, pal: &Pal, over: Rect, composition: &str, ou
             let title = t!("tor.template_title", name = printable(vpath, NAME_MAX)).to_string();
             let field = t!("tor.template_field").to_string();
             let buttons = [
-                (t!("tor.template_suggested").to_string(), false, Act::TemplateSuggest),
-                (t!("tor.template_clear").to_string(), false, Act::TemplateClear),
+                (word_of(&t!("tor.template_suggested")).to_string(), false, Act::TemplateSuggest),
+                (word_of(&t!("tor.template_clear")).to_string(), false, Act::TemplateClear),
                 (t!("tor.template_save").to_string(), true, Act::ModalSubmit),
             ];
             let shown = Entry { id: Id::new("tor-template"), title: &title, label: &field, input: template, error: error.as_deref(), buttons: &buttons };
@@ -1262,28 +1138,16 @@ fn candidate(ui: &mut Ui, words: &str, pointed: bool, pal: &Pal) {
     let (row, _) = ui.allocate_exact_size(vec2(w, LINE_H), Sense::hover());
     let mid = row.center().y;
     if pointed {
-        let at = pos2(row.min.x + 20.0, mid);
-        ui.painter().add(Shape::convex_polygon(vec![at + vec2(-2.5, -4.0), at + vec2(3.5, 0.0), at + vec2(-2.5, 4.0)], pal.dim, Stroke::NONE));
+        pointer(ui, pos2(row.min.x + 20.0, mid), pal.dim);
     }
     text(ui, pos2(row.min.x + 32.0, mid), words, mono(12.5), pal.dim, (w - 32.0).max(1.0), Align2::LEFT_CENTER);
 }
 
 /// A modal's buttons, right-aligned on a row of their own, 10 points apart
-/// in `buttons`' order: the acts of those clicked.
-fn button_row(ui: &mut Ui, id: Id, buttons: &[(String, bool, Act)], pal: &Pal) -> Vec<Act> {
-    let w = ui.available_width();
-    let (row, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
-    let mut right = row.max.x;
-    let mut acts = Vec::new();
-    for (i, (label, primary, act)) in buttons.iter().enumerate().rev() {
-        let bw = form_button_width(ui, label);
-        let at = Rect::from_min_size(pos2(right - bw, row.min.y), vec2(bw, FORM_BUTTON_H));
-        if form_button(ui, id.with("button").with(i), at, label, *primary, pal).clicked() {
-            acts.push(act.clone());
-        }
-        right = at.min.x - 10.0;
-    }
-    acts
+/// in `buttons`' order: the act of the one clicked.
+fn button_row(ui: &mut Ui, id: Id, buttons: &[(String, bool, Act)], pal: &Pal) -> Option<Act> {
+    let items: Vec<(&str, bool)> = buttons.iter().map(|(label, primary, _)| (label.as_str(), *primary)).collect();
+    foot(ui, id.with("button"), &[], &items, None, pal).map(|k| buttons[k].2.clone())
 }
 
 /// An entry modal: one text field, the lines under it, its error, its
@@ -1304,10 +1168,10 @@ impl Entry<'_> {
     /// register its box as the modal's Enter); the caret is the field's.
     fn show(self, ui: &Ui, over: Rect, composition: &str, pal: &Pal, out: &mut Out, lines: impl FnOnce(&mut Ui)) {
         let Entry { id, title, label, input, error, buttons } = self;
-        let shown = modal(ui, id, over, ENTRY_W, title, pal, |ui| {
+        let shown = Dialog::new(id, over, ENTRY_W, title).show(ui, pal, |ui| {
             // A path, a template of one: the figures' monospace, as the
             // canvas sets a path's field and this room its paths.
-            let drawn = Field::new(input.value(), input.cursor()).focused(true, composition).mono();
+            let drawn = Field::of(input).focused(true, composition).mono();
             let typed = studio::field(ui, id.with("field"), label, &drawn, pal);
             ui.add_space(14.0);
             lines(ui);
@@ -1331,29 +1195,30 @@ impl Entry<'_> {
     }
 }
 
-/// A gate: its lines in gold, wrapped, then the safe choice lit and the
-/// one that goes through beside it. The canvas's modal has a close, and
-/// the gate's way out is Esc, which its tips name: the close sends it.
+/// A gate, answered as the cells' (gold, its title wrapped where a
+/// torrent's long name runs on, no close; Esc keeps): its lines in gold,
+/// each its own paragraph, then the safe choice lit and the one that goes
+/// through beside it.
 #[allow(clippy::too_many_arguments)]
 fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], buttons: &[(String, bool, Act)], pal: &Pal, out: &mut Out) {
-    let shown = modal(ui, id, over, GATE_W, title, pal, |ui| {
-        for words in lines {
-            let words = egui::RichText::new(words).font(body(14.0)).color(pal.gold);
-            ui.add(egui::Label::new(words).wrap().selectable(false));
-            ui.add_space(4.0);
+    let shown = Dialog::new(id, over, GATE_W, title).gate(pal).show(ui, pal, |ui| {
+        for (k, words) in lines.iter().enumerate() {
+            if k > 0 {
+                ui.add_space(8.0);
+            }
+            Para::new(words, body(14.0), pal.gold).show(ui);
         }
         ui.add_space(20.0);
         button_row(ui, id, buttons, pal)
     });
     out.acts.extend(shown.inner);
-    if shown.closed {
-        out.keys.push(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    }
 }
+
 
 #[cfg(test)]
 mod tests {
-    use egui::epaint::TextShape;
+    use egui::Vec2;
+    use egui::epaint::{Shape, TextShape};
 
     use super::super::tests::{connected, english, loaded, new_room, params, type_text, users};
     use super::*;
@@ -1368,7 +1233,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::gui::window::panel::fonts(&ctx);
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = begin(ui);
+            let _ = studio::begin(ui);
         });
         out.textures_delta.clear();
         ctx
@@ -1453,8 +1318,7 @@ mod tests {
         assert_drawn(
             &out,
             &[
-                "connected",
-                " — Transmission 4.0.6 · 127.0.0.1:9091 · 2 of 4 libraries reachable",
+                "connected — Transmission 4.0.6 · 127.0.0.1:9091 · 2 of 4 libraries reachable",
                 "polls every 5 s",
                 "BETA",
                 "TORRENTS · 4",
@@ -1519,7 +1383,7 @@ mod tests {
                 ".torrents for content on disk",
                 "Hand mStream a .torrent whose content is already on disk. Its files are checked against your",
                 "libraries and, when all match, the daemon gets the torrent and seeds without downloading a byte.",
-                "Add a .torrent file ▸",
+                "Add a .torrent file",
                 "SEARCH IN",
                 "music",
                 "podcasts",
@@ -1570,14 +1434,15 @@ mod tests {
                 "127.0.0.1",
                 "9091",
                 "/transmission/rpc",
-                "use HTTPS",
+                "HTTPS",
+                "no",
                 "ALSO SAVED",
                 "qBittorrent 192.168.1.20:8080 — c switches without retyping the password",
-                "Users add torrents from a phone at home.mstream.example/torrent — the apps don't expose it.",
+                "Users add torrents from a phone at home.mstream.example:3000/torrent — the apps don't expose it.",
                 "Disconnecting forgets the credentials here; the daemon keeps every torrent it has.",
                 "TEST",
                 "DISCONNECT",
-                "SWITCH CLIENT ▸",
+                "SWITCH CLIENT",
             ],
         );
     }
@@ -1606,11 +1471,11 @@ mod tests {
         let mut room = connected();
         room.act(Act::Select(3));
         let (out, _) = settle(&ctx, &mut room);
-        assert_drawn(&out, &["e5f6e5f6e5f6…", " · ", "Tracker gave HTTP response code 403 (Forbidden)", " · added by iros", " · 2d ago"]);
+        assert_drawn(&out, &["e5f6e5f6e5f6… · Tracker gave HTTP response code 403 (Forbidden) · added by iros · 2d ago"]);
         room.busy = Some(t!("tor.busy_loading").to_string());
         let (out, _) = settle(&ctx, &mut room);
         assert_drawn(&out, &["loading…"]);
-        assert!(!words(&out).iter().any(|w| w == "e5f6e5f6e5f6…"), "the busy line wins");
+        assert!(!words(&out).iter().any(|w| w.starts_with("e5f6e5f6e5f6…")), "the busy line wins");
         room.busy = None;
         room.note = Some(("could not reach server".into(), true));
         assert_drawn(&settle(&ctx, &mut room).0, &["could not reach server"]);
@@ -1618,10 +1483,10 @@ mod tests {
         room.act(Act::Tab(Tab::Libraries));
         room.act(Act::Select(3));
         let (out, _) = settle(&ctx, &mut room);
-        assert_drawn(&out, &["vinyl", " — ", "daemon free-space returned -1 (path not visible to daemon)", " · ", "probed 3m ago"]);
+        assert_drawn(&out, &["vinyl — daemon free-space returned -1 (path not visible to daemon) · probed 3m ago"]);
         room.act(Act::Tab(Tab::Access));
         room.act(Act::Select(1));
-        assert_drawn(&settle(&ctx, &mut room).0, &["guest may not add torrents", " · s flips it, at once"]);
+        assert_drawn(&settle(&ctx, &mut room).0, &["guest may not add torrents · s flips it, at once"]);
     }
 
     #[test]
@@ -1630,7 +1495,7 @@ mod tests {
         let ctx = context();
         let mut room = connected();
         room.act(Act::Select(3));
-        assert_drawn(&settle(&ctx, &mut room).0, &["Radiohead - In Rainbows [MP3 V0]", "e5f6e5f6e5f6…"]);
+        assert_drawn(&settle(&ctx, &mut room).0, &["Radiohead - In Rainbows [MP3 V0]", "e5f6e5f6e5f6… · Tracker gave HTTP response code 403 (Forbidden) · added by iros · 2d ago"]);
         // What a failed poll leaves (`Done::Listed`): the list and the
         // cursor it had, and its error.
         room.list_error = Some("could not reach server".into());
@@ -1638,7 +1503,7 @@ mod tests {
         assert_drawn(&out, &["couldn't fetch torrents: could not reach server"]);
         let drawn = words(&out);
         assert!(!drawn.iter().any(|w| w == "Radiohead - In Rainbows [MP3 V0]"), "the error stands in place of the rows: {drawn:?}");
-        assert!(!drawn.iter().any(|w| w == "e5f6e5f6e5f6…"), "no row's story rides the note line: {drawn:?}");
+        assert!(!drawn.iter().any(|w| w.starts_with("e5f6e5f6e5f6…")), "no row's story rides the note line: {drawn:?}");
         assert!(!drawn.iter().any(|w| w == "4 torrents"), "nor is the list counted: {drawn:?}");
     }
 
@@ -1653,11 +1518,10 @@ mod tests {
         assert_drawn(
             &out,
             &[
-                "off",
-                " — no torrent client chosen",
+                "off — no torrent client chosen",
                 "Hand off magnet links and .torrent files to a torrent client on this host or on the LAN.",
                 "Completed downloads are picked up by the next library scan.",
-                "Users add torrents from a phone at home.mstream.example/torrent — the apps don't expose it.",
+                "Users add torrents from a phone at home.mstream.example:3000/torrent — the apps don't expose it.",
                 "CLIENT",
                 "Disabled",
                 "nobody can add torrents",
@@ -1673,7 +1537,7 @@ mod tests {
         );
         assert!(!words(&out).iter().any(|w| w.ends_with('▸')), "nothing to apply while off stays off");
         room.act(Act::PickClient(1));
-        assert_drawn(&settle(&ctx, &mut room).0, &["Connect to Transmission ▸"]);
+        assert_drawn(&settle(&ctx, &mut room).0, &["Connect to Transmission"]);
 
         let mut room = new_room();
         room.queued = None;
@@ -1682,8 +1546,7 @@ mod tests {
         assert_drawn(
             &out,
             &[
-                "transmission",
-                " — no credentials yet · Test saves nothing; Connect saves after a good probe",
+                "transmission — no credentials yet · Test saves nothing; Connect saves after a good probe",
                 "HOST",
                 "PORT",
                 "USERNAME",
@@ -1692,8 +1555,8 @@ mod tests {
                 "use HTTPS",
                 "9091",
                 "/transmission/rpc",
-                "^T TEST",
-                "CONNECT ▸",
+                "TEST",
+                "CONNECT",
             ],
         );
         room.act(Act::ConnectSubmit);
@@ -1824,7 +1687,7 @@ mod tests {
                 "Remove Boards of Canada - Music Has the Right to Children (1998) [FLAC] from Transmission?",
                 "The files on disk are KEPT — only the daemon's record of the torrent goes.",
                 "Use the daemon's own UI to delete the files.",
-                "◂ KEEP",
+                "KEEP",
                 "REMOVE",
             ],
         );
@@ -1832,8 +1695,9 @@ mod tests {
         assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "keep is the safe choice");
         room.act(Act::Remove(hash.clone()));
         let _ = settle(&ctx, &mut room);
-        click_on(&ctx, &mut room, remove.with("close"));
-        assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "the close is Esc: keep");
+        assert!(ctx.read_response(remove.with("close")).is_none(), "a gate has no close, as the cells draw it");
+        room.key(KeyEvent::new(KeyCode::Esc, crate::input::KeyModifiers::NONE));
+        assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "Esc keeps");
         room.act(Act::Remove(hash.clone()));
         let _ = settle(&ctx, &mut room);
         click_on(&ctx, &mut room, remove.with("button").with(1));
@@ -1851,11 +1715,11 @@ mod tests {
                 "Disconnect from Transmission?",
                 "mStream forgets the saved credentials; the daemon keeps every torrent and its files.",
                 "Torrents added through mStream cannot be removed from here until you reconnect.",
-                "◂ STAY",
+                "STAY",
             ],
         );
-        click_on(&ctx, &mut room, disconnect.with("close"));
-        assert!(matches!(room.modal, Modal::None) && room.queued.is_none());
+        room.key(KeyEvent::new(KeyCode::Esc, crate::input::KeyModifiers::NONE));
+        assert!(matches!(room.modal, Modal::None) && room.queued.is_none(), "Esc stays");
         room.act(Act::Disconnect);
         let _ = settle(&ctx, &mut room);
         click_on(&ctx, &mut room, disconnect.with("button").with(0));
@@ -1875,7 +1739,7 @@ mod tests {
         let mapping = Id::new("tor-mapping");
         room.act(Act::Mapping("vinyl".into()));
         let (out, shown) = settle(&ctx, &mut room);
-        assert_drawn(&out, &["Map vinyl for Transmission", "the daemon is asked to see a marker mStream writes there", "VERIFY AND SAVE ▸"]);
+        assert_drawn(&out, &["Map vinyl for Transmission", "the daemon is asked to see a marker mStream writes there", "VERIFY AND SAVE"]);
         assert!(shown.caret.is_some(), "the entry's field has the keyboard");
         // The cells register the box as the modal's Enter.
         click_on(&ctx, &mut room, mapping.with("field"));
@@ -1903,9 +1767,9 @@ mod tests {
                 "PREVIEW",
                 "Pink Floyd/The Dark Side of the Moon (1973)",
                 "resolved from the sample metadata; the server re-checks on save",
-                "^S SUGGESTED TEMPLATE",
-                "^X CLEAR",
-                "SAVE ▸",
+                "SUGGESTED TEMPLATE",
+                "CLEAR",
+                "SAVE",
             ],
         );
         click_on(&ctx, &mut room, template.with("button").with(1));
@@ -1923,7 +1787,7 @@ mod tests {
         let seed = Id::new("tor-seed-path");
         room.act(Act::SeedAdd);
         let (out, _) = settle(&ctx, &mut room);
-        assert_drawn(&out, &["Add a .torrent file", ".TORRENT FILE ON THIS MACHINE", "Tab completes · the file is read here and sent to the server", "CHECK AND SEED ▸"]);
+        assert_drawn(&out, &["Add a .torrent file", ".TORRENT FILE ON THIS MACHINE", "Tab completes · the file is read here and sent to the server", "CHECK AND SEED"]);
         click_on(&ctx, &mut room, seed.with("button").with(0));
         assert_drawn(&settle(&ctx, &mut room).0, &["a path to a .torrent file is needed"]);
         if let Modal::SeedPath { asked, .. } = &mut room.modal {

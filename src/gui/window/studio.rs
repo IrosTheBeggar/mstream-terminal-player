@@ -30,6 +30,7 @@ use egui::{
     Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use ratatui::style::Color;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::panel::STRONG;
 use crate::kit::theme::th;
@@ -140,20 +141,32 @@ pub(crate) fn begin(ui: &Ui) -> Pal {
 }
 
 /// egui's look for the desk, set once per context, which every page that
-/// draws in the panel shares: dark, amber on the scroll bars.
+/// draws in the panel shares: dark; a scroll bar a slim thumb in the strong
+/// edge whenever there is more than the view shows (the log's, and the
+/// cells' bar, which never hides), amber under the pointer and in the hand;
+/// a tooltip the canvas's, raised on a strong-edged hairline with no
+/// shadow.
 pub(crate) fn style_once(ctx: &egui::Context, pal: &Pal) {
     let id = Id::new("studio-styled");
     if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
         return;
     }
     ctx.set_theme(egui::Theme::Dark);
-    let (accent, text, ground, edge) = (pal.accent, pal.text, pal.ground, pal.edge_strong);
+    let (accent, text, ground, edge, raised) = (pal.accent, pal.text, pal.ground, pal.edge_strong, pal.raised);
     ctx.all_styles_mut(|style| {
         style.visuals.selection.bg_fill = accent;
         style.visuals.extreme_bg_color = ground;
         style.visuals.panel_fill = ground;
-        style.visuals.window_fill = ground;
+        // A tooltip's box: the canvas's (Log.dc.html), padded 6 by 10.
+        style.visuals.window_fill = raised;
+        style.visuals.window_stroke = Stroke::new(1.0, edge);
+        style.visuals.window_corner_radius = square();
+        style.visuals.menu_corner_radius = square();
+        style.visuals.popup_shadow = Shadow::NONE;
+        style.spacing.menu_margin = egui::Margin::symmetric(10, 6);
+        style.text_styles.insert(egui::TextStyle::Body, body(13.0));
         let widgets = &mut style.visuals.widgets;
+        widgets.noninteractive.fg_stroke.color = text;
         for state in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
             state.fg_stroke.color = text;
             state.corner_radius = CornerRadius::same(1);
@@ -161,6 +174,21 @@ pub(crate) fn style_once(ctx: &egui::Context, pal: &Pal) {
         widgets.inactive.bg_fill = edge;
         widgets.hovered.bg_fill = accent.gamma_multiply(0.75);
         widgets.active.bg_fill = accent;
+        // The thumb at rest too, never its track: egui's floating bar shows
+        // nothing until the pointer comes, and draws its thumb in the text
+        // colour.
+        style.spacing.scroll = egui::style::ScrollStyle {
+            floating_width: 4.0,
+            bar_width: 6.0,
+            foreground_color: false,
+            dormant_handle_opacity: 1.0,
+            active_handle_opacity: 1.0,
+            interact_handle_opacity: 1.0,
+            dormant_background_opacity: 0.0,
+            active_background_opacity: 0.0,
+            interact_background_opacity: 0.0,
+            ..egui::style::ScrollStyle::floating()
+        };
         style.spacing.item_spacing = vec2(8.0, 0.0);
         style.interaction.tooltip_delay = 0.0;
     });
@@ -169,7 +197,7 @@ pub(crate) fn style_once(ctx: &egui::Context, pal: &Pal) {
 
 /// The pointing hand over a control a click acts on: the GUI shows it
 /// for the panel as it does for its own cells.
-fn hand(response: Response) -> Response {
+pub(crate) fn hand(response: Response) -> Response {
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
@@ -226,6 +254,237 @@ pub(crate) fn width_of(ui: &Ui, s: &str, font: FontId) -> f32 {
     ui.painter().layout_no_wrap(s.to_string(), font, Color32::WHITE).size().x
 }
 
+/// `s` bare of the marks the cells set at a word's ends — a state's bullet,
+/// a tick, the arrows at a button's — which the desk draws as its own
+/// shapes (an LED, a tick box, the button itself) or, as the canvas's
+/// buttons, not at all.
+pub(crate) fn bare(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || matches!(c, '•' | '●' | '✓' | '◂' | '▸' | '◄' | '►'))
+}
+
+/// A button's words bare of the key the cells lead them with ("y copy",
+/// "^T test"): the canvas's buttons carry the word alone and name the key
+/// in their tooltip. The words, and the key where there was one.
+pub(crate) fn unkeyed(s: &str) -> (&str, Option<&str>) {
+    let s = s.trim();
+    match s.split_once(' ') {
+        Some((key, rest)) if !rest.trim().is_empty() && (key.chars().count() == 1 || (key.starts_with('^') && key.chars().count() == 2)) => {
+            (rest.trim_start(), Some(key))
+        }
+        _ => (s, None),
+    }
+}
+
+/// `s` cut at its start to fit `max_w` in `font`, an ellipsis standing for
+
+/// what went, so a path keeps its leaf in view (the canvas's paths, and the
+/// cells'): the line, and whether it was cut. Whole graphemes go, never a
+/// part of one, so no accent or joined emoji is left torn after the "…".
+pub(crate) fn cut_start(ui: &Ui, s: &str, font: FontId, max_w: f32) -> (String, bool) {
+    if width_of(ui, s, font.clone()) <= max_w {
+        return (s.to_string(), false);
+    }
+    // The fewest graphemes dropped from the head that let the rest fit:
+    // the narrower the tail the likelier, so a binary search finds it.
+    let starts: Vec<usize> = s.grapheme_indices(true).map(|(at, _)| at).collect();
+    let tail = |k: usize| starts.get(k).map_or("", |&at| &s[at..]);
+    let (mut lo, mut hi) = (1, starts.len());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if width_of(ui, &format!("…{}", tail(mid)), font.clone()) <= max_w {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    (format!("…{}", tail(lo)), true)
+}
+
+/// One run of a line set in several faces and colours (a state word in its
+/// tone, the facts plain, a figure in the monospace): its words, its face
+/// and its colour.
+pub(crate) type Run = (String, FontId, Color32);
+
+/// `parts` as one job, each run in its own face and colour.
+pub(crate) fn run_job(parts: &[Run]) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    for (s, font, color) in parts {
+        if !s.is_empty() {
+            job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, ..Default::default() });
+        }
+    }
+    job
+}
+
+/// How wide `parts` lay out in one line.
+pub(crate) fn runs_width(ui: &Ui, parts: &[Run]) -> f32 {
+    ui.painter().layout_job(run_job(parts)).size().x
+}
+
+/// `parts` in one line no wider than `max_w`, cut with an ellipsis where
+/// they run long, anchored at `pos` by `align`. Returns where it was drawn.
+pub(crate) fn runs(ui: &Ui, pos: Pos2, parts: &[Run], max_w: f32, align: Align2) -> Rect {
+    let mut job = run_job(parts);
+    job.wrap = TextWrapping::truncate_at_width(max_w.max(1.0));
+    let galley = ui.painter().layout_job(job);
+    let rect = align.anchor_size(pos, galley.size());
+    ui.painter().galley(rect.min, galley, Color32::WHITE);
+    rect
+}
+
+/// `s` as runs in `font` and `color`, each of `figures` found in it, in
+/// order, set in `figure` instead: a path, a count or a time in the grid's
+/// monospace inside a room's sentence, as the canvas sets its figures. A
+/// figure not found, or empty, is passed over.
+pub(crate) fn with_figures(s: &str, figures: &[&str], font: FontId, figure: FontId, color: Color32) -> Vec<Run> {
+    let mut parts = Vec::new();
+    let mut rest = s;
+    for f in figures.iter().filter(|f| !f.is_empty()) {
+        if let Some(at) = rest.find(f) {
+            parts.push((rest[..at].to_string(), font.clone(), color));
+            parts.push((f.to_string(), figure.clone(), color));
+            rest = &rest[at + f.len()..];
+        }
+    }
+    parts.push((rest.to_string(), font, color));
+    parts.retain(|(s, ..)| !s.is_empty());
+    parts
+}
+
+/// One line of words, a row of the layout `h` tall and the column wide,
+
+/// cut with an ellipsis where it runs long. Returns where it was drawn.
+pub(crate) fn line(ui: &mut Ui, h: f32, s: &str, font: FontId, color: Color32) -> Rect {
+    let w = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    text(ui, row.left_center(), s, font, color, w, Align2::LEFT_CENTER)
+}
+
+/// A label's row: the small capitals' 14 points.
+pub(crate) const LABEL_H: f32 = 14.0;
+
+/// A field's or a group's label, a [`LABEL_H`] row of the layout the column
+/// wide ([`label_at`]). Returns the row.
+pub(crate) fn label(ui: &mut Ui, s: &str, pal: &Pal) -> Rect {
+    let w = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(vec2(w, LABEL_H), Sense::hover());
+    label_at(ui, row.left_center(), s, w, pal);
+    row
+}
+
+/// A label from `pos`, its left middle, no wider than `max_w`: its words
+/// up to the first "·" in dim small capitals, the rest — the hint, from
+/// its "·" — dim in the UI face a space after them (the canvas's
+/// "DESTINATION · another drive, …"), only where some of it fits. Returns
+/// where it was drawn.
+pub(crate) fn label_at(ui: &Ui, pos: Pos2, s: &str, max_w: f32, pal: &Pal) -> Rect {
+    let (head, hint) = match s.find('·') {
+        Some(at) => (s[..at].trim_end(), &s[at..]),
+        None => (s, ""),
+    };
+    let drawn = small_caps(ui, pos, head, pal.dim, max_w, Align2::LEFT_CENTER);
+    let (from, end) = (drawn.max.x + 6.0, pos.x + max_w);
+    if hint.is_empty() || end - from < 16.0 {
+        return drawn;
+    }
+    drawn.union(text(ui, pos2(from, pos.y), hint, body(13.0), pal.dim, end - from, Align2::LEFT_CENTER))
+}
+
+/// The canvas's prose: words wrapped to a width, in one face and colour or
+/// as several [`Run`]s, `line` times the first run's size apart (the
+/// canvas's 1.3 by default), in at most `rows` lines with the last cut
+/// with an ellipsis, a line that would end below `floor` left out whole
+/// rather than cut through (as the cells leave out a row past the column's
+/// end), and a `lead` mark (a list's "−") standing in a column of its own
+/// with the lines wrapped beside it.
+pub(crate) struct Para {
+    parts: Vec<Run>,
+    line: f32,
+    rows: usize,
+    floor: f32,
+    lead: Option<String>,
+}
+
+/// The canvas's prose leading: its body's line-height.
+const PARA_LINE: f32 = 1.3;
+
+impl Para {
+    pub(crate) fn new(s: &str, font: FontId, color: Color32) -> Para {
+        Para::runs(&[(s.to_string(), font, color)])
+    }
+
+    pub(crate) fn runs(parts: &[Run]) -> Para {
+        Para { parts: parts.to_vec(), line: PARA_LINE, rows: usize::MAX, floor: f32::INFINITY, lead: None }
+    }
+
+    /// Lines `k` times the first run's size apart.
+    pub(crate) fn line(self, k: f32) -> Para {
+        Para { line: k, ..self }
+    }
+
+    /// At most `n` lines, the last cut with an ellipsis.
+    pub(crate) fn rows(self, n: usize) -> Para {
+        Para { rows: n.max(1), ..self }
+    }
+
+    /// Lines that would end below `y` left out whole.
+    pub(crate) fn floor(self, y: f32) -> Para {
+        Para { floor: y, ..self }
+    }
+
+    /// `mark` in a column of its own before the words, 8 points from them,
+    /// the wrapped lines hanging under the first one's words.
+    pub(crate) fn lead(self, mark: &str) -> Para {
+        Para { lead: Some(mark.to_string()), ..self }
+    }
+
+    /// A row of the layout the column wide, as tall as its lines. Returns
+    /// where they were drawn.
+    pub(crate) fn show(self, ui: &mut Ui) -> Rect {
+        let w = ui.available_width();
+        let at = ui.cursor().min;
+        let drawn = self.paint(ui, at, w);
+        let (rect, _) = ui.allocate_exact_size(vec2(w, drawn.height()), Sense::hover());
+        rect
+    }
+
+    /// Drawn from `at`, its top left, wrapped at `w`. Returns where.
+    pub(crate) fn paint(self, ui: &Ui, at: Pos2, w: f32) -> Rect {
+        let Some((_, font, color)) = self.parts.first().cloned() else { return Rect::from_min_size(at, Vec2::ZERO) };
+        let line_h = font.size * self.line;
+        let indent = match &self.lead {
+            Some(mark) => {
+                let format = TextFormat { font_id: font.clone(), color, line_height: Some(line_h), ..Default::default() };
+                let galley = ui.painter().layout_job(LayoutJob::single_section(mark.clone(), format));
+                let indent = galley.size().x + 8.0;
+                if at.y + galley.size().y <= self.floor {
+                    ui.painter().galley(at, galley, color);
+                }
+                indent
+            }
+            None => 0.0,
+        };
+        let mut job = LayoutJob::default();
+        for (s, font, color) in &self.parts {
+            if !s.is_empty() {
+                job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, line_height: Some(line_h), ..Default::default() });
+            }
+        }
+        job.wrap = TextWrapping { max_width: (w - indent).max(1.0), max_rows: self.rows, break_anywhere: false, overflow_character: Some('…') };
+        let galley = ui.painter().layout_job(job);
+        let origin = at + vec2(indent, 0.0);
+        let rect = Rect::from_min_size(at, vec2(w, galley.size().y));
+        // The lines that end at or above the floor, whole.
+        let fits = galley.rows.iter().map(|row| origin.y + row.rect().max.y).filter(|foot| *foot <= self.floor + 0.01).fold(origin.y, f32::max);
+        if fits >= rect.max.y - 0.01 {
+            ui.painter().galley(origin, galley, color);
+        } else if fits > origin.y {
+            ui.painter().with_clip_rect(rect.with_max_y(fits).intersect(ui.clip_rect())).galley(origin, galley, color);
+        }
+        rect
+    }
+}
+
 /// One gold sentence for a state with nothing else to show.
 pub(crate) fn sentence(ui: &mut Ui, head: &str, tail: &str, pal: &Pal) {
     let w = ui.available_width();
@@ -244,6 +503,59 @@ pub(crate) fn note_line(ui: &Ui, rect: Rect, busy: Option<&str>, note: Option<&(
         (None, None) => return,
     };
     text(ui, rect.left_center(), words, body(13.0), color, rect.width(), Align2::LEFT_CENTER);
+}
+
+/// A room's foot as [`note_line`] draws it and, with nothing busy and no
+/// note, `story` (what the cursor's row is, in the room's words) in one
+/// run, cut with an ellipsis where it runs long.
+pub(crate) fn foot_line(ui: &Ui, rect: Rect, busy: Option<&str>, note: Option<&(String, bool)>, story: &[Run], pal: &Pal) {
+    if busy.is_some() || note.is_some() {
+        note_line(ui, rect, busy, note, pal);
+    } else if !story.is_empty() {
+        runs(ui, rect.left_center(), story, rect.width(), Align2::LEFT_CENTER);
+    }
+}
+
+/// A room's state line across `row`: the LED lit `lamp` at its left, then
+/// `parts` in one run from `indent` points in, cut with an ellipsis, and
+/// `right` (the reload's cadence) at the row's end, only where the whole
+/// line fits beside it. Returns where the words were drawn.
+pub(crate) fn state_line(ui: &Ui, row: Rect, lamp: Color32, indent: f32, parts: &[Run], right: Option<&Run>) -> Rect {
+    let mid = row.center().y;
+    led(ui, pos2(row.min.x + 3.0, mid), lamp);
+    let x = row.min.x + indent;
+    let mut end = row.max.x;
+    if let Some((words, font, color)) = right {
+        let right_w = width_of(ui, words, font.clone());
+        if x + runs_width(ui, parts) + 16.0 + right_w <= row.max.x {
+            text(ui, pos2(row.max.x, mid), words, font.clone(), *color, right_w + 1.0, Align2::RIGHT_CENTER);
+            end = row.max.x - right_w - 16.0;
+        }
+    }
+    runs(ui, pos2(x, mid), parts, (end - x).max(1.0), Align2::LEFT_CENTER)
+}
+
+// ── The room ──────────────────────────────────────────────────────────────
+
+/// The note line along a room's foot, and the canvas's gap between a
+/// room's blocks.
+pub(crate) const NOTE_H: f32 = 18.0;
+pub(crate) const ROOM_GAP: f32 = 18.0;
+/// The canvas's margins round a room in its area: the top, the sides and
+/// the foot.
+const ROOM_TOP: f32 = 20.0;
+const ROOM_SIDE: f32 = 24.0;
+const ROOM_FOOT: f32 = 14.0;
+
+/// A room's two parts in `full`, its area, inside the canvas's margins: its
+/// body, then the note line along its foot a [`ROOM_GAP`] under it. Every
+/// room lays itself out the same way, so a room switched to keeps its
+/// blocks where the last one had them.
+pub(crate) fn room_rects(full: Rect) -> (Rect, Rect) {
+    let column = Rect::from_min_max(full.min + vec2(ROOM_SIDE, ROOM_TOP), (full.max - vec2(ROOM_SIDE, ROOM_FOOT)).max(full.min));
+    let note = Rect::from_min_max(pos2(column.min.x, (column.max.y - NOTE_H).max(column.min.y)), column.max);
+    let body = Rect::from_min_max(column.min, pos2(column.max.x, (note.min.y - ROOM_GAP).max(column.min.y)));
+    (body, note)
 }
 
 // ── Shapes ────────────────────────────────────────────────────────────────
@@ -282,6 +594,21 @@ pub(crate) fn arrow(ui: &Ui, at: Pos2, color: Color32, down: bool) {
     } else {
         vec![at + vec2(-w, h), at + vec2(w, h), at + vec2(0.0, -h)]
     };
+    ui.painter().add(Shape::convex_polygon(points, color, Stroke::NONE));
+}
+
+/// The canvas's check in its 10-point box, centred on `at`.
+pub(crate) fn check(ui: &Ui, at: Pos2, color: Color32) {
+    // M1.5 5.2 l2.4 2.4 L8.6 2.6.
+    let o = at - vec2(5.0, 5.0);
+    let points = vec![o + vec2(1.5, 5.2), o + vec2(3.9, 7.6), o + vec2(8.6, 2.6)];
+    ui.painter().add(Shape::line(points, Stroke::new(1.7, color)));
+}
+
+/// A small solid triangle pointing right, centred on `at`: the cells' "▸"
+/// before a folder in a list, and before the keyboard's pick.
+pub(crate) fn pointer(ui: &Ui, at: Pos2, color: Color32) {
+    let points = vec![at + vec2(-2.5, -4.0), at + vec2(3.5, 0.0), at + vec2(-2.5, 4.0)];
     ui.painter().add(Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
@@ -398,6 +725,18 @@ pub(crate) fn meter(ui: &Ui, at: Pos2, n: usize, lit: usize, seg: Vec2, gap: f32
     rect
 }
 
+/// A room on but with no one found yet (searching, connecting), as an
+/// 18-point row of the layout: ten [`meter`] segments 5 by 10 points, 2
+/// apart, none lit — never a share of anything — and `words` in the accent
+/// 10 points after them.
+pub(crate) fn searching(ui: &mut Ui, words: &str, pal: &Pal) {
+    let w = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
+    let bar = meter(ui, row.left_center(), 10, 0, vec2(5.0, 10.0), 2.0, pal.accent, pal);
+    let x = bar.max.x + 10.0;
+    text(ui, pos2(x, row.center().y), words, body(13.0), pal.accent, (row.max.x - x).max(1.0), Align2::LEFT_CENTER);
+}
+
 // ── Controls ──────────────────────────────────────────────────────────────
 
 /// How [`segmented`] draws: the chosen segment lit amber, or only marked
@@ -495,13 +834,15 @@ const FORM_BUTTON_SIZE: f32 = 11.5;
 
 /// How wide [`form_button`] wants to be for `label`.
 pub(crate) fn form_button_width(ui: &Ui, label: &str) -> f32 {
-    caps_width(ui, label, FORM_BUTTON_SIZE) + 36.0
+    caps_width(ui, bare(label), FORM_BUTTON_SIZE) + 36.0
 }
 
 /// A form's button at `rect` (the canvas's): the one act lit amber when
 /// `primary`, else a hairline in the strong edge with dim capitals that
-/// brighten under the pointer.
+/// brighten under the pointer. `label` is drawn [`bare`] of the cells'
+/// arrows, as no board draws one on a button.
 pub(crate) fn form_button(ui: &Ui, id: Id, rect: Rect, label: &str, primary: bool, pal: &Pal) -> Response {
+    let label = bare(label);
     let response = hand(ui.interact(rect, id, Sense::click()));
     let hovered = response.hovered();
     let color = if primary {
@@ -586,22 +927,80 @@ pub(crate) fn tool_button(ui: &Ui, id: Id, rect: Rect, icon: Icon, label: &str, 
 }
 
 /// The tick box's side.
-const BOX: f32 = 16.0;
+pub(crate) const BOX: f32 = 16.0;
 
 /// A tick box at `rect` on `fill`: a dim edge when off, the ok green's
-/// edge and check when on, each brighter under the pointer.
-fn tick_box(ui: &Ui, rect: Rect, on: bool, hovered: bool, fill: Color32, pal: &Pal) {
+/// edge and [`check`] when on, each brighter under the pointer. Alone it
+/// takes no click: a page's flag column can show its state while the row
+/// takes the click.
+pub(crate) fn tick_box(ui: &Ui, rect: Rect, on: bool, hovered: bool, fill: Color32, pal: &Pal) {
     let edge = if on { pal.ok } else { pal.dim };
     let edge = if hovered { lift(edge, 40) } else { edge };
     ui.painter().rect_filled(rect, square(), fill);
     ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, edge), StrokeKind::Inside);
     if on {
-        // The canvas's check in its 10-point box: M1.5 5.2 l2.4 2.4 L8.6 2.6.
-        let o = rect.center() - vec2(5.0, 5.0);
-        let points = vec![o + vec2(1.5, 5.2), o + vec2(3.9, 7.6), o + vec2(8.6, 2.6)];
-        let check = if hovered { lift(pal.ok, 40) } else { pal.ok };
-        ui.painter().add(Shape::line(points, Stroke::new(1.7, check)));
+        check(ui, rect.center(), if hovered { lift(pal.ok, 40) } else { pal.ok });
     }
+}
+
+/// The keyboard's look on a control of a form: the raised fill and the
+/// accent's ring round `rect`.
+fn cursor_look(ui: &Ui, rect: Rect, pal: &Pal) {
+    ui.painter().rect_filled(rect, square(), pal.raised);
+    ring(ui, rect, pal);
+}
+
+/// A tick at `rect` with its words, a form's choice (a library of a grant,
+/// a permission): the box 8 points in on the panel's fill and `label`
+/// beside it, cut to the row. The form's focus wears the keyboard's look —
+/// the raised fill, the accent ring, the label semibold — and the pointer
+/// raises it; the whole row takes the click (the canvas's FederationMint).
+pub(crate) fn tick_row(ui: &Ui, id: Id, rect: Rect, on: bool, label: &str, focused: bool, pal: &Pal) -> Response {
+    let response = hand(ui.interact(rect, id, Sense::click()));
+    let hovered = response.hovered();
+    if focused {
+        cursor_look(ui, rect, pal);
+    } else if hovered {
+        ui.painter().rect_filled(rect, square(), pal.raised);
+    }
+    let mark = Rect::from_min_size(pos2(rect.min.x + 8.0, rect.center().y - BOX / 2.0), Vec2::splat(BOX));
+    tick_box(ui, mark, on, hovered, pal.panel, pal);
+    let x = mark.max.x + 10.0;
+    let font = if focused { strong(14.0) } else { body(14.0) };
+    text(ui, pos2(x, rect.center().y), label, font, pal.text, (rect.max.x - x - 8.0).max(1.0), Align2::LEFT_CENTER);
+    response
+}
+
+/// A row of a list in a modal, `h` points of the layout the column wide,
+/// that takes the click: raised under the pointer, the keyboard's look
+/// when `on` (its cursor), the hand over it. The page paints its words in
+/// the rect; whether the pointer is on it is the response's.
+pub(crate) fn list_row(ui: &mut Ui, id: Id, h: f32, on: bool, pal: &Pal) -> (Rect, Response) {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let response = list_row_at(ui, id, rect, on, pal);
+    (rect, response)
+}
+
+/// [`list_row`] at `rect`.
+pub(crate) fn list_row_at(ui: &Ui, id: Id, rect: Rect, on: bool, pal: &Pal) -> Response {
+    let response = hand(ui.interact(rect, id, Sense::click()));
+    if on {
+        cursor_look(ui, rect, pal);
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, square(), pal.raised);
+    }
+    response
+}
+
+/// The ring round what the layout drew since `top` — a group of choices
+/// that has the keyboard as one — reaching 8 points past the column either
+/// side, as a [`radio`] row's hover does. Returns where.
+pub(crate) fn ring_since(ui: &Ui, top: f32, pal: &Pal) -> Rect {
+    let column = ui.max_rect();
+    let rect = Rect::from_min_max(pos2(column.min.x - 8.0, top - 2.0), pos2(column.max.x + 8.0, ui.cursor().min.y + 2.0));
+    ring(ui, rect, pal);
+    rect
 }
 
 /// A tick box alone, centred on `at` — a table's flag column — on the
@@ -616,17 +1015,23 @@ pub(crate) fn checkbox(ui: &Ui, id: Id, at: Pos2, on: bool, pal: &Pal) -> Respon
 /// A form's tick box and its words, a 28-point row of the layout: the box
 /// on the ground's fill, `label` in the text colour and `detail` dim right
 /// after it (so it carries its own separator, " — …"). The box and its
-/// words take the click, not the row's empty end.
-pub(crate) fn check_line(ui: &mut Ui, id: Id, on: bool, label: &str, detail: &str, pal: &Pal) -> Response {
+/// words take the click, not the row's empty end; while `focused` (the
+/// form's keyboard on it) they wear the keyboard's look, reaching 6 points
+/// past them either side, the label semibold.
+pub(crate) fn check_line(ui: &mut Ui, id: Id, on: bool, label: &str, detail: &str, focused: bool, pal: &Pal) -> Response {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, HIT), Sense::hover());
-    let words = width_of(ui, label, body(14.0)) + if detail.is_empty() { 0.0 } else { width_of(ui, detail, body(14.0)) };
+    let font = if focused { strong(14.0) } else { body(14.0) };
+    let words = width_of(ui, label, font.clone()) + if detail.is_empty() { 0.0 } else { width_of(ui, detail, body(14.0)) };
     let hit = Rect::from_min_size(row.min, vec2((BOX + 10.0 + words).min(w), row.height()));
+    if focused {
+        cursor_look(ui, hit.expand2(vec2(6.0, 0.0)), pal);
+    }
     let response = hand(ui.interact(hit, id, Sense::click()));
     let mark = Rect::from_min_size(pos2(row.min.x, row.center().y - BOX / 2.0), Vec2::splat(BOX));
     tick_box(ui, mark, on, response.hovered(), pal.ground, pal);
     let x = mark.max.x + 10.0;
-    let drawn = text(ui, pos2(x, row.center().y), label, body(14.0), pal.text, row.max.x - x, Align2::LEFT_CENTER);
+    let drawn = text(ui, pos2(x, row.center().y), label, font, pal.text, row.max.x - x, Align2::LEFT_CENTER);
     if !detail.is_empty() {
         text(ui, pos2(drawn.max.x, row.center().y), detail, body(14.0), pal.dim, row.max.x - drawn.max.x, Align2::LEFT_CENTER);
     }
@@ -662,27 +1067,167 @@ pub(crate) fn radio(ui: &mut Ui, id: Id, on: bool, label: &str, detail: &str, pa
     response
 }
 
-/// A room's add card, the full column wide and 56 points tall: an ok-green
-/// hairline with a plus and `label` in semibold green at its centre,
-/// washed green under the pointer (the canvas's "Add a music folder").
-pub(crate) fn add_card(ui: &mut Ui, id: Id, label: &str, pal: &Pal) -> Response {
+/// The 16-point glyph a room's [`card`] leads its words with: each room's
+/// own on the canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Glyph {
+    /// The words alone.
+    None,
+    /// A folder with a plus in it (Main's "Add a music folder").
+    Folder,
+    /// A person with a plus beside them (Users').
+    User,
+    /// An arrow down into a tray (Backups').
+    Tray,
+    /// A ticket, notched at its sides, its stub perforated (Federation's).
+    Ticket,
+}
+
+/// `glyph` in `color`, its 16-point box centred on `at`: the canvas's
+/// paths, stroked 1.5.
+fn draw_glyph(ui: &Ui, at: Pos2, glyph: Glyph, color: Color32) {
+    let o = at - vec2(8.0, 8.0);
+    let p = |x: f32, y: f32| o + vec2(x, y);
+    let stroke = Stroke::new(1.5, color);
+    let painter = ui.painter();
+    match glyph {
+        Glyph::None => {}
+        Glyph::Folder => {
+            // M2 4.5h4.5l1.5 1.5H14v7H2z, and M8 7.8v3.6M6.2 9.6h3.6.
+            painter.add(Shape::closed_line(vec![p(2.0, 4.5), p(6.5, 4.5), p(8.0, 6.0), p(14.0, 6.0), p(14.0, 13.0), p(2.0, 13.0)], stroke));
+            painter.line_segment([p(8.0, 7.8), p(8.0, 11.4)], stroke);
+            painter.line_segment([p(6.2, 9.6), p(9.8, 9.6)], stroke);
+        }
+        Glyph::User => {
+            // A head (r 2.6 at 6,5), the shoulders' arc from 1.5,14 over to
+            // 10.5,14, and M12.6 4.4v4.2M10.5 6.5h4.2.
+            painter.circle_stroke(p(6.0, 5.0), 2.6, stroke);
+            let arc = (0..=12).map(|k| {
+                let a = std::f32::consts::PI * (1.0 + k as f32 / 12.0);
+                p(6.0 + 4.5 * a.cos(), 14.0 + 4.6 * a.sin())
+            });
+            painter.add(Shape::line(arc.collect(), stroke));
+            painter.line_segment([p(12.6, 4.4), p(12.6, 8.6)], stroke);
+            painter.line_segment([p(10.5, 6.5), p(14.7, 6.5)], stroke);
+        }
+        Glyph::Tray => {
+            // M2 9.5h12v4H2z, and M8 2v5.4M5.6 5.1L8 7.5l2.4-2.4.
+            painter.rect_stroke(Rect::from_min_max(p(2.0, 9.5), p(14.0, 13.5)), 0.0, stroke, StrokeKind::Middle);
+            painter.line_segment([p(8.0, 2.0), p(8.0, 7.4)], stroke);
+            painter.add(Shape::line(vec![p(5.6, 5.1), p(8.0, 7.5), p(10.4, 5.1)], stroke));
+        }
+        Glyph::Ticket => {
+            // A notch of radius 1.6 into the side at x, bulging `inward`.
+            let notch = |x: f32, inward: f32| -> Vec<Pos2> {
+                (0..=8)
+                    .map(|k| {
+                        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * k as f32 / 8.0;
+                        p(x + inward * 1.6 * a.cos(), 8.0 + 1.6 * a.sin())
+                    })
+                    .collect()
+            };
+            let mut outline = vec![p(1.5, 4.0), p(14.5, 4.0)];
+            outline.extend(notch(14.5, -1.0));
+            outline.extend([p(14.5, 12.0), p(1.5, 12.0)]);
+            outline.extend(notch(1.5, 1.0).into_iter().rev());
+            painter.add(Shape::closed_line(outline, stroke));
+            painter.extend(Shape::dashed_line(&[p(10.5, 5.0), p(10.5, 11.0)], stroke, 1.5, 1.5));
+        }
+    }
+}
+
+/// A room's call to act, the column wide and 56 points tall: a hairline in
+/// `tone` with `glyph` and `label` (bare of the cells' arrows) in its
+/// semibold at the centre, washed in the tone under the pointer. While not
+/// `live` it is dim and takes no click: its act on its way.
+pub(crate) fn card(ui: &mut Ui, id: Id, label: &str, glyph: Glyph, tone: Color32, live: bool, pal: &Pal) -> Response {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 56.0), Sense::hover());
-    let response = hand(ui.interact(rect, id, Sense::click()));
-    if response.hovered() {
-        ui.painter().rect_filled(rect, square(), pal.ok.gamma_multiply(0.10));
+    let response = if live { hand(ui.interact(rect, id, Sense::click())) } else { ui.interact(rect, id, Sense::hover()) };
+    let tone = if live { tone } else { pal.dim };
+    if live && response.hovered() {
+        ui.painter().rect_filled(rect, square(), tone.gamma_multiply(0.10));
     }
-    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, pal.ok), StrokeKind::Inside);
+    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, tone), StrokeKind::Inside);
+    let label = bare(label);
     let font = strong(14.0);
-    let words = width_of(ui, label, font.clone()).min((w - 60.0).max(0.0));
-    let left = rect.center().x - (16.0 + 10.0 + words) / 2.0;
-    // The canvas's 16-point plus, stroked 1.5.
-    let plus = pos2(left + 8.0, rect.center().y);
-    let stroke = Stroke::new(1.5, pal.ok);
-    ui.painter().line_segment([plus + vec2(0.0, -5.5), plus + vec2(0.0, 5.5)], stroke);
-    ui.painter().line_segment([plus + vec2(-5.5, 0.0), plus + vec2(5.5, 0.0)], stroke);
-    text(ui, pos2(left + 26.0, rect.center().y), label, font, pal.ok, words + 1.0, Align2::LEFT_CENTER);
+    let lead = if glyph == Glyph::None { 0.0 } else { 26.0 };
+    let words = width_of(ui, label, font.clone()).min((w - 60.0 - lead).max(0.0));
+    let left = rect.center().x - (lead + words) / 2.0;
+    draw_glyph(ui, pos2(left + 8.0, rect.center().y), glyph, tone);
+    text(ui, pos2(left + lead, rect.center().y), label, font, tone, words + 1.0, Align2::LEFT_CENTER);
     response
+}
+
+/// A room's add card: a [`card`] in the ok green with its room's glyph
+/// (the canvas's "Add a music folder").
+pub(crate) fn add_card(ui: &mut Ui, id: Id, label: &str, glyph: Glyph, pal: &Pal) -> Response {
+    card(ui, id, label, glyph, pal.ok, true, pal)
+}
+
+/// A card that is one flag's tick, the column wide and 60 points tall: the
+/// panel's fill, raised under the pointer with its edge brightened, a tick
+/// box 24 points in, `label` semibold beside it and `hint` dim under the
+/// label — the whole of it the click that flips the flag (the canvas's
+/// Federation inbox).
+pub(crate) fn tick_card(ui: &mut Ui, id: Id, on: bool, label: &str, hint: &str, pal: &Pal) -> Response {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
+    let response = hand(ui.interact(rect, id, Sense::click()));
+    let hovered = response.hovered();
+    ui.painter().rect_filled(rect, square(), if hovered { pal.raised } else { pal.panel });
+    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, if hovered { pal.dim } else { pal.edge }), StrokeKind::Inside);
+    let top = rect.min.y + 20.0;
+    let mark = Rect::from_center_size(pos2(rect.min.x + 24.0, top), Vec2::splat(BOX));
+    tick_box(ui, mark, on, hovered, pal.ground, pal);
+    let x = mark.max.x + 12.0;
+    let room = (rect.max.x - x - 16.0).max(1.0);
+    text(ui, pos2(x, top), label, strong(14.0), pal.text, room, Align2::LEFT_CENTER);
+    text(ui, pos2(x, top + 21.0), hint, body(13.0), pal.dim, room, Align2::LEFT_CENTER);
+    response
+}
+
+/// A modal's foot, a [`FORM_BUTTON_H`] row of the layout the column wide
+/// ([`foot_at`]). The button clicked, counting `start` first.
+pub(crate) fn foot(ui: &mut Ui, id: Id, start: &[(&str, bool)], end: &[(&str, bool)], note: Option<&str>, pal: &Pal) -> Option<usize> {
+    let w = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(vec2(w, FORM_BUTTON_H), Sense::hover());
+    foot_at(ui, id, row, start, end, note, pal)
+}
+
+/// A modal's or a page's foot across `row`: form buttons, each as wide as
+/// its [`bare`] words and 10 points apart, the lit one where its flag is
+/// set — `start` laid from the row's left, `end` ending at its right — and
+/// with nothing at the start, `note` (a refusal) in gold at the left, cut
+/// 16 points short of the first button. Button `k`, counting `start` first,
+/// is `id.with(k)`. The button clicked.
+pub(crate) fn foot_at(ui: &Ui, id: Id, row: Rect, start: &[(&str, bool)], end: &[(&str, bool)], note: Option<&str>, pal: &Pal) -> Option<usize> {
+    let mut clicked = None;
+    let mut x = row.min.x;
+    for (k, (label, primary)) in start.iter().enumerate() {
+        let bw = form_button_width(ui, label);
+        let rect = Rect::from_min_size(pos2(x, row.min.y), vec2(bw, row.height()));
+        if form_button(ui, id.with(k), rect, label, *primary, pal).clicked() {
+            clicked = Some(k);
+        }
+        x += bw + 10.0;
+    }
+    let mut x = row.max.x;
+    for (k, (label, primary)) in end.iter().enumerate().rev() {
+        let bw = form_button_width(ui, label);
+        let rect = Rect::from_min_size(pos2(x - bw, row.min.y), vec2(bw, row.height()));
+        if form_button(ui, id.with(start.len() + k), rect, label, *primary, pal).clicked() {
+            clicked = Some(start.len() + k);
+        }
+        x -= bw + 10.0;
+    }
+    if let Some(note) = note.filter(|_| start.is_empty()) {
+        let room = x + 10.0 - 16.0 - row.min.x;
+        if room > 16.0 {
+            text(ui, row.left_center(), note, body(13.0), pal.gold, room, Align2::LEFT_CENTER);
+        }
+    }
+    clicked
 }
 
 /// A chip anchored at `at` by `align`: `s` in tracked small capitals in a
@@ -725,15 +1270,24 @@ pub(crate) struct Input<'a> {
     pub enabled: bool,
     /// Drawn dim while the value is empty.
     pub placeholder: &'a str,
+    /// A filter's box: the canvas's magnifier 10 points in, the line 30.
+    pub search: bool,
 }
 
 impl<'a> Input<'a> {
     pub(crate) fn new(value: &'a str, caret: usize) -> Self {
-        Input { value, caret, focused: false, composition: "", masked: false, mono: false, enabled: true, placeholder: "" }
+        Input { value, caret, focused: false, composition: "", masked: false, mono: false, enabled: true, placeholder: "", search: false }
+    }
+
+    /// One of a page's own inputs: its value and its caret.
+    pub(crate) fn of(input: &'a tui_input::Input) -> Self {
+        Input::new(input.value(), input.cursor())
     }
 
     /// The field has the keyboard, and the input method is composing
-    /// `composition` (empty for nothing).
+    /// `composition` (empty for nothing). A field without the keyboard
+    /// draws no composition, whatever it is handed, so a page may hand
+    /// every field the one it has.
     pub(crate) fn focused(self, focused: bool, composition: &'a str) -> Self {
         Input { focused, composition, ..self }
     }
@@ -753,6 +1307,10 @@ impl<'a> Input<'a> {
     pub(crate) fn placeholder(self, placeholder: &'a str) -> Self {
         Input { placeholder, ..self }
     }
+
+    pub(crate) fn search(self) -> Self {
+        Input { search: true, ..self }
+    }
 }
 
 /// What a field's pass gives back.
@@ -762,20 +1320,49 @@ pub(crate) struct Typed {
     /// The foot of the caret, in egui's points, while the field is focused:
     /// where the host floats the input method's candidates.
     pub caret: Option<Pos2>,
-    /// The character a click on the box landed nearest, for the page to put
-    /// its caret at. None while a composition is drawn in the line.
-    pub pick: Option<usize>,
 }
 
-/// A field as the canvas draws it, a row of the layout the full width:
-/// `label` in dim small capitals, then its box ([`field_box`]).
+/// A field with its label over it: the label's row, 6 points, the box.
+pub(crate) const FIELD_ROW_H: f32 = LABEL_H + 6.0 + FIELD_H;
+
+/// A field as the canvas draws it, a [`FIELD_ROW_H`] row of the layout the
+/// full width: its [`label`], then its box ([`field_box`]).
 pub(crate) fn field(ui: &mut Ui, id: Id, label: &str, input: &Input, pal: &Pal) -> Typed {
     let w = ui.available_width();
-    let (head, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-    small_caps(ui, head.left_center(), label, pal.dim, w, Align2::LEFT_CENTER);
-    ui.add_space(6.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
+    let (slot, _) = ui.allocate_exact_size(vec2(w, FIELD_ROW_H), Sense::hover());
+    field_at(ui, id, slot, label, input, pal)
+}
+
+/// [`field`] in `slot`, a [`FIELD_ROW_H`] rect: a form's fields side by
+/// side.
+pub(crate) fn field_at(ui: &Ui, id: Id, slot: Rect, label: &str, input: &Input, pal: &Pal) -> Typed {
+    label_at(ui, pos2(slot.min.x, slot.min.y + LABEL_H / 2.0), label, slot.width(), pal);
+    let rect = Rect::from_min_size(pos2(slot.min.x, slot.max.y - FIELD_H), vec2(slot.width(), FIELD_H));
     field_box(ui, id, rect, input, pal)
+}
+
+/// A field whose value is short (a name, a number), a row of the layout:
+/// its [`label`], then a box `box_w` wide (less where the column is
+/// narrower) and `note` dim 16 points beside it where it fits whole, else
+/// on a line of its own under it (the canvas's name and its charset).
+pub(crate) fn field_beside(ui: &mut Ui, id: Id, label: &str, input: &Input, box_w: f32, note: &str, pal: &Pal) -> Typed {
+    let w = ui.available_width();
+    self::label(ui, label, pal);
+    ui.add_space(6.0);
+    let box_w = box_w.min(w);
+    let (row, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
+    let typed = field_box(ui, id, Rect::from_min_size(row.min, vec2(box_w, FIELD_H)), input, pal);
+    if !note.is_empty() {
+        let note_w = width_of(ui, note, body(13.0));
+        if box_w + 16.0 + note_w <= w {
+            let at = pos2(row.min.x + box_w + 16.0, row.center().y);
+            text(ui, at, note, body(13.0), pal.dim, note_w + 1.0, Align2::LEFT_CENTER);
+        } else {
+            ui.add_space(6.0);
+            line(ui, 18.0, note, body(13.0), pal.dim);
+        }
+    }
+    typed
 }
 
 /// A field's box at `rect`: the ground's fill in a strong-edged hairline,
@@ -807,7 +1394,17 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
     ui.painter().rect_filled(rect, square(), fill);
     ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, edge), StrokeKind::Inside);
 
-    let view = rect.shrink2(vec2(FIELD_PAD, 0.0));
+    let mut view = rect.shrink2(vec2(FIELD_PAD, 0.0));
+    if input.search {
+        // The canvas's 14-point magnifier: a ring r 4.2 at 6,6 and its
+        // handle to 12.5,12.5, stroked 1.4, the words 30 points in.
+        let o = pos2(rect.min.x + 10.0, rect.center().y - 7.0);
+        let stroke = Stroke::new(1.4, pal.dim);
+        ui.painter().circle_stroke(o + vec2(6.0, 6.0), 4.2, stroke);
+        ui.painter().line_segment([o + vec2(9.2, 9.2), o + vec2(12.5, 12.5)], stroke);
+        view.min.x = rect.min.x + 30.0;
+    }
+
     let font = if input.mono { mono(12.5) } else { body(14.0) };
     let (line, caret_at, composing) = field_line(input);
     let clip = ui.painter().with_clip_rect(view.intersect(ui.clip_rect()));
@@ -815,7 +1412,13 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
         let galley = ui.painter().layout_no_wrap(input.placeholder.to_string(), font.clone(), pal.dim);
         clip.galley(pos2(view.min.x, rect.center().y - galley.size().y / 2.0), galley, pal.dim);
     }
-    let galley = ui.painter().layout_job(field_job(&line, composing.clone(), font.clone(), ink));
+    let mut job = field_job(&line, composing, font.clone(), ink);
+    if !focused {
+        // Unfocused, a long line is cut with an ellipsis, as the cells cut
+        // it, never cut through a letter at the box's edge.
+        job.wrap = TextWrapping::truncate_at_width(view.width().max(1.0));
+    }
+    let galley = ui.painter().layout_job(job);
     let caret_x = galley.pos_from_cursor(CCursor::new(caret_at)).min.x;
     let memory = id.with("window");
     let offset = if focused {
@@ -828,7 +1431,10 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
         0.0
     };
     let origin = pos2(view.min.x - offset, rect.center().y - galley.size().y / 2.0);
-    clip.galley(origin, galley.clone(), ink);
+    // A letter scrolled partly off the view's left edge is left out whole,
+    // as the cells' field scrolls by whole letters: none shows torn.
+    let from = view.min.x + whole_glyph(&galley, offset) - offset;
+    clip.with_clip_rect(clip.clip_rect().with_min_x(from.max(clip.clip_rect().min.x))).galley(origin, galley, ink);
 
     let caret = focused.then(|| {
         let x = (origin.x + caret_x).round();
@@ -837,12 +1443,17 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
         ui.painter().rect_filled(bar, 0.0, pal.accent);
         pos2(x, bar.max.y)
     });
-    let pick = if response.clicked() && composing.is_empty() {
-        response.interact_pointer_pos().map(|p| galley.cursor_from_pos(p - origin).index.0.min(input.value.chars().count()))
-    } else {
-        None
-    };
-    Typed { response, caret, pick }
+    Typed { response, caret }
+}
+
+/// Where the first letter whole in view starts on a field's line scrolled
+/// `offset` points left: the next letter's left edge from there.
+fn whole_glyph(galley: &egui::Galley, offset: f32) -> f32 {
+    if offset <= 0.0 {
+        return 0.0;
+    }
+    let row = galley.rows.first();
+    row.and_then(|r| r.row.glyphs.iter().map(|g| r.pos.x + g.pos.x).find(|x| *x >= offset - 0.01)).unwrap_or(offset)
 }
 
 /// The line a field lays out, the caret's index in it and where the
@@ -923,8 +1534,11 @@ impl Col {
 }
 
 /// The gap between columns, and a row's padding either side.
-const COL_GAP: f32 = 16.0;
-const CELL_PAD: f32 = 10.0;
+pub(crate) const COL_GAP: f32 = 16.0;
+pub(crate) const CELL_PAD: f32 = 10.0;
+/// How far a room's table's first row stands under its top: the 30-point
+/// headings and the 4 points under them.
+pub(crate) const TABLE_HEAD: f32 = 34.0;
 
 /// The columns' x ranges across `x0..x1`.
 pub(crate) fn spans(x0: f32, x1: f32, cols: &[Col]) -> Vec<(f32, f32)> {
@@ -974,7 +1588,7 @@ enum Look {
     Lit,
 }
 
-/// A table under its headings, its rows scrolled by egui and drawn one at
+//// A table under its headings, its rows scrolled by egui and drawn one at
 /// a time by the page's closure, the keyboard cursor's row kept in view on
 /// the pass it moved.
 pub(crate) struct Table<'a> {
@@ -986,6 +1600,11 @@ pub(crate) struct Table<'a> {
     row_h: f32,
     trail: f32,
     clickable: bool,
+    reveal: Option<usize>,
+    empty: Option<&'a str>,
+    headless: bool,
+    height: Option<f32>,
+    content: Option<Id>,
 }
 
 /// What a table's pass saw.
@@ -993,8 +1612,6 @@ pub(crate) struct Table<'a> {
 pub(crate) struct TableShown {
     /// The row a click landed on, if one did.
     pub row: Option<usize>,
-    /// The row and the column a click landed in, if it was in a cell.
-    pub cell: Option<(usize, usize)>,
     /// The last row on screen, for paging.
     pub last_on_screen: usize,
 }
@@ -1004,7 +1621,21 @@ impl<'a> Table<'a> {
     /// hairline, 40-point rows, the cursor's row raised and ringed in the
     /// accent, a row under the pointer raised, a click on a row reported.
     pub(crate) fn new(id: Id, cols: &'a [Col], len: usize) -> Self {
-        Table { id, cols, len, cursor: None, look: Look::Ring, row_h: 40.0, trail: 0.0, clickable: true }
+        Table {
+            id,
+            cols,
+            len,
+            cursor: None,
+            look: Look::Ring,
+            row_h: 40.0,
+            trail: 0.0,
+            clickable: true,
+            reveal: None,
+            empty: None,
+            headless: false,
+            height: None,
+            content: None,
+        }
     }
 
     /// The keyboard cursor's row.
@@ -1024,6 +1655,9 @@ impl<'a> Table<'a> {
 
     /// Points at the right of every row outside its selection area, for a
     /// column of row buttons (a remove) the cursor's ring stops short of.
+    /// The trail is no part of the row's target, as the cells register a
+    /// row's click left of its remove column: a click there beside the
+    /// button selects nothing, and shows no hand.
     pub(crate) fn trail(self, trail: f32) -> Self {
         Table { trail, ..self }
     }
@@ -1034,62 +1668,123 @@ impl<'a> Table<'a> {
         Table { clickable: false, ..self }
     }
 
+    /// Row `reveal` brought into view on this pass, just far enough, the
+    /// cursor left where it is: a fresh add's row, which the cells show
+    /// without selecting it.
+    pub(crate) fn reveal(self, reveal: Option<usize>) -> Self {
+        Table { reveal, ..self }
+    }
+
+    /// With no rows, the headings and `words` dim on the first row's line,
+    /// as the cells say an empty list is empty, the table no taller than
+    /// that; "" for the headings alone, the page saying more under them.
+    pub(crate) fn empty(self, words: &'a str) -> Self {
+        Table { empty: Some(words), ..self }
+    }
+
+    /// No headings and no rule: a list.
+    pub(crate) fn headless(self) -> Self {
+        Table { headless: true, ..self }
+    }
+
+    /// The rows' view `h` points tall, rather than all the layout has left.
+    pub(crate) fn height(self, h: f32) -> Self {
+        Table { height: Some(h), ..self }
+    }
+
+    /// What the rows are (a folder's listing, a destination's runs): a new
+    /// `key`, or a table that was not drawn on the last pass, starts at its
+    /// top and brings its cursor in from there, as the cells' lists open —
+    /// never where the wheel last left it, nor at another listing's place.
+    pub(crate) fn content(self, key: Id) -> Self {
+        Table { content: Some(key), ..self }
+    }
+
     /// Lay the table out in what is left of `ui`, `draw_row` painting each
     /// row on screen.
     pub(crate) fn show(self, ui: &mut Ui, pal: &Pal, mut draw_row: impl FnMut(&Ui, usize, &RowCtx)) -> TableShown {
-        let Table { id, cols, len, cursor, look, row_h, trail, clickable } = self;
+        let Table { id, cols, len, cursor, look, row_h, trail, clickable, reveal, empty, headless, height, content } = self;
         let w = ui.available_width();
-        let head_h = if look == Look::Lit { 26.0 } else { 30.0 };
-        let (head, _) = ui.allocate_exact_size(vec2(w, head_h), Sense::hover());
-        let cells = spans(head.min.x + CELL_PAD, head.max.x - CELL_PAD - trail, cols);
-        for (c, (x, cw)) in cols.iter().zip(&cells) {
-            let y = head.center().y;
-            let (pos, align) = match c.align {
-                Align::Min => (pos2(*x, y), Align2::LEFT_CENTER),
-                Align::Center => (pos2(x + cw / 2.0, y), Align2::CENTER_CENTER),
-                Align::Max => (pos2(x + cw, y), Align2::RIGHT_CENTER),
-            };
-            match look {
-                Look::Lit => caps(ui, pos, &c.title, 11.0, pal.dim, *cw, align),
-                Look::Ring => small_caps(ui, pos, &c.title, pal.dim, *cw, align),
-            };
-        }
-        let rule = if look == Look::Lit { pal.edge_strong } else { pal.edge };
-        ui.painter().line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, rule));
-        ui.add_space(4.0);
-
-        // The cursor moved since the last pass: the offset that brings it in.
-        let memory = id.with("view");
-        let (last_cursor, last_offset, last_height): (Option<usize>, f32, f32) =
-            ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((None, 0.0, 0.0));
-        let mut scroll = ScrollArea::vertical().id_salt(id).auto_shrink([false, false]);
-        if cursor != last_cursor
-            && let Some(s) = cursor
-            && last_height > 0.0
-        {
-            let (row_top, row_bottom) = (s as f32 * row_h, (s + 1) as f32 * row_h);
-            if row_top < last_offset {
-                scroll = scroll.vertical_scroll_offset(row_top);
-            } else if row_bottom > last_offset + last_height {
-                scroll = scroll.vertical_scroll_offset(row_bottom - last_height);
+        if !headless {
+            let head_h = if look == Look::Lit { 26.0 } else { 30.0 };
+            let (head, _) = ui.allocate_exact_size(vec2(w, head_h), Sense::hover());
+            let cells = spans(head.min.x + CELL_PAD, head.max.x - CELL_PAD - trail, cols);
+            for (c, (x, cw)) in cols.iter().zip(&cells) {
+                let y = head.center().y;
+                let (pos, align) = match c.align {
+                    Align::Min => (pos2(*x, y), Align2::LEFT_CENTER),
+                    Align::Center => (pos2(x + cw / 2.0, y), Align2::CENTER_CENTER),
+                    Align::Max => (pos2(x + cw, y), Align2::RIGHT_CENTER),
+                };
+                match look {
+                    Look::Lit => caps(ui, pos, &c.title, 11.0, pal.dim, *cw, align),
+                    Look::Ring => small_caps(ui, pos, &c.title, pal.dim, *cw, align),
+                };
             }
+            let rule = if look == Look::Lit { pal.edge_strong } else { pal.edge };
+            ui.painter().line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, rule));
+            ui.add_space(4.0);
+        }
+        if len == 0
+            && let Some(words) = empty
+        {
+            if !words.is_empty() {
+                let (row, _) = ui.allocate_exact_size(vec2(w, row_h), Sense::hover());
+                let at = pos2(row.min.x + CELL_PAD, row.center().y);
+                text(ui, at, words, body(14.0), pal.dim, (w - 2.0 * CELL_PAD).max(1.0), Align2::LEFT_CENTER);
+            }
+            return TableShown::default();
+        }
+
+        // Where the view should stand: a fresh listing at its top first,
+        // then the cursor brought in on the pass it moved and a revealed row
+        // on the pass it is asked for, each just far enough.
+        let memory = id.with("view");
+        let now = ui.ctx().cumulative_pass_nr();
+        let (last_pass, last_content, last_cursor, last_offset): (u64, Id, Option<usize>, f32) =
+            ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((0, Id::NULL, None, 0.0));
+        let fresh = content.is_some_and(|key| key != last_content || last_pass + 1 != now);
+        let view_h = height.unwrap_or_else(|| ui.available_height());
+        let view_h = if view_h.is_finite() { view_h.max(0.0) } else { len as f32 * row_h };
+        let (mut offset, mut moved) = if fresh { (0.0, true) } else { (last_offset, false) };
+        let mut bring = |row: usize| {
+            let (top, bottom) = (row as f32 * row_h, (row + 1) as f32 * row_h);
+            if top < offset {
+                (offset, moved) = (top, true);
+            } else if bottom > offset + view_h {
+                (offset, moved) = (bottom - view_h, true);
+            }
+        };
+        if let Some(s) = cursor.filter(|_| fresh || cursor != last_cursor) {
+            bring(s);
+        }
+        if let Some(r) = reveal {
+            bring(r);
+        }
+        let mut scroll = ScrollArea::vertical().id_salt(id).auto_shrink([false, false]);
+        if let Some(h) = height {
+            scroll = scroll.max_height(h).min_scrolled_height(h);
+        }
+        if moved {
+            scroll = scroll.vertical_scroll_offset(offset.max(0.0));
         }
         let mut shown = TableShown::default();
         let sense = if clickable { Sense::click() } else { Sense::hover() };
         let output = scroll.show_rows(ui, row_h, len, |ui, range| {
             shown.last_on_screen = range.end.saturating_sub(1);
             for i in range {
-                let (full, response) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), sense);
+                let (full, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+                let rect = Rect::from_min_max(full.min, pos2((full.max.x - trail).max(full.min.x), full.max.y));
+                let trail_rect = Rect::from_min_max(pos2(rect.max.x, full.min.y), full.max);
+                let response = ui.interact(rect, id.with("row").with(i), sense);
                 // The Stats page's controls show no hand yet, its rows
                 // among them; the rooms' do.
                 let response = if clickable && look == Look::Ring { hand(response) } else { response };
-                let rect = Rect::from_min_max(full.min, pos2((full.max.x - trail).max(full.min.x), full.max.y));
-                let trail_rect = Rect::from_min_max(pos2(rect.max.x, full.min.y), full.max);
                 let selected = cursor == Some(i);
                 // A room's row stays raised while the pointer is on a
-                // control the page draws in it (a tick box, a remove), which
-                // egui hovers in its stead: the row would blink out under
-                // it. Nothing covers a Stats row.
+                // control the page draws in it (a tick box), which egui
+                // hovers in its stead: the row would blink out under it.
+                // Nothing covers a Stats row.
                 let over = response.hovered() || (look == Look::Ring && response.contains_pointer());
                 let hovered = clickable && !selected && over;
                 match look {
@@ -1118,12 +1813,10 @@ impl<'a> Table<'a> {
                 draw_row(ui, i, &RowCtx { rect, trail: trail_rect, cells: &cells, selected, lit, hovered });
                 if response.clicked() {
                     shown.row = Some(i);
-                    let x = response.interact_pointer_pos().map_or(f32::NAN, |p| p.x);
-                    shown.cell = cells.iter().position(|(cx, cw)| x >= *cx && x < cx + cw).map(|c| (i, c));
                 }
             }
         });
-        let state = (cursor, output.state.offset.y, output.inner_rect.height());
+        let state = (now, content.unwrap_or(Id::NULL), cursor, output.state.offset.y);
         ui.ctx().data_mut(|d| d.insert_temp(memory, state));
         shown
     }
@@ -1152,6 +1845,70 @@ pub(crate) fn cell(ui: &Ui, row: &RowCtx, at: usize, s: &str, font: FontId, colo
     }
 }
 
+/// A row's name: semibold on the cursor's row alone (the canvas's), in the
+/// text colour, white under the pointer ([`ink`]).
+pub(crate) fn name_cell(ui: &Ui, row: &RowCtx, at: usize, s: &str, pal: &Pal) -> Rect {
+    let font = if row.selected { strong(14.0) } else { body(14.0) };
+    cell(ui, row, at, s, font, ink(row, pal.text, pal), false)
+}
+
+/// A cell that is words behind an LED (a status, a confidence, a last
+/// run's outcome): the LED lit `lamp` 3 points in where the cells draw a
+/// glyph, the words 14 points in; with no lamp, the words from the cell's
+/// left.
+pub(crate) fn led_cell(ui: &Ui, row: &RowCtx, at: usize, lamp: Option<Color32>, words: &str, font: FontId, color: Color32) -> Rect {
+    let (x, w) = row.cells[at];
+    let mid = row.rect.center().y;
+    let from = match lamp {
+        Some(lamp) => {
+            led(ui, pos2(x + 3.0, mid), lamp);
+            x + 14.0
+        }
+        None => x,
+    };
+    text(ui, pos2(from, mid), words, font, color, (x + w - from).max(1.0), Align2::LEFT_CENTER)
+}
+
+/// A cell whose words may not fit: cut with an ellipsis, and `tip` in a
+/// tooltip over the cell only when they were cut, as the cells register
+/// one over a clipped cell.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cell_tipped(ui: &Ui, row: &RowCtx, at: usize, s: &str, tip: &str, font: FontId, color: Color32, id: Id) -> Rect {
+    let drawn = cell(ui, row, at, s, font.clone(), color, false);
+    let rect = row.cell(at);
+    if width_of(ui, s, font) > rect.width() {
+        let _ = ui.interact(rect, id, Sense::hover()).on_hover_text(tip);
+    }
+    drawn
+}
+
+/// A path's cell: cut at its start ([`cut_start`]) so its leaf stays, and
+/// whole in a tooltip, in the cell's own face, only when it was cut.
+pub(crate) fn path_cell(ui: &Ui, row: &RowCtx, at: usize, path: &str, font: FontId, color: Color32, id: Id) -> Rect {
+    let rect = row.cell(at);
+    let (shown, cut) = cut_start(ui, path, font.clone(), rect.width());
+    let drawn = text(ui, rect.left_center(), &shown, font.clone(), color, rect.width(), Align2::LEFT_CENTER);
+    if cut {
+        let _ = ui.interact(rect, id, Sense::hover()).on_hover_text(egui::RichText::new(path).font(font));
+    }
+    drawn
+}
+
+/// `cols` for a table `w` wide: their fixed widths narrowed together, to
+/// no less than `floor` of themselves, where the flexible column would
+/// have less than `least` (the default window is narrower than the
+/// canvas's 1440).
+pub(crate) fn fitted(w: f32, cols: Vec<Col>, least: f32, floor: f32) -> Vec<Col> {
+    let gaps = COL_GAP * cols.len().saturating_sub(1) as f32 + 2.0 * CELL_PAD;
+    let fixed: f32 = cols.iter().map(|c| c.w).sum();
+    let room = w - gaps - least;
+    if fixed <= room || fixed <= 0.0 {
+        return cols;
+    }
+    let k = (room / fixed).clamp(floor, 1.0);
+    cols.into_iter().map(|c| Col { w: (c.w * k).floor(), ..c }).collect()
+}
+
 // ── Modals ────────────────────────────────────────────────────────────────
 
 /// A modal window's padding, the room under its title, and the title row.
@@ -1163,58 +1920,194 @@ const TITLE_H: f32 = 20.0;
 pub(crate) struct ModalShown<R> {
     /// The close button was clicked: the page cancels, as on Esc.
     pub closed: bool,
-    /// Where the window stood.
-    pub window: Rect,
+    /// The modal came up on this pass: it was not drawn on the last one.
+    pub opened: bool,
     /// What the body's closure returned.
     pub inner: R,
+}
+
+/// Where a modal's body stood on this pass, for [`reveal`]: the top of its
+/// content and its view, in the screen's points, and whether the modal
+/// came up on this pass.
+#[derive(Clone, Copy)]
+struct BodyView {
+    origin: f32,
+    view: Rect,
+    opened: bool,
 }
 
 /// A modal over `over` only — the room's area, never the window's — as the
 /// canvas draws one: the scrim across `over`, and centred in it a window
 /// `width` wide (less where `over` is narrower) on the panel's fill in a
 /// strong-edged hairline with the canvas's shadow, 24 points in: `title`
-/// in 16-point semibold with a close button at its right, then `body` laid
-/// out top-down under it, scrolled where it is taller than `over` allows.
+/// in 16-point semibold (wrapped where it runs long, never cut short of its
+/// question) with a close button at its right, then the body laid out
+/// top-down under it, scrolled where it is taller than `over` allows.
+///
 /// The window takes the height its body asked for on the last pass (egui
 /// runs the pass again when that changed, so it never shows misplaced). A
-/// press anywhere in `over` outside the window is swallowed: what is
-/// under the scrim is inert.
-pub(crate) fn modal<R>(ui: &Ui, id: Id, over: Rect, width: f32, title: &str, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> ModalShown<R> {
-    let ctx = ui.ctx().clone();
-    let width = width.min(over.width() - 32.0).max(over.width().min(160.0));
-    let max_h = (over.height() - 32.0).max(2.0 * MODAL_PAD + TITLE_H);
-    let size_key = id.with("height");
-    let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
-    let window = Rect::from_center_size(over.center(), vec2(width, known.unwrap_or(max_h).min(max_h)));
-    // Up at once, as the canvas's and the cells' modals are: egui fades an
-    // area in by default, over frames the panel would have to run for it.
-    let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false);
-    let shown = area.show(&ctx, |ui| {
-        let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
-        ui.painter().rect_filled(over, 0.0, SCRIM);
-        let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
-        ui.painter().add(shadow.as_shape(window, square()));
-        ui.painter().rect_filled(window, square(), pal.panel);
-        ui.painter().rect_stroke(window, square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
-        let inner = window.shrink(MODAL_PAD);
-        let title_row = Rect::from_min_size(inner.min, vec2(inner.width(), TITLE_H));
-        // The canvas pulls the close button 6 points past the padding.
-        let close = icon_button(ui, id.with("close"), pos2(inner.max.x - 8.0, title_row.center().y), Icon::Close, pal.dim, pal);
-        text(ui, title_row.left_center(), title, strong(16.0), pal.text, inner.width() - 40.0, Align2::LEFT_CENTER);
-        let budget = (max_h - 2.0 * MODAL_PAD - TITLE_H - MODAL_GAP).max(0.0);
-        let body_rect = Rect::from_min_size(pos2(inner.min.x, title_row.max.y + MODAL_GAP), vec2(inner.width(), budget));
-        let mut child =
-            ui.new_child(UiBuilder::new().id_salt(id.with("body")).max_rect(body_rect).layout(Layout::top_down(Align::Min)));
-        let out = ScrollArea::vertical().id_salt(id.with("scroll")).max_height(budget).auto_shrink([false, true]).show(&mut child, body);
-        let wanted = 2.0 * MODAL_PAD + TITLE_H + MODAL_GAP + out.content_size.y.min(budget);
-        (close.clicked(), out.inner, wanted.min(max_h))
-    });
-    let (closed, inner, wanted) = shown.inner;
-    if known.is_none_or(|h| (h - wanted).abs() > 0.5) {
-        ctx.data_mut(|d| d.insert_temp(size_key, wanted));
-        ctx.request_discard("a modal took its body's height");
+/// press anywhere in `over` outside the window is swallowed: what is under
+/// the scrim is inert. A modal comes up with its body at its top, as the
+/// cells draw a modal afresh each time, wherever it was scrolled to when it
+/// was last up.
+pub(crate) struct Dialog<'a> {
+    id: Id,
+    over: Rect,
+    width: f32,
+    title: &'a str,
+    tone: Option<Color32>,
+    close: bool,
+    hold: Option<f32>,
+}
+
+impl<'a> Dialog<'a> {
+    pub(crate) fn new(id: Id, over: Rect, width: f32, title: &'a str) -> Self {
+        Dialog { id, over, width, title, tone: None, close: true, hold: None }
     }
-    ModalShown { closed, window: Rect::from_center_size(over.center(), vec2(width, wanted)), inner }
+
+    /// The title and the frame in `color`.
+    pub(crate) fn tone(self, color: Color32) -> Self {
+        Dialog { tone: Some(color), ..self }
+    }
+
+    /// With no close button: what it asks is answered with its own
+    /// buttons and keys.
+    pub(crate) fn closable(self, close: bool) -> Self {
+        Dialog { close, ..self }
+    }
+
+    /// A warning gate, as the cells draw every one: its title and frame in
+    /// the warning's gold, and no close, since a gate is answered — Esc and
+    /// the safe button keep — never dismissed.
+    pub(crate) fn gate(self, pal: &Pal) -> Self {
+        self.tone(pal.gold).closable(false)
+    }
+
+    /// The window's top held where a window with a body `body_h` tall would
+    /// stand centred, its foot following its body: a list under a field
+    /// that grows and shrinks moves nothing above it (the cells anchor
+    /// their path entry so).
+    pub(crate) fn hold(self, body_h: f32) -> Self {
+        Dialog { hold: Some(body_h), ..self }
+    }
+
+    pub(crate) fn show<R>(self, ui: &Ui, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> ModalShown<R> {
+        let Dialog { id, over, width, title, tone, close, hold } = self;
+        let ctx = ui.ctx().clone();
+        let width = width.min(over.width() - 32.0).max(over.width().min(160.0));
+        let inner_w = (width - 2.0 * MODAL_PAD).max(1.0);
+        // The title wrapped where it runs long, its first line standing
+        // where a one-line title does.
+        let title_color = tone.unwrap_or(pal.text);
+        let title_w = (inner_w - if close { 40.0 } else { 0.0 }).max(1.0);
+        let format = TextFormat { font_id: strong(16.0), color: title_color, ..Default::default() };
+        let mut job = LayoutJob::single_section(title.to_string(), format);
+        job.wrap = TextWrapping { max_width: title_w, max_rows: 3, break_anywhere: false, overflow_character: Some('…') };
+        let galley = ui.painter().layout_job(job);
+        let lines = galley.rows.len().max(1);
+        let line_h = galley.size().y / lines as f32;
+        let title_h = TITLE_H + (lines - 1) as f32 * line_h;
+        let fixed = 2.0 * MODAL_PAD + title_h + MODAL_GAP;
+
+        let max_h = (over.height() - 32.0).max(fixed);
+        let size_key = id.with("height");
+        let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
+        let h = known.unwrap_or(max_h).min(max_h);
+        let window = match hold {
+            Some(body_h) => {
+                let top = over.center().y - (fixed + body_h).min(max_h) / 2.0;
+                Rect::from_min_size(pos2(over.center().x - width / 2.0, top), vec2(width, h))
+            }
+            None => Rect::from_center_size(over.center(), vec2(width, h)),
+        };
+        // Up on this pass when it was not drawn on the last.
+        let now = ctx.cumulative_pass_nr();
+        let drawn_key = id.with("drawn");
+        let opened = ctx.data(|d| d.get_temp::<u64>(drawn_key)).is_none_or(|last| last + 1 != now);
+        ctx.data_mut(|d| d.insert_temp(drawn_key, now));
+        let reveal_to: Option<f32> = ctx.data_mut(|d| d.remove_temp(id.with("reveal-to")));
+
+        // Up at once, as the canvas's and the cells' modals are: egui fades an
+        // area in by default, over frames the panel would have to run for it.
+        let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false);
+        let shown = area.show(&ctx, |ui| {
+            let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
+            ui.painter().rect_filled(over, 0.0, SCRIM);
+            let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
+            ui.painter().add(shadow.as_shape(window, square()));
+            ui.painter().rect_filled(window, square(), pal.panel);
+            ui.painter().rect_stroke(window, square(), Stroke::new(1.0, tone.unwrap_or(pal.edge_strong)), StrokeKind::Inside);
+            let inner = window.shrink(MODAL_PAD);
+            let title_row = Rect::from_min_size(inner.min, vec2(inner.width(), TITLE_H));
+            // The canvas pulls the close button 6 points past the padding.
+            let closed = close && {
+                let at = pos2(inner.max.x - 8.0, title_row.center().y);
+                icon_button(ui, id.with("close"), at, Icon::Close, pal.dim, pal).clicked()
+            };
+            ui.painter().galley(pos2(inner.min.x, title_row.center().y - line_h / 2.0), galley, title_color);
+            let budget = (max_h - fixed).max(0.0);
+            let body_rect = Rect::from_min_size(pos2(inner.min.x, inner.min.y + title_h + MODAL_GAP), vec2(inner.width(), budget));
+            let mut child =
+                ui.new_child(UiBuilder::new().id_salt(id.with("body")).max_rect(body_rect).layout(Layout::top_down(Align::Min)));
+            let mut scroll = ScrollArea::vertical().id_salt(id.with("scroll")).max_height(budget).auto_shrink([false, true]);
+            if opened {
+                scroll = scroll.vertical_scroll_offset(0.0);
+            } else if let Some(to) = reveal_to {
+                scroll = scroll.vertical_scroll_offset(to);
+            }
+            let out = scroll.show(&mut child, |ui| {
+                let view = BodyView { origin: ui.max_rect().min.y, view: ui.clip_rect(), opened };
+                ui.ctx().data_mut(|d| d.insert_temp(id.with("view"), view));
+                body(ui)
+            });
+            let wanted = fixed + out.content_size.y.min(budget);
+            (closed, out.inner, wanted.min(max_h))
+        });
+        let (closed, inner, wanted) = shown.inner;
+        if known.is_none_or(|h| (h - wanted).abs() > 0.5) {
+            ctx.data_mut(|d| d.insert_temp(size_key, wanted));
+            ctx.request_discard("a modal took its body's height");
+        }
+        ModalShown { closed, opened, inner }
+    }
+}
+
+/// A [`Dialog`] with nothing but its title: the plain modal, with its close.
+pub(crate) fn modal<R>(ui: &Ui, id: Id, over: Rect, width: f32, title: &str, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> ModalShown<R> {
+    Dialog::new(id, over, width, title).show(ui, pal, body)
+}
+
+/// The keyboard's control in the body of the modal `modal` at `rect`,
+/// brought just into the body's view, at once, on the pass the keyboard
+/// moved to it (`at`, the page's own number for it: a field's, a list's
+/// cursor) or the modal came up or changed height — never after, so the
+/// wheel keeps the body where it puts it. The move lands within the frame:
+/// the pass runs again with the body where it goes, or where egui runs no
+/// more passes this frame, the next frame is asked for.
+pub(crate) fn reveal(ui: &Ui, modal: Id, at: usize, rect: Rect) {
+    let ctx = ui.ctx();
+    let Some(body) = ctx.data(|d| d.get_temp::<BodyView>(modal.with("view"))) else { return };
+    let h = body.view.height();
+    let key = modal.with("revealed");
+    let last: Option<(usize, f32)> = ctx.data(|d| d.get_temp(key));
+    ctx.data_mut(|d| d.insert_temp(key, (at, h)));
+    if !body.opened && last.is_some_and(|(was, h_was)| was == at && (h_was - h).abs() < 0.5) {
+        return;
+    }
+    let offset = body.view.min.y - body.origin;
+    let (top, bottom) = (rect.min.y - body.origin, rect.max.y - body.origin);
+    let to = if top < offset {
+        top
+    } else if bottom > offset + h {
+        (bottom - h).min(top)
+    } else {
+        return;
+    };
+    ctx.data_mut(|d| d.insert_temp(modal.with("reveal-to"), to.max(0.0)));
+    ctx.request_discard("a modal brought its keyboard's control into view");
+    if !ctx.will_discard() {
+        ctx.request_repaint();
+    }
 }
 
 #[cfg(test)]
@@ -1231,6 +2124,8 @@ mod tests {
 
     /// One pass over a `size` screen with `events`, `run` drawing it.
     fn pass(ctx: &egui::Context, size: Vec2, events: Vec<egui::Event>, run: &mut dyn FnMut(&mut Ui)) -> egui::FullOutput {
+        // Styled as every host styles the context first.
+        style_once(ctx, &Pal::now());
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), events, ..Default::default() };
         let mut out = ctx.run_ui(input, |ui| run(ui));
         // No GPU here to take the font atlas: let go of it on purpose, or
@@ -1318,19 +2213,26 @@ mod tests {
         let over = Rect::from_min_max(pos2(200.0, 0.0), pos2(800.0, 500.0));
         let beneath_clicked = Cell::new(false);
         let closed = Cell::new(false);
-        let window = Cell::new(Rect::NOTHING);
+        let id = Id::new("probe-modal");
         let mut run = |ui: &mut Ui| {
             let pal = Pal::now();
             if ui.interact(over, Id::new("beneath"), Sense::click()).clicked() {
                 beneath_clicked.set(true);
             }
-            let shown = modal(ui, Id::new("probe-modal"), over, 480.0, "Add a user", &pal, |ui| {
+            let shown = modal(ui, id, over, 480.0, "Add a user", &pal, |ui| {
                 ui.add_space(120.0);
             });
             if shown.closed {
                 closed.set(true);
             }
-            window.set(shown.window);
+        };
+        // Where the window stood: centred on `over`, its close at its top
+        // right, as tall as it last took.
+        let window = |ctx: &egui::Context| {
+            let close = ctx.read_response(id.with("close")).expect("the close is drawn").rect.center();
+            let h = ctx.data(|d| d.get_temp::<f32>(id.with("height"))).expect("the window took a height");
+            let w = 2.0 * (close.x + 8.0 + MODAL_PAD - over.center().x);
+            Rect::from_center_size(over.center(), vec2(w, h))
         };
         let click = |at: Pos2| -> Vec<Vec<egui::Event>> {
             let button = |pressed| egui::Event::PointerButton {
@@ -1342,7 +2244,8 @@ mod tests {
             vec![vec![egui::Event::PointerMoved(at)], vec![button(true)], vec![button(false)]]
         };
         let _ = pass(&ctx, size, Vec::new(), &mut run);
-        let at = window.get();
+        let at = window(&ctx);
+
         assert!(over.contains_rect(at), "the window stands in the room: {at:?}");
         assert!((at.center().x - over.center().x).abs() < 1.0, "centred in the room, not the screen");
         assert!((at.height() - (2.0 * MODAL_PAD + TITLE_H + MODAL_GAP + 120.0)).abs() < 1.0, "its body's height: {at:?}");
@@ -1384,5 +2287,350 @@ mod tests {
         }
         assert_eq!(out.map(|o| o.platform_output.cursor_icon), Some(CursorIcon::PointingHand), "the tick box has the pointer");
         assert!(hovered.get(), "and its row stays raised under it");
+    }
+
+    /// Every text a pass drew, as laid out, with where.
+    fn texts(out: &egui::FullOutput) -> Vec<(String, Rect)> {
+        out.shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                Shape::Text(t) => Some((t.galley.text().to_string(), Rect::from_min_size(t.pos, t.galley.size()))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn click_events(at: Pos2) -> Vec<Vec<egui::Event>> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        vec![vec![egui::Event::PointerMoved(at)], vec![button(true)], vec![button(false)]]
+    }
+
+    #[test]
+    fn the_cells_marks_and_keys_come_off_a_label() {
+        assert_eq!(bare("• running"), "running");
+        assert_eq!(bare("◂ Keep it"), "Keep it");
+        assert_eq!(bare("Add folder ▸"), "Add folder");
+        assert_eq!(bare("✓ claimed "), "claimed");
+        assert_eq!(unkeyed("y copy"), ("copy", Some("y")));
+        assert_eq!(unkeyed("^T test"), ("test", Some("^T")));
+        assert_eq!(unkeyed("/ filter"), ("filter", Some("/")));
+        assert_eq!(unkeyed("Switch client ▸"), ("Switch client ▸", None), "a word of its own is no key");
+        assert_eq!(unkeyed("open"), ("open", None));
+    }
+
+    #[test]
+    fn figures_are_cut_out_of_a_sentence_in_order_and_the_rest_kept() {
+        let (font, figure, c) = (body(14.0), mono(12.5), Color32::WHITE);
+        let parts = with_figures(" — music → /srv/b · 3m 2s", &["/srv/b", "3m 2s"], font.clone(), figure.clone(), c);
+        let words: Vec<(&str, bool)> = parts.iter().map(|(s, f, _)| (s.as_str(), *f == figure)).collect();
+        assert_eq!(words, [(" — music → ", false), ("/srv/b", true), (" · ", false), ("3m 2s", true)]);
+        let none = with_figures("nothing here", &["", "zz"], font.clone(), figure, c);
+        assert_eq!(none.len(), 1, "a figure not found is passed over");
+    }
+
+    #[test]
+    fn columns_narrow_together_only_where_the_flexible_one_would_starve() {
+        let cols = || vec![Col::left("A", 200.0), Col::left("B", 0.0), Col::left("C", 100.0)];
+        let wide = fitted(1000.0, cols(), 120.0, 0.4);
+        assert_eq!(wide.iter().map(|c| c.w).collect::<Vec<_>>(), [200.0, 0.0, 100.0], "room enough: the canvas's");
+        let narrow = fitted(400.0, cols(), 120.0, 0.4);
+        let (a, c) = (narrow[0].w, narrow[2].w);
+        assert!(a < 200.0 && c < 100.0 && (a / c - 2.0).abs() < 0.05, "narrowed together: {a} {c}");
+        let floor = fitted(100.0, cols(), 120.0, 0.4);
+        assert_eq!(floor[0].w, 80.0, "never under the floor's share");
+    }
+
+    #[test]
+    fn a_rooms_parts_stand_inside_the_canvas_margins() {
+        let (body, note) = room_rects(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 420.0)));
+        assert_eq!(body.min, pos2(24.0, 20.0));
+        assert_eq!(note.max, pos2(776.0, 406.0));
+        assert_eq!(note.height(), NOTE_H);
+        assert_eq!(note.min.y - body.max.y, ROOM_GAP);
+    }
+
+    #[test]
+    fn text_pieces_cut_label_and_wrap_as_the_canvas_sets_them() {
+        let ctx = context();
+        let size = vec2(600.0, 400.0);
+        let mut got = Vec::new();
+        let out = pass(&ctx, size, Vec::new(), &mut |ui| {
+            // A path cut at its start keeps its leaf, and no accent torn off
+            // its letter after the ellipsis.
+            let path = "/srv/e\u{301}te\u{301}/recordings/leaf";
+            let (cut, was) = cut_start(ui, path, mono(12.5), 90.0);
+            got.push((cut.clone(), was));
+            let (whole, was) = cut_start(ui, "/srv", mono(12.5), 90.0);
+            got.push((whole, was));
+            let pal = Pal::now();
+            label_at(ui, pos2(10.0, 20.0), "Destination · another drive", 400.0, &pal);
+            // Two lines at most, the second cut; and a floor that leaves out
+            // a line that would cross it.
+            let long = "word ".repeat(80);
+            let two = Para::new(&long, body(13.0), pal.text).rows(2).paint(ui, pos2(10.0, 60.0), 200.0);
+            got.push((format!("{}", (two.height() / (13.0 * 1.3)).round()), false));
+            let floored = Para::new(&long, body(13.0), pal.text).floor(60.0 + 3.0 * 13.0 * 1.3 + 0.5).paint(ui, pos2(300.0, 60.0), 200.0);
+            got.push((format!("{}", floored.height() > 3.0 * 13.0 * 1.3), false));
+            let hung = Para::new("Users who hold it lose it", body(13.0), pal.text).lead("−").paint(ui, pos2(10.0, 200.0), 400.0);
+            got.push((format!("{}", hung.min.x), false));
+        });
+        assert!(got[0].1 && got[0].0.starts_with('…') && got[0].0.ends_with("leaf"), "{:?}", got[0]);
+        assert!(!got[0].0.starts_with("…\u{301}"), "no mark torn from its letter");
+        assert_eq!(got[1], ("/srv".to_string(), false), "a short path stays whole");
+        let drawn = texts(&out);
+        assert!(drawn.iter().any(|(t, _)| t == "DESTINATION"), "the head in capitals: {drawn:?}");
+        let hint = drawn.iter().find(|(t, _)| t == "· another drive").expect("the hint, from its dot");
+        let head = drawn.iter().find(|(t, _)| t == "DESTINATION").expect("the head").1;
+        assert!(hint.1.min.x > head.max.x + 4.0, "a space after the head");
+        assert_eq!(got[2].0, "2", "two lines, no more");
+        let dash = drawn.iter().find(|(t, _)| t == "−").expect("the lead in a column of its own").1;
+        let words = drawn.iter().find(|(t, _)| t.starts_with("Users who")).expect("the words").1;
+        assert!(words.min.x >= dash.max.x + 7.0, "the words hang beside the dash: {dash:?} {words:?}");
+    }
+
+    #[test]
+    fn a_foot_lays_its_buttons_from_either_end_and_says_which_was_clicked() {
+        let ctx = context();
+        let size = vec2(600.0, 200.0);
+        let row = Rect::from_min_size(pos2(20.0, 50.0), vec2(500.0, FORM_BUTTON_H));
+        let clicked = Cell::new(None);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let got = foot_at(ui, Id::new("probe-foot"), row, &[("◂ up", false)], &[("close", false), ("Add ▸", true)], None, &pal);
+            if got.is_some() {
+                clicked.set(got);
+            }
+        };
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let drawn = texts(&out);
+        assert!(drawn.iter().any(|(t, _)| t == "UP") && drawn.iter().any(|(t, _)| t == "ADD"), "bare words: {drawn:?}");
+        let first = ctx.read_response(Id::new("probe-foot").with(0usize)).expect("start").rect;
+        let last = ctx.read_response(Id::new("probe-foot").with(2usize)).expect("end").rect;
+        assert_eq!((first.min.x, last.max.x), (row.min.x, row.max.x), "from the left, to the right");
+        let close = ctx.read_response(Id::new("probe-foot").with(1usize)).expect("close").rect;
+        assert!((last.min.x - close.max.x - 10.0).abs() < 0.01, "10 points apart");
+        for events in click_events(close.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(clicked.get(), Some(1), "counted from the start");
+    }
+
+    #[test]
+    fn an_unfocused_long_field_is_cut_with_an_ellipsis_and_a_focused_one_shows_no_torn_letter() {
+        let ctx = context();
+        let size = vec2(400.0, 200.0);
+        let rect = Rect::from_min_size(pos2(20.0, 40.0), vec2(160.0, FIELD_H));
+        let long = "mstrfed1:eyJ0IjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoifQ";
+        let out = pass(&ctx, size, Vec::new(), &mut |ui| {
+            let _ = field_box(ui, Id::new("probe-idle"), rect, &Input::new(long, 0).mono(), &Pal::now());
+        });
+        let shape = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == long => Some(t.galley.clone()),
+                _ => None,
+            })
+            .expect("the line drawn");
+        assert!(shape.size().x <= rect.width() - 2.0 * FIELD_PAD + 0.5, "cut to the box: {}", shape.size().x);
+        assert!(shape.rows[0].row.glyphs.last().is_some_and(|g| g.chr == '…'), "with an ellipsis");
+        // Scrolled to its end, the first letter in view starts at or after
+        // the view's edge.
+        let galley = shape;
+        assert_eq!(whole_glyph(&galley, 0.0), 0.0);
+        let x = whole_glyph(&galley, 3.0);
+        assert!(x >= 3.0 && galley.rows[0].row.glyphs.iter().any(|g| (g.pos.x - x).abs() < 0.01), "a letter's edge: {x}");
+    }
+
+    #[test]
+    fn a_modal_comes_up_at_its_top_however_it_was_left_scrolled() {
+        let ctx = context();
+        let size = vec2(600.0, 300.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let id = Id::new("probe-scroller");
+        let up = Cell::new(true);
+        let at = Cell::new(0usize);
+        let opened = Cell::new(false);
+        // Where the last pass drew rows 0 and 29 (egui's own record of a
+        // widget can be a discarded pass's).
+        let first = Cell::new(Rect::NOTHING);
+        let last = Cell::new(Rect::NOTHING);
+        let mut run = |ui: &mut Ui| {
+            if !up.get() {
+                return;
+            }
+            let pal = Pal::now();
+            let shown = Dialog::new(id, over, 400.0, "Rows").show(ui, &pal, |ui| {
+                for i in 0..30 {
+                    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+                    match i {
+                        0 => first.set(rect),
+                        29 => last.set(rect),
+                        _ => {}
+                    }
+                    if i == at.get() {
+                        reveal(ui, id, i, rect);
+                    }
+                }
+            });
+            opened.set(shown.opened);
+        };
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let home = first.get().min.y;
+        assert!(!opened.get(), "up since the pass before");
+        // The keys move to the last row: within the one frame, with no
+        // other input, the body stands where it shows it.
+        at.set(29);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let row = last.get();
+        assert!(row.max.y <= size.y - 16.0 - 24.0 + 0.5, "the cursor's row whole in the body: {row:?}");
+        assert!(first.get().min.y < home - 100.0, "the body scrolled");
+        // Down for a pass, then up again: at its top on its first pass.
+        up.set(false);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        up.set(true);
+        at.set(0);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(opened.get(), "it came up on this pass");
+        assert!((first.get().min.y - home).abs() < 0.5, "at its top: {:?} for {home}", first.get());
+    }
+
+    #[test]
+    fn a_gate_has_no_close_and_wears_the_warnings_gold_and_its_title_wraps_whole() {
+        let ctx = context();
+        let size = vec2(600.0, 400.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let title = "Remove Boards of Canada - Music Has the Right to Children (1998) [FLAC] from Transmission?";
+        let out = pass(&ctx, size, Vec::new(), &mut |ui| {
+            let pal = Pal::now();
+            let _ = Dialog::new(Id::new("probe-gate"), over, 420.0, title).gate(&pal).show(ui, &pal, |ui| ui.add_space(40.0));
+        });
+        assert!(ctx.read_response(Id::new("probe-gate").with("close")).is_none(), "no close");
+        let galley = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == title => Some(t.galley.clone()),
+                _ => None,
+            })
+            .expect("the title");
+        assert!(galley.rows.len() >= 2, "wrapped, its question kept");
+        assert!(!galley.elided, "never cut short");
+        assert_eq!(galley.job.sections[0].format.color, Pal::now().gold, "in the warning's gold");
+    }
+
+    #[test]
+    fn a_held_modal_keeps_its_top_as_its_body_grows() {
+        let ctx = context();
+        let size = vec2(600.0, 500.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let id = Id::new("probe-held");
+        let rows = Cell::new(0usize);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let _ = Dialog::new(id, over, 400.0, "Path").hold(200.0).show(ui, &pal, |ui| {
+                ui.add_space(20.0);
+                for _ in 0..rows.get() {
+                    ui.add_space(30.0);
+                }
+            });
+        };
+        let close_y = |ctx: &egui::Context| ctx.read_response(id.with("close")).expect("the close").rect.center().y;
+        for _ in 0..2 {
+            let _ = pass(&ctx, size, Vec::new(), &mut run);
+        }
+        let short = close_y(&ctx);
+        rows.set(6);
+        for _ in 0..2 {
+            let _ = pass(&ctx, size, Vec::new(), &mut run);
+        }
+        assert!((close_y(&ctx) - short).abs() < 0.5, "the title held where it stood");
+    }
+
+    #[test]
+    fn an_empty_table_says_so_on_its_first_rows_line_and_takes_no_more_room() {
+        let ctx = context();
+        let size = vec2(600.0, 400.0);
+        let cols = [Col::left("Name", 0.0)];
+        let after = Cell::new(0.0);
+        let out = pass(&ctx, size, Vec::new(), &mut |ui| {
+            let top = ui.cursor().min.y;
+            let _ = Table::new(Id::new("probe-empty"), &cols, 0).empty("(nothing added yet)").show(ui, &Pal::now(), |_, _, _| {});
+            after.set(ui.cursor().min.y - top);
+        });
+        let words = texts(&out);
+        let said = words.iter().find(|(t, _)| t == "(nothing added yet)").expect("the words").1;
+        assert!((said.center().y - (TABLE_HEAD + 20.0)).abs() < 1.0, "on the first row's line: {said:?}");
+        assert!((after.get() - (TABLE_HEAD + 40.0)).abs() < 0.5, "the headings and one row: {}", after.get());
+    }
+
+    #[test]
+    fn a_fresh_listing_starts_at_its_top_and_a_revealed_row_comes_in_on_its_pass() {
+        let ctx = context();
+        let size = vec2(400.0, 400.0);
+        let key = Cell::new(1u32);
+        let cursor = Cell::new(Some(25usize));
+        let reveal_row = Cell::new(None);
+        let rows = std::cell::RefCell::new(Vec::new());
+        let mut run = |ui: &mut Ui| {
+            rows.borrow_mut().clear();
+            let t = Table::new(Id::new("probe-list"), &[], 40)
+                .headless()
+                .row_height(30.0)
+                .height(150.0)
+                .cursor(cursor.get())
+                .reveal(reveal_row.take())
+                .content(Id::new(key.get()));
+            let _ = t.show(ui, &Pal::now(), |_, i, row| {
+                // Whole in the view: what a row shows.
+                if row.rect.min.y >= -0.5 && row.rect.max.y <= 150.5 {
+                    rows.borrow_mut().push(i);
+                }
+            });
+        };
+        let drawn = |i: usize| rows.borrow().contains(&i);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(drawn(25) && !drawn(0), "the cursor brought in on the first pass");
+        // Another listing, its cursor on its first row: at its top.
+        key.set(2);
+        cursor.set(Some(0));
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(drawn(0) && !drawn(25), "a new listing at its top");
+        // A row revealed, the cursor left where it is.
+        reveal_row.set(Some(30));
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(drawn(30), "revealed on the pass it is asked for");
+    }
+
+    #[test]
+    fn a_click_in_a_rows_trail_is_no_rows_and_shows_no_hand() {
+        let ctx = context();
+        let size = vec2(600.0, 300.0);
+        let cols = [Col::left("User", 0.0)];
+        let picked = Cell::new(None);
+        let mut run = |ui: &mut Ui| {
+            let shown = Table::new(Id::new("probe-trail"), &cols, 3).trail(50.0).show(ui, &Pal::now(), |_, _, _| {});
+            if shown.row.is_some() {
+                picked.set(shown.row);
+            }
+        };
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let in_trail = pos2(size.x - 20.0, 34.0 + 20.0);
+        let mut last = None;
+        for events in click_events(in_trail) {
+            last = Some(pass(&ctx, size, events, &mut run));
+        }
+        assert_eq!(picked.get(), None, "the trail selects nothing");
+        assert_ne!(last.map(|o| o.platform_output.cursor_icon), Some(CursorIcon::PointingHand), "and shows no hand");
+        for events in click_events(pos2(40.0, 34.0 + 20.0)) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(picked.get(), Some(0), "the selection area does");
     }
 }
