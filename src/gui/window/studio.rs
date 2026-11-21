@@ -1163,7 +1163,9 @@ pub(crate) fn tick_row(ui: &Ui, id: Id, rect: Rect, on: bool, label: &str, focus
     response
 }
 
-/// A form's tick's height, the room between lines of ticks, and between a
+/// A form's tick's height where no board sets one — a control's [`HIT`],
+/// the Users add form's and Discovery's federate form's; the mint board
+/// sets its own 32 — then the room between lines of ticks, and between a
 /// grid's columns (the mint form's 4 and 8).
 pub(crate) const TICK_H: f32 = HIT;
 const TICK_GAP: f32 = 4.0;
@@ -1188,22 +1190,23 @@ fn tick_want(ui: &Ui, label: &str) -> f32 {
 
 /// A form's ticks in a grid (the mint form's), a row of the layout the
 /// column wide and as tall as its lines: at most `most` columns 8 points
-/// apart ([`grid_columns`]), in reading order, lines [`TICK_H`] tall and
+/// apart ([`grid_columns`]), in reading order, lines `tick_h` tall (the
+/// mint board's 32, or [`TICK_H`] where a form has no board) and
 /// [`TICK_GAP`] apart, each a [`tick_row`], `focus` in the keyboard's
 /// look.
-pub(crate) fn tick_grid(ui: &mut Ui, id: Id, items: &[(String, bool)], focus: Option<usize>, most: usize, pal: &Pal) -> Ticks {
+pub(crate) fn tick_grid(ui: &mut Ui, id: Id, items: &[(String, bool)], focus: Option<usize>, most: usize, tick_h: f32, pal: &Pal) -> Ticks {
     let w = ui.available_width();
     let wants: Vec<f32> = items.iter().map(|(label, _)| tick_want(ui, label)).collect();
     let cols = grid_columns(&wants, w, TICK_COL_GAP, most);
     let n = cols.len();
     let lines = items.len().div_ceil(n);
-    let h = (lines as f32 * (TICK_H + TICK_GAP) - TICK_GAP).max(0.0);
+    let h = (lines as f32 * (tick_h + TICK_GAP) - TICK_GAP).max(0.0);
     let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let mut ticks = Ticks { clicked: None, rects: Vec::new() };
     for (i, (label, on)) in items.iter().enumerate() {
         let (line, col) = (i / n, i % n);
         let x = area.min.x + cols[..col].iter().sum::<f32>() + col as f32 * TICK_COL_GAP;
-        let rect = Rect::from_min_size(pos2(x, area.min.y + line as f32 * (TICK_H + TICK_GAP)), vec2(cols[col], TICK_H));
+        let rect = Rect::from_min_size(pos2(x, area.min.y + line as f32 * (tick_h + TICK_GAP)), vec2(cols[col], tick_h));
         if tick_row(ui, id.with(i), rect, *on, label, focus == Some(i), pal).clicked() {
             ticks.clicked = Some(i);
         }
@@ -3437,7 +3440,7 @@ mod tests {
         let out = pass(&ctx, vec2(600.0, 300.0), Vec::new(), &mut |ui| {
             let column = Rect::from_min_size(pos2(20.0, 20.0), vec2(512.0, 200.0));
             let mut child = ui.new_child(UiBuilder::new().max_rect(column).layout(Layout::top_down(Align::Min)));
-            let _ = tick_grid(&mut child, Id::new("probe-grid"), &items, Some(2), 3, &Pal::now());
+            let _ = tick_grid(&mut child, Id::new("probe-grid"), &items, Some(2), 3, TICK_H, &Pal::now());
         });
         let drawn: Vec<String> = texts(&out).into_iter().map(|(t, _)| t).collect();
         assert!(names.iter().all(|n| drawn.iter().any(|t| t == n)), "every name whole, the focused one in its semibold too: {drawn:?}");

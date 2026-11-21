@@ -26,7 +26,7 @@ use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, ScrollArea, Sense, Sh
 use super::super::{EguiShown, age_text, fmt_bytes, fmt_count, iso_unix, unix_now};
 use super::*;
 use crate::gui::window::studio::{
-    self, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, RowCtx, SEG_H, Seg, Table, add_card, bare, body, caps, caps_width, cell,
+    self, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, RowCtx, SEG_H, Seg, TICK_H, Table, add_card, bare, body, caps, caps_width, cell,
     field, field_box, foot, form_button, gate, hand, ink, label, label_at, led, led_cell, led_mid, line, list_row, mono,
     name_cell, reveal, runs, runs_width, searching, segmented, segmented_width, small_caps, small_caps_width, square, strong,
     text, tick_card, tick_grid, unkeyed, width_of,
@@ -1114,7 +1114,7 @@ fn compose(ui: &Ui, over: Rect, c: &Compose, pal: &Pal, composition: &str, pass:
         // The libraries in three columns, the kit's grid of ticks, the
         // keyboard's in the form's focused look, as the Federation mint
         // draws them; a name is cut only where no column could hold it.
-        let ticks = tick_grid(ui, Id::new("disc-compose-lib"), &c.libraries, c.focus, 3, pal);
+        let ticks = tick_grid(ui, Id::new("disc-compose-lib"), &c.libraries, c.focus, 3, TICK_H, pal);
         if let Some(i) = ticks.clicked {
             does.push(Act::ComposeToggle(i));
         }

@@ -25,7 +25,7 @@ use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, UiBuilder,
 use super::*;
 use crate::admin::{EguiShown, fmt_bytes};
 use crate::gui::window::studio::{
-    self, Col, Dialog, FIELD_H, FIELD_ROW_H, Glyph, Pal, Para, Run, SEG_H, Seg, TICK_H, Table, Typed, bare, body, cadence, caps,
+    self, Col, Dialog, FIELD_H, FIELD_ROW_H, Glyph, Pal, Para, Run, SEG_H, Seg, Table, Typed, bare, body, cadence, caps,
     card, cell, cell_tipped, checkbox, field_at, field_box, fitted, foot, foot_line, gate, ink, label_at, led, led_cell, led_mid,
     mono, name_cell, reveal, room_rects, searching, segmented, state_line, strong, text, tick_card, tick_grid, tick_row, unkeyed,
     with_figures,
@@ -42,6 +42,9 @@ const FORM_W: f32 = 640.0;
 const SECTION: f32 = 22.0;
 /// The gap between the forms' columns (their fields).
 const FORM_GAP: f32 = 16.0;
+/// A tick's row in a form: the mint board's 32 points (its grid's lines
+/// 4 apart are the kit's).
+const CHOICE_H: f32 = 32.0;
 /// The least a table's flexible column keeps where the default window is
 /// narrower than the canvas, and the least share its fixed ones narrow to.
 const FLEX_LEAST: f32 = 120.0;
@@ -566,7 +569,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
                     Field::Library(i) => Some(i),
                     _ => None,
                 };
-                let ticks = tick_grid(ui, Id::new("fed-form-lib"), &f.libraries, here, 3, pal);
+                let ticks = tick_grid(ui, Id::new("fed-form-lib"), &f.libraries, here, 3, CHOICE_H, pal);
                 if let Some(rect) = here.and_then(|i| ticks.rects.get(i)) {
                     reveal(ui, form_id, f.focus, *rect);
                 }
@@ -615,7 +618,7 @@ fn form(ui: &Ui, f: &Form, over: Rect, pal: &Pal, got: &mut Gathered) {
             }
             FormKind::Accept if !f.their_offer.is_empty() => {
                 ui.add_space(SECTION);
-                let (rect, _) = ui.allocate_exact_size(vec2(w, TICK_H), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(vec2(w, CHOICE_H), Sense::hover());
                 let words = t!("fed.accept_their_offer", libraries = f.their_offer.join(", "));
                 let here = focused == Field::TheirOffer;
                 let response = tick_row(ui, Id::new("fed-form-offer"), rect, f.accept_their_offer, &words, here, pal);
@@ -1136,6 +1139,10 @@ mod tests {
         // the room, and its button is under the scroll's fold.
         room.act(Act::Mint);
         let _ = settle(&ctx, &mut room, LARGE);
+        // The libraries' ticks are the mint board's: 32 points tall, their
+        // lines 4 apart.
+        let (first, under) = (rect_of(&ctx, Id::new("fed-form-lib").with(0)), rect_of(&ctx, Id::new("fed-form-lib").with(3)));
+        assert_eq!((first.height(), under.min.y - first.min.y), (CHOICE_H, CHOICE_H + 4.0), "{first:?} {under:?}");
         // A box flips and takes the focus; the fields follow the name and
         // the five libraries.
         let _ = click_on(&ctx, &mut room, LARGE, Id::new("fed-form-lib").with(0));
