@@ -25,7 +25,7 @@ use rust_i18n::t;
 
 use super::super::{Act, LANGS, Modal, Wizard};
 use super::{Drawn, Page, parts, status_line, tip_keyed, tips_line};
-use crate::gui::window::studio::{self, BROWSER_W, Dialog, FIELD_H, FOLDER_ROW_H, FORM_BUTTON_H, ModalShown, Table, body, strong};
+use crate::gui::window::studio::{self, BROWSER_W, Dialog, FIELD_H, FOLDER_ROW_H, FORM_BUTTON_H, ModalShown, Pal, Table, body, strong};
 
 /// The language list's window at its narrowest, the board's 300: wider
 /// where the title or an autonym asks for more.
@@ -45,6 +45,9 @@ const BROWSE_ROUND: f32 = 18.0 + 12.0 + 20.0;
 /// title (studio.rs keeps both its own).
 const WINDOW_PAD: f32 = 24.0;
 const CLOSE_ROOM: f32 = 40.0;
+/// Between a foot's buttons, beside one another and a row apart: the kit's
+/// 10 beside, and the canvas's 10 between the rows of a foot that stacks.
+const FOOT_GAP: f32 = 10.0;
 /// Where a list row's words start, and the room after them: the kit's
 /// folder row's, whose marker stands centred 13 points in.
 const WORDS_IN: f32 = 26.0;
@@ -56,12 +59,13 @@ const MARK_IN: f32 = 13.0;
 /// name, in the order of [`LANGS`], a row each, the current one's LED lit in
 /// the accent where the cells put their "•" and the rest unlit, its name,
 /// the cursor's and the pointer's in the text colour and the others' a step
-/// under it. The keys' cursor is the model's, ringed and kept in view. A click on a row
-/// chooses that language at once, as the cells' click and Enter do, and
-/// the close is the cells' (the path's cancel, which closes whatever modal
-/// is up). The window is as wide as the widest name or the title wants,
-/// measured from their words in the faces drawn (a CJK name is narrower
-/// than its cells; a German title may be longer than the English).
+/// under it. The keys' cursor is the model's, ringed and kept in view. A
+/// click on a row chooses that language at once, as the cells' click and
+/// Enter do, and the close is the cells' (the path's cancel, which closes
+/// whatever modal is up). The window is as wide as the widest name or the
+/// title wants, measured from their words in the faces drawn (a CJK name
+/// is narrower than its cells; a German title may be longer than the
+/// English).
 pub(super) fn language(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page) -> Drawn {
     let Modal::Language(sel) = wizard.modal else { return Drawn::default() };
     let pal = &page.pal;
@@ -167,10 +171,11 @@ pub(super) fn path(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page) ->
 /// folder listed cut at its start so its leaf stays, its folders under it,
 /// nine at once, the keys' cursor ringed and kept in view, a new listing
 /// from its top, an empty folder saying so; then the cells' four acts in
-/// their order from the left, up, open, the add (lit) and close. A click on
-/// a folder moves the cursor to it and opens nothing, as in the cells; the
-/// add takes the folder listed, not the cursor's. The title says the
-/// server's folders, as the cells' does, though the listing is this
+/// their order from the left, up, open, the add (lit) and close, a button
+/// that would run past the window starting a row of its own ([`foot`]). A
+/// click on a folder moves the cursor to it and opens nothing, as in the
+/// cells; the add takes the folder listed, not the cursor's. The title says
+/// the server's folders, as the cells' does, though the listing is this
 /// machine's (the code's, left for the owner to rule on).
 pub(super) fn browser(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page) -> Drawn {
     let Modal::Browser(browse) = &wizard.modal else { return Drawn::default() };
@@ -180,14 +185,20 @@ pub(super) fn browser(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page)
     let dialog = Dialog::new(id, over, BROWSER_W, &title);
     let shown = window(ui, over, id, dialog, wizard, page, |ui| {
         // The kit's browser takes as many rows as the window has room for,
-        // up to its eleven: the room it is given is nine's at most.
+        // up to its eleven, keeping one row of the foot's under them: the
+        // room it is given is nine's at most, whatever the foot then takes.
         let most = BROWSE_ROUND + BROWSE_ROWS as f32 * FOLDER_ROW_H + FORM_BUTTON_H;
-        ui.set_max_height(most.min(ui.available_height()));
-        let picked = studio::folder_browser(ui, id.with("list"), &browse.path, &browse.dirs, browse.sel, &t!("browse.empty"), pal);
+        let empty = t!("browse.empty");
+        let picked = ui
+            .scope(|ui| {
+                ui.set_max_height(most.min(ui.available_height()));
+                studio::folder_browser(ui, id.with("list"), &browse.path, &browse.dirs, browse.sel, &empty, pal)
+            })
+            .inner;
         let (up, open, add, close) = (t!("browse.up"), t!("browse.open"), t!("browse.add"), t!("browse.close"));
         let start = [(up.as_ref(), false), (open.as_ref(), false), (add.as_ref(), true), (close.as_ref(), false)];
         let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseAdd, Act::BrowseCancel];
-        studio::foot(ui, id.with("foot"), &start, &[], None, pal).map(|k| meant[k].clone()).or(picked.map(Act::BrowseRow))
+        foot(ui, id.with("foot"), &start, pal).map(|k| meant[k].clone()).or(picked.map(Act::BrowseRow))
     });
     let mut acts = Vec::new();
     if shown.closed {
@@ -195,6 +206,38 @@ pub(super) fn browser(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page)
     }
     acts.extend(shown.inner);
     Drawn { acts, caret: None }
+}
+
+/// A modal's foot as the kit lays one from the left (`studio::foot`): the
+/// form buttons `labels` in their order, each as wide as its words, the lit
+/// one where its flag is set, 10 points apart, button `k` under `id.with(k)`;
+/// but a button that would run past the window's inner edge starts a row of
+/// its own 10 points under the last, whole, where the kit's would run on
+/// over the window's edge and its clip would cut it through a letter. The
+/// cells cut such a label inside their frame instead; the canvas stacks a
+/// foot that will not fit (the skip gate's). On the boards' page every
+/// language's four fit one row (German's, the longest, take some 533
+/// points of the 592); a narrower window stacks them. The button clicked.
+fn foot(ui: &mut Ui, id: Id, labels: &[(&str, bool)], pal: &Pal) -> Option<usize> {
+    let row_w = ui.available_width();
+    let mut at = Vec::with_capacity(labels.len());
+    let (mut x, mut y) = (0.0, 0.0);
+    for (label, _) in labels {
+        let w = studio::form_button_width(ui, label).min(row_w);
+        if x > 0.0 && x + w > row_w {
+            (x, y) = (0.0, y + FORM_BUTTON_H + FOOT_GAP);
+        }
+        at.push(Rect::from_min_size(pos2(x, y), vec2(w, FORM_BUTTON_H)));
+        x += w + FOOT_GAP;
+    }
+    let (rect, _) = ui.allocate_exact_size(vec2(row_w, y + FORM_BUTTON_H), Sense::hover());
+    let mut clicked = None;
+    for (k, ((label, primary), at)) in labels.iter().zip(at).enumerate() {
+        if studio::form_button(ui, id.with(k), at.translate(rect.min.to_vec2()), label, *primary, pal).clicked() {
+            clicked = Some(k);
+        }
+    }
+    clicked
 }
 
 /// The modal `id`'s window, `dialog` over `over` with `body` in it: the
@@ -481,6 +524,43 @@ mod tests {
         let _ = probe.settle(&mut wizard);
         let cursor = probe.rect(row(BROWSE, 20));
         assert!(cursor.max.y <= buttons.min.y - 20.0 + 0.5, "whole in the list: {cursor:?}");
+    }
+
+    /// In a window narrower than the boards' the browser's foot stacks
+    /// rather than run past the window: German's four buttons want some 533
+    /// points, a page 500 wide leaves its window 420 inside, so close starts
+    /// a row of its own under the other three, every label whole, and each
+    /// button still does the cells' act.
+    #[test]
+    fn in_a_narrow_window_the_browsers_foot_stacks_inside_it_every_label_whole() {
+        let Some(_) = in_own_process(&["de"]) else { return };
+        let probe = Probe::new(vec2(500.0, 800.0));
+        let mut wizard = wizard();
+        let open = |w: &mut Wizard| w.apply(Done::Browsed(Ok(listing("/home/anna", &["Musik"]))));
+        open(&mut wizard);
+        let (out, _) = probe.settle(&mut wizard);
+        // The window's inside: from the foot's left to the close's right,
+        // which stands 8 past the close's middle.
+        let (left, right) = (probe.rect(foot(0)).min.x, probe.rect(Id::new(BROWSE).with("close")).center().x + 8.0);
+        let buttons: Vec<Rect> = (0..4).map(|k| probe.rect(foot(k))).collect();
+        for (k, b) in buttons.iter().enumerate() {
+            assert!(b.min.x >= left - 0.5 && b.max.x <= right + 0.5, "button {k} inside the window: {b:?}, {left} to {right}");
+        }
+        assert!(buttons[..3].iter().all(|b| (b.min.y - buttons[0].min.y).abs() < 0.5), "up, open and the add on one row: {buttons:?}");
+        let under = pos2(left, buttons[0].max.y + 10.0);
+        assert!((buttons[3].min - under).length() < 0.5, "close starts the next row, 10 under: {buttons:?}");
+        for w in ["HOCH", "ÖFFNEN", "DIESEN ORDNER HINZUFÜGEN", "SCHLIESSEN"] {
+            assert!(has(&drawn(&out), w), "{w} whole: {:?}", drawn(&out));
+        }
+        // Each still does what the cells' does: close shuts it, the add adds
+        // the folder listed.
+        let shown = probe.click(&mut wizard, foot(3));
+        assert!(wizard.modal == Modal::None && wizard.folders.is_empty() && shown.outcome.is_none(), "close");
+        open(&mut wizard);
+        let _ = probe.settle(&mut wizard);
+        probe.click(&mut wizard, foot(2));
+        assert_eq!(wizard.modal, Modal::None);
+        assert_eq!(wizard.folders.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["/home/anna"], "the add");
     }
 
     #[test]
