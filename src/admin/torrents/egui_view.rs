@@ -216,7 +216,6 @@ fn state_row(ui: &mut Ui, room: &Room, pal: &Pal) {
     let polls = state.polls.map(|p| (p, body(12.5), pal.dim));
     let line = Rect::from_min_max(row.min, pos2((beta.min.x - 16.0).max(row.min.x), row.max.y));
     state_line(ui, line, state.tone, 14.0, &parts, polls.as_ref());
-
 }
 
 // ── Painting helpers ──────────────────────────────────────────────────────
@@ -526,7 +525,6 @@ fn tabs(ui: &mut Ui, room: &Room, filtered: &[usize], pal: &Pal, composition: &s
         Tab::Client => client(ui, room, pal, out),
     }
 }
-
 
 // ── Torrents ──────────────────────────────────────────────────────────────
 
@@ -1213,7 +1211,6 @@ fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], buttons: &[(
     });
     out.acts.extend(shown.inner);
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -272,7 +272,6 @@ pub(crate) fn unkeyed(s: &str) -> (&str, Option<&str>) {
 }
 
 /// `s` cut at its start to fit `max_w` in `font`, an ellipsis standing for
-
 /// what went, so a path keeps its leaf in view (the canvas's paths, and the
 /// cells'): the line, and whether it was cut. Whole graphemes go, never a
 /// part of one, so no accent or joined emoji is left torn after the "…".
@@ -348,7 +347,6 @@ pub(crate) fn with_figures(s: &str, figures: &[&str], font: FontId, figure: Font
 }
 
 /// One line of words, a row of the layout `h` tall and the column wide,
-
 /// cut with an ellipsis where it runs long. Returns where it was drawn.
 pub(crate) fn line(ui: &mut Ui, h: f32, s: &str, font: FontId, color: Color32) -> Rect {
     let w = ui.available_width();
@@ -391,14 +389,16 @@ pub(crate) fn label_at(ui: &Ui, pos: Pos2, s: &str, max_w: f32, pal: &Pal) -> Re
 /// canvas's 1.3 by default), in at most `rows` lines with the last cut
 /// with an ellipsis, a line that would end below `floor` left out whole
 /// rather than cut through (as the cells leave out a row past the column's
-/// end), and a `lead` mark (a list's "−") standing in a column of its own
-/// with the lines wrapped beside it.
+/// end), a `lead` mark (a list's "−") standing in a column of its own with
+/// the lines wrapped beside it, and words with no spaces (a ticket) broken
+/// `anywhere` to fill each line.
 pub(crate) struct Para {
     parts: Vec<Run>,
     line: f32,
     rows: usize,
     floor: f32,
     lead: Option<String>,
+    anywhere: bool,
 }
 
 /// The canvas's prose leading: its body's line-height.
@@ -410,7 +410,7 @@ impl Para {
     }
 
     pub(crate) fn runs(parts: &[Run]) -> Para {
-        Para { parts: parts.to_vec(), line: PARA_LINE, rows: usize::MAX, floor: f32::INFINITY, lead: None }
+        Para { parts: parts.to_vec(), line: PARA_LINE, rows: usize::MAX, floor: f32::INFINITY, lead: None, anywhere: false }
     }
 
     /// Lines `k` times the first run's size apart.
@@ -432,6 +432,12 @@ impl Para {
     /// the wrapped lines hanging under the first one's words.
     pub(crate) fn lead(self, mark: &str) -> Para {
         Para { lead: Some(mark.to_string()), ..self }
+    }
+
+    /// Lines broken at any letter, each filled to the width: a ticket, whose
+    /// colons and dashes would otherwise end its lines short.
+    pub(crate) fn anywhere(self) -> Para {
+        Para { anywhere: true, ..self }
     }
 
     /// A row of the layout the column wide, as tall as its lines. Returns
@@ -466,7 +472,7 @@ impl Para {
                 job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, line_height: Some(line_h), ..Default::default() });
             }
         }
-        job.wrap = TextWrapping { max_width: (w - indent).max(1.0), max_rows: self.rows, break_anywhere: false, overflow_character: Some('…') };
+        job.wrap = TextWrapping { max_width: (w - indent).max(1.0), max_rows: self.rows, break_anywhere: self.anywhere, overflow_character: Some('…') };
         let galley = ui.painter().layout_job(job);
         let origin = at + vec2(indent, 0.0);
         let rect = Rect::from_min_size(at, vec2(w, galley.size().y));
@@ -633,7 +639,6 @@ fn draw_icon(ui: &Ui, at: Pos2, icon: Icon, color: Color32) {
             painter.line_segment([p(2.5, 2.5), p(9.5, 9.5)], stroke);
             painter.line_segment([p(9.5, 2.5), p(2.5, 9.5)], stroke);
         }
-
         // The canvas draws the tools' two in a finer stroke.
         Icon::Copy => {
             let thin = Stroke::new(1.3, color);
@@ -1569,7 +1574,7 @@ enum Look {
     Lit,
 }
 
-//// A table under its headings, its rows scrolled by egui and drawn one at
+/// A table under its headings, its rows scrolled by egui and drawn one at
 /// a time by the page's closure, the keyboard cursor's row kept in view on
 /// the pass it moved.
 pub(crate) struct Table<'a> {

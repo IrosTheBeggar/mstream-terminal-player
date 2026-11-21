@@ -502,7 +502,7 @@ fn invite_pane(ui: &Ui, pane: Rect, room: &Room, s: &DiscoveryStatus, look: &Loo
             // Over two lines at most, as the cells wrap it.
             let room_h = befriend_y - head_h / 2.0 - 6.0 - ticket_top;
             let rows = ((room_h + 2.0) / 15.0).floor().clamp(1.0, 2.0) as usize;
-            Para::new(&printable(ticket, 4096), mono(12.5), pal.text).line(1.2).rows(rows).paint(ui, pos2(x0, ticket_top), w);
+            Para::new(&printable(ticket, 4096), mono(12.5), pal.text).line(1.2).rows(rows).anywhere().paint(ui, pos2(x0, ticket_top), w);
         }
         None => {
             let at = pos2(x0, ticket_top + 8.0);
@@ -839,7 +839,6 @@ fn section_line(ui: &mut Ui, room: &Room, s: &DiscoveryStatus, look: &Look, pal:
     }
 }
 
-
 // ── Off the network ───────────────────────────────────────────────────────
 
 /// The join page: the state line, the join card (the add-folder card's
@@ -896,7 +895,6 @@ fn off_network(ui: &mut Ui, room: &Room, s: &DiscoveryStatus, look: &Look, pal: 
     });
 }
 
-
 // ── Modals ────────────────────────────────────────────────────────────────
 
 /// The room's modal, if one is up, over the whole of the room's area.
@@ -935,7 +933,6 @@ fn modals(ui: &Ui, room: &Room, over: Rect, pal: &Pal, typing: Typing, key_hints
         Modal::Blocked(sel) => blocked(ui, room, over, *sel, pal, pass),
     }
 }
-
 
 /// One of the sheet's facts: its label in the canvas's column, and its
 /// value's runs, after an LED when it has one, cut to the row.
@@ -1277,7 +1274,6 @@ fn blocked(ui: &Ui, room: &Room, over: Rect, sel: usize, pal: &Pal, pass: &mut P
         for (i, id) in ids.iter().enumerate() {
             let on = i == sel;
             let (rect, response) = list_row(ui, Id::new("disc-blocked-row").with(i), 34.0, on, pal);
-
             if on {
                 reveal(ui, Id::new("disc-blocked"), i, rect);
             }

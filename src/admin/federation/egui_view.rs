@@ -11,9 +11,9 @@
 //! Every click is one of the room's own [`Act`]s — the one the cells view
 //! registers where the click lands — applied through [`Room::act`] in the
 //! pass. A gate has no close, as the cells draw it: it is answered with its
-//! buttons or its keys. Keys never reach egui: the
-//! room's key handler edits its fields as it always has, and each field is
-//! drawn from the room's own value and caret. Where the cells draw a glyph
+//! buttons or its keys. Keys never reach egui: the room's key handler edits
+//! its fields as it always has, and each field is drawn from the room's own
+//! value and caret. Where the cells draw a glyph
 //! — the state line's bullet, the claimed tick, a peer's status dot, the
 //! checkboxes, the connecting strip, a button's arrow — the desk draws its
 //! LED, its tick box, its meter or its button instead.
@@ -442,7 +442,6 @@ fn note(ui: &Ui, rect: Rect, room: &Room, pal: &Pal) {
     foot_line(ui, rect, room.busy.as_deref(), room.note.as_ref(), &parts, pal);
 }
 
-
 /// The cursor row's whole story in the cells' words, the short endpoint id
 /// it names (drawn in figures), and its colour.
 fn story(room: &Room, pal: &Pal) -> Option<(String, Option<String>, Color32)> {
@@ -673,7 +672,7 @@ fn minted(ui: &Ui, name: &str, ticket: Option<&str>, libraries: &[String], over:
                 let w = ui.available_width();
                 let back = ui.painter().add(egui::Shape::Noop);
                 let at = ui.cursor().min + vec2(12.0, 12.0);
-                let drawn = Para::new(&printable(ticket, 4096), mono(12.5), pal.text).paint(ui, at, w - 24.0);
+                let drawn = Para::new(&printable(ticket, 4096), mono(12.5), pal.text).anywhere().paint(ui, at, w - 24.0);
                 let (rect, _) = ui.allocate_exact_size(vec2(w, drawn.height() + 24.0), Sense::hover());
                 ui.painter().set(back, egui::Shape::rect_filled(rect, studio::square(), pal.ground));
                 ui.painter().rect_stroke(rect, studio::square(), egui::Stroke::new(1.0, pal.edge_strong), egui::StrokeKind::Inside);
@@ -754,7 +753,6 @@ fn gate(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (Strin
         None => {}
     }
 }
-
 
 // ── Pieces the kit does not have ──────────────────────────────────────────
 

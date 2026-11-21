@@ -274,7 +274,6 @@ fn status_tone(status: &str, pal: &Pal) -> Color32 {
     }
 }
 
-
 /// The destinations under their headings, in server order: the library,
 /// the path cut from its start (the whole of it in a tooltip where it was
 /// cut), the trigger, the retention, the last run behind an LED in its
@@ -420,7 +419,6 @@ fn browse_button(ui: &Ui, id: Id, rect: Rect, label: &str, pal: &Pal) -> egui::R
     response
 }
 
-
 /// The LIBRARY choice as the canvas draws it: the names joined in one
 /// hairline group, wrapped to more rows where the column is narrow, in the
 /// UI face as they are written (the kit's segmented sets its labels in
@@ -451,7 +449,6 @@ fn choices(ui: &mut Ui, id: Id, names: &[String], chosen: usize, pal: &Pal) -> (
     for (i, (name, (x, row, nw))) in names.iter().zip(spots).enumerate() {
         let seg = Rect::from_min_size(pos2(group.min.x + x, group.min.y + row as f32 * H), vec2(nw, H));
         let response = hand(ui.interact(seg, id.with(i), Sense::click()));
-
         let ink = if i == chosen {
             ui.painter().rect_filled(seg.shrink(1.0), egui::CornerRadius::same(2), pal.accent);
             pal.on_accent
@@ -849,7 +846,6 @@ fn gate(ui: &Ui, room: &Room, id: i64, over: Rect, pal: &Pal, acts: &mut Vec<Act
         }
     });
 }
-
 
 #[cfg(test)]
 mod tests {
