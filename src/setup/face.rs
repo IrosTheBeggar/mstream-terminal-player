@@ -14,7 +14,8 @@ use ratatui::Frame;
 use ratatui::crossterm::event::Event as TermEvent;
 use ratatui::layout::{Position, Rect};
 
-use super::{Done, Job, Outcome, Wizard, render, session_title};
+use super::cells::render;
+use super::{Done, Job, Outcome, Wizard, session_title};
 use crate::api::Client;
 use crate::gui::window::WindowTerminal;
 use crate::gui::window::face::Face;
@@ -213,8 +214,9 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use rust_i18n::t;
 
+    use super::super::cells::{LOGO, done_buttons};
     use super::super::tests::{IoTest, LOCALE_LOCK, click_rect, row_text};
-    use super::super::{Act, LOGO, LoginField, Modal, Op, POLL, Screen, done_buttons};
+    use super::super::{Act, LoginField, Modal, Op, POLL, Screen};
     use super::*;
     use crate::tui::art::Art;
 

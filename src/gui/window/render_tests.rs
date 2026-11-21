@@ -1575,7 +1575,7 @@ fn the_quick_connect_page_draws_its_code_in_the_window() {
     let WizardFrame { frame, placed, under, text } = frames.remove(0);
     assert_eq!((placed.len(), under), (2, 0), "the wordmark and the code, painted: {placed:?}");
     // The Done page's column starts two cells in; its left column is 30
-    // wide at this grid (`setup::draw_done`).
+    // wide at this grid (`setup::cells::draw_done`).
     let (wordmark, code) = (placed[0], placed[1]);
     for rect in [wordmark, code] {
         assert!(rect.x >= 2 && rect.right() <= 32, "{rect:?} is not in the left column");
