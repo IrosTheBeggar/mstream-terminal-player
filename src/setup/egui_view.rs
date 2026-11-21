@@ -979,15 +979,18 @@ mod tests {
         wizard.screen = Screen::Done;
         let (out, _) = probe.settle(&mut wizard);
         let words = drawn(&out);
-        let (heading, hint) = (t!("done.heading_wizard").to_string(), footer_hint(&wizard));
-        for w in ["4 / 4", heading.as_str(), hint.as_str()] {
+        // No heading: the wordmark heads the page, as in the cells' two
+        // columns; the message opens it.
+        let (opening, hint) = (t!("done.running_port", port = 9).to_string(), footer_hint(&wizard));
+        for w in ["4 / 4", opening.as_str(), hint.as_str()] {
             assert!(has(&words, w), "{w} drawn: {words:?}");
         }
         assert!(!has(&words, "CONTINUE") && !has(&words, "English"), "no bar, no chip: {words:?}");
+        assert!(!has(&words, &t!("done.heading_wizard")), "{words:?}");
         wizard.standalone = true;
         let (out, _) = probe.settle(&mut wizard);
         let words = drawn(&out);
-        assert!(has(&words, &t!("done.heading_qr")) && !has(&words, "4 / 4"), "{words:?}");
+        assert!(has(&words, &opening) && !has(&words, "4 / 4") && !has(&words, &t!("done.heading_qr")), "{words:?}");
     }
 
     #[test]
