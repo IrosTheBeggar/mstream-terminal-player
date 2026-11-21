@@ -3,7 +3,8 @@
 //! column (the frame, egui_view.rs, draws the top strip, the status and
 //! tips lines and the bar with Back and Create Admin around it, the form's
 //! problem said on the status line as the cells say it); the gate is a
-//! window over the kit's scrim, the page beneath inert.
+//! window over the kit's scrim, the page beneath inert, the status and tips
+//! lines lifted lit over the scrim as the board stands them.
 //!
 //! Every click is the act the cells register for the same control
 //! (`draw_login`, `draw_skip_warning`): a field gives itself the keyboard
@@ -15,12 +16,12 @@
 
 use egui::epaint::{Shadow, StrokeKind};
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rangef, Rect, Response, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Align2, Color32, Id, LayerId, Layout, Order, Pos2, Rangef, Rect, Response, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use rust_i18n::t;
 
 use super::super::{Act, LoginField, Wizard};
 use super::extras::{HEAD, heading, scrolled};
-use super::{Drawn, Page, tip};
+use super::{Drawn, Page, parts, status_line, tip, tips_line};
 use crate::gui::window::studio::{self, FIELD_ROW_H, FORM_BUTTON_H, HIT, Pal, Para, body, strong};
 
 /// The form's width, centred in the column: the boards' 420 points, the
@@ -67,14 +68,14 @@ pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, page: &Page) -> Drawn {
             if studio::hand(typed.response).clicked() {
                 drawn.acts.push(Act::Focus(*field));
             }
+            // The caret of the field drawn with the keyboard, also on the
+            // pass a click moves the keyboard on: the field it moved to notes
+            // its own on the next, as the cells' next frame does, and the
+            // window's input method stays on between the two rather than
+            // dropping what it was composing.
             if typed.caret.is_some() {
                 drawn.caret = typed.caret;
             }
-        }
-        // A click that moved the keyboard took this pass's caret with it:
-        // the field it moved to notes its own on the next.
-        if drawn.acts.iter().any(|act| matches!(act, Act::Focus(field) if *field != wizard.field)) {
-            drawn.caret = None;
         }
         ui.add_space(SKIP_GAP);
         let (row, _) = ui.allocate_exact_size(vec2(room, HIT), Sense::hover());
@@ -130,8 +131,9 @@ const SCRIM: Color32 = Color32::from_rgba_premultiplied(6, 6, 9, 158);
 /// upsides in the ok green and the downsides in gold, each led by its "+"
 /// or "−" in a column of its own, the last dim; and the two answers, the
 /// way back lit. Enter goes public, as the model has it; no answer takes
-/// egui's focus.
-pub(super) fn skip_gate(ui: &mut Ui, over: Rect, _wizard: &mut Wizard, page: &Page) -> Drawn {
+/// egui's focus. The frame's status and tips lines stand lit over the
+/// scrim where the window leaves them clear ([`lift_lines`]).
+pub(super) fn skip_gate(ui: &mut Ui, over: Rect, wizard: &mut Wizard, page: &Page) -> Drawn {
     let pal = &page.pal;
     let sentences = vec![
         Para::new(&t!("skip_modal.body"), body(14.0), pal.text),
@@ -142,7 +144,9 @@ pub(super) fn skip_gate(ui: &mut Ui, over: Rect, _wizard: &mut Wizard, page: &Pa
         Para::new(&t!("skip_modal.later"), body(14.0), pal.dim),
     ];
     let answers = [t!("skip_modal.back"), t!("skip_modal.confirm")];
-    let answered = gate(ui, Id::new("setup-skip"), over, &t!("skip_modal.title"), sentences, [&answers[0], &answers[1]], pal);
+    let id = Id::new("setup-skip");
+    let (answered, window) = gate(ui, id, over, &t!("skip_modal.title"), sentences, [&answers[0], &answers[1]], pal);
+    lift_lines(ui, id, over, window.max.y, wizard, page);
     let acts = answered.map(|go| if go { Act::SkipConfirm } else { Act::SkipCancel });
     Drawn { acts: acts.into_iter().collect(), caret: None }
 }
@@ -168,8 +172,9 @@ fn listed(s: &str, color: Color32) -> Para {
 /// window is taller than `over` allows, from its top each time the gate
 /// comes up. The window takes the height its body asked for on the last
 /// pass, egui running the pass again when that changed. How a click
-/// answered it: `Some(true)` goes through, `Some(false)` keeps.
-fn gate(ui: &Ui, id: Id, over: Rect, title: &str, sentences: Vec<Para>, answers: [&str; 2], pal: &Pal) -> Option<bool> {
+/// answered it, `Some(true)` going through and `Some(false)` keeping, and
+/// where the window stood.
+fn gate(ui: &Ui, id: Id, over: Rect, title: &str, sentences: Vec<Para>, answers: [&str; 2], pal: &Pal) -> (Option<bool>, Rect) {
     let ctx = ui.ctx().clone();
     let width = GATE_W.min(over.width() - 32.0).max(over.width().min(160.0));
     let inner_w = (width - 2.0 * PAD).max(1.0);
@@ -231,7 +236,30 @@ fn gate(ui: &Ui, id: Id, over: Rect, title: &str, sentences: Vec<Para>, answers:
         ctx.data_mut(|d| d.insert_temp(size_key, wanted));
         ctx.request_discard("the skip gate took its body's height");
     }
-    answered
+    (answered, window)
+}
+
+/// The frame's status line and tips line drawn again over the gate's
+/// scrim, lit, as the LoginSkip board stands them (and every board over
+/// every modal's scrim) and as the cells leave them beside their modal: the
+/// gate's hint, and what the wizard is busy with or its note (a problem
+/// the form had before the gate came up). Only where the window, its foot
+/// at `foot`, leaves them clear: where it reaches them (a short page), they
+/// stay under the scrim where the frame drew them, never over the window.
+/// Drawn in a layer of their own that egui keeps just over the gate's, and
+/// which takes no pointer.
+fn lift_lines(ui: &Ui, gate: Id, over: Rect, foot: f32, wizard: &Wizard, page: &Page) {
+    let at = parts(over);
+    if foot > at.status.min.y {
+        return;
+    }
+    let lines = gate.with("lines");
+    ui.ctx().set_sublayer(LayerId::new(Order::Foreground, gate), LayerId::new(Order::Foreground, lines));
+    let area = egui::Area::new(lines).order(Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false).interactable(false);
+    let _ = area.show(ui.ctx(), |ui| {
+        status_line(ui, at.status, wizard, &page.pal);
+        tips_line(ui, at.tips, wizard, &page.pal);
+    });
 }
 
 /// The gate's foot, a row of the layout the body wide: its two answers as
@@ -410,7 +438,10 @@ mod tests {
         let shown = probe.click(&mut wizard, field(1));
         assert_eq!(wizard.field, LoginField::Password);
         assert_eq!(wizard.password.cursor(), 13, "the caret where it stood");
-        assert!(shown.caret.is_none(), "the username's caret went with the keyboard");
+        // The pass of the click hands back the caret it drew, the
+        // username's, so the input method stays on through the move, as
+        // through the cells' (their caret is the last frame's until the next).
+        assert!(shown.caret.is_some_and(|c| probe.rect(field(0)).contains(c - vec2(0.0, 1.0))), "{:?}", shown.caret);
         let (_, shown) = probe.settle(&mut wizard);
         assert!(shown.caret.is_some_and(|c| probe.rect(field(1)).contains(c - vec2(0.0, 1.0))), "the next pass hands back the password's");
         // A click on the field that has the keyboard keeps its caret.
@@ -539,6 +570,45 @@ mod tests {
         let (out, _) = probe.settle(&mut wizard);
         assert_eq!((wizard.screen, wizard.public), (Screen::Done, true), "Enter goes public");
         assert!(!has(&drawn(&out), &t!("skip_modal.title")), "and the gate is gone");
+    }
+
+    /// Whether `words` were drawn over the scrim the page `size` lies under:
+    /// their last drawing comes after it.
+    fn lifted(out: &egui::FullOutput, size: egui::Vec2, words: &str) -> bool {
+        let page = Rect::from_min_size(Pos2::ZERO, size);
+        let at = |hit: &dyn Fn(&Shape) -> bool| out.shapes.iter().rposition(|c| hit(&c.shape));
+        let scrim = at(&|s| matches!(s, Shape::Rect(r) if r.rect == page && r.fill.a() > 0 && r.fill.a() < 255));
+        let words = at(&|s| matches!(s, Shape::Text(t) if t.galley.text() == words));
+        matches!((scrim, words), (Some(scrim), Some(words)) if words > scrim)
+    }
+
+    /// Over the gate the status line and the tips line stand lit over the
+    /// scrim, as the LoginSkip board draws them, where the window leaves
+    /// them clear: the gate's hint, and the problem the form had when the
+    /// gate came up. Where the window reaches them, on a page at the cells'
+    /// floor, they stay under the scrim, where the frame drew them.
+    #[test]
+    fn the_status_and_tips_lines_stand_over_the_gates_scrim_where_its_window_leaves_them_clear() {
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        let problem = t!("login_problem.username").to_string();
+        for (size, clear) in [(BOARD, true), (FLOOR, false)] {
+            let probe = Probe::new(size);
+            let mut wizard = login();
+            wizard.act(crate::setup::Act::CreateAdmin);
+            assert_eq!(wizard.note, Some((problem.clone(), true)), "an empty form's first problem");
+            wizard.act(crate::setup::Act::SkipLogin);
+            let (out, _) = probe.settle(&mut wizard);
+            let (words, hint) = (drawn(&out), footer_hint(&wizard));
+            assert_eq!(hint, t!("hint.skip"));
+            assert!(has(&words, &hint) && has(&words, &problem), "at {size:?}: {words:?}");
+            assert_eq!(lifted(&out, size, &hint), clear, "at {size:?}: the hint");
+            assert_eq!(lifted(&out, size, &problem), clear, "at {size:?}: the problem");
+            // Lifted or not, they take no click: a press on the status line
+            // leaves the gate up.
+            let status = super::super::parts(Rect::from_min_size(Pos2::ZERO, size)).status;
+            probe.press(&mut wizard, status.left_center() + vec2(8.0, 0.0));
+            assert_eq!(wizard.modal, Modal::SkipWarning, "at {size:?}");
+        }
     }
 
     #[test]
