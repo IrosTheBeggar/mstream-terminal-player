@@ -462,6 +462,13 @@ not.
     - with no log on screen (`L` hid it, or a room is shown in the Room
       placement), the room's area less its first row, as before.
 
+    While a room's modal is up, the GUI's cells beside the room's part
+    take the scrim's colour, ink and background alike: the pick banner's
+    row over the room, and the cells between the room and the docked log
+    (the column's blank columns and its `│`, or the band's `─` row). The
+    log stays live, and the banner's row over the hallway and above the
+    log is left as it is.
+
     `MSTREAM_WINDOW_CELLS=1` (no panel), a terminal, and the frames before
     the window exists keep everything in cells, as clauses 18–34 tell it.
 36. **The pointer in the region is egui's**: a press there, its drag and
@@ -841,3 +848,28 @@ from every locale. The rooms' own strings (`admin.*`, `usr.*`, `bak.*`,
     much as a form's; Libraries and Backups share one folder browser; a
     check's verdict hangs its words beside its mark; and a button carries
     its word bare of the cells' key letters and arrows.
+  - **One scroll thumb and whole rows**, the kit's, after a tour of the
+    real window: every scroll area's thumb is the log's (clause 37) —
+    6 points, rounded, no track, drawn only while the rows overflow —
+    and a table leaves it 10 points of its own beside the rows, so it
+    never stands on the cursor's ring; a table's view ends on a whole row
+    and a wheel notch moves one. Figures in the monospace stand on their
+    words' baseline, and an LED centres on its words' small letters (on
+    their capitals beside spaced capitals); a cadence sets only its number
+    in the monospace.
+  - **Ticks wrap rather than cut**: a grid of ticks keeps even columns
+    while every name fits, else sizes each column to its widest name,
+    else drops a column; a flow of ticks (Users' Add) runs onto further
+    lines, and the keys reach every tick. Each form keeps its board's tick
+    height: Discovery's federate form 28 points on a 32-point pitch, the
+    Federation mint and accept forms 32 on 36. A tick box lights its own
+    edge under the pointer wherever it stands, the click still the row's
+    where the cells give it to the row; Torrents' Access list shows the
+    cells' ticks rather than LEDs.
+  - **A cut cell's tooltip hangs under the cell**, its right edge on the
+    cell's, above it where there is no room below, so it clears the next
+    row's controls.
+  - **The log with the keys wears the keyboard's ring** round its panel,
+    in the accent the rule beside it takes then (clause 35), in every
+    placement; in the Log room it holds the keys, so the ring is always
+    there.
