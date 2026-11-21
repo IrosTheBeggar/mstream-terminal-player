@@ -190,6 +190,15 @@ impl Board {
         panel.area.is_some() && !panel.under
     }
 
+    /// The frame just drawn painted the panel: its face showed it and no
+    /// overlay stood over it. Its pass presents though no cell changed
+    /// (`needs_update`), which is how the window knows a frame of a face
+    /// drawn by egui alone was presented.
+    pub(super) fn panel_painted(&self) -> bool {
+        let panel = self.panel();
+        panel.shown && !panel.under
+    }
+
     /// The face's pass over `area` this frame. Texture changes pile up
     /// behind any the post-processor has not taken yet.
     pub(super) fn panel_drawn(&self, area: Rect, pass: Paint) {
@@ -1028,6 +1037,32 @@ mod tests {
             crisp: false,
         });
         assert!(board.has_news(), "a resample waits for a present");
+    }
+
+    /// A frame whose face showed the panel painted it, and so presented
+    /// though it handed the backend no cell (the setup wizard drawn by egui
+    /// leaves its whole grid blank): the window shows itself on it. A frame
+    /// that showed none, skipped its draw, or had an overlay over the panel
+    /// painted nothing of it.
+    #[test]
+    fn a_frame_that_showed_the_panel_painted_it() {
+        let board = Board::default();
+        let grid = Rect::new(0, 0, 160, 50);
+        board.begin_frame();
+        board.end_frame(true);
+        assert!(!board.panel_painted(), "no panel shown");
+        board.begin_frame();
+        board.panel_drawn(grid, Paint::default());
+        board.end_frame(true);
+        assert!(board.panel_painted(), "the panel over the whole grid");
+        board.begin_frame();
+        board.end_frame(false);
+        assert!(!board.panel_painted(), "a skipped draw painted nothing");
+        board.begin_frame();
+        board.panel_drawn(grid, Paint::default());
+        board.overlay(Rect::new(10, 10, 20, 5));
+        board.end_frame(true);
+        assert!(!board.panel_painted(), "stood down under an overlay");
     }
 
     /// A modal registered after covers were placed stands down the ones it

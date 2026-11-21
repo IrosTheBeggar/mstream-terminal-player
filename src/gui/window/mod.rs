@@ -1228,9 +1228,14 @@ impl App {
             eprintln!("gui --window: the dump failed: {e}");
         }
         // The first frame that handed the backend cells has been presented
-        // (the same moment the stats lever calls the first present): a
-        // window made hidden goes on screen now.
-        if !self.shown && cells > 0 {
+        // (the same moment the stats lever calls the first present), and so
+        // has the first that painted the egui panel, whose pass presents
+        // though no cell changed (covers.rs, `needs_update`): a window made
+        // hidden goes on screen now. A face drawn by egui over its whole
+        // grid, the setup wizard's, leaves every cell blank and hands the
+        // backend none, so its window would otherwise stay hidden until the
+        // deadline, drawing a frame on every turn of the loop meanwhile.
+        if !self.shown && (cells > 0 || self.board.panel_painted()) {
             self.show(true);
         }
         // What came before the first frame, now that it has drawn: one act
