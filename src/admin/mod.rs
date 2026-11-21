@@ -323,7 +323,6 @@ pub(crate) trait Screen {
 
 /// What a hosted page's egui pass tells its host ([`Screen::egui`]).
 #[cfg(feature = "window")]
-#[cfg_attr(not(test), allow(dead_code))] // made by the rooms' egui faces, as each lands
 pub(crate) struct EguiShown {
     /// The foot of the focused field's caret in egui's points, if a field
     /// has the page's keyboard: the host lifts it to the cell under it,

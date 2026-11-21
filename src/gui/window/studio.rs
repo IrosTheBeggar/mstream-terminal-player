@@ -17,10 +17,6 @@
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
-// The kit comes before the rooms' egui faces, which land one by one: until
-// each has, some of its pieces have no caller outside the tests.
-#![allow(dead_code)]
-
 use std::ops::Range;
 
 use egui::epaint::{CornerRadius, Shadow, Shape, StrokeKind};
@@ -36,18 +32,18 @@ use super::panel::STRONG;
 use crate::kit::theme::th;
 
 /// The desk's corners: square, softened by a point or two.
-pub(crate) const RADIUS: u8 = 3;
+const RADIUS: u8 = 3;
 /// An LED segment's height and the dark gap above it, in points.
 pub(crate) const LED: f32 = 4.0;
 pub(crate) const LED_GAP: f32 = 2.0;
 /// Spaced capitals: this much extra room per letter, as a share of the size.
-pub(crate) const TRACK: f32 = 0.12;
+const TRACK: f32 = 0.12;
 /// The small labels' wider tracking (field labels, table headings, chips).
-pub(crate) const LABEL_TRACK: f32 = 0.14;
+const LABEL_TRACK: f32 = 0.14;
 /// The small labels' size.
-pub(crate) const LABEL_SIZE: f32 = 10.5;
+const LABEL_SIZE: f32 = 10.5;
 /// The scrim a modal lays over its room: the canvas's rgba(9, 10, 15, .62).
-pub(crate) const SCRIM: Color32 = Color32::from_rgba_premultiplied(6, 6, 9, 158);
+const SCRIM: Color32 = Color32::from_rgba_premultiplied(6, 6, 9, 158);
 /// A control's click target, square: the canvas's 28-point buttons.
 pub(crate) const HIT: f32 = 28.0;
 
@@ -107,7 +103,7 @@ impl Pal {
 }
 
 /// `c` lifted toward white by `by` of 255, opaque.
-pub(crate) fn lift(c: Color32, by: u8) -> Color32 {
+fn lift(c: Color32, by: u8) -> Color32 {
     let up = |v: u8| v.saturating_add(by);
     Color32::from_rgb(up(c.r()), up(c.g()), up(c.b()))
 }
@@ -207,7 +203,7 @@ pub(crate) fn hand(response: Response) -> Response {
 /// `spacing` points between letters, anchored at `pos` by `align`.
 /// Returns where it was drawn.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spaced(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, spacing: f32, max_w: f32, align: Align2) -> Rect {
+fn spaced(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, spacing: f32, max_w: f32, align: Align2) -> Rect {
     let format = TextFormat { font_id: font, color, extra_letter_spacing: spacing, ..Default::default() };
     let mut job = LayoutJob::single_section(s.to_string(), format);
     job.wrap = TextWrapping::truncate_at_width(max_w.max(1.0));
@@ -306,7 +302,7 @@ pub(crate) fn cut_start(ui: &Ui, s: &str, font: FontId, max_w: f32) -> (String, 
 pub(crate) type Run = (String, FontId, Color32);
 
 /// `parts` as one job, each run in its own face and colour.
-pub(crate) fn run_job(parts: &[Run]) -> LayoutJob {
+fn run_job(parts: &[Run]) -> LayoutJob {
     let mut job = LayoutJob::default();
     for (s, font, color) in parts {
         if !s.is_empty() {
@@ -361,7 +357,7 @@ pub(crate) fn line(ui: &mut Ui, h: f32, s: &str, font: FontId, color: Color32) -
 }
 
 /// A label's row: the small capitals' 14 points.
-pub(crate) const LABEL_H: f32 = 14.0;
+const LABEL_H: f32 = 14.0;
 
 /// A field's or a group's label, a [`LABEL_H`] row of the layout the column
 /// wide ([`label_at`]). Returns the row.
@@ -617,14 +613,8 @@ pub(crate) fn pointer(ui: &Ui, at: Pos2, color: Color32) {
 pub(crate) enum Icon {
     /// A window's close: the cross.
     Close,
-    /// An add.
-    Plus,
     /// A row's remove: the cross, red under the pointer.
     Remove,
-    /// The way back: a chevron pointing left.
-    Back,
-    /// A list to drop: a chevron pointing down.
-    Chevron,
     /// A copy: two sheets, one over the other.
     Copy,
     /// A download: an arrow down onto a line.
@@ -632,7 +622,7 @@ pub(crate) enum Icon {
 }
 
 /// `icon` in `color`, centred on `at`.
-pub(crate) fn draw_icon(ui: &Ui, at: Pos2, icon: Icon, color: Color32) {
+fn draw_icon(ui: &Ui, at: Pos2, icon: Icon, color: Color32) {
     // The canvas's 12-point boxes, their paths verbatim.
     let o = at - vec2(6.0, 6.0);
     let p = |x: f32, y: f32| o + vec2(x, y);
@@ -643,16 +633,7 @@ pub(crate) fn draw_icon(ui: &Ui, at: Pos2, icon: Icon, color: Color32) {
             painter.line_segment([p(2.5, 2.5), p(9.5, 9.5)], stroke);
             painter.line_segment([p(9.5, 2.5), p(2.5, 9.5)], stroke);
         }
-        Icon::Plus => {
-            painter.line_segment([p(6.0, 2.0), p(6.0, 10.0)], stroke);
-            painter.line_segment([p(2.0, 6.0), p(10.0, 6.0)], stroke);
-        }
-        Icon::Back => {
-            painter.add(Shape::line(vec![p(7.5, 2.5), p(4.0, 6.0), p(7.5, 9.5)], stroke));
-        }
-        Icon::Chevron => {
-            painter.add(Shape::line(vec![p(2.0, 4.0), p(6.0, 8.0), p(10.0, 4.0)], stroke));
-        }
+
         // The canvas draws the tools' two in a finer stroke.
         Icon::Copy => {
             let thin = Stroke::new(1.3, color);
@@ -1195,13 +1176,13 @@ pub(crate) fn foot(ui: &mut Ui, id: Id, start: &[(&str, bool)], end: &[(&str, bo
     foot_at(ui, id, row, start, end, note, pal)
 }
 
-/// A modal's or a page's foot across `row`: form buttons, each as wide as
+/// A modal's foot across `row`: form buttons, each as wide as
 /// its [`bare`] words and 10 points apart, the lit one where its flag is
 /// set — `start` laid from the row's left, `end` ending at its right — and
 /// with nothing at the start, `note` (a refusal) in gold at the left, cut
 /// 16 points short of the first button. Button `k`, counting `start` first,
 /// is `id.with(k)`. The button clicked.
-pub(crate) fn foot_at(ui: &Ui, id: Id, row: Rect, start: &[(&str, bool)], end: &[(&str, bool)], note: Option<&str>, pal: &Pal) -> Option<usize> {
+fn foot_at(ui: &Ui, id: Id, row: Rect, start: &[(&str, bool)], end: &[(&str, bool)], note: Option<&str>, pal: &Pal) -> Option<usize> {
     let mut clicked = None;
     let mut x = row.min.x;
     for (k, (label, primary)) in start.iter().enumerate() {
@@ -1498,7 +1479,7 @@ fn field_job(line: &str, composing: Range<usize>, font: FontId, color: Color32) 
 /// stood (`offset`): unmoved while the caret is in view, moved just far
 /// enough to bring it back when not, and never past the line's end, where
 /// a point is kept for the caret.
-pub(crate) fn scroll_to_caret(offset: f32, caret_x: f32, line_w: f32, view_w: f32) -> f32 {
+fn scroll_to_caret(offset: f32, caret_x: f32, line_w: f32, view_w: f32) -> f32 {
     let most = (line_w + 1.0 - view_w).max(0.0);
     let mut at = offset.clamp(0.0, most);
     if caret_x < at {
@@ -1541,7 +1522,7 @@ pub(crate) const CELL_PAD: f32 = 10.0;
 pub(crate) const TABLE_HEAD: f32 = 34.0;
 
 /// The columns' x ranges across `x0..x1`.
-pub(crate) fn spans(x0: f32, x1: f32, cols: &[Col]) -> Vec<(f32, f32)> {
+fn spans(x0: f32, x1: f32, cols: &[Col]) -> Vec<(f32, f32)> {
     let fixed: f32 = cols.iter().map(|c| c.w).sum::<f32>() + COL_GAP * cols.len().saturating_sub(1) as f32;
     let flex = (x1 - x0 - fixed).max(60.0);
     let mut x = x0;
@@ -1920,8 +1901,6 @@ const TITLE_H: f32 = 20.0;
 pub(crate) struct ModalShown<R> {
     /// The close button was clicked: the page cancels, as on Esc.
     pub closed: bool,
-    /// The modal came up on this pass: it was not drawn on the last one.
-    pub opened: bool,
     /// What the body's closure returned.
     pub inner: R,
 }
@@ -2068,13 +2047,8 @@ impl<'a> Dialog<'a> {
             ctx.data_mut(|d| d.insert_temp(size_key, wanted));
             ctx.request_discard("a modal took its body's height");
         }
-        ModalShown { closed, opened, inner }
+        ModalShown { closed, inner }
     }
-}
-
-/// A [`Dialog`] with nothing but its title: the plain modal, with its close.
-pub(crate) fn modal<R>(ui: &Ui, id: Id, over: Rect, width: f32, title: &str, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> ModalShown<R> {
-    Dialog::new(id, over, width, title).show(ui, pal, body)
 }
 
 /// The keyboard's control in the body of the modal `modal` at `rect`,
@@ -2219,7 +2193,7 @@ mod tests {
             if ui.interact(over, Id::new("beneath"), Sense::click()).clicked() {
                 beneath_clicked.set(true);
             }
-            let shown = modal(ui, id, over, 480.0, "Add a user", &pal, |ui| {
+            let shown = Dialog::new(id, over, 480.0, "Add a user").show(ui, &pal, |ui| {
                 ui.add_space(120.0);
             });
             if shown.closed {
@@ -2455,7 +2429,6 @@ mod tests {
         let id = Id::new("probe-scroller");
         let up = Cell::new(true);
         let at = Cell::new(0usize);
-        let opened = Cell::new(false);
         // Where the last pass drew rows 0 and 29 (egui's own record of a
         // widget can be a discarded pass's).
         let first = Cell::new(Rect::NOTHING);
@@ -2465,7 +2438,7 @@ mod tests {
                 return;
             }
             let pal = Pal::now();
-            let shown = Dialog::new(id, over, 400.0, "Rows").show(ui, &pal, |ui| {
+            let _ = Dialog::new(id, over, 400.0, "Rows").show(ui, &pal, |ui| {
                 for i in 0..30 {
                     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
                     match i {
@@ -2478,12 +2451,10 @@ mod tests {
                     }
                 }
             });
-            opened.set(shown.opened);
         };
         let _ = pass(&ctx, size, Vec::new(), &mut run);
         let _ = pass(&ctx, size, Vec::new(), &mut run);
         let home = first.get().min.y;
-        assert!(!opened.get(), "up since the pass before");
         // The keys move to the last row: within the one frame, with no
         // other input, the body stands where it shows it.
         at.set(29);
@@ -2497,7 +2468,7 @@ mod tests {
         up.set(true);
         at.set(0);
         let _ = pass(&ctx, size, Vec::new(), &mut run);
-        assert!(opened.get(), "it came up on this pass");
+
         assert!((first.get().min.y - home).abs() < 0.5, "at its top: {:?} for {home}", first.get());
     }
 
