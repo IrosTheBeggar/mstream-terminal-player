@@ -34,22 +34,38 @@ const PATH_LEAST: f32 = 160.0;
 /// FIELD).
 const NAME_FIELD_H: f32 = 30.0;
 const REACH: f32 = 9.0;
+/// The room the column keeps for the add card at its full height: the card
+/// and its gap, the table's headings and two of its rows. A shorter column
+/// (the cells' floor, where the tall card left the table a sliver of one
+/// row) takes the short look: the kit's short card [`SHORT_GAP`] over the
+/// table, and rows [`SHORT_ROW_H`] tall, the name field's box with 3 points
+/// over and under it, so that the floor shows two rows whole.
+const TALL_ROOM: f32 = studio::CARD_H + studio::ROOM_GAP + studio::TABLE_HEAD + 2.0 * ROW_H;
+const SHORT_GAP: f32 = 8.0;
+const SHORT_ROW_H: f32 = NAME_FIELD_H + 6.0;
 
 /// The body over the whole of `ui`, the column under the wordmark: the add
 /// card, then the table of the folders chosen, NAME and FOLDER, a remove
-/// for each row in a column of its own past the selection area. The
-/// keyboard's cursor row wears the kit's ring and is brought into view on
-/// the pass it moves, a fresh add's row likewise without being selected,
-/// and the wheel scrolls the table (never under a modal, whose scrim takes
-/// the pointer); an empty list keeps its headings and says so where the
-/// first row would be.
+/// for each row in a column of its own past the selection area, both in the
+/// short look where the column has not [`TALL_ROOM`]. The keyboard's cursor
+/// row wears the kit's ring and is brought into view on the pass it moves,
+/// a fresh add's row likewise without being selected, and the wheel scrolls
+/// the table (never under a modal, whose scrim takes the pointer); an empty
+/// list keeps its headings and says so where the first row would be.
 pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, page: &Page) -> Drawn {
     let pal = &page.pal;
     let mut drawn = Drawn::default();
-    if studio::add_card(ui, Id::new("setup-add"), &t!("folders.add_card"), Glyph::Folder, pal).clicked() {
+    let short = ui.available_height() < TALL_ROOM;
+    let (id, label) = (Id::new("setup-add"), t!("folders.add_card"));
+    let add = if short {
+        studio::short_add_card(ui, id, &label, Glyph::Folder, pal)
+    } else {
+        studio::add_card(ui, id, &label, Glyph::Folder, pal)
+    };
+    if add.clicked() {
         drawn.acts.push(Act::BrowseNative);
     }
-    ui.add_space(studio::ROOM_GAP);
+    ui.add_space(if short { SHORT_GAP } else { studio::ROOM_GAP });
 
     let cols = vec![Col::left(t!("folders.col_name"), NAME_W), Col::left(t!("folders.col_folder"), 0.0)];
     let cols = studio::fitted(ui.available_width() - TRAIL, cols, PATH_LEAST, 0.5);
@@ -59,7 +75,7 @@ pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, page: &Page) -> Drawn {
     // slab: the field is the row's mark then.
     let table = Table::new(Id::new("setup-folders"), &cols, wizard.folders.len())
         .cursor(wizard.sel.filter(|s| Some(*s) != editing))
-        .row_height(ROW_H)
+        .row_height(if short { SHORT_ROW_H } else { ROW_H })
         .trail(TRAIL)
         .inert()
         .reveal(wizard.reveal.take())
@@ -177,7 +193,7 @@ mod tests {
     use rust_i18n::t;
 
     use super::super::tests::{BOARD, Probe, color_of, drawn, has, key, tipped, wheel, wizard};
-    use crate::gui::window::studio::Pal;
+    use crate::gui::window::studio::{self, Pal};
     use crate::setup::tests::LOCALE_LOCK;
     use crate::setup::{Act, Done, FolderCheck, Modal, Op, Wizard, ellipsize_path_start};
 
@@ -404,6 +420,43 @@ mod tests {
         probe.press(&mut wizard, pos2(field.rect.center().x, field.rect.min.y + 2.0));
         assert!(wizard.editing.is_none(), "a press where the field does not show is no press on it");
         assert_eq!(wizard.folders[0].name, "00", "the draft kept");
+    }
+
+    /// At the cells' floor the column has no room for the tall add card
+    /// and two rows under it: the card and the rows are the short ones, and
+    /// the table shows both folders whole, where the tall card left it 35
+    /// points of one 40-point row. On the boards' page both keep their
+    /// height.
+    #[test]
+    fn at_the_cells_floor_the_add_card_is_short_and_the_table_shows_a_row_whole() {
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        let mut wizard = wizard();
+        wizard.add_folder("/srv/music".into());
+        wizard.add_folder("/srv/vinyl".into());
+        let probe = Probe::new(super::super::FLOOR);
+        let _ = probe.settle(&mut wizard);
+        // The reveal's scroll is egui's, eased over a few passes.
+        for _ in 0..10 {
+            let _ = probe.pass_after(&mut wizard, Vec::new(), 0.1);
+        }
+        let (out, _) = probe.pass(&mut wizard, Vec::new());
+        assert!(has(&drawn(&out), "Add a music folder"), "the card keeps its words");
+        assert_eq!(probe.rect(Id::new("setup-add")).height(), studio::HIT, "the short card");
+        let seen = |i: usize| probe.ctx.read_response(nth("setup-path", i)).map(|r| r.interact_rect.height());
+        assert_eq!((seen(0), seen(1)), (Some(super::SHORT_ROW_H), Some(super::SHORT_ROW_H)), "both rows whole");
+        // The add card's click is the same at either height, and a name's
+        // field fits its short row.
+        probe.click(&mut wizard, Id::new("setup-add"));
+        assert_eq!(wizard.queued, Some(Op::PickNative));
+        wizard.act(Act::RenameFolder(0));
+        let (_, shown) = probe.settle(&mut wizard);
+        let (field, row) = (probe.rect(Id::new("setup-rename")), probe.rect(nth("setup-path", 0)));
+        assert!(field.min.y >= row.min.y && field.max.y <= row.max.y && shown.caret.is_some(), "{field:?} in {row:?}");
+
+        let probe = Probe::new(BOARD);
+        let _ = probe.settle(&mut wizard);
+        assert_eq!(probe.rect(Id::new("setup-add")).height(), studio::CARD_H, "the tall card on the boards' page");
+        assert_eq!(probe.rect(nth("setup-path", 0)).height(), super::ROW_H, "and the tall rows");
     }
 
     #[test]

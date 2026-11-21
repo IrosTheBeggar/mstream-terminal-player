@@ -1459,13 +1459,35 @@ fn draw_glyph(ui: &Ui, at: Pos2, glyph: Glyph, color: Color32) {
     }
 }
 
-/// A room's call to act, the column wide and 56 points tall: a hairline in
+/// A [`card`]'s height.
+pub(crate) const CARD_H: f32 = 56.0;
+
+/// A room's call to act, the column wide and [`CARD_H`] tall: a hairline in
 /// `tone` with `glyph` and `label` (bare of the cells' arrows) in its
 /// semibold at the centre, washed in the tone under the pointer. While not
 /// `live` it is dim and takes no click: its act on its way.
 pub(crate) fn card(ui: &mut Ui, id: Id, label: &str, glyph: Glyph, tone: Color32, live: bool, pal: &Pal) -> Response {
+    card_of(ui, id, label, glyph, tone, live, CARD_H, pal)
+}
+
+/// A room's add card: a [`card`] in the ok green with its room's glyph
+/// (the canvas's "Add a music folder").
+pub(crate) fn add_card(ui: &mut Ui, id: Id, label: &str, glyph: Glyph, pal: &Pal) -> Response {
+    card(ui, id, label, glyph, pal.ok, true, pal)
+}
+
+/// An [`add_card`] a control's [`HIT`] tall, for a page too short for the
+/// tall one: the same hairline, glyph and words, as the wizard's Done
+/// shortens its link cards where it has no room for theirs.
+pub(crate) fn short_add_card(ui: &mut Ui, id: Id, label: &str, glyph: Glyph, pal: &Pal) -> Response {
+    card_of(ui, id, label, glyph, pal.ok, true, HIT, pal)
+}
+
+/// A [`card`] `h` points tall.
+#[allow(clippy::too_many_arguments)]
+fn card_of(ui: &mut Ui, id: Id, label: &str, glyph: Glyph, tone: Color32, live: bool, h: f32, pal: &Pal) -> Response {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 56.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let response = if live { hand(ui.interact(rect, id, Sense::click())) } else { ui.interact(rect, id, Sense::hover()) };
     let tone = if live { tone } else { pal.dim };
     if live && response.hovered() {
@@ -1480,12 +1502,6 @@ pub(crate) fn card(ui: &mut Ui, id: Id, label: &str, glyph: Glyph, tone: Color32
     draw_glyph(ui, pos2(left + 8.0, rect.center().y), glyph, tone);
     text(ui, pos2(left + lead, rect.center().y), label, font, tone, words + 1.0, Align2::LEFT_CENTER);
     response
-}
-
-/// A room's add card: a [`card`] in the ok green with its room's glyph
-/// (the canvas's "Add a music folder").
-pub(crate) fn add_card(ui: &mut Ui, id: Id, label: &str, glyph: Glyph, pal: &Pal) -> Response {
-    card(ui, id, label, glyph, pal.ok, true, pal)
 }
 
 /// A card that is one flag's tick, the column wide and 60 points tall, on
