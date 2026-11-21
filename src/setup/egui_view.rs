@@ -68,7 +68,8 @@ const LOGO_ROOM: f32 = 56.0 + 18.0 + 34.0 + 3.0 * 40.0;
 /// The least the wordmark is drawn at: on a column with less room for it
 /// the screen goes without.
 const LOGO_LEAST: f32 = 24.0;
-/// A tooltip's widest: the boards', about the cells' 40 characters.
+/// A tooltip's widest: the boards', the room for the cells' 40 cells of
+/// words, which [`tip`] wraps them at.
 const TIP_W: f32 = 300.0;
 
 /// What the view keeps between frames that egui's memory cannot: when a
@@ -226,10 +227,12 @@ fn dwell(ctx: &egui::Context) {
 }
 
 /// The cells' tooltip for `response`: `words` in the kit's box under the
-/// target's middle, over it where there is no room under it, no wider than
-/// the boards' [`TIP_W`], once the pointer has rested on the target for the
-/// cells' dwell, and never in the dwell after a key, which hides it as it
-/// hides the cells'. The next pass is asked for when that dwell ends.
+/// target's middle, over it where there is no room under it, in the cells'
+/// lines (wrapped at their 40 cells, `kit::wrap_tip`, a word wider than
+/// that, a path, broken between its letters), no wider than the boards'
+/// [`TIP_W`], once the pointer has rested on the target for the cells'
+/// dwell, and never in the dwell after a key, which hides it as it hides
+/// the cells'. The next pass is asked for when that dwell ends.
 fn tip(page: &Page, response: &Response, words: &str) {
     if let Some(since) = page.since_key.filter(|since| *since < TIP_DELAY) {
         response.ctx.request_repaint_after(TIP_DELAY - since);
@@ -237,7 +240,7 @@ fn tip(page: &Page, response: &Response, words: &str) {
     }
     let mut tooltip = egui::Tooltip::for_enabled(response);
     tooltip.popup = tooltip.popup.align(egui::RectAlign::BOTTOM).align_alternatives(&[egui::RectAlign::TOP]).gap(8.0);
-    let words = egui::RichText::new(words).font(body(12.5)).color(page.pal.text);
+    let words = egui::RichText::new(crate::kit::wrap_tip(words).join("\n")).font(body(12.5)).color(page.pal.text);
     let _ = tooltip.show(|ui| {
         ui.set_max_width(TIP_W);
         ui.add(egui::Label::new(words));
@@ -383,17 +386,79 @@ fn logo(ui: &Ui, column: Rect) -> f32 {
         return column.min.y;
     }
     let band = Rect::from_min_size(column.min, vec2(column.width(), h));
-    if let Some(texture) = studio::texture(ui.ctx(), Id::new("setup-logo"), 0, false, logo_image) {
+    if let Some(texture) = logo_texture(ui.ctx(), band) {
         studio::picture(ui, band, &texture);
     }
     band.max.y + LOGO_GAP * h / LOGO_H
 }
 
-/// The wordmark's pixels with their alpha, as egui takes them.
-fn logo_image() -> Option<egui::ColorImage> {
+/// The wordmark's texture for `band`: the picture halved as many times as
+/// leaves it at most twice the pixels it is drawn at, each half made once
+/// and kept. The window's textures have no mipmaps, and one sampled at
+/// under half its size skips texels (covers.rs fits a cover down for the
+/// same reason): the 1224 pixels drawn 372 points wide on a screen at 100%
+/// would lose the wordmark's thin strokes, which their half keeps.
+fn logo_texture(ctx: &egui::Context, band: Rect) -> Option<egui::TextureHandle> {
+    let halvings = halvings(logo_size(ctx)?, band, ctx.pixels_per_point());
+    studio::texture(ctx, Id::new("setup-logo").with(halvings), 0, false, || logo_image(halvings))
+}
+
+/// How many times a picture `size` pixels is halved to be drawn whole in
+/// `band` at `ppp` pixels a point: as often as leaves it at most twice the
+/// pixels it is drawn at, and never once where it is drawn at its own size
+/// or larger.
+fn halvings(size: Vec2, band: Rect, ppp: f32) -> u32 {
+    let drawn = size.x * (band.width() / size.x).min(band.height() / size.y) * ppp;
+    (size.x / drawn.max(1.0)).log2().floor().clamp(0.0, 8.0) as u32
+}
+
+/// The wordmark's size in pixels, read once off its header and kept.
+fn logo_size(ctx: &egui::Context) -> Option<Vec2> {
+    let id = Id::new("setup-logo-size");
+    if let Some(kept) = ctx.data(|d| d.get_temp::<Option<Vec2>>(id)) {
+        return kept;
+    }
+    let reader = image::ImageReader::new(std::io::Cursor::new(LOGO_PNG)).with_guessed_format().ok();
+    let size = reader.and_then(|r| r.into_dimensions().ok()).map(|(w, h)| vec2(w as f32, h as f32));
+    ctx.data_mut(|d| d.insert_temp(id, size));
+    size
+}
+
+/// The wordmark's pixels with their alpha, as egui takes them, halved
+/// `halvings` times: each half a texel the mean of the four under it,
+/// premultiplied, so the clear pixels round its strokes lend the edges
+/// none of their colour (a mipmap's level, made by hand).
+fn logo_image(halvings: u32) -> Option<egui::ColorImage> {
     let image = image::load_from_memory(LOGO_PNG).ok()?.to_rgba8();
     let size = [image.width() as usize, image.height() as usize];
-    Some(egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()))
+    let mut image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    for _ in 0..halvings {
+        image = halved(&image);
+    }
+    Some(image)
+}
+
+/// `image` at half its size, each texel the mean of the (premultiplied)
+/// two by two under it: an odd last row or column is left out, as a
+/// mipmap's level leaves it, and a side one texel long is kept.
+fn halved(image: &egui::ColorImage) -> egui::ColorImage {
+    let [w, h] = image.size;
+    let (hw, hh) = ((w / 2).max(1), (h / 2).max(1));
+    let at = |x: usize, y: usize| image.pixels[y.min(h - 1) * w + x.min(w - 1)].to_array();
+    let mut pixels = Vec::with_capacity(hw * hh);
+    for y in 0..hh {
+        for x in 0..hw {
+            let mut sum = [0u32; 4];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                for (s, v) in sum.iter_mut().zip(at(2 * x + dx, 2 * y + dy)) {
+                    *s += u32::from(v);
+                }
+            }
+            let [r, g, b, a] = sum.map(|s| ((s + 2) / 4) as u8);
+            pixels.push(egui::Color32::from_rgba_premultiplied(r, g, b, a));
+        }
+    }
+    egui::ColorImage::new([hw, hh], pixels)
 }
 
 /// The status line across `rect`, the cells' one row of it: what the
@@ -648,6 +713,11 @@ mod tests {
         drawn.iter().any(|d| d == words)
     }
 
+    /// `words` as a tooltip draws them: the cells' lines.
+    pub(super) fn tipped(words: &str) -> String {
+        crate::kit::wrap_tip(words).join("\n")
+    }
+
     /// The colour `words` were drawn in, where the pass drew them.
     pub(super) fn color_of(out: &FullOutput, words: &str) -> Option<Color32> {
         out.shapes.iter().find_map(|clipped| match &clipped.shape {
@@ -710,14 +780,17 @@ mod tests {
         let key = tips.sections.iter().find(|s| &tips.text[s.byte_range.start.0..s.byte_range.end.0] == "b").expect("the key b");
         assert_eq!(key.format.font_id, mono(12.5));
         // The wordmark, a texture of its own, whole at the boards' 372 by
-        // 93, centred at the column's head.
+        // 93, centred at the column's head, from the picture's half (612
+        // by 153): at one pixel a point the whole 1224 would be sampled at
+        // under half its size.
         let logo = out.shapes.iter().find_map(|c| match &c.shape {
-            Shape::Mesh(mesh) if mesh.texture_id != egui::TextureId::default() => Some(mesh.calc_bounds()),
+            Shape::Mesh(mesh) if mesh.texture_id != egui::TextureId::default() => Some((mesh.calc_bounds(), mesh.texture_id)),
             _ => None,
         });
-        let logo = logo.expect("the wordmark drawn");
+        let (logo, texture) = logo.expect("the wordmark drawn");
         assert!((logo.width() - 372.0).abs() < 1.0 && (logo.height() - 93.0).abs() < 1.0, "{logo:?}");
         assert!((logo.center().x - 640.0).abs() < 0.5 && (logo.min.y - 64.0).abs() < 0.5, "{logo:?}");
+        assert_eq!(probe.ctx.tex_manager().read().meta(texture).map(|m| m.size), Some([612, 153]));
         assert!(shown.caret.is_none() && shown.outcome.is_none(), "no field, nothing ended");
     }
 
@@ -938,6 +1011,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The wordmark is never sampled at under half its pixels (the window's
+    /// textures have no mipmaps): halved until it is at most twice what it
+    /// is drawn at, whole where the screen's pixels are as many, each half
+    /// the mean of the premultiplied texels under it.
+    #[test]
+    fn the_wordmark_is_halved_to_within_twice_the_pixels_it_is_drawn_at() {
+        let size = vec2(1224.0, 306.0);
+        let band = |h: f32| Rect::from_min_size(pos2(280.0, 64.0), vec2(720.0, h));
+        assert_eq!(halvings(size, band(93.0), 1.0), 1, "372 pixels wide: the 612 half");
+        assert_eq!(halvings(size, band(93.0), 1.5), 1, "558 wide: still the half");
+        assert_eq!(halvings(size, band(93.0), 2.0), 0, "744 wide: the whole");
+        assert_eq!(halvings(size, band(93.0), 3.0), 0, "never more than whole");
+        assert_eq!(halvings(size, band(24.0), 1.0), 3, "the least it is drawn at: an eighth");
+        assert_eq!(halvings(size, Rect::from_min_size(Pos2::ZERO, vec2(100.0, 93.0)), 1.0), 3, "a narrow band, by its width");
+        for (h, ppp) in [(93.0, 1.0), (93.0, 1.25), (60.0, 1.0), (24.0, 2.0)] {
+            let n = halvings(size, band(h), ppp);
+            let ratio = size.y / 2f32.powi(n as i32) / (h * ppp);
+            assert!(ratio <= 2.0 + 1e-3, "{h} at {ppp}: {n} halvings sample at {ratio}");
+        }
+        let image = logo_image(1).expect("the half");
+        assert_eq!(image.size, [612, 153]);
+        // Each texel the mean of the four under it, an odd last column
+        // left out.
+        let red = Color32::from_rgba_premultiplied(200, 0, 0, 200);
+        let two = egui::ColorImage::new([2, 2], vec![red, Color32::TRANSPARENT, Color32::TRANSPARENT, Color32::TRANSPARENT]);
+        assert_eq!(halved(&two).pixels, [Color32::from_rgba_premultiplied(50, 0, 0, 50)]);
+        let three = egui::ColorImage::new([3, 1], vec![red, red, Color32::TRANSPARENT]);
+        assert_eq!((halved(&three).size, halved(&three).pixels), ([1, 1], vec![red]));
     }
 
     #[test]

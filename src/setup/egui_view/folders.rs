@@ -13,7 +13,7 @@
 //! on the name being edited keeps the draft first, as the cells' blur does.
 //! Rows take no click as a whole: the keyboard's cursor is the keys'.
 
-use egui::{Align2, Color32, FontId, Id, Rect, Sense, Ui, pos2, vec2};
+use egui::{Align2, Color32, Id, Rect, Sense, Ui, pos2, vec2};
 use rust_i18n::t;
 
 use super::super::{Act, Folder, REMOVE_TIP, Wizard, ellipsize_path_start};
@@ -115,10 +115,12 @@ pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, page: &Page) -> Drawn {
 
 /// A row's name, the folder's vpath, in its cell: a button as wide as its
 /// words in the text colour, white under the pointer with the hand,
-/// semibold on the cursor's row, cut plainly at the cell's edge as the
-/// cells cut it. Its tooltip says what a click does, in the cells' words:
-/// rename it, or for a folder already on the server that it cannot be
-/// renamed here. Whether it was clicked.
+/// semibold on the cursor's row, cut with an ellipsis at the cell's edge,
+/// as the boards' button cuts it and the kit cuts a name (the cells cut it
+/// plainly, its last letter touching the path: no gap in the cells, the
+/// columns' 16 points here). Its tooltip says what a click does, in the
+/// cells' words: rename it, or for a folder already on the server that it
+/// cannot be renamed here. Whether it was clicked.
 fn name(ui: &Ui, row: &RowCtx, i: usize, folder: &Folder, page: &Page) -> bool {
     let pal = &page.pal;
     let cell = row.cell(0);
@@ -127,7 +129,7 @@ fn name(ui: &Ui, row: &RowCtx, i: usize, folder: &Folder, page: &Page) -> bool {
     let rect = Rect::from_min_size(pos2(cell.min.x, cell.center().y - HIT / 2.0), vec2(words, HIT));
     let response = studio::hand(ui.interact(rect, Id::new("setup-name").with(i), Sense::click()));
     let color = if response.hovered() { Color32::WHITE } else { pal.text };
-    clipped(ui, cell, &folder.name, font, color);
+    studio::text(ui, cell.left_center(), &folder.name, font, color, cell.width().max(1.0), Align2::LEFT_CENTER);
     let why = if folder.committed { t!("note.committed_rename") } else { t!("folders.tip_name") };
     tip(page, &response, &why);
     response.clicked()
@@ -165,15 +167,6 @@ fn path(ui: &Ui, row: &RowCtx, i: usize, folder: &Folder, page: &Page) {
     }
 }
 
-/// `s` in one line from `rect`'s left, its middle on `rect`'s, cut plainly
-/// at the rect's right edge: no ellipsis, as the cells and the canvas cut a
-/// long name.
-fn clipped(ui: &Ui, rect: Rect, s: &str, font: FontId, color: Color32) {
-    let galley = ui.painter().layout_no_wrap(s.to_string(), font, color);
-    let at = pos2(rect.min.x, rect.center().y - galley.size().y / 2.0);
-    ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(at, galley, color);
-}
-
 #[cfg(test)]
 mod tests {
     use egui::epaint::Shape;
@@ -181,7 +174,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use rust_i18n::t;
 
-    use super::super::tests::{BOARD, Probe, color_of, drawn, has, wizard};
+    use super::super::tests::{BOARD, Probe, color_of, drawn, has, tipped, wizard};
     use crate::gui::window::studio::Pal;
     use crate::setup::tests::LOCALE_LOCK;
     use crate::setup::{Act, Done, FolderCheck, Modal, Op, Wizard, ellipsize_path_start, handle_key};
@@ -224,6 +217,7 @@ mod tests {
         wizard.add_folder("C:\\Users\\anna\\Music".into());
         let long = format!("D:\\{}\\Vinyl Rips", "Archive\\Lossless\\".repeat(9).trim_end_matches('\\'));
         wizard.add_folder(long.clone());
+        wizard.add_folder("/srv/The Complete Recordings Of Everything Ever".into());
         let (out, shown) = probe.settle(&mut wizard);
         let words = drawn(&out);
         let hint = t!("hint.folders_rows").to_string();
@@ -236,9 +230,20 @@ mod tests {
         assert_eq!(color_of(&out, "music"), Some(pal.text));
         assert_eq!(color_of(&out, "CONTINUE"), Some(pal.on_accent), "Continue lit: there is something to continue with");
         assert!(shown.caret.is_none(), "no name is being edited");
+        // A name longer than NAME is cut with an ellipsis inside it, as the
+        // boards' name button cuts one, and its click is no wider.
+        let cut = out.shapes.iter().find_map(|c| match &c.shape {
+            Shape::Text(t) if t.galley.text() == "the-complete-recordings-of-everything-ever" => Some(t.galley.clone()),
+            _ => None,
+        });
+        let cut = cut.expect("the long name drawn");
+        assert!(cut.elided && cut.size().x <= super::NAME_W + 0.5, "cut with an ellipsis: {:?}", cut.size());
+        let name = probe.rect(nth("setup-name", 2));
+        assert!(name.width() <= super::NAME_W + 0.5, "{name:?}");
         // The cut path's whole, in its tooltip, at most the cells' three lines.
         let cell = probe.rect(nth("setup-path", 1)).center();
-        let tip = ellipsize_path_start(&long, crate::kit::TIP_WRAP * 3).0;
+        let tip = tipped(&ellipsize_path_start(&long, crate::kit::TIP_WRAP * 3).0);
+        assert_eq!(tip.lines().count(), 3, "{tip}");
         assert!(has(&drawn(&probe.rest(&mut wizard, cell, 0.6)), &tip), "the whole path in the tip");
         // A short one, whole in its cell, has none: its words once, the cell's.
         let cell = probe.rect(nth("setup-path", 0)).center();
@@ -276,15 +281,18 @@ mod tests {
             .collect();
         assert_eq!(leds.len(), 1, "{leds:?}");
         assert!(cell.contains(leds[0].center()) && leds[0].min.x - cell.min.x < 1.0, "{leds:?} in {cell:?}");
-        // Resting anywhere in the cell, the words why.
+        // Resting anywhere in the cell, the words why, in the lines the
+        // cells' 40-cell wrap breaks them into (the board's two).
         let blank = pos2(cell.max.x - 10.0, cell.center().y);
-        assert!(has(&drawn(&probe.rest(&mut wizard, blank, 0.6)), &t!("folders.warn_nested")));
+        let why = "Inside another chosen folder — it would\nbe scanned twice";
+        assert_eq!(tipped(&t!("folders.warn_nested")), why);
+        assert!(has(&drawn(&probe.rest(&mut wizard, blank, 0.6)), why));
         // The local check's other answers wear the same gold and tell their own.
         checked(&mut wizard, "/home/anna/Vinyl", FolderCheck::Missing);
         let (out, _) = probe.settle(&mut wizard);
         assert_eq!(color_of(&out, "/home/anna/Vinyl"), Some(pal.gold));
         let cell = probe.rect(nth("setup-path", 1)).center();
-        assert!(has(&drawn(&probe.rest(&mut wizard, cell, 0.6)), &t!("folders.warn_missing")));
+        assert!(has(&drawn(&probe.rest(&mut wizard, cell, 0.6)), &tipped(&t!("folders.warn_missing"))));
     }
 
     #[test]
@@ -324,10 +332,15 @@ mod tests {
         probe.click(&mut wizard, nth("setup-name", 0));
         assert!(wizard.editing.is_none());
         assert_eq!(wizard.note, Some((t!("note.committed_rename").to_string(), false)));
+        // (Its tip in the cells' lines, which the note's one line is not;
+        // egui shows none where the pointer rests after a click until it
+        // has moved a beat later, so it goes away and comes back.)
         let name = probe.rect(nth("setup-name", 0)).center();
-        assert!(has(&drawn(&probe.rest(&mut wizard, name, 0.6)), &t!("note.committed_rename")));
+        let _ = probe.pass_after(&mut wizard, vec![Event::PointerMoved(pos2(4.0, 4.0))], 0.2);
+        let seen = drawn(&probe.rest(&mut wizard, name, 0.6));
+        assert!(has(&seen, &tipped(&t!("note.committed_rename"))), "{seen:?}");
         let name = probe.rect(nth("setup-name", 1)).center();
-        assert!(has(&drawn(&probe.rest(&mut wizard, name, 0.6)), &t!("folders.tip_name")));
+        assert!(has(&drawn(&probe.rest(&mut wizard, name, 0.6)), &tipped(&t!("folders.tip_name"))));
         // A row takes no click as a whole: the cursor is the keys'.
         let row = probe.rect(nth("setup-path", 1));
         probe.press(&mut wizard, pos2(row.max.x - 4.0, row.center().y));
@@ -336,7 +349,7 @@ mod tests {
         // follows a click at once: a beat first.)
         let _ = probe.pass_after(&mut wizard, Vec::new(), 0.2);
         let cross = probe.rect(nth("setup-remove", 1)).center();
-        assert!(has(&drawn(&probe.rest(&mut wizard, cross, 0.6)), super::REMOVE_TIP));
+        assert!(has(&drawn(&probe.rest(&mut wizard, cross, 0.6)), &tipped(super::REMOVE_TIP)));
     }
 
     #[test]
