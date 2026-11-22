@@ -220,6 +220,12 @@ impl App {
         let window = Arc::new(
             event_loop.create_window(attributes).map_err(|e| format!("the window would not open: {e}"))?,
         );
+        // Watched, as the player's window is, for the graphics stack's
+        // restarts, after which its picture comes back shifted by the frame
+        // until the window moves; the watch ends as the window is destroyed
+        // (display_watch.rs).
+        #[cfg(windows)]
+        crate::display_watch::watch(&window);
         // The instance by the rule the player's own window follows
         // (`gpu_pick`: on Windows DX12 or Vulkan alone, never GL, whose
         // presence in a process froze its window on a keyboard-layout

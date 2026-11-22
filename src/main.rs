@@ -45,6 +45,11 @@ mod shader;
 /// process instead of hanging it behind WER's dialog.
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu_pick;
+/// On Windows, a window's picture put back in place after the graphics stack
+/// restarts (a driver reset, or the PC out of connected standby), for the
+/// player's window and the visualizer's; its rule is tested on every OS.
+#[cfg(all(not(target_arch = "wasm32"), any(windows, test)))]
+mod display_watch;
 /// The visualizer's window: a child process of the player (PLAN.md, Phase
 /// 11.1; docs/ux-contracts/visualizer-window.md).
 #[cfg(not(target_arch = "wasm32"))]
