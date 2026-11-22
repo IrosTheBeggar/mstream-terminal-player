@@ -2581,8 +2581,14 @@ impl<'a> Dialog<'a> {
             // The body's view starts where its content does, on the pixel
             // egui puts that on, and is a whole number of 32nds of a point
             // tall (egui's grid), so it is as tall on every pass, wherever
-            // the height the window last took has moved it.
-            let budget = (max_h - fixed).max(0.0).floor_ui();
+            // the height the window last took has moved it. The floor
+            // has a 1024th's grace: `over`'s height is a difference of
+            // two of its edges, so a room a whole number of 32nds tall can
+            // come to at most a few ten-thousandths of a point under it,
+            // and the floor would take a whole 32nd from the body for that.
+            // A view up to a 1024th taller than the room costs nothing: the
+            // window it asks for is held to `max_h`.
+            let budget = ((max_h - fixed).max(0.0) + 1.0 / 1024.0).floor_ui();
             let top = (inner.min.y + title_h + MODAL_GAP).round_to_pixels(ui.pixels_per_point()).round_ui();
             // The scrolled area reaches into the window's padding, where its
             // thumb stands 8 points in from the window's edge, clear of the
@@ -4263,8 +4269,10 @@ mod tests {
             let _ = pass(&ctx, size, Vec::new(), &mut |ui| foot_h = foot_rects(ui, &buttons, &[], width - 2.0 * MODAL_PAD).1);
             // The body too short for the path, a row and the foot with the
             // 12 and the 20 by a fraction of a point, by a point and more,
-            // by half the two gaps, and by all of them but a fraction.
-            for (case, short) in [0.3, 1.3, 16.7, 31.3].into_iter().enumerate() {
+            // by half the two gaps, by all of them but a fraction, and by
+            // all of them, where the body is exactly as tall as the path,
+            // the row and the foot.
+            for (case, short) in [0.3, 1.3, 16.7, 31.3, 32.0].into_iter().enumerate() {
                 for step in 0..6 {
                     let id = Id::new("probe-off-pixels").with(case).with(step);
                     let budget = 18.0 + 12.0 + 30.0 + 20.0 + foot_h - short;
