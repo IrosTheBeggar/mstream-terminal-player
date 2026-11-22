@@ -412,13 +412,25 @@ rfd = { version = "0.18", default-features = false }
 # the disk's bus and removable flag, its partition style); System_Registry
 # reads where Windows itself lives (the system partition, the page files),
 # whose disks are never a card's.
+#
+# Win32_System_Power is the console display setting's registration and its
+# withdrawal, and the POWERBROADCAST_SETTING it is read from, both flavours
+# (src/display_watch.rs): a window of ours hears the console display come
+# back on after connected standby, and puts its picture back in place.
+# Graphics_Gdi is MonitorFromWindow and MonitorFromRect alone, for that
+# watch's nudge to keep the window on its monitor (and so at its scale);
+# WindowsAndMessaging has the rest of the watch (the procedure in front of
+# winit's, WM_DISPLAYCHANGE, the nudge and the message it is posted back
+# as).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_Time",
     "Win32_UI_Shell",

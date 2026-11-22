@@ -47,6 +47,14 @@
 //! what is typed or clicked while the window stands blank, its renderer
 //! still being built, takes effect once the first frame has drawn (held.rs).
 //!
+//! What Windows gets wrong about the window, the window puts right: after
+//! the graphics stack restarts (a driver reset, or the PC out of connected
+//! standby) its swap chain's picture comes back shifted by the window's
+//! frame, the tab bar cut off, until the window moves, and no winit event
+//! says so. The window is watched for the messages that come with a
+//! restart and nudged a pixel and straight back (`crate::display_watch`,
+//! which the visualizer's window shares).
+//!
 //! What the terminal's main does on the way out, the window does itself:
 //! the launcher's instance lock is dropped after the App, or in `exiting`
 //! when a Cmd-Q on macOS ends the process without returning from the event
@@ -811,6 +819,11 @@ impl App {
         // alone, and the dialogs open on worker threads.
         #[cfg(windows)]
         crate::setup::picker::set_owner(hwnd(&window));
+        // And it is watched for the graphics stack's restarts, after which a
+        // flip-model swap chain's picture comes back shifted by the window's
+        // frame until the window moves (display_watch.rs).
+        #[cfg(windows)]
+        crate::display_watch::watch(&window);
         self.panel.attach(window.clone());
         self.window = Some(window);
         self.poll_build(OPEN_WAIT)
@@ -1682,9 +1695,13 @@ impl App {
         self.done = true;
         // The dialogs stop naming the window before it is destroyed below
         // (or leaked, past a hung build), so no later one is handed a stale
-        // handle for its owner.
+        // handle for its owner; and the display watch lets go of it, its
+        // power registration with it.
         #[cfg(windows)]
-        crate::setup::picker::set_owner(None);
+        {
+            crate::setup::picker::set_owner(None);
+            crate::display_watch::unwatch();
+        }
         if let Some(stats) = &self.stats {
             let covers = self.terminal.as_ref().map(|t| t.backend().post_processor().report());
             stats.write(covers);
