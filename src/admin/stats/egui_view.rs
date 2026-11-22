@@ -14,21 +14,20 @@
 //! capitals, figures in the grid's own monospace (Hack, already in the
 //! binary), and LED meters for bars, each a column of small lit segments
 //! in amber. The ground is the kit's, so the panel meets the cells of the
-//! top bar with no seam.
+//! top bar with no seam. The look's palette, faces and widgets are the
+//! Studio kit's (src/gui/window/studio.rs), which the admin rooms share;
+//! what is drawn here is the page's own.
 //!
 //! Built only with the window: the terminal build has no panel to draw in.
 
 use egui::epaint::{CornerRadius, Shape, StrokeKind};
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{
-    Align, Align2, Color32, FontFamily, FontId, Id, Layout, Pos2, Rect, Response, ScrollArea, Sense, Stroke, Ui,
-    UiBuilder, Vec2, pos2, vec2,
-};
-use ratatui::style::Color;
+use egui::{Align, Align2, Color32, Id, Layout, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use super::*;
-use crate::gui::window::panel::STRONG;
-use crate::kit::theme::th;
+use crate::gui::window::studio::{
+    Col, LED, LED_GAP, Pal, RowCtx, SEG_H, Seg, Table, arrow, begin, body, button, caps, caps_width, cell, chevron, ink,
+    led_column, led_row, mono, panel, segmented, segmented_width, sentence, square, strong, text, width_of,
+};
 
 /// The page's margin inside the panel, in points.
 const PAD: Vec2 = vec2(22.0, 14.0);
@@ -36,94 +35,11 @@ const PAD: Vec2 = vec2(22.0, 14.0);
 const NOTE_H: f32 = 30.0;
 const GAP: f32 = 10.0;
 const ROW_H: f32 = 30.0;
-/// The desk's corners: square, softened by a point or two.
-const RADIUS: u8 = 3;
-/// An LED segment's height and the dark gap above it, in points.
-const LED: f32 = 4.0;
-const LED_GAP: f32 = 2.0;
-/// Spaced capitals: this much extra room per letter, as a share of the size.
-const TRACK: f32 = 0.12;
-
-/// The desk's palette. The ground, the body text's ok green and the gold
-/// are the kit's (the window pins truecolour, so every role is an RGB; the
-/// fallbacks are the canvas hexes); the rest is Studio's own.
-struct Pal {
-    ground: Color32,
-    panel: Color32,
-    raised: Color32,
-    edge: Color32,
-    edge_strong: Color32,
-    text: Color32,
-    dim: Color32,
-    accent: Color32,
-    accent_hot: Color32,
-    on_accent: Color32,
-    unlit: Color32,
-    down: Color32,
-    up: Color32,
-    gold: Color32,
-    ok: Color32,
-}
-
-impl Pal {
-    fn now() -> Pal {
-        let th = th();
-        let rgb = |c: Color, fallback: Color32| match c {
-            Color::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
-            _ => fallback,
-        };
-        let ground = th.ground_rgb.map_or(Color32::from_rgb(0x12, 0x13, 0x1c), |(r, g, b)| Color32::from_rgb(r, g, b));
-        Pal {
-            ground,
-            panel: lift(ground, 6),
-            raised: lift(ground, 14),
-            edge: lift(ground, 22),
-            edge_strong: lift(ground, 36),
-            text: Color32::from_rgb(0xe6, 0xe6, 0xe3),
-            dim: Color32::from_rgb(0x9a, 0x9c, 0x98),
-            accent: Color32::from_rgb(0xf2, 0xa9, 0x3b),
-            accent_hot: Color32::from_rgb(0xff, 0xcf, 0x7a),
-            on_accent: Color32::from_rgb(0x1a, 0x12, 0x06),
-            unlit: lift(ground, 18),
-            down: Color32::from_rgb(0xff, 0x8a, 0x6b),
-            up: rgb(th.ok, Color32::from_rgb(0x8f, 0xd1, 0x8b)),
-            gold: rgb(th.gold, Color32::from_rgb(0xe0, 0xb4, 0x5a)),
-            ok: rgb(th.ok, Color32::from_rgb(0x8f, 0xd1, 0x8b)),
-        }
-    }
-}
-
-/// `c` lifted toward white by `by` of 255, opaque.
-fn lift(c: Color32, by: u8) -> Color32 {
-    let up = |v: u8| v.saturating_add(by);
-    Color32::from_rgb(up(c.r()), up(c.g()), up(c.b()))
-}
-
-/// Names and prose: the system's UI face.
-fn body(size: f32) -> FontId {
-    FontId::proportional(size)
-}
-
-/// Labels, set in spaced capitals ([`caps`]): the UI face's semibold.
-fn strong(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name(STRONG.into()))
-}
-
-/// Figures: the grid's monospace.
-fn mono(size: f32) -> FontId {
-    FontId::monospace(size)
-}
-
-fn square() -> CornerRadius {
-    CornerRadius::same(RADIUS)
-}
 
 /// One pass of the page over the whole of `ui` — the panel's region.
 pub(crate) fn show(ui: &mut Ui, page: &mut Page) {
-    let pal = Pal::now();
-    style_once(ui.ctx(), &pal);
+    let pal = begin(ui);
     let full = ui.max_rect();
-    ui.painter().rect_filled(full, 0.0, pal.ground);
     let column = full.shrink2(PAD);
     let body_rect = Rect::from_min_max(column.min, pos2(column.max.x, column.max.y - NOTE_H));
     let note_rect = Rect::from_min_max(pos2(column.min.x, column.max.y - NOTE_H), column.max);
@@ -160,183 +76,7 @@ pub(crate) fn show(ui: &mut Ui, page: &mut Page) {
     }
 }
 
-/// egui's look for the page, set once: dark, amber on the scroll bars.
-fn style_once(ctx: &egui::Context, pal: &Pal) {
-    let id = Id::new("stats-egui-styled");
-    if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
-        return;
-    }
-    ctx.set_theme(egui::Theme::Dark);
-    let (accent, text, ground, edge) = (pal.accent, pal.text, pal.ground, pal.edge_strong);
-    ctx.all_styles_mut(|style| {
-        style.visuals.selection.bg_fill = accent;
-        style.visuals.extreme_bg_color = ground;
-        style.visuals.panel_fill = ground;
-        style.visuals.window_fill = ground;
-        let widgets = &mut style.visuals.widgets;
-        for state in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
-            state.fg_stroke.color = text;
-            state.corner_radius = CornerRadius::same(1);
-        }
-        widgets.inactive.bg_fill = edge;
-        widgets.hovered.bg_fill = accent.gamma_multiply(0.75);
-        widgets.active.bg_fill = accent;
-        style.spacing.item_spacing = vec2(8.0, 0.0);
-        style.interaction.tooltip_delay = 0.0;
-    });
-    ctx.data_mut(|d| d.insert_temp(id, true));
-}
-
 // ── Painting helpers ──────────────────────────────────────────────────────
-
-/// `s` in one line no wider than `max_w`, an ellipsis where it is cut,
-/// `spacing` points between letters, anchored at `pos` by `align`.
-/// Returns where it was drawn.
-#[allow(clippy::too_many_arguments)]
-fn spaced(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, spacing: f32, max_w: f32, align: Align2) -> Rect {
-    let format = TextFormat { font_id: font, color, extra_letter_spacing: spacing, ..Default::default() };
-    let mut job = LayoutJob::single_section(s.to_string(), format);
-    job.wrap = TextWrapping::truncate_at_width(max_w.max(1.0));
-    let galley = ui.painter().layout_job(job);
-    let rect = align.anchor_size(pos, galley.size());
-    ui.painter().galley(rect.min, galley, color);
-    rect
-}
-
-/// `s` in one line, as [`spaced`] with no extra room between letters.
-fn text(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, max_w: f32, align: Align2) -> Rect {
-    spaced(ui, pos, s, font, color, 0.0, max_w, align)
-}
-
-/// A label in the desk's spaced capitals.
-fn caps(ui: &Ui, pos: Pos2, s: &str, size: f32, color: Color32, max_w: f32, align: Align2) -> Rect {
-    spaced(ui, pos, &s.to_uppercase(), strong(size), color, size * TRACK, max_w, align)
-}
-
-/// How wide [`caps`] draws `s` at `size`.
-fn caps_width(ui: &Ui, s: &str, size: f32) -> f32 {
-    let format =
-        TextFormat { font_id: strong(size), color: Color32::WHITE, extra_letter_spacing: size * TRACK, ..Default::default() };
-    ui.painter().layout_job(LayoutJob::single_section(s.to_uppercase(), format)).size().x
-}
-
-/// How wide `s` is in `font`.
-fn width_of(ui: &Ui, s: &str, font: FontId) -> f32 {
-    ui.painter().layout_no_wrap(s.to_string(), font, Color32::WHITE).size().x
-}
-
-/// A panel of the desk: the lifted ground and its hairline.
-fn panel(ui: &Ui, rect: Rect, pal: &Pal) {
-    ui.painter().rect_filled(rect, square(), pal.panel);
-    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, pal.edge), StrokeKind::Inside);
-}
-
-/// How [`segmented`] draws: the chosen segment lit amber, or only marked
-/// by an amber rule along its foot.
-#[derive(Clone, Copy, PartialEq)]
-enum Seg {
-    Lit,
-    Marked,
-}
-
-const SEG_H: f32 = 30.0;
-const SEG_SIZE: f32 = 12.5;
-
-/// How wide [`segmented`] draws `labels`.
-fn segmented_width(ui: &Ui, labels: &[String]) -> f32 {
-    labels.iter().map(|l| caps_width(ui, l, SEG_SIZE) + 30.0).sum::<f32>() + 2.0
-}
-
-/// A row of square buttons joined by hairlines at `left`, centred on
-/// `mid_y`: one per label in spaced capitals, `chosen` lit (or marked).
-/// Returns the control's rect and the segment clicked, if any.
-#[allow(clippy::too_many_arguments)]
-fn segmented(ui: &Ui, id: Id, left: f32, mid_y: f32, labels: &[String], chosen: usize, kind: Seg, pal: &Pal) -> (Rect, Option<usize>) {
-    let total = segmented_width(ui, labels);
-    let outer = Rect::from_min_size(pos2(left, mid_y - SEG_H / 2.0), vec2(total, SEG_H));
-    ui.painter().rect_filled(outer, square(), pal.panel);
-    let mut x = outer.min.x + 1.0;
-    let mut clicked = None;
-    for (i, label) in labels.iter().enumerate() {
-        let w = caps_width(ui, label, SEG_SIZE) + 30.0;
-        let seg = Rect::from_min_size(pos2(x, outer.min.y + 1.0), vec2(w, SEG_H - 2.0));
-        let response = ui.interact(seg, id.with(i), Sense::click());
-        let on = i == chosen;
-        let color = match (on, kind) {
-            (true, Seg::Lit) => {
-                ui.painter().rect_filled(seg, CornerRadius::same(2), pal.accent);
-                pal.on_accent
-            }
-            (true, Seg::Marked) => {
-                ui.painter().rect_filled(seg, CornerRadius::same(2), pal.raised);
-                let rule = Rect::from_min_max(pos2(seg.min.x, seg.max.y - 2.0), seg.max);
-                ui.painter().rect_filled(rule, 0.0, pal.accent);
-                pal.accent
-            }
-            (false, _) if response.hovered() => {
-                ui.painter().rect_filled(seg, CornerRadius::same(2), pal.raised);
-                pal.text
-            }
-            (false, _) => pal.dim,
-        };
-        if i > 0 {
-            ui.painter().line_segment([pos2(x, outer.min.y + 1.0), pos2(x, outer.max.y - 1.0)], Stroke::new(1.0, pal.edge_strong));
-        }
-        caps(ui, seg.center(), label, SEG_SIZE, color, w, Align2::CENTER_CENTER);
-        if response.clicked() && !on {
-            clicked = Some(i);
-        }
-        x += w;
-    }
-    ui.painter().rect_stroke(outer, square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
-    (outer, clicked)
-}
-
-/// A chevron, two strokes, centred on `at`, pointing down (or up).
-fn chevron(ui: &Ui, at: Pos2, color: Color32, up: bool) {
-    let (dx, dy) = (4.0, if up { -2.5 } else { 2.5 });
-    let stroke = Stroke::new(1.5, color);
-    ui.painter().line_segment([at + vec2(-dx, -dy), at + vec2(0.0, dy)], stroke);
-    ui.painter().line_segment([at + vec2(0.0, dy), at + vec2(dx, -dy)], stroke);
-}
-
-/// A small solid triangle at `at`, pointing down (a fall) or up (a rise).
-fn arrow(ui: &Ui, at: Pos2, color: Color32, down: bool) {
-    let (w, h) = (4.0, 3.5);
-    let points = if down {
-        vec![at + vec2(-w, -h), at + vec2(w, -h), at + vec2(0.0, h)]
-    } else {
-        vec![at + vec2(-w, h), at + vec2(w, h), at + vec2(0.0, -h)]
-    };
-    ui.painter().add(Shape::convex_polygon(points, color, Stroke::NONE));
-}
-
-/// A square button at `rect` in spaced capitals: lit amber when
-/// `primary`, an outline in `tone` otherwise.
-fn button(ui: &Ui, id: Id, rect: Rect, label: &str, primary: bool, tone: Color32, pal: &Pal) -> Response {
-    let response = ui.interact(rect, id, Sense::click());
-    let hovered = response.hovered();
-    let color = if primary {
-        ui.painter().rect_filled(rect, square(), if hovered { pal.accent_hot } else { pal.accent });
-        pal.on_accent
-    } else {
-        if hovered {
-            ui.painter().rect_filled(rect, square(), tone.gamma_multiply(0.14));
-        }
-        ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, tone), StrokeKind::Inside);
-        tone
-    };
-    caps(ui, rect.center(), label, 12.5, color, rect.width(), Align2::CENTER_CENTER);
-    response
-}
-
-/// One gold sentence for a state with nothing else to show.
-fn sentence(ui: &mut Ui, head: &str, tail: &str, pal: &Pal) {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 26.0), Sense::hover());
-    let head_rect = text(ui, rect.left_center(), head, strong(15.0), pal.gold, w, Align2::LEFT_CENTER);
-    text(ui, pos2(head_rect.max.x, rect.center().y), tail, body(15.0), pal.gold, rect.max.x - head_rect.max.x, Align2::LEFT_CENTER);
-}
 
 /// The body's own spinner while the first numbers are on their way.
 fn loading(ui: &mut Ui, page: &Page, pal: &Pal) {
@@ -345,28 +85,6 @@ fn loading(ui: &mut Ui, page: &Page, pal: &Pal) {
     if page.busy.is_some() || page.in_flight {
         let spin = Rect::from_center_size(rect.center() - vec2(0.0, 8.0), vec2(22.0, 22.0));
         ui.put(spin, egui::Spinner::new().size(22.0).color(pal.accent));
-    }
-}
-
-/// An LED meter standing on `base`, centred on `cx`: `lit` segments of
-/// `color` from the bottom, each [`LED`] tall with a [`LED_GAP`] above it.
-fn led_column(ui: &Ui, cx: f32, base: f32, width: f32, lit: usize, color: Color32) {
-    for k in 0..lit {
-        let bottom = base - k as f32 * (LED + LED_GAP);
-        let seg = Rect::from_min_max(pos2(cx - width / 2.0, bottom - LED), pos2(cx + width / 2.0, bottom));
-        ui.painter().rect_filled(seg, 0.0, color);
-    }
-}
-
-/// A horizontal LED meter across `track`: `share` of its segments lit.
-fn led_row(ui: &Ui, track: Rect, share: f32, lit_color: Color32, unlit: Color32) {
-    let step = LED + LED_GAP - 1.0;
-    let count = ((track.width() + LED_GAP - 1.0) / step).floor().max(1.0) as usize;
-    let lit = if share > 0.0 { ((share * count as f32).round() as usize).clamp(1, count) } else { 0 };
-    for k in 0..count {
-        let x = track.min.x + k as f32 * step;
-        let seg = Rect::from_min_size(pos2(x, track.min.y), vec2(LED - 1.0, track.height()));
-        ui.painter().rect_filled(seg, 0.0, if k < lit { lit_color } else { unlit });
     }
 }
 
@@ -746,134 +464,6 @@ fn origins_panel(ui: &Ui, rect: Rect, data: &Loaded, pal: &Pal) {
 
 // ── Tables ────────────────────────────────────────────────────────────────
 
-/// A column: its heading, its width (zero for the one that takes the
-/// rest) and whether it is right-aligned.
-struct Col {
-    title: String,
-    w: f32,
-    right: bool,
-}
-
-fn col(title: impl Into<String>, w: f32, right: bool) -> Col {
-    Col { title: title.into(), w, right }
-}
-
-/// The columns' x ranges across `x0..x1`.
-fn spans(x0: f32, x1: f32, cols: &[Col]) -> Vec<(f32, f32)> {
-    let gap = 16.0;
-    let fixed: f32 = cols.iter().map(|c| c.w).sum::<f32>() + gap * cols.len().saturating_sub(1) as f32;
-    let flex = (x1 - x0 - fixed).max(60.0);
-    let mut x = x0;
-    cols.iter()
-        .map(|c| {
-            let w = if c.w == 0.0 { flex } else { c.w };
-            let span = (x, w);
-            x += w + gap;
-            span
-        })
-        .collect()
-}
-
-/// What one row hands its painter: the row, its cells, and its state.
-struct RowCtx<'a> {
-    rect: Rect,
-    cells: &'a [(f32, f32)],
-    selected: bool,
-    hovered: bool,
-}
-
-/// A table under its headings in spaced capitals, rows scrolled by egui,
-/// the page's cursor lit amber on the selected row and kept in view as the
-/// keys move it. A click selects. Returns the last row index on screen,
-/// for paging.
-#[allow(clippy::too_many_arguments)]
-fn table(
-    ui: &mut Ui,
-    id: Id,
-    cols: &[Col],
-    len: usize,
-    sel: Option<usize>,
-    pal: &Pal,
-    acts: &mut Vec<Act>,
-    mut draw_row: impl FnMut(&Ui, usize, &RowCtx),
-) -> usize {
-    let w = ui.available_width();
-    let (head, _) = ui.allocate_exact_size(vec2(w, 26.0), Sense::hover());
-    let cells = spans(head.min.x + 10.0, head.max.x - 10.0, cols);
-    for (c, (x, cw)) in cols.iter().zip(&cells) {
-        let (pos, align) =
-            if c.right { (pos2(x + cw, head.center().y), Align2::RIGHT_CENTER) } else { (pos2(*x, head.center().y), Align2::LEFT_CENTER) };
-        caps(ui, pos, &c.title, 11.0, pal.dim, *cw, align);
-    }
-    ui.painter().line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, pal.edge_strong));
-    ui.add_space(4.0);
-
-    // The cursor moved since the last pass: the offset that brings it in.
-    let memory = id.with("view");
-    let (last_sel, last_offset, last_height): (Option<usize>, f32, f32) =
-        ui.ctx().data(|d| d.get_temp(memory)).unwrap_or((None, 0.0, 0.0));
-    let mut scroll = ScrollArea::vertical().id_salt(id).auto_shrink([false, false]);
-    if sel != last_sel
-        && let Some(s) = sel
-        && last_height > 0.0
-    {
-        let (row_top, row_bottom) = (s as f32 * ROW_H, (s + 1) as f32 * ROW_H);
-        if row_top < last_offset {
-            scroll = scroll.vertical_scroll_offset(row_top);
-        } else if row_bottom > last_offset + last_height {
-            scroll = scroll.vertical_scroll_offset(row_bottom - last_height);
-        }
-    }
-    let mut last_on_screen = 0;
-    let output = scroll.show_rows(ui, ROW_H, len, |ui, range| {
-        last_on_screen = range.end.saturating_sub(1);
-        for i in range {
-            let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
-            let selected = sel == Some(i);
-            let hovered = !selected && response.hovered();
-            if selected {
-                ui.painter().rect_filled(rect, CornerRadius::same(2), pal.accent);
-            } else if hovered {
-                ui.painter().rect_filled(rect, CornerRadius::same(2), pal.raised);
-            }
-            if !selected {
-                let rule = [pos2(rect.min.x, rect.max.y - 0.5), pos2(rect.max.x, rect.max.y - 0.5)];
-                ui.painter().line_segment(rule, Stroke::new(1.0, pal.panel));
-            }
-            let cells = spans(rect.min.x + 10.0, rect.max.x - 10.0, cols);
-            draw_row(ui, i, &RowCtx { rect, cells: &cells, selected, hovered });
-            if response.clicked() {
-                acts.push(Act::Select(i));
-            }
-        }
-    });
-    let state = (sel, output.state.offset.y, output.inner_rect.height());
-    ui.ctx().data_mut(|d| d.insert_temp(memory, state));
-    last_on_screen
-}
-
-/// A cell's text colour on its row: the selection's ink, else its own.
-fn ink(row: &RowCtx, own: Color32, pal: &Pal) -> Color32 {
-    if row.selected {
-        pal.on_accent
-    } else if row.hovered && own == pal.text {
-        Color32::WHITE
-    } else {
-        own
-    }
-}
-
-/// A cell's text: left or right in its column, cut to fit.
-fn cell(ui: &Ui, row: &RowCtx, at: usize, s: &str, font: FontId, color: Color32, right: bool) -> Rect {
-    let (x, w) = row.cells[at];
-    let y = row.rect.center().y;
-    if right {
-        text(ui, pos2(x + w, y), s, font, color, w, Align2::RIGHT_CENTER)
-    } else {
-        text(ui, pos2(x, y), s, font, color, w, Align2::LEFT_CENTER)
-    }
-}
-
 /// A name and, after it, the dim `via` a peer's track carries.
 fn name_cell(ui: &Ui, row: &RowCtx, at: usize, name: &str, via: Option<&str>, pal: &Pal) {
     let (x, w) = row.cells[at];
@@ -925,11 +515,11 @@ fn top(ui: &mut Ui, page: &Page, pal: &Pal, acts: &mut Vec<Act>) {
     ui.add_space(14.0);
 
     let tracks = page.entity == Entity::Tracks;
-    let mut cols = vec![col(t!("sta.col_rank"), 26.0, true), col(page.entity.header(), 0.0, false)];
-    cols.push(if tracks { col(t!("sta.col_last"), 110.0, false) } else { col(t!("sta.col_tracks"), 90.0, false) });
-    cols.push(col(t!("sta.col_share"), 120.0, false));
-    cols.push(col(t!("sta.col_plays"), 64.0, true));
-    cols.push(col(t!("sta.col_time"), 80.0, true));
+    let mut cols = vec![Col::right(t!("sta.col_rank"), 26.0), Col::left(page.entity.header(), 0.0)];
+    cols.push(if tracks { Col::left(t!("sta.col_last"), 110.0) } else { Col::left(t!("sta.col_tracks"), 90.0) });
+    cols.push(Col::left(t!("sta.col_share"), 120.0));
+    cols.push(Col::right(t!("sta.col_plays"), 64.0));
+    cols.push(Col::right(t!("sta.col_time"), 80.0));
     if page.top.is_empty() {
         let (rect, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
         text(ui, rect.left_center() + vec2(10.0, 0.0), &t!("sta.nothing_here"), body(14.0), pal.dim, w, Align2::LEFT_CENTER);
@@ -938,7 +528,8 @@ fn top(ui: &mut Ui, page: &Page, pal: &Pal, acts: &mut Vec<Act>) {
     let metric = page.metric;
     let top_value = page.top.iter().map(|i| metric.of(i)).max().unwrap_or(0).max(1);
     let now = unix_now();
-    table(ui, Id::new("stats-top"), &cols, page.top.len(), page.sel, pal, acts, |ui, i, row| {
+    let table = Table::new(Id::new("stats-top"), &cols, page.top.len()).cursor(page.sel).lit();
+    let shown = table.show(ui, pal, |ui, i, row| {
         let item = &page.top[i];
         let (name, via) = if tracks {
             let (title, artist, _, _) = track_words(item.track.as_ref());
@@ -970,6 +561,10 @@ fn top(ui: &mut Ui, page: &Page, pal: &Pal, acts: &mut Vec<Act>) {
         cell(ui, row, 4, &fmt_count(item.plays), mono(13.5), ink(row, pal.text, pal), true);
         cell(ui, row, 5, &fmt_duration(item.listened_ms), mono(12.5), ink(row, pal.dim, pal), true);
     });
+    // A click selects.
+    if let Some(i) = shown.row {
+        acts.push(Act::Select(i));
+    }
 }
 
 // ── Recent ────────────────────────────────────────────────────────────────
@@ -981,12 +576,12 @@ fn recent(ui: &mut Ui, page: &mut Page, pal: &Pal, acts: &mut Vec<Act>) {
     }
     let w = ui.available_width();
     let cols = [
-        col(t!("sta.col_when"), 48.0, false),
-        col(t!("sta.col_day"), 104.0, false),
-        col(t!("sta.col_track"), 0.0, false),
-        col(t!("sta.col_outcome"), 150.0, false),
-        col(t!("sta.col_listened"), 110.0, false),
-        col(t!("sta.col_client"), 120.0, false),
+        Col::left(t!("sta.col_when"), 48.0),
+        Col::left(t!("sta.col_day"), 104.0),
+        Col::left(t!("sta.col_track"), 0.0),
+        Col::left(t!("sta.col_outcome"), 150.0),
+        Col::left(t!("sta.col_listened"), 110.0),
+        Col::left(t!("sta.col_client"), 120.0),
     ];
     if page.history.is_empty() {
         let (rect, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
@@ -996,7 +591,8 @@ fn recent(ui: &mut Ui, page: &mut Page, pal: &Pal, acts: &mut Vec<Act>) {
     let now = unix_now();
     let len = page.history.len();
     let shown: &Page = page;
-    let last = table(ui, Id::new("stats-recent"), &cols, len, shown.sel, pal, acts, |ui, i, row| {
+    let table = Table::new(Id::new("stats-recent"), &cols, len).cursor(shown.sel).lit();
+    let drawn = table.show(ui, pal, |ui, i, row| {
         let r = recent_row(shown, &shown.history[i], now);
         cell(ui, row, 0, &r.time, mono(13.5), ink(row, pal.text, pal), false);
         cell(ui, row, 1, &r.day, mono(12.5), ink(row, pal.dim, pal), false);
@@ -1008,9 +604,13 @@ fn recent(ui: &mut Ui, page: &mut Page, pal: &Pal, acts: &mut Vec<Act>) {
         let client = if r.counted { r.client.clone() } else { t!("sta.not_counted").to_string() };
         cell(ui, row, 5, &client, body(12.5), ink(row, pal.dim, pal), false);
     });
+    // A click selects.
+    if let Some(i) = drawn.row {
+        acts.push(Act::Select(i));
+    }
     // The log pages as its end comes into view, as the cursor nearing the
     // end pages it on the cells page.
-    if last + PAGE_AHEAD >= len {
+    if drawn.last_on_screen + PAGE_AHEAD >= len {
         more(page);
     }
 }
@@ -1188,6 +788,8 @@ fn forget(ui: &mut Ui, page: &Page, pal: &Pal, full: Rect, row: usize, acts: &mu
 
 #[cfg(test)]
 mod tests {
+    use egui::Pos2;
+
     use super::super::tests::{english, ready};
     use super::*;
 

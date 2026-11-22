@@ -71,6 +71,7 @@ pub(crate) mod panel;
 mod render_tests;
 mod script;
 mod stats;
+pub(crate) mod studio;
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
