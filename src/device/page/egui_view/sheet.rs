@@ -67,9 +67,12 @@ const REACH: f32 = 8.0;
 const APART: f32 = 24.0;
 /// Where a refusal's words start: past the cross and the 8 after it.
 const MARK_IN: f32 = 20.0;
-/// The release control's height at most, and the room beside its words: 10
-/// at either end and 10 before its chevron's 12.
+/// The release control's height at most, its width at least (the Settings
+/// board's closed dropdown's 120, so it keeps its width from "pick one" to
+/// the tag picked), and the room beside its words: 10 at either end and 10
+/// before its chevron's 12.
 const CONTROL_H: f32 = 26.0;
+const CONTROL_LEAST: f32 = 120.0;
 const CONTROL_PAD: f32 = 10.0;
 const CHEVRON_W: f32 = 12.0;
 /// The release list: its entries, their padding, the lead column (a picked
@@ -988,15 +991,16 @@ fn radio_row(ui: &Ui, id: Id, row: Rect, radio: &Radio, m: &Measures, live: bool
 
 /// The release control, its left middle at `at`, `h` tall: a closed
 /// dropdown as the canvas's Settings board draws one — its words and the
-/// kit's chevron after them in a box on the ground's fill inside a strong
-/// hairline — raised under the pointer with its words semibold, its words
-/// and its edge in the accent while the keyboard is on it, as the cells
-/// light it. Its rect, and whether a click landed.
+/// kit's chevron at its right end in a box on the ground's fill inside a
+/// strong hairline, at least [`CONTROL_LEAST`] wide — raised under the
+/// pointer with its words semibold, its words and its edge in the accent
+/// while the keyboard is on it, as the cells light it. Its rect, and
+/// whether a click landed.
 #[allow(clippy::too_many_arguments)]
 fn dropdown(ui: &Ui, id: Id, at: Pos2, h: f32, words: &str, focused: bool, max_w: f32, face: &Face) -> (Rect, bool) {
     let pal = face.pal;
     let wide = studio::runs_width(ui, &studio::figured(words, face.ports, strong(13.0), mono(12.5), pal.text));
-    let w = (CONTROL_PAD + wide + CONTROL_PAD + CHEVRON_W + CONTROL_PAD).min(max_w);
+    let w = (CONTROL_PAD + wide + CONTROL_PAD + CHEVRON_W + CONTROL_PAD).max(CONTROL_LEAST).min(max_w);
     let rect = Rect::from_min_size(pos2(at.x, at.y - h / 2.0), vec2(w, h));
     let response = studio::hand(ui.interact(rect, id, Sense::click()));
     let hovered = response.hovered();
@@ -1110,10 +1114,11 @@ fn erase_line(ui: &Ui, id: Id, row: Rect, on: bool, focused: bool, pal: &Pal) ->
 /// for, its date and its builds in columns as wide as every release's, the
 /// picked one's LED before it; the asking line, the failure, the switch,
 /// what is on this computer and Try again — the keyboard's cursor lit, an
-/// entry raised under the pointer. It is as wide as its widest entry, no
-/// wider than the column, and keeps inside it; as tall as its entries, no
-/// lower than the body's view, its cursor kept in sight. With not one entry
-/// of room it is not drawn and still holds the keys.
+/// entry raised under the pointer. Its column's words stand under the
+/// control's; it is as wide as its widest entry, no wider than the column,
+/// and keeps inside it; as tall as its entries, no lower than the body's
+/// view, its cursor kept in sight. With not one entry of room it is not
+/// drawn and still holds the keys.
 ///
 /// A click on an entry that picks asks for [`Act::ListPick`]; one anywhere
 /// else in the page's area, the sheet's controls under it, its close and
@@ -1148,7 +1153,11 @@ fn release_list(ui: &Ui, id: Id, list: &List, anchor: Rect, col: Rect, face: &Fa
     };
     let widest = list.rows.iter().map(natural).fold(0.0, f32::max);
     let w = (widest + 4.0).min(col.width());
-    let left = (anchor.min.x - 2.0 - ENTRY_PAD - LEAD_W).min(col.max.x - w).max(col.min.x);
+    // Its column's words under the control's, as the cells hang theirs and
+    // the Settings board lines its entries up with its box's words: the
+    // frame's hairline and padding, an entry's padding and the lead's room
+    // stand left of them.
+    let left = (anchor.min.x + CONTROL_PAD - 2.0 - ENTRY_PAD - LEAD_W).min(col.max.x - w).max(col.min.x);
     let top = anchor.max.y + 2.0;
     let bottom = view.max.y.min(face.full.max.y);
     let fits = (((bottom - top - 4.0) / ENTRY_H).floor().max(0.0) as usize).min(list.rows.len());
@@ -1710,6 +1719,12 @@ mod tests {
             out.shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == pal.accent && r.rect.contains(at.center())))
         };
         assert!(lit(&out, "v0.7.0") && !lit(&out, "v0.6.0"));
+        // Its tags stand under the control's words, and the control at the
+        // Settings board's least width.
+        let control = Id::new("mp3-sheet").with("firmware").with(1usize).with("control");
+        let (tag, words) = (find(&out, "v0.7.0"), find(&out, "pick one"));
+        assert!((tag.min.x - words.min.x).abs() < 1.0, "the tags under the control's words: {tag:?} {words:?}");
+        assert_eq!(probe.rect_of(control).width(), CONTROL_LEAST);
         // The switch keeps it open, the pre-release shown.
         probe.click(&mut page, find(&out, "Show 1 pre-release").center());
         assert!(page.show_pre && sheet(&page).list.is_some(), "the cells' ListPick on the switch");
@@ -1734,6 +1749,7 @@ mod tests {
         let out = probe.settle(&mut page);
         assert_drew(&out, &["v0.7.0", "2026-10-07 · QIO and DIO · a step back from COM3's v0.8.0"]);
         assert_drew(&out, &["v0.7.0 downloads on Apply and is checked against its own SHA256SUMS. “Up to date” still means v0.8.0."]);
+        assert_eq!(probe.rect_of(control).width(), CONTROL_LEAST, "the control kept its width from pick one to the tag");
         assert!(ends.sent().is_empty(), "the list in hand: GitHub is not asked again");
         probe.click(&mut page, find(&out, "APPLY").center());
         assert_eq!(ends.sent(), [choose(Image::release("v0.7.0", Mode::Qio), false)]);
@@ -1912,12 +1928,21 @@ mod tests {
         assert_drew(&out, &["Type a path", "no dialog here: no session bus"]);
         assert!(!drew(&out, "Choose a file…") && !drew(&out, "Choose a folder…"));
         // The keyboard's chooser, the one the field came from, in the
-        // accent while the row has the keyboard.
+        // accent while the row has the keyboard. The pointer still rests
+        // where the click left it, on Type a path now, and under it the
+        // pointer's look wins, as the cells' hover does; gone, the
+        // keyboard's shows.
         assert_eq!((sheet(&page).focus, sheet(&page).chooser), (Stop::Sub, Chooser::Type));
-        let accent = Pal::now().accent;
-        let lit = out.shapes.iter().any(|c| {
-            matches!(&c.shape, egui::Shape::Text(t) if t.galley.text() == "Type a path" && t.galley.job.sections.iter().all(|s| s.format.color == accent))
-        });
-        assert!(lit, "the keyboard's chooser lit");
+        let pal = Pal::now();
+        let ink = |out: &FullOutput| {
+            out.shapes.iter().find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Type a path" => t.galley.job.sections.first().map(|s| s.format.color),
+                _ => None,
+            })
+        };
+        assert_eq!(ink(&out), Some(pal.text), "under the pointer: its look");
+        let _ = probe.pass(&mut page, vec![Event::PointerGone]);
+        let out = probe.settle(&mut page);
+        assert_eq!(ink(&out), Some(pal.accent), "the keyboard's chooser lit");
     }
 }
