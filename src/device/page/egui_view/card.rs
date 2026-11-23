@@ -1067,6 +1067,23 @@ mod tests {
             (out, told.expect("the pass ran"))
         }
 
+        /// One pass with `events` that egui runs twice, as it does for a
+        /// gate that took its body's height: the first run asks for the
+        /// second, and the runs egui made come back.
+        fn pass_twice(&self, page: &mut Page, events: Vec<Event>) -> u32 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), events, ..Default::default() };
+            let mut runs = 0;
+            let mut out = self.ctx.run_ui(input, |ui| {
+                runs += 1;
+                let _ = page_show(ui, page, "", false);
+                if runs == 1 {
+                    ui.ctx().request_discard("the test's second run");
+                }
+            });
+            out.textures_delta.clear();
+            runs
+        }
+
         /// Two passes (egui sizes a gate on the first), the second's.
         fn settle(&self, page: &mut Page) -> FullOutput {
             let _ = self.pass(page, Vec::new());
@@ -1373,6 +1390,17 @@ mod tests {
             assert!(find(&out, &words).max.x < primary.min.x, "{words} clear of the primary");
         }
         assert!(worker::sent(&inbox).is_empty());
+        // Narrower, the links that would run under the primary go from the
+        // end: at the first width that leaves one out, those left are the
+        // row's first, in its order.
+        let order = ["Details", "Settings…", "Eject"];
+        let narrower = (1..40).map(|k| 480.0 - 8.0 * k as f32).find_map(|w| {
+            let out = Probe::new(vec2(w, 448.0)).settle(&mut page);
+            let left: Vec<bool> = order.iter().map(|words| drew(&out, words)).collect();
+            (!left[2]).then_some((w, left))
+        });
+        let (w, left) = narrower.expect("a width that leaves a link out");
+        assert!(left[0] && left.windows(2).all(|pair| pair[0] || !pair[1]), "the links from the end at {w}: {left:?}");
     }
 
     #[test]
@@ -1492,6 +1520,14 @@ mod tests {
         page.act(Act::Card(0));
         let out = probe.settle(&mut page);
         assert_drew(&out, &["SYNC", "Settings…"]);
+        // Its why in a tooltip under the pointer, the cells' tip's words.
+        let why = t!("dev.fw_one_at_a_time", port = "COM3").to_string();
+        assert!(!drew(&out, &why), "no tooltip yet");
+        let _ = probe.pass(&mut page, vec![Event::PointerMoved(find(&out, "SYNC").center())]);
+        for _ in 0..30 {
+            let _ = probe.pass(&mut page, Vec::new());
+        }
+        assert_drew(&probe.pass(&mut page, Vec::new()).0, &[&why]);
         probe.click_on(&mut page, "SYNC");
         probe.click_on(&mut page, "Settings…");
         assert!(worker::sent(&inbox).is_empty() && page.card.sheet.is_none(), "nothing starts during a write");
@@ -1742,18 +1778,57 @@ mod tests {
     }
 
     #[test]
-    fn a_gate_at_the_guis_floor_scrolls_its_body_and_keeps_its_foot_in_the_window() {
+    fn a_gate_at_the_guis_floor_stands_in_the_area_and_its_body_scrolls_to_its_foot() {
         let _en = english();
-        let probe = Probe::new(vec2(576.0, 352.0));
+        let size = vec2(576.0, 352.0);
+        let probe = Probe::new(size);
         let (mut page, inbox) = alone(planned(|p| p.removals = paths(214)));
         page.act(Act::Primary);
         let out = probe.settle(&mut page);
-        assert_drew(&out, &["Remove 214 tracks from Car music?"]);
-        // The window stands inside the area, its body scrolled to its top.
+        // The window stands inside the area, its body at its top.
         let title = find(&out, "Remove 214 tracks from Car music?");
-        assert!(title.min.y >= 16.0 && title.max.x <= 576.0 - 16.0, "{title:?}");
-        page.act(Act::CardKeep);
+        assert!(title.min.y >= 16.0 && title.max.x <= size.x - 16.0, "{title:?}");
+        let why = t!("dev.card.gate_remove_why", server = "Home").to_string();
+        let body_top = title.center().y + TITLE_H / 2.0 + MODAL_GAP;
+        assert!(find(&out, &why).min.y >= body_top - 1.0, "at its top: {} under {body_top}", find(&out, &why).min.y);
+        // The body runs past its view, its foot's buttons with it.
+        let view_end = size.y - 16.0 - MODAL_PAD;
+        assert!(find(&out, "NOT NOW").max.y > view_end + 1.0, "the foot past the view: {:?}", find(&out, "NOT NOW"));
+        // The wheel over the body brings the foot into the view, under the
+        // title, which stays.
+        let wheel = Event::MouseWheel { unit: MouseWheelUnit::Point, delta: vec2(0.0, -2000.0), phase: egui::TouchPhase::Move, modifiers: Default::default() };
+        let _ = probe.pass(&mut page, vec![Event::PointerMoved(pos2(size.x / 2.0, size.y / 2.0)), wheel]);
+        for _ in 0..40 {
+            let _ = probe.pass(&mut page, Vec::new());
+        }
+        let out = probe.settle(&mut page);
+        let keep = find(&out, "NOT NOW");
+        assert!(keep.max.y <= view_end + 0.5 && keep.min.y >= body_top, "the foot in the view: {keep:?}");
+        assert!((find(&out, "Remove 214 tracks from Car music?").min.y - title.min.y).abs() < 0.5, "the title stays");
+        // Its keep answers it there: the cells' CardKeep.
+        probe.click(&mut page, keep.center());
         assert!(page.card.gate.is_none() && worker::sent(&inbox) == [worker::Cmd::Dismiss { key: KEY.into() }]);
+    }
+
+    #[test]
+    fn a_click_on_the_stronger_gates_box_in_a_pass_egui_runs_twice_ticks_it_once() {
+        let _en = english();
+        let probe = Probe::new(BOARD);
+        let many = paths(214);
+        let (mut page, inbox) = alone(planned(|p| {
+            p.removals = many.clone();
+            p.guards = vec![Guard::Removals { paths: many.clone(), strong: true }];
+            p.removal_libs = (0..214).map(|i| if i < 200 { "Rock" } else { "Jazz" }.to_string()).collect();
+        }));
+        page.act(Act::Primary);
+        let out = probe.settle(&mut page);
+        let at = find(&out, "Home really has dropped them").center();
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let _ = probe.pass(&mut page, vec![Event::PointerMoved(at)]);
+        let _ = probe.pass(&mut page, vec![button(true)]);
+        assert_eq!(probe.pass_twice(&mut page, vec![button(false)]), 2, "egui ran the release's pass twice");
+        let ticked = matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(GateKind::Half { ticked: true, .. }));
+        assert!(ticked && worker::sent(&inbox).is_empty(), "the box ticked once, not ticked and back");
     }
 }
 
