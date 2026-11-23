@@ -9,7 +9,8 @@
 //! meter, Last sync, Next sync, Converts, or a sync's Syncing and Now —
 //! each label on its value's first line, a plain value in 13.5 points, a
 //! verdict behind the kit's LED, an explanation dim, a scan as the kit's
-//! searching shape with its share; then the bottom row (board.rs's
+//! searching shape with its share, the figures in the monospace and the
+//! card's drive letter with them; then the bottom row (board.rs's
 //! `Paint`), and Details with its facts, the card's own log and Sync
 //! again. Short of room the rows give way as the cells give them way
 //! (`give_way_rows`), measured in points: the dim explanation lines first,
@@ -31,7 +32,7 @@
 
 use egui::epaint::{Shadow, Shape, StrokeKind};
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Response, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Align2, Color32, FontId, Id, Layout, Pos2, Rect, Response, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
@@ -114,6 +115,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
     let s = face.space;
     let grid = Grid::of(room, face);
     let laid = Laid::of(cells::card::card_layout(page, view, WIDE));
+    let drive = view.drive();
     let actions = links_give_way(ui, face, grid, laid.actions);
     let actions_h = match &actions {
         Row::Actions { primary: Some(_), .. } => TALL_H,
@@ -128,7 +130,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
         let fixed = 2.0 * s.pad_y + HEAD_H + s.gap + actions_h + details_h;
         let mut probe = ui.new_child(UiBuilder::new().id_salt("mp3-card-measure").max_rect(room));
         probe.set_invisible();
-        let measure = Values { ui: &probe, face, grid, floor: f32::INFINITY };
+        let measure = Values { ui: &probe, face, grid, floor: f32::INFINITY, drive: &drive };
         while fixed + measure.paint(0.0, &values) > room.height() + 0.5 && give_way(&mut values) {}
     }
     let card = clipped(ui, room, "mp3-card");
@@ -136,7 +138,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
     // The measuring run sees the card whole; the drawing cuts the values
     // short of the bottom row's place at the room's foot.
     let foot = if face.live { room.max.y - s.pad_y } else { f32::INFINITY };
-    let y = Values { ui: &card, face, grid, floor: foot - actions_h - s.gap }.paint(y, &values);
+    let y = Values { ui: &card, face, grid, floor: foot - actions_h - s.gap, drive: &drive }.paint(y, &values);
     let mut acts = Vec::new();
     let mut paint = Paint::new(&card, face, grid, y, foot, Id::new("mp3-card"), &mut acts);
     paint.blank();
@@ -336,14 +338,14 @@ impl Read {
     }
 
     /// The words as runs at `size`, the bold ones semibold and, `figures`
-    /// asked, the figures in the monospace.
-    fn runs(&self, size: f32, figures: bool, face: &Face) -> Vec<Run> {
+    /// asked, the figures in the monospace, the card's `drive` among them.
+    fn runs(&self, size: f32, figures: bool, face: &Face, drive: &str) -> Vec<Run> {
         let font = |bold: bool| if bold { strong(size) } else { body(size) };
         let mut runs = Vec::new();
         for (k, (s, color, bold)) in self.spans.iter().enumerate() {
             let words = if k == 0 { s.trim_start() } else { s.as_str() };
             if figures {
-                runs.extend(studio::figured(words, face.ports, font(*bold), mono(FIGURE), *color));
+                runs.extend(figured(words, face.ports, drive, font(*bold), mono(FIGURE), *color));
             } else {
                 runs.push((words.to_string(), font(*bold), *color));
             }
@@ -367,6 +369,49 @@ fn drop_chars(spans: &mut Vec<(String, Style)>, mut n: usize) {
     }
 }
 
+/// What `Para` takes to set `runs`' lines `line_h` apart: it reckons its
+/// leading from its first run's size, and words that open on a figure (12
+/// new, 41.2 of 63.8 GB, 37 plays not yet sent) open in the monospace's
+/// smaller one, which would draw their wrapped lines closer.
+fn leading(runs: &[Run], line_h: f32) -> f32 {
+    line_h / runs.first().map_or(line_h, |(_, font, _)| font.size)
+}
+
+/// Whether `drive` is a drive letter (`E:`): a figure, which the boards set
+/// in the monospace wherever a card's words name it (Card.dc.html's Drive
+/// fact), as the subjects row sets it on the card's tab. A volume's name
+/// (Linux, macOS) is a word.
+fn letter(drive: &str) -> bool {
+    let b = drive.as_bytes();
+    b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+/// `words` as runs in `font` and `color`, their figures in `figure` — the
+/// kit's (`studio::figured`, the boards' `ports` among them) and the card's
+/// `drive` where it is a [`letter`] standing as a word of its own, which
+/// the kit's cannot take: its figures end before a colon.
+fn figured(words: &str, ports: &[&str], drive: &str, font: FontId, figure: FontId, color: Color32) -> Vec<Run> {
+    let mut runs = Vec::new();
+    let mut rest = words;
+    while let Some(at) = letter(drive).then(|| word_at(rest, drive)).flatten() {
+        runs.extend(studio::figured(&rest[..at], ports, font.clone(), figure.clone(), color));
+        runs.push((drive.to_string(), figure.clone(), color));
+        rest = &rest[at + drive.len()..];
+    }
+    runs.extend(studio::figured(rest, ports, font, figure, color));
+    runs
+}
+
+/// Where `word` first stands in `s` as a word of its own: at its start or
+/// after a space, and before a space, a mark or its end.
+fn word_at(s: &str, word: &str) -> Option<usize> {
+    s.match_indices(word).map(|(at, _)| at).find(|&at| {
+        let before = s[..at].chars().next_back().is_none_or(char::is_whitespace);
+        let after = s[at + word.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        before && after
+    })
+}
+
 /// Where a line centred on its middle stands that middle to share the
 /// baseline of a paragraph's first line drawn from `top` in the UI face at
 /// `size`, so the words at a row's right stand on its left's.
@@ -377,12 +422,14 @@ fn on_baseline(ui: &Ui, top: f32, size: f32) -> f32 {
 
 /// The Card view's value rows set in points on a card's [`Grid`], none
 /// past `floor`: a row that would cross it is left out whole, a
-/// paragraph's lines past it too, and nothing after it is drawn.
+/// paragraph's lines past it too, and nothing after it is drawn. `drive`
+/// is the card's, a figure where its words name it.
 struct Values<'u, 'f> {
     ui: &'u Ui,
     face: &'f Face<'f>,
     grid: Grid,
     floor: f32,
+    drive: &'f str,
 }
 
 /// What the last row drawn was: the next row's gap follows it.
@@ -504,11 +551,11 @@ impl Values<'_, '_> {
             Kind::Plain | Kind::Dim => {}
         }
         let figures = label.is_none_or(|l| l != t!("dev.card.label_converts"));
-        let runs = read.runs(size, figures, face);
+        let runs = read.runs(size, figures, face, self.drive);
         let height = if runs.is_empty() {
             line_h
         } else {
-            let para = Para::runs(&runs).line(line_h / size).floor(self.floor);
+            let para = Para::runs(&runs).line(leading(&runs, line_h)).floor(self.floor);
             para.paint(self.ui, pos2(from, top), (end - from).max(1.0)).height().max(line_h)
         };
         if let Some(right) = right
@@ -533,7 +580,7 @@ impl Values<'_, '_> {
     fn right_words(&self, right: &Line, mid: f32, left_end: f32, end: f32) {
         let face = self.face;
         let read = Read::of(right, face);
-        let runs = read.runs(PLAIN.0, true, face);
+        let runs = read.runs(PLAIN.0, true, face, self.drive);
         let lamp = match read.kind {
             Kind::Verdict(lamp) => Some(lamp),
             _ => None,
@@ -592,13 +639,15 @@ fn fact_row(paint: &mut Paint, ui: &Ui, face: &Face, grid: Grid, label: &str, va
 /// drive, its file system and its size whole, then as many of the pieces
 /// that give way as the value column holds — its clusters, then its serial
 /// — each whole; short of room for even the first three, cut with an
-/// ellipsis as any fact is.
+/// ellipsis as any fact is. Its figures are in the monospace, the drive
+/// letter with them, as the Card board sets it.
 fn drive_fact(paint: &mut Paint, ui: &Ui, face: &Face, grid: Grid, view: &CardView, label: &str, value: &str) {
     let v = &view.found.volume;
     let spare = usize::from(v.space.is_some_and(|s| s.cluster > 0)) + usize::from(v.serial.is_some());
     let mut pieces: Vec<&str> = value.rsplitn(spare + 1, " · ").collect();
     pieces.reverse();
-    let runs = |words: &str| studio::figured(words, face.ports, body(PLAIN.0), mono(FIGURE), face.pal.text);
+    let drive = view.drive();
+    let runs = |words: &str| figured(words, face.ports, &drive, body(PLAIN.0), mono(FIGURE), face.pal.text);
     fact_row(paint, ui, face, grid, label, |mid, x, w| {
         let mut keep = pieces.len();
         while keep > 1 && studio::runs_width(ui, &runs(&pieces[..keep].join(" · "))) > w {
@@ -733,6 +782,12 @@ pub(super) fn gate(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
     let title = cells::card::gate_title(gate);
     let (keep, go) = cells::card::gate_buttons_of(gate);
     let groups = said(gate);
+    // The adopt gate names the card's drive, a figure as the card's own
+    // words set it.
+    let drive = match &gate.kind {
+        GateKind::Adopt { drive, .. } => drive.clone(),
+        _ => String::new(),
+    };
     let (pal, id) = (face.pal, Id::new("mp3-card-gate"));
     let (answer, ticked) = gold_gate(ui, id, face.full, &title, pal, |ui| {
         let mut ticked = false;
@@ -741,7 +796,7 @@ pub(super) fn gate(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
                 ui.add_space(GROUP_GAP);
             }
             for line in group {
-                ticked |= said_line(ui, id, line, face);
+                ticked |= said_line(ui, id, line, face, &drive);
             }
         }
         ui.add_space(FOOT_ABOVE);
@@ -758,9 +813,10 @@ pub(super) fn gate(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
     drawn
 }
 
-/// One line of a gate's body, a row of the layout the window's body wide.
-/// Whether the box was clicked.
-fn said_line(ui: &mut Ui, id: Id, line: &Said, face: &Face) -> bool {
+/// One line of a gate's body, a row of the layout the window's body wide,
+/// `drive` the card's where the gate names it. Whether the box was
+/// clicked.
+fn said_line(ui: &mut Ui, id: Id, line: &Said, face: &Face, drive: &str) -> bool {
     let pal = face.pal;
     let cut_row = |ui: &mut Ui, runs: &[Run]| {
         let w = ui.available_width();
@@ -768,19 +824,22 @@ fn said_line(ui: &mut Ui, id: Id, line: &Said, face: &Face) -> bool {
         let x = row.min.x + studio::STATE_INDENT;
         studio::runs(ui, pos2(x, row.center().y), runs, (row.max.x - x).max(1.0), Align2::LEFT_CENTER)
     };
-    let figured = |words: &str, color: Color32| studio::figured(words, face.ports, body(SAY), mono(SAY_FIGURE), color);
+    let runs_of = |words: &str, color: Color32| figured(words, face.ports, drive, body(SAY), mono(SAY_FIGURE), color);
     match line {
         Said::Words(words, green) => {
-            Para::runs(&figured(words, if *green { pal.ok } else { pal.text })).show(ui);
+            // The kit's 1.3 leading of the words' 14 points, a sentence
+            // that opens on a figure too.
+            let runs = runs_of(words, if *green { pal.ok } else { pal.text });
+            Para::runs(&runs).line(leading(&runs, SAY_LINE)).show(ui);
         }
         Said::Path(path) => {
             cut_row(ui, &[(path.clone(), mono(SAY_FIGURE), pal.text)]);
         }
         Said::More(words) => {
-            cut_row(ui, &figured(words, pal.dim));
+            cut_row(ui, &runs_of(words, pal.dim));
         }
         Said::Row(words) => {
-            cut_row(ui, &figured(words, pal.text));
+            cut_row(ui, &runs_of(words, pal.text));
         }
         Said::Library(lib, count) => {
             let w = ui.available_width();
@@ -790,7 +849,7 @@ fn said_line(ui: &mut Ui, id: Id, line: &Said, face: &Face) -> bool {
             let name = studio::text(ui, pos2(x, row.center().y), lib, body(SAY), pal.text, room, Align2::LEFT_CENTER);
             let from = name.max.x + LIB_APART;
             if from < row.max.x {
-                studio::runs(ui, pos2(from, row.center().y), &figured(count, pal.text), row.max.x - from, Align2::LEFT_CENTER);
+                studio::runs(ui, pos2(from, row.center().y), &runs_of(count, pal.text), row.max.x - from, Align2::LEFT_CENTER);
             }
         }
         Said::Box(words, ticked) => return studio::check_line(ui, id.with("box"), *ticked, words, "", false, pal).clicked(),
@@ -825,12 +884,18 @@ fn gold_gate<R>(ui: &Ui, id: Id, over: Rect, title: &str, pal: &Pal, body: impl 
     let size_key = id.with("height");
     let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
     let window = Rect::from_center_size(over.center(), vec2(width, known.unwrap_or(max_h).min(max_h)));
-    // Up on this pass when it was not drawn on the last: its body at its
-    // top, as the cells draw a gate afresh.
+    // Up on this pass when it was not drawn on the last, or another gate
+    // took its place there (a chained gate, which the last one's go opened
+    // where its foot had been scrolled to): its body at its top, as the
+    // cells draw a gate afresh.
     let now = ctx.cumulative_pass_nr();
-    let drawn_key = id.with("drawn");
-    let opened = ctx.data(|d| d.get_temp::<u64>(drawn_key)).is_none_or(|last| last + 1 != now);
-    ctx.data_mut(|d| d.insert_temp(drawn_key, now));
+    let (drawn_key, title_key) = (id.with("drawn"), id.with("title"));
+    let other = ctx.data(|d| d.get_temp::<String>(title_key)).is_none_or(|was| was != title);
+    let opened = other || ctx.data(|d| d.get_temp::<u64>(drawn_key)).is_none_or(|last| last + 1 != now);
+    ctx.data_mut(|d| {
+        d.insert_temp(drawn_key, now);
+        d.insert_temp(title_key, title.to_string());
+    });
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false);
     let shown = area.show(&ctx, |ui| {
         let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
@@ -1530,6 +1595,102 @@ mod tests {
         let sent = worker::sent(&inbox);
         let [worker::Cmd::Sync { allow, .. }] = sent.as_slice() else { panic!("{sent:?}") };
         assert_eq!((allow.answers.removals, allow.answers.adopt), (true, Some(false)), "Leave them all as mine");
+    }
+
+    #[test]
+    fn a_chained_gate_opens_at_its_top_wherever_the_last_ones_body_was_scrolled_to() {
+        let _en = english();
+        // A window short enough that both gates' bodies scroll.
+        let size = vec2(576.0, 260.0);
+        let probe = Probe::new(size);
+        let (mut page, inbox) = alone(planned(|p| {
+            p.removals = paths(214);
+            p.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])];
+        }));
+        page.act(Act::Primary);
+        let out = probe.settle(&mut page);
+        let why = t!("dev.card.gate_remove_why", server = "Home").to_string();
+        let top = find(&out, &why).min.y;
+        // The wheel takes the body to its foot, where its go stands.
+        let at = pos2(size.x / 2.0, size.y / 2.0);
+        let wheel = Event::MouseWheel { unit: MouseWheelUnit::Point, delta: vec2(0.0, -2000.0), phase: egui::TouchPhase::Move, modifiers: Default::default() };
+        let _ = probe.pass(&mut page, vec![Event::PointerMoved(at), wheel]);
+        for _ in 0..40 {
+            let _ = probe.pass(&mut page, Vec::new());
+        }
+        let out = probe.settle(&mut page);
+        assert!(find(&out, &why).min.y < top - 40.0, "scrolled to the foot: {} from {top}", find(&out, &why).min.y);
+        probe.click_on(&mut page, "REMOVE 214 AND SYNC");
+        let gate = page.card.gate.clone().expect("the next gate");
+        assert!(matches!(gate.kind, GateKind::Adopt { .. }) && worker::sent(&inbox).is_empty(), "the adopt gate, chained");
+        // Its body from its top under its title, though egui kept the last
+        // body's place, and taller than its view, so that place would show.
+        let out = probe.settle(&mut page);
+        let title = find(&out, &cells::card::gate_title(&gate)).center().y;
+        let Some(Said::Words(first, _)) = said(&gate).into_iter().flatten().next() else { panic!("the adopt's words") };
+        let body_top = title + TITLE_H / 2.0 + MODAL_GAP;
+        assert!(find(&out, &first).min.y >= body_top - 1.0, "at its top: {} under {body_top}", find(&out, &first).min.y);
+        let keep = keep_words(&cells::card::gate_buttons_of(&gate).0).to_uppercase();
+        assert!(find(&out, &keep).min.y > size.y - 16.0 - MODAL_PAD, "its foot under its view");
+    }
+
+    #[test]
+    fn a_value_or_a_gates_sentence_that_opens_on_a_figure_keeps_its_leading_where_it_wraps() {
+        let _en = english();
+        let apart = |g: &egui::Galley| g.rows[1].rect().min.y - g.rows[0].rect().min.y;
+        // Next sync opens on its count, and at the cells' least width its
+        // pieces wrap: 20 points a line, as a value's words.
+        let probe = Probe::new(vec2(NARROW.x, BOARD.y));
+        let (mut page, _inbox) = alone(planned(|p| {
+            p.new = 12_345;
+            p.removals = paths(2_345);
+            p.plays = 37_000;
+            p.waves_missing = true;
+        }));
+        let out = probe.settle(&mut page);
+        let next = galley(&out, "12,345 new · 2,345 to remove · 37,000 plays to send · waveforms to add");
+        assert!(next.rows.len() >= 2 && next.job.sections[0].format.font_id == mono(12.5), "it wraps, from its figure");
+        assert!((apart(&*next) - 20.0).abs() < 0.1, "a value's 20 points: {}", apart(&*next));
+        // The take-over's plays sentence opens on its count; in a narrow
+        // window it wraps on the kit's 1.3 of the gate's 14 points, as its
+        // sentence that opens on words does (egui lays rows on whole
+        // pixels).
+        let probe = Probe::new(vec2(360.0, BOARD.y));
+        let card = cards::ready("E:", now());
+        let (mut page, _inbox) = alone(card.clone());
+        let kind = GateKind::Server { card: "Car music".into(), old: "Home".into(), new: "Studio".into(), rows: 4_812, plays: 37, want: None };
+        page.card.gate = Some(CardGate { key: card.key.clone(), kind, allow: Allow::default(), card: Opened::of(&card) });
+        let out = probe.settle(&mut page);
+        let plays = galley(&out, &t!("dev.card.gate_server_plays", n = "37", old = "Home"));
+        let words = galley(&out, &t!("dev.card.gate_server_body", card = "Car music", old = "Home", new = "Studio"));
+        assert!(plays.rows.len() >= 2 && words.rows.len() >= 2 && plays.job.sections[0].format.font_id == mono(SAY_FIGURE), "both wrap, one from its figure");
+        assert!((apart(&*plays) - apart(&*words)).abs() < 0.01, "the gate's leading: {} as {}", apart(&*plays), apart(&*words));
+        assert!((apart(&*words) - SAY * 1.3).abs() < 0.5, "the kit's 1.3: {}", apart(&*words));
+    }
+
+    #[test]
+    fn the_cards_drive_letter_is_a_figure_in_its_drive_fact_and_in_the_words_that_name_it() {
+        let _en = english();
+        let probe = Probe::new(BOARD);
+        let run_of = |g: &egui::Galley, words: &str| {
+            let section = g.job.sections.iter().find(|s| &g.job.text[s.byte_range.start.0..s.byte_range.end.0] == words);
+            section.unwrap_or_else(|| panic!("{words:?} a run of its own in {:?}", g.job.text)).format.font_id.clone()
+        };
+        // Details' Drive fact, as the Card board sets it.
+        let (mut page, _inbox) = alone(cards::ready("E:", now()));
+        page.act(Act::Details);
+        let out = probe.settle(&mut page);
+        let fact = galley(&out, "E: · FAT32 on MBR · 63.8 GB · 32 KB clusters · 1A2B-3C4D");
+        assert_eq!(run_of(&*fact, "E:"), mono(12.5));
+        assert_eq!(run_of(&*fact, "1A2B-3C4D"), mono(12.5));
+        // A line that names it among its words: the disk check's.
+        let (mut page, _inbox) = alone(cards::with(cards::ready("E:", now()), |c| cards::facts(c).check = true));
+        let out = probe.settle(&mut page);
+        let windows = galley(&out, &t!("dev.card.check_win", drive = "E:"));
+        assert_eq!(run_of(&*windows, "E:"), mono(12.5));
+        // A word that only holds it, and a volume's name, are words.
+        assert!(word_at("XE: E:", "E:") == Some(4) && word_at("E:x", "E:").is_none());
+        assert!(letter("E:") && !letter("MSTREAM_CAR_MUSIC") && !letter("E"));
     }
 
     #[test]
