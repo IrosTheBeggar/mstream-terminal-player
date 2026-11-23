@@ -128,7 +128,16 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, roo
     paint.cut = false;
     paint.blank();
     paint.row(page, board.port(), &actions, 0.0);
-    let rest = paint.y + s.pad_y - room.min.y;
+    let mut rest = paint.y + s.pad_y - room.min.y;
+    // A failed write opens Details by itself on the log's newest lines
+    // (the Failed board; the cells keep three of them at the GUI's floor):
+    // there Details counts at rest — its rule, the port, which is all its
+    // facts after a failure, and two lines of the log — so the frame takes
+    // the tighter measures rather than leave the failure under the card's
+    // foot.
+    if page.details && matches!(board.written, Some(Written::Failed { .. })) {
+        rest += 2.0 * s.gap + 1.0 + FACT_H + s.gap + 2.0 * LOG_ROW;
+    }
     if page.details && face.live {
         paint.rows(page, board.port(), &cells::details_rows(page, board));
     }
@@ -377,6 +386,16 @@ fn on_baseline(ui: &Ui, top: f32, size: f32) -> f32 {
     top + m.ascent - m.baseline + m.row / 2.0
 }
 
+/// The leading that sets `runs` a line `line_h` points apart: the kit's
+/// prose takes its leading as a share of its first run's size, which is a
+/// figure's smaller one where a line starts with a figure (the card's
+/// "21.4 of 59.6 GB used"), so its lines would stand closer than its
+/// words'.
+fn leading(runs: &[Run], line_h: f32) -> f32 {
+    let first = runs.first().map_or(line_h, |(_, font, _)| font.size);
+    line_h / first.max(1.0)
+}
+
 /// The cells' door mark off a link's words, as the kit's lead: their ▸ a
 /// door shut, their ▾ a door open.
 fn lead_of(text: &str) -> (Option<Lead>, &str) {
@@ -541,7 +560,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         let height = if runs.is_empty() {
             line_h
         } else {
-            let para = Para::runs(&runs).line(line_h / size).floor(self.floor);
+            let para = Para::runs(&runs).line(leading(&runs, line_h)).floor(self.floor);
             para.paint(self.ui, pos2(x, top), (end - x).max(1.0)).height().max(line_h)
         };
         if let Some(right) = right {
@@ -641,7 +660,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             line_h
         } else {
             let room = if reset { end - x - reset_w - CLEAR } else { end - x };
-            let para = Para::runs(&runs).line(line_h / size).floor(self.floor);
+            let para = Para::runs(&runs).line(leading(&runs, line_h)).floor(self.floor);
             para.paint(self.ui, pos2(x, top), room.max(1.0)).height().max(line_h)
         };
         let beside = runs.is_empty() || x + studio::runs_width(self.ui, &runs) + CLEAR + reset_w <= end;
@@ -740,10 +759,12 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
     /// The log under a block's gap, in the rows the card leaves it less
     /// `tail` (what the rows after it take), and no more than it has: its
     /// newest lines, `mm:ss` dim and then the line in its kind's colour, all
-    /// in the monospace, each cut with an ellipsis short of the thumb's
-    /// room — scrolled up by the page's own count (the wheel's over it, a
-    /// line a notch), else following the newest line on the pane's foot. No
-    /// room for a line: no log, and no gap for it.
+    /// in the monospace, each cut with an ellipsis at the content's end, or
+    /// short of the thumb's room while there are more lines than rows (the
+    /// Done board's log; the Failed board's, which all fit, has none) —
+    /// scrolled up by the page's own count (the wheel's over it, a line a
+    /// notch), else following the newest line on the pane's foot. No room
+    /// for a line: no log, and no gap for it.
     fn log(&mut self, page: &mut Page, port: &str, tail: f32) {
         let face = self.face;
         let gap = face.space.gap;
@@ -760,7 +781,9 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         }
         let scroll = page.log_scroll.min(lines.len() - rows);
         let end = lines.len() - scroll;
-        let words_w = (pane.width() - CLOCK_W - studio::BAR_ROOM).max(1.0);
+        let overflows = lines.len() > rows;
+        let bar = if overflows { studio::BAR_ROOM } else { 0.0 };
+        let words_w = (pane.width() - CLOCK_W - bar).max(1.0);
         for (k, entry) in lines[end - rows..end].iter().enumerate() {
             let mid = pane.min.y + (k as f32 + 0.5) * LOG_ROW;
             let secs = entry.at.as_secs();
@@ -774,7 +797,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             };
             studio::text(self.ui, pos2(pane.min.x + CLOCK_W, mid), &entry.text, mono(FIGURE), ink, words_w, Align2::LEFT_CENTER);
         }
-        if lines.len() > rows {
+        if overflows {
             thumb(self.ui, face, pane, rows, lines.len(), end - rows);
         }
         self.y = pane.max.y;
@@ -830,4 +853,494 @@ fn thumb(ui: &Ui, face: &Face, pane: Rect, rows: usize, len: usize, first: usize
     let rect = Rect::from_min_size(pos2(pane.max.x - studio::THUMB_W, top), vec2(studio::THUMB_W, h));
     let rest = face.pal.dim.gamma_multiply(studio::THUMB_REST);
     ui.painter().rect_filled(rect, egui::CornerRadius::same((studio::THUMB_W / 2.0) as u8), rest);
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+pub(super) mod tests {
+    //! The write on the board card run headless, as the frame's tests run
+    //! the page (egui_view/tests.rs) and on the page's own fixtures: the
+    //! write's steps over its bar, the lock, Done with Details open, a
+    //! failure, and a format on its own. The helpers are the gate's tests'
+    //! too (gate.rs).
+
+    use std::time::{Duration, Instant};
+
+    use egui::epaint::Shape;
+    use egui::{Event, FullOutput, PointerButton, Pos2, Vec2};
+
+    use super::super::{COLUMN_W, ROOMY, show};
+    use super::*;
+    use crate::admin::{EguiShown, Screen};
+    use crate::device::board::{CardRoot, Clock, Formatted};
+    use crate::device::desk::Event as Told;
+    use crate::device::firmware::Mode;
+    use crate::device::page::{Kind as GateKind, fixtures};
+    use crate::gui::window::studio::Pal;
+
+    pub(in super::super) fn english() -> std::sync::RwLockReadGuard<'static, ()> {
+        let guard = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        crate::kit::theme::pin_modern_terminal();
+        guard
+    }
+
+    /// The page's area in points: in the GUI's default 100×30 window, at
+    /// the GUI's floor (100×24), and in the boards' 1440 by 900 window.
+    pub(in super::super) const WINDOW: Vec2 = vec2(800.0, 448.0);
+    pub(in super::super) const FLOOR: Vec2 = vec2(800.0, 352.0);
+    pub(in super::super) const BOARD: Vec2 = vec2(1440.0, 824.0);
+
+    /// A context styled as the host's, its passes run over a page's area.
+    pub(in super::super) struct Headless {
+        pub(in super::super) ctx: egui::Context,
+        size: Vec2,
+    }
+
+    impl Headless {
+        pub(in super::super) fn new(size: Vec2) -> Headless {
+            let ctx = egui::Context::default();
+            crate::gui::window::panel::fonts(&ctx);
+            studio::style_once(&ctx, &Pal::now());
+            Headless { ctx, size }
+        }
+
+        /// One pass, and what the page told its host.
+        pub(in super::super) fn shown(&self, page: &mut Page) -> EguiShown {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), ..Default::default() };
+            let mut told = None;
+            let mut out = self.ctx.run_ui(input, |ui| told = Some(show(ui, page, "", false)));
+            out.textures_delta.clear();
+            told.expect("the pass ran")
+        }
+
+        /// One pass with `events`: what egui drew.
+        pub(in super::super) fn pass(&self, page: &mut Page, events: Vec<Event>) -> FullOutput {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), events, ..Default::default() };
+            let mut out = self.ctx.run_ui(input, |ui| {
+                let _ = show(ui, page, "", false);
+            });
+            // No GPU here to take the font atlas: let go of it on purpose, or
+            // epaint's debug check fails the drop.
+            out.textures_delta.clear();
+            out
+        }
+
+        /// Two passes (egui sizes a modal's area on the first), the second's.
+        pub(in super::super) fn settle(&self, page: &mut Page) -> FullOutput {
+            let _ = self.pass(page, Vec::new());
+            self.pass(page, Vec::new())
+        }
+
+        /// A press and a release at `at`, a pass each after the move.
+        pub(in super::super) fn click(&self, page: &mut Page, at: Pos2) {
+            let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+            for events in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)]] {
+                let _ = self.pass(page, events);
+            }
+        }
+
+        /// A click on the middle of what `id` drew on the last pass.
+        pub(in super::super) fn click_id(&self, page: &mut Page, id: Id) {
+            self.click(page, self.rect_of(id).center());
+        }
+
+        /// Where `id` was drawn on the last pass.
+        pub(in super::super) fn rect_of(&self, id: Id) -> Rect {
+            self.ctx.read_response(id).unwrap_or_else(|| panic!("{id:?} was drawn")).rect
+        }
+    }
+
+    /// Every text a pass drew, whole, with where.
+    pub(in super::super) fn texts(out: &FullOutput) -> Vec<(String, Rect)> {
+        galleys(out).into_iter().map(|(pos, g)| (g.text().to_string(), Rect::from_min_size(pos, g.size()))).collect()
+    }
+
+    /// Every galley a pass drew, with where.
+    pub(in super::super) fn galleys(out: &FullOutput) -> Vec<(Pos2, std::sync::Arc<egui::Galley>)> {
+        out.shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                Shape::Text(t) => Some((t.pos, t.galley.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(in super::super) fn drew(out: &FullOutput, words: &str) -> bool {
+        texts(out).iter().any(|(t, _)| t == words)
+    }
+
+    /// Where the pass drew `words`.
+    pub(in super::super) fn find(out: &FullOutput, words: &str) -> Rect {
+        let all = texts(out);
+        all.iter().find(|(t, _)| t == words).map(|(_, r)| *r).unwrap_or_else(|| panic!("{words:?} drawn: {:?}", all.iter().map(|(t, _)| t).collect::<Vec<_>>()))
+    }
+
+    pub(in super::super) fn assert_drew(out: &FullOutput, words: &[&str]) {
+        for w in words {
+            assert!(drew(out, w), "{w:?} drawn: {:?}", texts(out).into_iter().map(|(t, _)| t).collect::<Vec<_>>());
+        }
+    }
+
+    /// The colours `words` was set in, run by run, and their faces.
+    pub(in super::super) fn looks(out: &FullOutput, words: &str) -> Vec<(Color32, egui::FontId)> {
+        let galley = galleys(out).into_iter().find(|(_, g)| g.text() == words).unwrap_or_else(|| panic!("{words:?} drawn")).1;
+        galley.job.sections.iter().map(|s| (s.format.color, s.format.font_id.clone())).collect()
+    }
+
+    /// The one colour `words` was set in.
+    pub(in super::super) fn color_of(out: &FullOutput, words: &str) -> Color32 {
+        let colors: Vec<Color32> = looks(out, words).into_iter().map(|(c, _)| c).collect();
+        assert!(colors.windows(2).all(|w| w[0] == w[1]), "{words:?} in one colour: {colors:?}");
+        colors[0]
+    }
+
+    /// The rects a pass filled with `fill`, `h` points tall: an LED row's
+    /// segments.
+    pub(in super::super) fn filled(out: &FullOutput, fill: Color32, h: f32) -> Vec<Rect> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::Rect(r) if r.fill == fill && (r.rect.height() - h).abs() < 0.01 => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The LEDs a pass lit in `color`: the 6-point squares.
+    pub(in super::super) fn leds(out: &FullOutput, color: Color32) -> Vec<Rect> {
+        filled(out, color, 6.0).into_iter().filter(|r| (r.width() - 6.0).abs() < 0.01).collect()
+    }
+
+    /// A page on quiet channels, its worker's reports read.
+    pub(in super::super) fn page_with(tell: impl FnOnce(&Ends)) -> (Page, Ends) {
+        let (mut page, ends) = Page::quiet();
+        tell(&ends);
+        page.pump();
+        (page, ends)
+    }
+
+    /// COM3's update said yes to, the page locked: what the worker was
+    /// sent read away.
+    fn locked(tell: impl FnOnce(&Ends)) -> (Page, Ends) {
+        let (mut page, ends) = page_with(tell);
+        page.act(Act::Primary);
+        page.act(Act::Write);
+        assert!(page.writing(), "the gate's yes locks the page");
+        let _ = ends.sent();
+        (page, ends)
+    }
+
+    /// COM3 at work `work`, as the worker tells it during the write.
+    fn at_work(work: Work) -> Board {
+        let mut board = fixtures::old("COM3", "v0.7.0");
+        board.work = work;
+        board
+    }
+
+    #[test]
+    fn the_write_says_each_step_on_the_firmware_row_over_its_bar_lit_as_the_cells_fill_theirs() {
+        let _en = english();
+        let probe = Headless::new(WINDOW);
+        let pal = Pal::now();
+        let (mut page, ends) = locked(Ends::update_available);
+        // Every phase the worker reports, with the share its bar shows: none
+        // until the copy says its percent, whole while it is checked and the
+        // board restarts.
+        let steps = [
+            (Work::Queued, 0),
+            (Work::Writing { phase: Phase::Connecting, pct: None }, 0),
+            (Work::Writing { phase: Phase::Reading, pct: None }, 0),
+            (Work::Writing { phase: Phase::Erasing, pct: None }, 0),
+            (Work::Writing { phase: Phase::Comparing, pct: None }, 0),
+            (Work::Writing { phase: Phase::Writing, pct: None }, 0),
+            (Work::Writing { phase: Phase::Writing, pct: Some(1) }, 10),
+            (Work::Writing { phase: Phase::Writing, pct: Some(62) }, 620),
+            (Work::Writing { phase: Phase::Writing, pct: Some(99) }, 990),
+            (Work::Writing { phase: Phase::Verifying, pct: Some(100) }, 1000),
+            (Work::Writing { phase: Phase::Restarting, pct: Some(100) }, 1000),
+        ];
+        for (work, permille) in steps {
+            let board = at_work(work.clone());
+            ends.tell([Told::Board(board.clone())]);
+            page.pump();
+            let out = probe.settle(&mut page);
+            let words = page.write_words(&board);
+            assert_drew(&out, &[&words, "FIRMWARE"]);
+            assert!(looks(&out, &words).iter().all(|(c, _)| *c == pal.accent), "{words:?} in the accent, the cells' step words");
+            assert!(looks(&out, &words).iter().all(|(_, f)| *f == body(FIRST.0) || *f == mono(FIGURE)), "regular: work, not a verdict");
+            let (lit, unlit) = (filled(&out, pal.accent, METER_H).len(), filled(&out, pal.unlit, METER_H).len());
+            assert!(lit + unlit > 60, "{work:?}: the bar across the value column, {lit} lit and {unlit} not");
+            assert_eq!(lit, studio::fill_lit(permille, lit + unlit), "{work:?}: {permille}‰ lit as the cells fill their bar");
+            // The bar 4 points under the words.
+            let segment = filled(&out, pal.accent, METER_H).into_iter().chain(filled(&out, pal.unlit, METER_H)).next().expect("a segment");
+            let bar_top = segment.min.y - (METER_ROW - METER_H) / 2.0;
+            assert!((bar_top - (find(&out, &words).max.y + LINE_GAP)).abs() < 2.0, "{work:?}: {bar_top} under {:?}", find(&out, &words));
+            // The card row untouched, dim; the bottom row the door alone.
+            let untouched = t!("dev.card_untouched").to_string();
+            assert_eq!(color_of(&out, &untouched), pal.dim);
+            assert_drew(&out, &["Details"]);
+            for never in ["UPDATE", "Advanced…", "Show on the player", "Ask again"] {
+                assert!(!drew(&out, never), "{work:?}: {never:?} under the lock");
+            }
+        }
+        // The time left, once the rate is known, at the end of the words.
+        let (mut page, _ends) = locked(Ends::update_available);
+        let t0 = Instant::now();
+        for (pct, after) in [(10, 0), (20, 1), (40, 10)] {
+            page.apply_at(Told::Board(at_work(Work::Writing { phase: Phase::Writing, pct: Some(pct) })), t0 + Duration::from_secs(after));
+        }
+        let out = probe.settle(&mut page);
+        assert_drew(&out, &["writing v0.8.0… 40% · about 20 s left"]);
+        let figures: Vec<egui::FontId> = looks(&out, "writing v0.8.0… 40% · about 20 s left").into_iter().map(|(_, f)| f).collect();
+        assert_eq!(figures.iter().filter(|f| **f == mono(FIGURE)).count(), 3, "the version, the percent and the seconds in the monospace: {figures:?}");
+    }
+
+    #[test]
+    fn under_the_lock_another_board_waits_its_turn_and_its_primary_says_why_under_the_pointer() {
+        let _en = english();
+        let probe = Headless::new(WINDOW);
+        let pal = Pal::now();
+        let (mut page, ends) = locked(|e| e.boards(vec![fixtures::old("COM3", "v0.7.0"), fixtures::old("COM5", "v0.7.0")]));
+        ends.writing(62);
+        page.pump();
+        page.act(Act::Board(1));
+        let out = probe.settle(&mut page);
+        let why = t!("dev.fw_one_at_a_time", port = "COM3").to_string();
+        assert_drew(&out, &[&why, "UPDATE", "Update available · v0.7.0 → v0.8.0"]);
+        assert_eq!(color_of(&out, &why), pal.dim, "the one-at-a-time line, dim");
+        assert_eq!(color_of(&out, "UPDATE"), pal.dim, "the kit's disabled frame: dim, no pointer");
+        for never in ["Show on the player", "Advanced…", "Ask again"] {
+            assert!(!drew(&out, never), "{never:?} under the lock");
+        }
+        // Under the pointer it says why, as the cells' tooltip does.
+        let at = find(&out, "UPDATE").center();
+        let _ = probe.pass(&mut page, vec![Event::PointerMoved(at)]);
+        let out = probe.settle(&mut page);
+        assert_eq!(texts(&out).iter().filter(|(t, _)| *t == why).count(), 2, "the line and its tooltip");
+        // And a click on it asks for nothing.
+        probe.click(&mut page, at);
+        assert!(page.gate.is_none() && ends.sent().is_empty(), "the primary waits its turn");
+        // The footer's warning is the cells' hint, never cut.
+        assert!(Screen::hint(&page).starts_with(&t!("dev.hint_working_port", port = "COM3").to_string()), "{}", Screen::hint(&page));
+        // The tab of the board being written still takes the view back.
+        probe.click_id(&mut page, Id::new("mp3-tab").with(0usize));
+        assert_eq!(page.open.as_deref(), Some("COM3"));
+        let out = probe.settle(&mut page);
+        assert_drew(&out, &["writing v0.8.0… 62%"]);
+        assert!(ends.sent().is_empty());
+    }
+
+    /// COM3 written the pin, checked, restarted and answering again, its
+    /// firmware the one that formats (`clock=`).
+    fn written_answering() -> Board {
+        let mut board = fixtures::answering_with("COM3", "v0.8.0", |s| s.clock = Clock::Ok);
+        board.probe = Some(Ok(crate::device::board::Probe { info: fixtures::info("COM3"), on_board: Some(fixtures::ours("v0.8.0")) }));
+        board.written = Some(Written::Done {
+            version: "v0.8.0".into(),
+            took: Duration::from_secs(41),
+            skipped: false,
+            install: false,
+            boot: Some("mstream-mp3-player v0.8.0 (commit 4e94418, 2026-10-10), ELF 11c35a4a".into()),
+            image: crate::device::firmware::tests::pin_facts("v0.8.0", Mode::Qio),
+            looping: None,
+        });
+        fixtures::judged(board)
+    }
+
+    /// A log line about COM3 of `kind`, as the worker tells one.
+    fn log(text: &str, kind: LogKind) -> Told {
+        Told::Log { port: Some("COM3".into()), text: text.into(), kind }
+    }
+
+    #[test]
+    fn done_is_the_card_again_with_details_open_on_its_facts_its_log_and_its_two_links() {
+        let _en = english();
+        let probe = Headless::new(BOARD);
+        let pal = Pal::now();
+        let (mut page, ends) = locked(Ends::update_available);
+        ends.writing(62);
+        ends.tell([log("writing… 100%", LogKind::Phase), log("mstream-mp3-player v0.8.0", LogKind::Quiet)]);
+        ends.tell([Told::Board(written_answering())]);
+        page.pump();
+        assert!(!page.writing(), "the lock ended with the restart");
+        let out = probe.settle(&mut page);
+        assert_drew(&out, &["Up to date · v0.8.0 · just written", "21.4 of 59.6 GB used · 1,284 tracks", "Details", "Advanced…"]);
+        assert!(!drew(&out, "UPDATE") && !drew(&out, "TRY AGAIN"), "nothing to do: no primary");
+        assert_eq!(leds(&out, pal.ok).len(), 1, "the chip's green LED");
+        // Details open: the facts, the write's log, then Write again and the
+        // format, as the cells offer them only with Details open.
+        assert!(!drew(&out, "Write v0.8.0 again"), "Details closed: no Write again");
+        probe.click(&mut page, find(&out, "Details").center());
+        assert!(page.details);
+        let out = probe.settle(&mut page);
+        assert_drew(&out, &["PORT", "BOARD", "ON THE BOARD", "THIS PLAYER", "WRITTEN", "CARD"]);
+        assert_drew(&out, &["writing… 100%", "mstream-mp3-player v0.8.0", "Write v0.8.0 again", "Format as FAT32…", "erases the whole card"]);
+        assert_eq!(color_of(&out, "writing… 100%"), pal.accent, "a phase in the accent");
+        assert_eq!(color_of(&out, "mstream-mp3-player v0.8.0"), pal.dim, "the boot line dim");
+        let (again, format) = (find(&out, "Write v0.8.0 again"), find(&out, "Format as FAT32…"));
+        assert!(format.min.y > again.max.y && find(&out, "writing… 100%").max.y < again.min.y, "under the log, Write again then the format");
+        // Each asks for the cells' act: its gate.
+        probe.click(&mut page, again.center());
+        assert!(page.gate.as_ref().is_some_and(|g| g.kind == GateKind::Again), "the cells' WriteAgain");
+        page.act(Act::Keep);
+        let out = probe.settle(&mut page);
+        probe.click(&mut page, find(&out, "Format as FAT32…").center());
+        assert!(page.gate.as_ref().is_some_and(|g| g.kind == GateKind::Format), "the cells' Format");
+        let sent = ends.sent();
+        assert!(matches!(sent.as_slice(), [Cmd::Facts { .. }]), "only Details' facts were asked: {sent:?}");
+    }
+
+    #[test]
+    fn a_failed_write_opens_details_on_its_newest_line_and_try_again_is_the_primary() {
+        let _en = english();
+        let probe = Headless::new(BOARD);
+        let pal = Pal::now();
+        let (mut page, ends) = locked(Ends::update_available);
+        ends.writing(38);
+        ends.tell((0..40).map(|i| log(&format!("wrote chunk {i:02}"), LogKind::Fact)));
+        ends.tell([log("the board stopped answering at 38% — unplugged?", LogKind::Fail)]);
+        ends.failed();
+        page.pump();
+        assert!(!page.writing() && page.details, "the lock ended, and Details opened by itself");
+        let out = probe.settle(&mut page);
+        let chip = "Write failed · the board is half written";
+        assert_drew(&out, &[chip, "It cannot start until it is written again.", "unknown until the firmware runs again"]);
+        assert_eq!(looks(&out, chip)[0], (pal.gold, strong(FIRST.0)), "the chip's words semibold in the gold");
+        assert_eq!(color_of(&out, "It cannot start until it is written again."), pal.dim, "its line dim, never gold");
+        assert_eq!(leds(&out, pal.gold).len(), 1, "the chip's gold LED");
+        assert_eq!(leds(&out, pal.dim).len(), 1, "the card row's dim one");
+        assert_eq!(color_of(&out, "unknown until the firmware runs again"), pal.dim);
+        assert_drew(&out, &["TRY AGAIN", "PORT"]);
+        assert!(!drew(&out, "BOARD") && !drew(&out, "THIS PLAYER"), "after a failure the port alone, then the log");
+        // The newest line on the pane's foot, in the gold; the oldest above
+        // the pane; the thumb at the foot of its travel.
+        let fail = "the board stopped answering at 38% — unplugged?";
+        assert_eq!(color_of(&out, fail), pal.gold);
+        let lowest = texts(&out).into_iter().filter(|(t, _)| t.starts_with("wrote chunk") || t == fail).max_by(|a, b| a.1.min.y.total_cmp(&b.1.min.y));
+        assert_eq!(lowest.map(|(t, _)| t).as_deref(), Some(fail), "following the newest line");
+        assert!(!drew(&out, "wrote chunk 00"), "the oldest lines above the pane");
+        // Try again: the gate again, never a write.
+        probe.click(&mut page, find(&out, "TRY AGAIN").center());
+        assert!(page.gate.as_ref().is_some_and(|g| g.kind == GateKind::Again), "half written on ours: Write again's gate");
+        assert!(ends.sent().is_empty(), "nothing written before the gate's yes");
+    }
+
+    #[test]
+    fn at_the_guis_floor_a_failure_still_shows_its_newest_lines_under_try_again() {
+        let _en = english();
+        let probe = Headless::new(FLOOR);
+        let (mut page, ends) = locked(Ends::update_available);
+        ends.writing(38);
+        ends.tell((0..40).map(|i| log(&format!("wrote chunk {i:02}"), LogKind::Fact)));
+        let fail = "the board stopped answering at 38% — unplugged?";
+        ends.tell([log(fail, LogKind::Fail)]);
+        ends.failed();
+        page.pump();
+        let out = probe.settle(&mut page);
+        // The tighter measures, so the log has rows: its newest line whole
+        // over the busy line, the primary whole too.
+        let busy_top = FLOOR.y - super::super::TIGHT.under_busy - studio::NOTE_H;
+        let line = find(&out, fail);
+        assert!(line.max.y <= busy_top, "the failure on the card: {line:?} over {busy_top}");
+        assert!(drew(&out, "wrote chunk 39"), "and the line before it");
+        let primary = find(&out, "TRY AGAIN");
+        assert!(primary.max.y < line.min.y, "under Try again");
+        // Details closed, the card is the card at rest, as tall as ever.
+        page.act(Act::Details);
+        let out = probe.settle(&mut page);
+        assert!(!drew(&out, fail) && drew(&out, "TRY AGAIN"));
+    }
+
+    #[test]
+    fn a_log_that_fits_runs_to_the_cards_end_and_one_that_does_not_leaves_its_thumb_room() {
+        let _en = english();
+        let probe = Headless::new(BOARD);
+        let long = "x".repeat(400);
+        let (mut page, ends) = page_with(Ends::up_to_date);
+        ends.tell([log(&long, LogKind::Fact)]);
+        page.pump();
+        page.act(Act::Details);
+        let out = probe.settle(&mut page);
+        let cut = texts(&out).into_iter().find(|(t, _)| t.starts_with("xxx")).expect("the long line, cut").1;
+        let end = BOARD.x / 2.0 + COLUMN_W / 2.0 - ROOMY.pad_x;
+        let reaches = cut.max.x > end - studio::BAR_ROOM + 1.0 && cut.max.x <= end + 0.5;
+        assert!(reaches, "a log with no more lines than rows runs into the thumb's room, to the content's end: {cut:?} to {end}");
+        ends.tell((0..80).map(|i| log(&format!("line {i:02}"), LogKind::Fact)));
+        ends.tell([log(&long, LogKind::Fact)]);
+        page.pump();
+        let out = probe.settle(&mut page);
+        let cut = texts(&out).into_iter().filter(|(t, _)| t.starts_with("xxx")).max_by(|a, b| a.1.min.y.total_cmp(&b.1.min.y)).expect("the newest long line").1;
+        assert!(cut.max.x <= end - studio::BAR_ROOM + 1.0, "one that overflows leaves the thumb its room: {cut:?}");
+    }
+
+    /// A board whose firmware formats, its card exFAT, its format at
+    /// `state` (the page's own tests' `formats` and `at`).
+    fn formatting(state: Format) -> Board {
+        formatting_with(state, |_| {})
+    }
+
+    /// The same, its status changed after.
+    fn formatting_with(state: Format, change: impl FnOnce(&mut crate::device::board::Status)) -> Board {
+        let mut board = fixtures::answering_with("COM3", "v0.8.0", |s| {
+            (s.cid, s.clock, s.card) = (CardRoot::None, Clock::Ok, CardKind::ExFat);
+            change(s);
+        });
+        let going = matches!(state, Format::Asking | Format::Waiting | Format::Restarting | Format::Running { .. });
+        board.work = if going { Work::Formatting } else { Work::Idle };
+        board.format = state;
+        board
+    }
+
+    #[test]
+    fn a_format_on_its_own_is_the_sd_rows_scan_its_share_and_its_time_left() {
+        let _en = english();
+        let probe = Headless::new(WINDOW);
+        let pal = Pal::now();
+        let (mut page, ends) = page_with(|e| e.boards(vec![formatting(Format::Idle)]));
+        let out = probe.settle(&mut page);
+        assert_drew(&out, &["exFAT card · the player reads FAT32 only", "FORMAT AS FAT32"]);
+        // The player asked: its question, then its percent and its time left.
+        ends.tell([Told::Board(formatting(Format::Waiting))]);
+        page.pump();
+        let out = probe.settle(&mut page);
+        let waiting = t!("dev.card.fmt_waiting").to_string();
+        assert_drew(&out, &[&waiting, &t!("dev.card.fmt_waiting_2")]);
+        assert_eq!(color_of(&out, &waiting), pal.accent);
+        assert_eq!(filled(&out, pal.ok, 2.0).len(), 0, "no share yet: no segment lit");
+        for never in ["FORMAT AS FAT32", "Advanced…", "Format as FAT32…"] {
+            assert!(!drew(&out, never), "{never:?} while the player formats");
+        }
+        ends.tell([Told::Board(formatting(Format::Restarting)), Told::Board(formatting(Format::Running { pct: 41 }))]);
+        page.pump();
+        let out = probe.settle(&mut page);
+        let running = t!("dev.card.fmt_running").to_string();
+        assert_drew(&out, &[&running, "41%"]);
+        assert_eq!(looks(&out, "41%"), [(pal.dim, mono(FIGURE))], "the share dim, a figure");
+        assert_eq!(color_of(&out, &running), pal.accent);
+        // The scan's ten segments, four of them lit in the green (each a
+        // stack of the kit's 2-point lines), and its words after the share.
+        let lit_columns = |c: Color32| {
+            let mut xs: Vec<i32> = filled(&out, c, 2.0).iter().filter(|r| (r.width() - 5.0).abs() < 0.01).map(|r| r.min.x as i32).collect();
+            xs.dedup();
+            xs.len()
+        };
+        assert_eq!((lit_columns(pal.ok), lit_columns(pal.unlit)), (4, 6), "41% lights four of the ten");
+        assert!(find(&out, "41%").max.x < find(&out, &running).min.x, "the share before the words");
+        let left = texts(&out).into_iter().find(|(t, _)| t.contains("leaving the tab")).expect("the time left").0;
+        assert!(left.starts_with("about ") && left.contains(" s left"), "{left:?}");
+        // Done: a FAT card's row again, and where to fill it.
+        let done = Formatted { size: 59_617_918_976, free: 59_517_918_976, cluster: 32_768, took: Duration::from_secs(41) };
+        let empty = formatting_with(Format::Done(done), |s| {
+            (s.card, s.free, s.tracks) = (CardKind::Fat32, Free::Bytes(59_517_918_976), Tracks::Count(0));
+        });
+        ends.tell([Told::Board(empty)]);
+        page.pump();
+        let out = probe.settle(&mut page);
+        assert_drew(&out, &["0.1 of 59.6 GB used · no tracks", &t!("dev.card.fmt_done")]);
+        assert!(!drew(&out, "FORMAT AS FAT32"), "the player's own card: no primary");
+        assert!(ends.sent().is_empty(), "drawing asks the worker nothing");
+    }
 }
