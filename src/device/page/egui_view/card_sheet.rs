@@ -75,6 +75,10 @@ const RADIO_IN: f32 = 24.0;
 const RADIO_APART: f32 = 24.0;
 /// A tick's words after its box.
 const TICK_IN: f32 = BOX + 10.0;
+/// A library's size at its row's right: the board's 10 points clear of the
+/// name, and the least of the name it leaves before it is left out.
+const SIZE_GAP: f32 = 10.0;
+const NAME_LEAST: f32 = 48.0;
 /// The fit's lines, the help's lines and the room under the rule, the
 /// room over a tight fit's dim line.
 const FIT_LINE: f32 = 20.0;
@@ -569,8 +573,10 @@ fn row_at(ui: &Ui, v: &View, face: &Face, id: Id, slot: Rect, row: &SRow, lit: b
 /// left on the panel's fill (its edge brightened while the row is
 /// `hovered`), the name 10 points after it in the row's face and ink, and
 /// at the slot's right, dim with its figures in the monospace, `right` (a
-/// library's size and tracks), gone where the name would not stand whole
-/// beside it, as the cells cut their line's end.
+/// library's size and tracks), whole. A long name gives way to it, cut with
+/// an ellipsis 10 points short of it, as the board's row cuts its name
+/// beside the size; only where the name would keep less than its least is
+/// the size left out.
 #[allow(clippy::too_many_arguments)]
 fn tick_line(ui: &Ui, slot: Rect, on: bool, hovered: bool, name: &str, right: Option<&str>, (font, ink): (&FontId, Color32), pal: &Pal) {
     let mid = slot.center().y;
@@ -581,9 +587,9 @@ fn tick_line(ui: &Ui, slot: Rect, on: bool, hovered: bool, name: &str, right: Op
     if let Some(right) = right {
         let runs = studio::figured(right, &[], body(13.0), mono(12.5), pal.dim);
         let right_w = studio::runs_width(ui, &runs);
-        if x + studio::width_of(ui, name, strong(VALUE)) + 16.0 + right_w <= slot.max.x {
+        if x + NAME_LEAST + SIZE_GAP + right_w <= slot.max.x {
             studio::runs(ui, pos2(slot.max.x, mid), &runs, right_w + 1.0, Align2::RIGHT_CENTER);
-            end = slot.max.x - right_w - 16.0;
+            end = slot.max.x - right_w - SIZE_GAP;
         }
     }
     studio::text(ui, pos2(x, mid), name, font.clone(), ink, (end - x).max(1.0), Align2::LEFT_CENTER);
@@ -1173,6 +1179,41 @@ mod tests {
         page.act(Act::Primary);
         probe.click_on(&mut page, "SET UP");
         assert!(matches!(worker::sent(&inbox).as_slice(), [worker::Cmd::SetUp { .. }]), "the cells' CardApply: set up");
+    }
+
+    #[test]
+    fn the_close_wears_the_cells_tooltip_its_key_named_only_as_their_surface_names_keys() {
+        let _en = english();
+        let probe = Probe::new(BOARD);
+        let (mut page, _ends, _inbox, _fold) = ready_sheet();
+        let _ = probe.settle(&mut page);
+        let close = probe.ctx.read_response(Id::new("mp3-card-sheet").with("close")).expect("the close drawn").rect.center();
+        let _ = probe.pass(&mut page, vec![Event::PointerMoved(close)]);
+        let mut out = probe.pass(&mut page, Vec::new()).0;
+        for _ in 0..10 {
+            out = probe.pass(&mut page, Vec::new()).0;
+        }
+        // The probe's host names no keys: the cells' tip_keyed drops the
+        // " — Esc" so.
+        let words = t!("path_modal.tip_close").to_string();
+        let bare = words.rsplit_once(" — ").map_or(words.as_str(), |(w, _)| w);
+        assert!(drew(&out, bare) && !drew(&out, &words), "{:?}", texts(&out).into_iter().map(|(t, _)| t).collect::<Vec<_>>());
+        assert!(page.card.sheet.is_some(), "a hover closes nothing");
+    }
+
+    #[test]
+    fn a_long_library_name_gives_way_to_its_size_cut_short_of_it_as_the_board_cuts_it() {
+        let _en = english();
+        let probe = Probe::new(BOARD);
+        let (mut page, _ends, _inbox, _fold) = ready_sheet();
+        let long = "The Complete Tuesday Night Sessions at the Village Vanguard, Every Set Ever Taped";
+        page.card.sheet.as_mut().expect("the sheet").offered[0].0 = long.to_string();
+        let out = probe.settle(&mut page);
+        let (name, size) = (find(&out, long), find(&out, "27.9 GB · 2,904 tracks"));
+        let body_right = find(&out, "12.6 GB · 1,908 tracks").max.x;
+        assert!((size.max.x - body_right).abs() < 1.0, "the size whole at the row's right: {size:?}");
+        assert!(name.max.x <= size.min.x - SIZE_GAP + 1.0, "the name cut short of it: {name:?} {size:?}");
+        assert!((name.center().y - size.center().y).abs() < 2.0);
     }
 
     #[test]
