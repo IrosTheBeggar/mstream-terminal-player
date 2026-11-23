@@ -848,10 +848,17 @@ pub(crate) fn led_column(ui: &Ui, cx: f32, base: f32, width: f32, lit: usize, co
     }
 }
 
+/// How many segments a horizontal LED meter `width` points long holds:
+/// each [`LED`] less a point wide, [`LED_GAP`] less a point apart.
+fn led_count(width: f32) -> usize {
+    let step = LED + LED_GAP - 1.0;
+    ((width + LED_GAP - 1.0) / step).floor().max(1.0) as usize
+}
+
 /// A horizontal LED meter across `track`: `share` of its segments lit.
 pub(crate) fn led_row(ui: &Ui, track: Rect, share: f32, lit_color: Color32, unlit: Color32) {
     let step = LED + LED_GAP - 1.0;
-    let count = ((track.width() + LED_GAP - 1.0) / step).floor().max(1.0) as usize;
+    let count = led_count(track.width());
     let lit = if share > 0.0 { ((share * count as f32).round() as usize).clamp(1, count) } else { 0 };
     for k in 0..count {
         let x = track.min.x + k as f32 * step;
@@ -2980,6 +2987,201 @@ pub(crate) fn halved(image: &egui::ColorImage) -> egui::ColorImage {
     egui::ColorImage::new([hw, hh], pixels)
 }
 
+// ── Figures, text buttons, the tall primary and a share's meter ──────────
+//
+// What the MP3 Player tab's egui frame needed first (src/device/page/
+// egui_view.rs) and nothing of which is the tab's own: a sentence's
+// figures found and set in the monospace, a button that is only its words
+// with the mark a door wears, the page's one tall act, and an LED row lit
+// for a share the way the cells fill their bar.
+
+/// Where the figure in `word` runs, if it holds one: from its first letter
+/// or digit (or a `/`), the letters and digits and the marks that join a
+/// figure's parts (`.,:-+_/`), less the marks it ends on (a sentence's
+/// full stop) — when that run starts with a digit (`21.4`, `1,284`,
+/// `14:03`, a serial), is a version (`v0.14.0`, `v0.14.0-5-g4e94418`), is
+/// a hex string of six or more with a digit in it (an ELF), or is one of
+/// `also` (a port's name, which no rule can tell from a word).
+fn figure_span(word: &str, also: &[&str]) -> Option<Range<usize>> {
+    let start = word.find(|c: char| c.is_ascii_alphanumeric() || c == '/')?;
+    let joins = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | ',' | ':' | '-' | '+' | '_' | '/');
+    let len = word[start..].find(|c: char| !joins(c)).unwrap_or(word.len() - start);
+    let core = word[start..start + len].trim_end_matches(['.', ',', ':', '-']);
+    let mut chars = core.chars();
+    let first = chars.next()?;
+    let digit = first.is_ascii_digit();
+    let version = first == 'v' && chars.next().is_some_and(|c| c.is_ascii_digit());
+    let hex = core.len() >= 6 && core.chars().all(|c| c.is_ascii_hexdigit()) && core.chars().any(|c| c.is_ascii_digit());
+    (digit || version || hex || also.contains(&core)).then(|| start..start + core.len())
+}
+
+/// `s` as runs in `font` and `color`, each figure in it ([`figure_span`]:
+/// a size, a version, a count, a time, a serial, a port named in `also`)
+/// set in `figure` instead, as the canvas sets a page's figures in the
+/// grid's monospace inside its sentences. The words between keep their
+/// spaces, so the line says what the cells say.
+pub(crate) fn figured(s: &str, also: &[&str], font: FontId, figure: FontId, color: Color32) -> Vec<Run> {
+    let mut parts: Vec<Run> = Vec::new();
+    let mut plain = String::new();
+    let mut rest = s;
+    while !rest.is_empty() {
+        let lead = rest.len() - rest.trim_start().len();
+        plain.push_str(&rest[..lead]);
+        rest = &rest[lead..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..end];
+        match figure_span(word, also) {
+            Some(span) => {
+                plain.push_str(&word[..span.start]);
+                if !plain.is_empty() {
+                    parts.push((std::mem::take(&mut plain), font.clone(), color));
+                }
+                parts.push((word[span.clone()].to_string(), figure.clone(), color));
+                plain.push_str(&word[span.end..]);
+            }
+            None => plain.push_str(word),
+        }
+        rest = &rest[end..];
+    }
+    if !plain.is_empty() {
+        parts.push((plain, font, color));
+    }
+    parts
+}
+
+/// What leads a [`text_button`]'s words, 8 points before them: the kit's
+/// [`pointer`] (the cells' ▸, a door shut) or its [`arrow`] down (their ▾,
+/// the door open).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lead {
+    Shut,
+    Open,
+}
+
+/// A [`text_button`]'s height, its words' size, and the room its lead
+/// takes: the mark's 8 points and the 8 after it.
+pub(crate) const TEXT_BUTTON_H: f32 = HIT;
+const TEXT_BUTTON_SIZE: f32 = 13.5;
+const LEAD_W: f32 = 16.0;
+
+/// How wide [`text_button`] draws `words` led by `lead`, in the semibold it
+/// wears under the pointer, the widest it gets.
+pub(crate) fn text_button_width(ui: &Ui, words: &str, lead: Option<Lead>, also: &[&str]) -> f32 {
+    let lead_w = if lead.is_some() { LEAD_W } else { 0.0 };
+    lead_w + runs_width(ui, &figured(words, also, strong(TEXT_BUTTON_SIZE), mono(12.5), Color32::WHITE))
+}
+
+/// A button that is only its words, the canvas's TEXT BUTTON (a door, a
+/// link that acts), its left middle at `at`: `words` dim with no frame and
+/// no fill, their figures in the monospace ([`figured`], `also` among
+/// them), led by `lead`; in the text colour and the semibold under the
+/// pointer, with the hand. Its target is as wide as it draws, no wider
+/// than `max_w`, where its words are cut with an ellipsis, and
+/// [`TEXT_BUTTON_H`] tall. Not `live`, it is drawn at rest and senses the
+/// pointer for nothing but a hover no look answers: something lies over
+/// it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_button(
+    ui: &Ui,
+    id: Id,
+    at: Pos2,
+    words: &str,
+    lead: Option<Lead>,
+    also: &[&str],
+    max_w: f32,
+    live: bool,
+    pal: &Pal,
+) -> Response {
+    let w = text_button_width(ui, words, lead, also).min(max_w).max(8.0);
+    let rect = Rect::from_min_size(pos2(at.x, at.y - TEXT_BUTTON_H / 2.0), vec2(w, TEXT_BUTTON_H));
+    let response = if live { hand(ui.interact(rect, id, Sense::click())) } else { ui.interact(rect, id, Sense::hover()) };
+    let hot = live && response.hovered();
+    let ink = if hot { pal.text } else { pal.dim };
+    let font = if hot { strong(TEXT_BUTTON_SIZE) } else { body(TEXT_BUTTON_SIZE) };
+    let mut x = at.x;
+    match lead {
+        // The pointer's 6 points and the arrow's 8 each stand at the lead's
+        // left, its middle on the words' small letters.
+        Some(Lead::Shut) => pointer(ui, pos2(x + 2.5, led_mid(ui, at.y, &font, false)), ink),
+        Some(Lead::Open) => arrow(ui, pos2(x + 4.0, led_mid(ui, at.y, &font, false)), ink, true),
+        None => {}
+    }
+    if lead.is_some() {
+        x += LEAD_W;
+    }
+    let room = (at.x + max_w - x).max(1.0);
+    runs(ui, pos2(x, at.y), &figured(words, also, font, mono(12.5), ink), room, Align2::LEFT_CENTER);
+    response
+}
+
+/// The tall primary's height, its capitals' size, the room either side of
+/// its words, and the pointer's room after them: its 6 points and the 10
+/// before it.
+pub(crate) const TALL_H: f32 = 44.0;
+const TALL_SIZE: f32 = 12.5;
+const TALL_PAD: f32 = 22.0;
+const TALL_MARK: f32 = 16.0;
+
+/// How wide [`tall_button`] wants to be for `label`, with its pointer
+/// while `enabled`.
+pub(crate) fn tall_button_width(ui: &Ui, label: &str, enabled: bool) -> f32 {
+    caps_width(ui, bare(label), TALL_SIZE) + 2.0 * TALL_PAD + if enabled { TALL_MARK } else { 0.0 }
+}
+
+/// A page's one act at `rect`, the canvas's TALL PRIMARY: a 1-point accent
+/// frame with no fill, `label` [`bare`] in accent capitals and the kit's
+/// [`pointer`] after them, the frame, the words and the pointer heating to
+/// the hot accent under the pointer, with the hand. Not `enabled` (its act
+/// waits on another): the frame and the words dim, no pointer, no hand and
+/// no click — its response senses the pointer only for the tooltip that
+/// says why. Not `live`, it is drawn at rest and takes nothing: something
+/// lies over it.
+pub(crate) fn tall_button(ui: &Ui, id: Id, rect: Rect, label: &str, enabled: bool, live: bool, pal: &Pal) -> Response {
+    let acts = enabled && live;
+    let response = ui.interact(rect, id, if acts { Sense::click() } else { Sense::hover() });
+    let response = if acts { hand(response) } else { response };
+    let ink = match (enabled, acts && response.hovered()) {
+        (false, _) => pal.dim,
+        (true, true) => pal.accent_hot,
+        (true, false) => pal.accent,
+    };
+    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, ink), StrokeKind::Inside);
+    let label = bare(label);
+    let words = caps_width(ui, label, TALL_SIZE);
+    let mark = if enabled { TALL_MARK } else { 0.0 };
+    let left = (rect.center().x - (words + mark) / 2.0).max(rect.min.x + 1.0);
+    let room = (rect.max.x - left - mark).max(1.0);
+    let drawn = caps(ui, pos2(left, rect.center().y), label, TALL_SIZE, ink, room, Align2::LEFT_CENTER);
+    if enabled {
+        pointer(ui, pos2(drawn.max.x + 10.0 + 2.5, led_mid(ui, rect.center().y, &strong(TALL_SIZE), true)), ink);
+    }
+    response
+}
+
+/// How many of a meter's `count` segments `permille` lights, as the cells
+/// fill their bar: the nearest whole segments, one at least for a sliver,
+/// and never the last before the whole — a card 99.6% full shows one
+/// segment unlit.
+pub(crate) fn fill_lit(permille: u32, count: usize) -> usize {
+    let count = count as u64;
+    let mut lit = (count * u64::from(permille.min(1000)) + 500) / 1000;
+    if permille > 0 {
+        lit = lit.max(1);
+    }
+    if permille < 1000 {
+        lit = lit.min(count.saturating_sub(1));
+    }
+    lit as usize
+}
+
+/// An LED row across `track` ([`led_row`]'s segments) lit for `permille` of
+/// it as [`fill_lit`] counts, in `lit` and `unlit`: the cells' bar in the
+/// desk's look.
+pub(crate) fn led_fill(ui: &Ui, track: Rect, permille: u32, lit: Color32, unlit: Color32) {
+    let count = led_count(track.width());
+    led_row(ui, track, fill_lit(permille, count) as f32 / count as f32, lit, unlit);
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -4497,5 +4699,105 @@ mod tests {
             _ => None,
         });
         assert_eq!(galley.expect("the title").rows.len(), 1, "one line beside the close");
+    }
+
+    /// The runs of `s` [`figured`] sets in the figure face.
+    fn figures_in(s: &str, also: &[&str]) -> Vec<String> {
+        let figure = mono(12.5);
+        let parts = figured(s, also, body(13.5), figure.clone(), Color32::WHITE);
+        let whole: String = parts.iter().map(|(s, ..)| s.as_str()).collect();
+        assert_eq!(whole, s, "the words kept whole, spaces and all");
+        parts.into_iter().filter(|(_, font, _)| *font == figure).map(|(s, ..)| s).collect()
+    }
+
+    #[test]
+    fn a_sentences_figures_are_set_in_the_monospace_and_its_words_are_not() {
+        assert_eq!(figures_in("21.4 of 59.6 GB used · 1,284 tracks", &[]), ["21.4", "59.6", "1,284"]);
+        assert_eq!(figures_in("Update available · v0.13.0 → v0.14.0", &[]), ["v0.13.0", "v0.14.0"]);
+        assert_eq!(figures_in("v0.14.0-5-g4e94418 (dev build)", &[]), ["v0.14.0-5-g4e94418"], "a dev build whole");
+        let port = "COM3 · CH9102 · serial 5B1F007751 · 921600 baud";
+        assert_eq!(figures_in(port, &["COM3"]), ["COM3", "5B1F007751", "921600"], "a port only by name; a chip is a word");
+        assert_eq!(figures_in("mstream-mp3-player v0.14.0 · QIO · ELF fa4e0000.", &[]), ["v0.14.0", "fa4e0000"], "the full stop left out");
+        assert!(figures_in("M5Stack Core2 · FAT32 · a decade", &[]).is_empty(), "names and words with a digit in them stay words");
+        assert_eq!(figures_in("64 % battery · set at 14:03 (it was 3.2 s off)", &[]), ["64", "14:03", "3.2"]);
+        assert_eq!(figures_in("v0.8.0に更新しました", &[]), ["v0.8.0"], "a figure ends where its script does");
+    }
+
+    #[test]
+    fn a_share_lights_whole_segments_a_sliver_one_and_the_last_only_when_whole() {
+        assert_eq!(fill_lit(0, 114), 0);
+        assert_eq!(fill_lit(1, 114), 1, "a sliver still shows a segment");
+        assert_eq!(fill_lit(359, 114), 41, "the canvas's 21.4 of 59.6 GB");
+        assert_eq!(fill_lit(996, 114), 113, "not quite full never shows full");
+        assert_eq!(fill_lit(1000, 114), 114);
+        assert_eq!(fill_lit(2000, 10), 10, "past the whole is whole, no more");
+    }
+
+    #[test]
+    fn a_text_button_is_its_words_and_answers_the_pointer_only_while_live() {
+        let ctx = context();
+        let size = vec2(500.0, 200.0);
+        let clicked = Cell::new(0);
+        let live = Cell::new(true);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let at = pos2(20.0, 50.0);
+            if text_button(ui, Id::new("probe-text"), at, "Write v0.14.0 again", Some(Lead::Shut), &[], 400.0, live.get(), &pal).clicked() {
+                clicked.set(clicked.get() + 1);
+            }
+        };
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let drawn = texts(&out);
+        let words = drawn.iter().find(|(t, _)| t == "Write v0.14.0 again").expect("its words, the figure's run among them");
+        assert!(words.1.min.x >= 20.0 + LEAD_W - 0.5, "after its lead: {:?}", words.1);
+        let rect = ctx.read_response(Id::new("probe-text")).expect("its target").rect;
+        assert_eq!(rect.height(), TEXT_BUTTON_H);
+        for events in click_events(rect.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(clicked.get(), 1, "a click");
+        let out = pass(&ctx, size, vec![egui::Event::PointerMoved(rect.center())], &mut run);
+        assert_eq!(out.platform_output.cursor_icon, CursorIcon::PointingHand, "the hand over it");
+        live.set(false);
+        for events in click_events(rect.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(clicked.get(), 1, "at rest under something, it takes no click");
+    }
+
+    #[test]
+    fn the_tall_primary_acts_when_enabled_and_says_why_not_otherwise() {
+        let ctx = context();
+        let size = vec2(500.0, 200.0);
+        let rect = Rect::from_min_size(pos2(200.0, 40.0), vec2(180.0, TALL_H));
+        let clicked = Cell::new(0);
+        let enabled = Cell::new(true);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let response = tall_button(ui, Id::new("probe-tall"), rect, "Update ▸", enabled.get(), true, &pal);
+            if response.clicked() {
+                clicked.set(clicked.get() + 1);
+            }
+        };
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(texts(&out).iter().any(|(t, _)| t == "UPDATE"), "the cells' arrow off, in capitals: {:?}", texts(&out));
+        assert!(tall_button_width_probe(&ctx, "Update ▸", true) > tall_button_width_probe(&ctx, "Update ▸", false), "the pointer's room");
+        for events in click_events(rect.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(clicked.get(), 1);
+        enabled.set(false);
+        for events in click_events(rect.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(clicked.get(), 1, "disabled: no click");
+        let out = pass(&ctx, size, vec![egui::Event::PointerMoved(rect.center())], &mut run);
+        assert_ne!(out.platform_output.cursor_icon, CursorIcon::PointingHand, "and no hand");
+    }
+
+    fn tall_button_width_probe(ctx: &egui::Context, label: &str, enabled: bool) -> f32 {
+        let w = Cell::new(0.0);
+        let _ = pass(ctx, vec2(400.0, 100.0), Vec::new(), &mut |ui| w.set(tall_button_width(ui, label, enabled)));
+        w.get()
     }
 }

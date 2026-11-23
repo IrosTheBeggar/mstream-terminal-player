@@ -221,6 +221,10 @@ pub(crate) struct DeviceUi {
     /// The last frame was drawn as the mini player: no room for the gate,
     /// so a quit there stops the sync at its next save as Ctrl+C does.
     mini: bool,
+    /// The last frame drew the page with egui (the window's panel), and
+    /// the pointer was over something egui would act on: the hand.
+    #[cfg(feature = "window")]
+    egui_hand: bool,
 }
 
 /// The page is writing (contract clause 9): the GUI cannot leave the tab.
@@ -296,11 +300,23 @@ pub(crate) fn close(gui: &mut Gui) {
 
 /// `view` is the Now Playing screen's rect, which keeps the top bar's row
 /// for the TUI view's own title; the page wants the rows under the bar,
-/// and leaves its own first row blank under it (clause 1).
+/// and leaves its own first row blank under it (clause 1). In a window of
+/// its own the page, or the line a visit waits under, is drawn by egui
+/// over these rows, which stay blank (window/panel.rs); the keys and the
+/// cells' pointer path still reach the page as below.
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     let area = Rect { y: view.y + 1, height: view.height.saturating_sub(1), ..view };
     let hints = gui.ui.key_hints;
     let composition = if gui.modal_open() { String::new() } else { gui.ui.composition().to_string() };
+    #[cfg(feature = "window")]
+    match egui_frame(frame, gui, area, hints, &composition) {
+        Drew::Page => {
+            gui.device.at = Some(area);
+            return;
+        }
+        Drew::Waiting => return,
+        Drew::Cells => {}
+    }
     let Some(page) = gui.device.page.as_mut() else {
         // A visit waiting for the last page to let its ports go.
         if let Some((parting, _)) = &gui.device.parting {
@@ -320,6 +336,63 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
         gui.ui.note_caret(at);
     }
     gui.device.at = Some(area);
+}
+
+/// What the window's panel drew of the screen this frame.
+#[cfg(feature = "window")]
+enum Drew {
+    /// The page.
+    Page,
+    /// The line a visit waits under while the last page lets go.
+    Waiting,
+    /// Nothing: the cells draw the screen (no panel, or no window yet).
+    Cells,
+}
+
+/// The screen drawn by egui on the window's panel, when the GUI holds one:
+/// one pass over the page's area, from its blank first row through the
+/// busy line — the footer under it stays the GUI's row, in cells as on
+/// every tab — with the page's acts applied in the pass through its own act
+/// path, its hand kept for the frame's duties, and its focused field's
+/// caret lifted to the cell under it on the GUI's surface, as the Admin
+/// tab lifts a room's, where the window turns its input method and paste on
+/// for it. A click that ends the page ends it through the page's own
+/// `finished`, which the frame's duties ask right after the draw
+/// ([`end_if_finished`]), as the cells' pointer path asks it after a click.
+/// While a GUI modal or the server menu owns the pointer, nothing egui drew
+/// shows the hand. Cells, when there is no panel or no window to run its
+/// pass in yet.
+#[cfg(feature = "window")]
+fn egui_frame(frame: &Frame, gui: &mut Gui, area: Rect, hints: bool, composition: &str) -> Drew {
+    gui.device.egui_hand = false;
+    let Some(panel) = gui.panel.clone() else { return Drew::Cells };
+    // The cells draw nothing in an area of one row (render_hosted), and
+    // egui draws nothing there either.
+    if area.width == 0 || area.height < 2 {
+        return Drew::Cells;
+    }
+    let grid = frame.area();
+    let Some(page) = gui.device.page.as_mut() else {
+        let Some((parting, _)) = &gui.device.parting else { return Drew::Cells };
+        let words = parting.parting_words();
+        let shown = panel.show(area, grid, &mut |ui| crate::device::draw_waiting_egui(ui, &words));
+        return if shown.is_some() { Drew::Waiting } else { Drew::Cells };
+    };
+    HostedRoom::set_key_hints(page, hints);
+    HostedRoom::set_composition(page, composition);
+    let mut caret: Option<(egui::Rect, egui::Pos2)> = None;
+    let shown = panel.show(area, grid, &mut |ui| {
+        let points = ui.max_rect();
+        // egui may run a frame's pass twice: the caret is the last run's.
+        caret = HostedRoom::draw_egui(page, ui).and_then(|pass| pass.caret).map(|foot| (points, foot));
+    });
+    let Some(shown) = shown else { return Drew::Cells };
+    let gui_owns_pointer = gui.modal_open() || gui.servers.drop_open;
+    gui.device.egui_hand = shown.hand && !gui_owns_pointer;
+    if let Some((points, foot)) = caret {
+        gui.ui.note_caret(super::window::panel::caret_cell(foot, points, area));
+    }
+    Drew::Page
 }
 
 /// The screen's keys (clauses 9 and 12). Returns true to quit.
@@ -623,6 +696,9 @@ pub(crate) fn frame(gui: &mut Gui) -> Duties {
     }
     let Some(page) = gui.device.page.as_mut() else { return Duties { over: false, news } };
     let over = HostedRoom::after_frame(page);
+    // The panel's hand, while the last frame drew the page with egui.
+    #[cfg(feature = "window")]
+    let over = over || gui.device.egui_hand;
     // An end found after the draw changes the screen: the next pass draws
     // the Library at once, not at the gated loop's next redraw.
     let left = end_if_finished(gui);

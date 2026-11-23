@@ -167,7 +167,7 @@ pub(crate) fn draw_waiting(frame: &mut Frame, area: Rect, words: &str) {
 
 /// A board's mark on its tab: ✓ green, ! and ✗ gold, ? and … dim, a
 /// write's percentage in the accent, `in use` dim.
-fn mark(page: &Page, board: &Board) -> (String, Color) {
+pub(super) fn mark(page: &Page, board: &Board) -> (String, Color) {
     let g = glyphs();
     if let Work::Writing { pct, .. } = board.work {
         return (pct.map_or_else(|| g.busy.to_string(), |p| format!("{p}%")), th().accent);
@@ -273,7 +273,7 @@ fn tab_row(frame: &mut Frame, page: &mut Page, row: Rect) {
 /// The tab row's right edge: Update all as it goes, the board being
 /// written, Update all to offer, C's count of the boards that need an
 /// update, or what is plugged in.
-fn tabs_right(page: &Page) -> (String, Style, Option<Act>) {
+pub(super) fn tabs_right(page: &Page) -> (String, Style, Option<Act>) {
     match &page.lock {
         Some(Lock::All { ports, at, .. }) => {
             let text = t!("dev.tabs_all_at", i = (at + 1).min(ports.len()), n = ports.len());
@@ -508,7 +508,7 @@ fn scan(pct: Option<u8>, words: &str) -> Vec<(String, Style)> {
 }
 
 /// The board's name on the card's head (contract clause 18).
-fn board_name(board: &Board) -> String {
+pub(super) fn board_name(board: &Board) -> String {
     if board.ours() {
         return t!("dev.name_core2").to_string();
     }
@@ -523,7 +523,7 @@ fn board_name(board: &Board) -> String {
 /// The head's right edge: the port with one board; with several (the port
 /// is on the tab) the USB serial, the bridge before it for a board that
 /// has not answered as ours.
-fn head_right(page: &Page, board: &Board) -> String {
+pub(super) fn head_right(page: &Page, board: &Board) -> String {
     if page.boards.len() < 2 {
         return board.port().to_string();
     }
@@ -537,7 +537,7 @@ fn head_right(page: &Page, board: &Board) -> String {
 
 /// The identity line with several boards: what a person can check on the
 /// board itself — its battery, its headphones (contract clause 18).
-fn identity(page: &Page, board: &Board) -> Option<String> {
+pub(super) fn identity(page: &Page, board: &Board) -> Option<String> {
     if page.boards.len() < 2 {
         return None;
     }
@@ -958,7 +958,7 @@ fn card_rows(page: &Page, board: &Board, w: u16) -> Vec<Row> {
 }
 
 /// Details (contract clause 18): the facts, the log, Write again.
-fn details_rows(page: &Page, board: &Board) -> Vec<Row> {
+pub(super) fn details_rows(page: &Page, board: &Board) -> Vec<Row> {
     let mut rows = vec![Row::Rule];
     let fact = |label: &str, value: String| {
         Row::Fact { label: t!(label).to_string(), value, style: Style::default() }
@@ -1098,13 +1098,34 @@ fn card_layout(page: &Page, board: &Board, content_w: u16) -> Vec<Row> {
     if let Some(line) = identity(page, board) {
         rows.extend(wide_rows(&[(line, dim())], content_w));
     }
-    rows.push(Row::Blank);
-    rows.extend(firmware_rows(page, board, value_w));
-    if !matches!(board.verdict, Verdict::NotCore2 { .. }) {
+    for block in value_blocks(page, board, value_w) {
         rows.push(Row::Blank);
-        rows.extend(card_rows(page, board, value_w));
+        rows.extend(block);
     }
     rows.push(Row::Blank);
+    rows.push(actions_row(page, board));
+    if page.details {
+        rows.extend(details_rows(page, board));
+    }
+    rows.push(Row::Blank);
+    rows
+}
+
+/// The card's value blocks under its head, top to bottom, a blank row
+/// between them: the Firmware row and, but for a board that is no Core2,
+/// the SD card row. An egui face lays the same blocks out in points.
+pub(super) fn value_blocks(page: &Page, board: &Board, value_w: u16) -> Vec<Vec<Row>> {
+    let mut blocks = vec![firmware_rows(page, board, value_w)];
+    if !matches!(board.verdict, Verdict::NotCore2 { .. }) {
+        blocks.push(card_rows(page, board, value_w));
+    }
+    blocks
+}
+
+/// The card's bottom row (contract clause 17): the Details door and the
+/// text buttons the board offers now, then its one primary — enabled, or
+/// the kit's disabled frame with why while another board is written.
+pub(super) fn actions_row(page: &Page, board: &Board) -> Row {
     let g = glyphs();
     let details = format!("{} {}", if page.details { g.open } else { g.forward }, t!("dev.details"));
     let mut links = vec![(details, Act::Details)];
@@ -1134,12 +1155,7 @@ fn card_layout(page: &Page, board: &Board, content_w: u16) -> Vec<Row> {
             None => (format!("{word} {}", g.forward), true, None),
         }
     });
-    rows.push(Row::Actions { links, primary, covered: false });
-    if page.details {
-        rows.extend(details_rows(page, board));
-    }
-    rows.push(Row::Blank);
-    rows
+    Row::Actions { links, primary, covered: false }
 }
 
 /// The card in `room`: its rows laid out, its height what they need (the
@@ -1469,21 +1485,11 @@ enum GateLine {
     Erase(Line<'static>),
 }
 
-/// The gate's words, wrapped in `width` cells (contract clause 23): what
-/// goes on and how long, what you see, what stays or goes, the one danger.
-fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
-    let g = glyphs();
-    let gold = Style::default().fg(th().gold);
-    let green = Style::default().fg(th().ok);
-    let mut lines = Vec::new();
-    let text = |lines: &mut Vec<GateLine>, words: String, style: Style| {
-        for line in wrap_spans(&[(words, style)], width) {
-            lines.push(GateLine::Text(line));
-        }
-    };
+/// The gate's title (contract clause 23), one function's over every write:
+/// the build the write puts on after the version, where the gate names it
+/// (clause 39): `Update from v0.7.0 to v0.8.0 · DIO?`.
+pub(super) fn gate_title(gate: &Gate) -> String {
     let from = gate.from.clone().unwrap_or_else(|| "?".to_string());
-    // The build the write puts on, after the version, where the gate names
-    // it (clause 39): `Update from v0.7.0 to v0.8.0 · DIO?`.
     let to = match gate.title_mode {
         Some(mode) => format!("{} · {}", gate.to, mode.word()),
         None => gate.to.clone(),
@@ -1499,7 +1505,27 @@ fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
         Kind::Local => t!("dev.gate_title_local", from = from),
         Kind::Format => t!("dev.card.gate_fmt_title", port = short(gate.port.as_deref().unwrap_or("?"))),
     };
-    text(&mut lines, title.to_string(), gold.add_modifier(Modifier::BOLD));
+    title.to_string()
+}
+
+/// The gate's words, wrapped in `width` cells (contract clause 23): what
+/// goes on and how long, what you see, what stays or goes, the one danger.
+fn gate_lines(gate: &Gate, width: usize) -> Vec<GateLine> {
+    let g = glyphs();
+    let gold = Style::default().fg(th().gold);
+    let green = Style::default().fg(th().ok);
+    let mut lines = Vec::new();
+    let text = |lines: &mut Vec<GateLine>, words: String, style: Style| {
+        for line in wrap_spans(&[(words, style)], width) {
+            lines.push(GateLine::Text(line));
+        }
+    };
+    // Update all's rows name the version as its title does.
+    let to = match gate.title_mode {
+        Some(mode) => format!("{} · {}", gate.to, mode.word()),
+        None => gate.to.clone(),
+    };
+    text(&mut lines, gate_title(gate), gold.add_modifier(Modifier::BOLD));
     lines.push(GateLine::Blank);
     // What a chosen write puts on and the check it passed, and what may go
     // wrong: under the title, before today's words.

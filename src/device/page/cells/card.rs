@@ -55,7 +55,7 @@ pub(in crate::device::page) fn mark(card: &CardView) -> (String, Color) {
 
 /// A card's tab's name (clause 25): on Windows its drive, then its name;
 /// elsewhere its name alone. `room` cells at most for the name.
-pub(super) fn tab_name(card: &CardView, room: usize) -> String {
+pub(in crate::device::page) fn tab_name(card: &CardView, room: usize) -> String {
     let name = card.name().unwrap_or_else(|| t!("dev.card.tab_new").to_string());
     let name = if room < kit::width(&name) { fit(&name, room.max(6)) } else { name };
     if cfg!(windows) { format!("{} {name}", card.drive()) } else { name }
@@ -809,6 +809,16 @@ pub(in crate::device::page) fn gate_words(gate: &CardGate, width: usize) -> Vec<
         GLine::Blank => String::new(),
     };
     gate_body(gate, width).into_iter().map(words).collect()
+}
+
+/// The gate's title, as [`gate_body`] sets it: what an egui face heads
+/// the gate with.
+#[cfg(feature = "window")]
+pub(in crate::device::page) fn gate_title(gate: &CardGate) -> String {
+    match gate_body(gate, usize::from(u16::MAX)).into_iter().next() {
+        Some(GLine::Text(line) | GLine::Box(line)) => line.to_string(),
+        _ => String::new(),
+    }
 }
 
 /// A gate line: text, a blank that gives way, or the box.

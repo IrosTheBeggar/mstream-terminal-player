@@ -32,12 +32,17 @@
 //! This file and its two children are the page's model: its state, the
 //! worker's reports, its keys, its hints and its gates' words. The page is
 //! drawn in character cells by cells.rs and its children (cells/card.rs,
-//! cells/sheet.rs), which read it as any view would.
+//! cells/sheet.rs), which read it as any view would, and in the desktop
+//! window's panel by egui_view.rs and its children.
 
 mod card;
 /// The page in character cells: its drawing half, for a terminal and for
 /// the GUI's grid alike. This module and its two children are its model.
 mod cells;
+/// The page drawn by egui, in the desktop window's panel: its other face,
+/// over the same model, built only with the window.
+#[cfg(feature = "window")]
+mod egui_view;
 mod sheet;
 
 use std::collections::HashSet;
@@ -52,6 +57,8 @@ use rust_i18n::t;
 use self::card::CardUi;
 pub(crate) use self::card::{Transfer, Wants};
 pub(crate) use self::cells::draw_waiting;
+#[cfg(feature = "window")]
+pub(crate) use self::egui_view::waiting as draw_waiting_egui;
 use self::sheet::{Dialogs, Listing, Sheet, mode_words, next_what};
 use super::FlashArgs;
 use super::board::{Board, By, Card, CardKind, Format, FormatOffer};
@@ -1799,10 +1806,35 @@ impl Screen for Page {
     /// to the newest line resumes it).
     fn wheel(&mut self, up: bool, at: Position) {
         let Some(rect) = self.log_rect.filter(|r| r.contains(at)) else { return };
-        // The log drawn is the card's while one is in view, else the board's.
+        self.wheel_log(up, usize::from(rect.height));
+    }
+
+    /// The page has an egui face (egui_view.rs), drawn in the desktop
+    /// window's panel when its host has one.
+    #[cfg(feature = "window")]
+    fn has_egui(&self) -> bool {
+        true
+    }
+
+    /// One pass of the egui face, with the input method's composition and
+    /// the tooltips' key names the host handed this surface.
+    #[cfg(feature = "window")]
+    fn egui(&mut self, ui: &mut egui::Ui) -> Option<crate::admin::EguiShown> {
+        let composition = self.ui.composition().to_string();
+        let key_hints = self.ui.key_hints;
+        Some(egui_view::show(ui, self, &composition, key_hints))
+    }
+}
+
+impl Page {
+    /// A notch of the wheel over the log, `rows` of it in view: a line
+    /// older up, which stops the follow, a line newer down, back to
+    /// following on the newest. The log is the card's while one is in
+    /// view, else the board's: whichever face drew it.
+    fn wheel_log(&mut self, up: bool, rows: usize) {
         let shown = self.card_open.as_deref().or(self.open.as_deref());
         let lines = shown.map_or(0, |port| self.log_for(port).len());
-        let most = lines.saturating_sub(usize::from(rect.height));
+        let most = lines.saturating_sub(rows);
         self.log_scroll = if up { (self.log_scroll + 1).min(most) } else { self.log_scroll.saturating_sub(1) };
     }
 }
