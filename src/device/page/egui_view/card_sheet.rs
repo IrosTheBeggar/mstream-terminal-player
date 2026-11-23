@@ -23,7 +23,9 @@
 //!
 //! Short of room, as the cells give way: the rule and the help go first,
 //! then the room between the blocks closes up, and what is left scrolls in
-//! the Dialog's body, the row with the keyboard brought into its view.
+//! the Dialog's body, the row with the keyboard brought into its view, and
+//! brought in again when its field or its list opens. A list hangs only
+//! from a box in that view.
 
 use egui::{
     Align2, Color32, CornerRadius, FontId, Id, LayerId, Order, Pos2, Rect, Sense, Shadow, Stroke, StrokeKind, Ui, UiBuilder,
@@ -89,8 +91,11 @@ const MORE_GAP: f32 = 4.0;
 const ENTRY_H: f32 = 28.0;
 const ENTRY_PAD: f32 = 10.0;
 /// The reveal's numbers for the Writing tab's rows, apart from Music's, so
-/// a tab switched to brings its first row in as a move would.
+/// a tab switched to brings its first row in as a move would; and for a
+/// row with its field or its list open, apart from the row, so the one
+/// that opens brings its row in as the keyboard's move to it would.
 const WRITING: usize = 1_000;
+const OPENED: usize = 2_000;
 
 /// The card's Settings sheet over `face.full`, its top held where its
 /// tallest state stands. What a click asked for comes back as the cells'
@@ -367,7 +372,10 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id) -> Body {
     // The keyboard's row wears its look only while it is the row's, not a
     // field's or a list's it opened.
     let calm = sheet.field.is_none() && sheet.list.is_none();
-    let at = focus + if sheet.tab == SheetTab::Writing { WRITING } else { 0 };
+    let writing = sheet.tab == SheetTab::Writing;
+    let at = focus + if writing { WRITING } else { 0 } + if calm { 0 } else { OPENED };
+    // The body's view, scrolled or not: what a list may hang from.
+    let view = ui.clip_rect();
     let w = ui.available_width();
     if plan.tabs {
         tabs(ui, v, face, id, &mut out.acts);
@@ -384,15 +392,24 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id) -> Body {
                 studio::runs(ui, slot.left_center(), &runs, slot.width(), Align2::LEFT_CENTER);
             }
             Line::Row(i, row) => {
-                let row_drawn = row_at(ui, v, face, id.with("row").with(*i), slot, row, *i == focus && calm);
+                // A row's id is its tab's and its number's: a press taken
+                // on one and let go after a key turned the tab is lost with
+                // its row, never the click of the other tab's row that now
+                // stands under it.
+                let row_id = id.with("row").with(writing).with(*i);
+                let row_drawn = row_at(ui, v, face, row_id, slot, row, *i == focus && calm);
                 if row_drawn.clicked {
                     out.acts.push(Act::CardSheetRow(*i));
                 }
                 out.caret = out.caret.or(row_drawn.caret);
                 if *i == focus {
                     studio::reveal(ui, id, at, row_drawn.rect);
+                    // A list hangs only from a box in the body's view, as
+                    // the cells hang none from a row they cut: never over
+                    // the title, its close or past the window.
                     if sheet.list.is_some() {
-                        out.hang = row_drawn.boxed.map(|b| Rect::from_min_max(b.min, pos2(b.max.x, slot.max.y)));
+                        let shown = row_drawn.boxed.filter(|b| view.intersects(*b));
+                        out.hang = shown.map(|b| Rect::from_min_max(b.min, pos2(b.max.x, slot.max.y)));
                     }
                 }
             }
@@ -743,6 +760,9 @@ fn hang(ui: &Ui, v: &View, face: &Face, parent: Id, anchor: Rect, cursor: usize)
     let w = (widest + 2.0 * ENTRY_PAD + 4.0).max(anchor.width()).min(over.max.x - anchor.min.x).max(1.0);
     let rect = Rect::from_min_size(pos2(anchor.min.x, top), vec2(w, n as f32 * ENTRY_H + 4.0));
     let list_id = parent.with("list");
+    // Its entries' ids are their list's (From's on Music, Into's on
+    // Writing) and their numbers, as the rows' are their tab's.
+    let entry_id = parent.with("entry").with(v.sheet.tab == SheetTab::Writing);
     let ctx = ui.ctx().clone();
     let shown = egui::Area::new(list_id).order(Order::Foreground).fixed_pos(rect.min).constrain(false).fade_in(false).show(&ctx, |ui| {
         let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
@@ -752,7 +772,7 @@ fn hang(ui: &Ui, v: &View, face: &Face, parent: Id, anchor: Rect, cursor: usize)
         let mut picked = None;
         for (i, entry) in entries.iter().take(n).enumerate() {
             let row = Rect::from_min_size(rect.min + vec2(2.0, 2.0 + i as f32 * ENTRY_H), vec2(w - 4.0, ENTRY_H));
-            let response = face.takes().then(|| studio::hand(ui.interact(row, parent.with("entry").with(i), Sense::CLICK)));
+            let response = face.takes().then(|| studio::hand(ui.interact(row, entry_id.with(i), Sense::CLICK)));
             let on = i == cursor;
             let ink = if on {
                 ui.painter().rect_filled(row, CornerRadius::same(2), pal.accent);
@@ -1214,6 +1234,106 @@ mod tests {
         assert!((size.max.x - body_right).abs() < 1.0, "the size whole at the row's right: {size:?}");
         assert!(name.max.x <= size.min.x - SIZE_GAP + 1.0, "the name cut short of it: {name:?} {size:?}");
         assert!((name.center().y - size.center().y).abs() < 2.0);
+    }
+
+    #[test]
+    fn a_press_let_go_after_a_key_turned_the_tab_clicks_nothing_on_the_other_tab() {
+        let _en = english();
+        let probe = Probe::new(BOARD);
+        // egui gives a click to the id a press was taken on, wherever the
+        // pointer is let go; the cells act at the press.
+        for passes_between in [0, 1] {
+            let (mut page, _ends, inbox, _fold) = ready_sheet();
+            // Rock is Music's third row; Writing's third, Removals, stands
+            // where it was.
+            let rock = find(&probe.settle(&mut page), "Rock").center();
+            let _ = probe.pass(&mut page, vec![Event::PointerMoved(rock)]);
+            let _ = probe.pass(&mut page, vec![button(rock, true)]);
+            press(&mut page, KeyCode::Right);
+            assert_eq!(sheet(&page).tab, SheetTab::Writing);
+            for _ in 0..passes_between {
+                let _ = probe.pass(&mut page, Vec::new());
+            }
+            let want = sheet(&page).want.clone();
+            let _ = probe.pass(&mut page, vec![button(rock, false)]);
+            assert_eq!(sheet(&page).want, want, "nothing on Writing turned, {passes_between} passes between");
+            assert_eq!(sheet(&page).focus, 0, "the keyboard where Right put it");
+            assert!(worker::sent(&inbox).is_empty());
+            // An entry of From's list, let go once the keys have Into's
+            // hanging: no codec picked.
+            page.act(Act::CardSheetTab(0));
+            page.act(Act::CardSheetRow(1));
+            let studio = find(&probe.settle(&mut page), "Studio").center();
+            let _ = probe.pass(&mut page, vec![Event::PointerMoved(studio)]);
+            let _ = probe.pass(&mut page, vec![button(studio, true)]);
+            for code in [KeyCode::Esc, KeyCode::Right, KeyCode::Down, KeyCode::Char(' ')] {
+                press(&mut page, code);
+            }
+            assert_eq!((sheet(&page).row(), sheet(&page).list), (SRow::Into, Some(0)));
+            for _ in 0..passes_between {
+                let _ = probe.pass(&mut page, Vec::new());
+            }
+            let want = sheet(&page).want.clone();
+            let _ = probe.pass(&mut page, vec![button(studio, false)]);
+            assert_eq!(sheet(&page).want, want, "no codec picked, {passes_between} passes between");
+            assert_eq!(sheet(&page).list, Some(0), "Into's list still hangs");
+            assert!(worker::sent(&inbox).is_empty());
+        }
+    }
+
+    /// A wheel's turn of `dy` points over `at` (down the body for a
+    /// negative one), and the passes egui eases the scroll over.
+    fn wheel(probe: &Probe, page: &mut Page, at: Pos2, dy: f32) {
+        let turn = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        };
+        let _ = probe.pass(page, vec![Event::PointerMoved(at), turn]);
+        for _ in 0..40 {
+            let _ = probe.pass(page, Vec::new());
+        }
+    }
+
+    #[test]
+    fn a_list_hangs_only_from_its_box_in_the_bodys_view_and_its_opening_brings_the_box_in() {
+        let _en = english();
+        let probe = Probe::new(FLOOR);
+        let (mut page, _ends, _inbox, _fold) = ready_sheet();
+        // More libraries than the floor's body holds: it scrolls.
+        let more = page.card.sheet.as_mut().expect("the sheet");
+        more.offered.extend((1..=6).map(|k| (format!("Shelf {k}"), None)));
+        press(&mut page, KeyCode::Down);
+        assert_eq!(sheet(&page).row(), SRow::From);
+        let title = find(&probe.settle(&mut page), "Settings · Car music");
+        // The pointer on the body's right, clear of where the list hangs.
+        let body = pos2(FLOOR.x / 2.0 + 220.0, FLOOR.y / 2.0 + 20.0);
+        // The wheel takes the body to its foot, From out of its view above.
+        wheel(&probe, &mut page, body, -2000.0);
+        assert!(find(&probe.settle(&mut page), "FROM").max.y < title.max.y, "From scrolled away");
+        // Space opens its list: the box comes back into view and the list
+        // hangs under it.
+        press(&mut page, KeyCode::Char(' '));
+        assert_eq!(sheet(&page).list, Some(0));
+        for _ in 0..40 {
+            let _ = probe.pass(&mut page, Vec::new());
+        }
+        let out = probe.settle(&mut page);
+        let (back, studio) = (find(&out, "FROM"), find(&out, "Studio"));
+        // The body's view starts 20 points under the title's row.
+        assert!(back.min.y > title.max.y + 20.0, "From in view again: {back:?} under {title:?}");
+        assert!(studio.min.y > back.max.y, "the list under it: {studio:?}");
+        // The wheel takes the box away again: no list hangs over the title,
+        // though it is still the keyboard's.
+        wheel(&probe, &mut page, body, -2000.0);
+        let out = probe.settle(&mut page);
+        assert!(find(&out, "FROM").max.y < title.max.y, "From scrolled away");
+        assert!(!drew(&out, "Studio"), "{:?}", texts(&out).into_iter().map(|(t, _)| t).collect::<Vec<_>>());
+        assert_eq!(sheet(&page).list, Some(0));
+        // And back with it.
+        wheel(&probe, &mut page, body, 2000.0);
+        assert!(drew(&probe.settle(&mut page), "Studio"));
     }
 
     #[test]
