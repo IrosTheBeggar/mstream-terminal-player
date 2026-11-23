@@ -1756,6 +1756,38 @@ mod tests {
     }
 
     #[test]
+    fn under_the_hanging_list_a_click_on_the_sheets_own_controls_only_closes_it() {
+        let _en = english();
+        let probe = Probe::new(BOARD);
+        let (mut page, ends) = sheet_up();
+        page.act(Act::SheetSource(1));
+        ends.tell([fixtures::listed()]);
+        page.pump();
+        let _ = ends.sent();
+        let asked = format!("asked GitHub at {}", clock_at(1_791_621_660));
+        // The pin's row over the list, the control it hangs from, its own
+        // row that picks nothing, and the erase line and Use defaults clear
+        // of it under the body's view: the cells' close over the whole area
+        // takes each click, never the control's own act (the pin chosen, the
+        // list kept, the box ticked, the sheet let go).
+        let below = [("v0.8.0", false), ("pick one", false), (asked.as_str(), false), ("Erase the whole flash first", true), ("USE DEFAULTS", true)];
+        for (words, below) in below {
+            page.act(Act::ListOpen);
+            let out = probe.settle(&mut page);
+            let at = find(&out, words);
+            if below {
+                assert!(at.min.y > find(&out, &asked).max.y, "{words:?} clear of the list's rows: {at:?}");
+            }
+            probe.click(&mut page, at.center());
+            assert!(page.sheet.is_some(), "{words:?}: the sheet stays up");
+            let sheet = sheet(&page);
+            assert!(sheet.list.is_none(), "{words:?}: the cells' ListClose");
+            assert_eq!((sheet.source, sheet.focus, sheet.erase), (Source::Release, Stop::Sub, false), "{words:?}: nothing else");
+            assert!(ends.sent().is_empty(), "{words:?}: nothing asked of the worker");
+        }
+    }
+
+    #[test]
     fn with_nothing_picked_apply_waits_and_takes_no_click() {
         let _en = english();
         let probe = Probe::new(BOARD);
