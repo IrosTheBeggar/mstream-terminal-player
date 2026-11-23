@@ -273,7 +273,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
                         act = Some(Act::Erase);
                     }
                     let hung = pos2(at.x + ERASE_HANG, at.y + HIT);
-                    cost_para(cost, pal).floor(laid.floor).paint(ui, hung, (inner.width() - ERASE_HANG).max(1.0));
+                    cost_para(cost, face).floor(laid.floor).paint(ui, hung, (inner.width() - ERASE_HANG).max(1.0));
                 }
             }
         }
@@ -307,9 +307,13 @@ fn words_para(piece: &Piece, face: &Face) -> Para {
     if *line { para.rows(1) } else { para }
 }
 
-/// The erase box's cost: dim, 13 points on 18.
-fn cost_para(cost: &str, pal: &Pal) -> Para {
-    Para::new(cost, body(COST.0), pal.dim).line(COST.1 / COST.0)
+/// The erase box's cost: dim, 13 points on 18, its figures (a version in
+/// the old firmware's name) in the monospace a point under its words, as
+/// every sentence of the gate sets them.
+fn cost_para(cost: &str, face: &Face) -> Para {
+    let runs = studio::figured(cost, face.ports, body(COST.0), mono(COST.0 - 1.0), face.pal.dim);
+    let first = runs.first().map_or(COST.0, |(_, font, _)| font.size);
+    Para::runs(&runs).line(COST.1 / first)
 }
 
 /// The gate laid out for its room: its measures, its window, its title set
@@ -432,7 +436,7 @@ fn measure(ui: &mut Ui, face: &Face, pieces: &[(bool, Piece)], w: f32) -> Vec<f3
         .iter()
         .map(|(_, piece)| match piece {
             Piece::Words { .. } => words_para(piece, face).paint(&probe, Pos2::ZERO, w).height(),
-            Piece::Erase { cost, .. } => HIT + cost_para(cost, face.pal).paint(&probe, Pos2::ZERO, (w - ERASE_HANG).max(1.0)).height(),
+            Piece::Erase { cost, .. } => HIT + cost_para(cost, face).paint(&probe, Pos2::ZERO, (w - ERASE_HANG).max(1.0)).height(),
         })
         .collect()
 }
@@ -798,6 +802,16 @@ mod tests {
         probe.click_id(&mut page, Id::new("mp3-gate").with("erase"));
         assert_eq!(page.gate.as_ref().map(|g| g.erase), Some(true), "and back");
         assert!(ends.sent().is_empty(), "the box writes nothing");
+        // A figure in the old firmware's name stands in the monospace a
+        // point under the cost's words, as in every sentence of the gate.
+        if let Some(gate) = page.gate.as_mut() {
+            gate.name = Some("UIFlow v1.13.2".into());
+        }
+        let out = probe.settle(&mut page);
+        let cost = t!("dev.gate_erase_on", name = "UIFlow v1.13.2").to_string();
+        let faces: Vec<egui::FontId> = looks(&out, &cost).into_iter().map(|(_, f)| f).collect();
+        assert_eq!(faces, [body(COST.0), mono(COST.0 - 1.0), body(COST.0)], "{cost:?}");
+        assert_eq!(color_of(&out, &cost), Pal::now().dim);
         // The install writes as the box says.
         page.act(Act::Erase);
         let _ = probe.settle(&mut page);

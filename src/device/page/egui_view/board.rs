@@ -552,7 +552,11 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             let bar = studio::meter(self.ui, pos2(x, mid), 10, *lit, vec2(5.0, 10.0), 2.0, face.pal.ok, face.pal);
             x = bar.max.x + SCAN_GAP;
             if let Some(share) = share {
-                let drawn = studio::text(self.ui, pos2(x, mid), share, mono(FIGURE), face.pal.dim, (end - x).max(1.0), Align2::LEFT_CENTER);
+                // On its words' baseline, as the cells' one line sets the
+                // two: the words are a paragraph from the row's top, so a
+                // share centred on the row's middle would stand under them.
+                let on = on_baseline(self.ui, top, size);
+                let drawn = studio::text(self.ui, pos2(x, on), share, mono(FIGURE), face.pal.dim, (end - x).max(1.0), Align2::LEFT_CENTER);
                 x = drawn.max.x + SCAN_GAP;
             }
         }
@@ -990,6 +994,13 @@ pub(super) mod tests {
         galley.job.sections.iter().map(|s| (s.format.color, s.format.font_id.clone())).collect()
     }
 
+    /// Where `words`' first letter stands on its baseline.
+    fn baseline(out: &FullOutput, words: &str) -> f32 {
+        let (pos, galley) = galleys(out).into_iter().find(|(_, g)| g.text() == words).unwrap_or_else(|| panic!("{words:?} drawn"));
+        let row = &galley.rows[0];
+        pos.y + row.pos.y + row.row.glyphs[0].pos.y
+    }
+
     /// The one colour `words` was set in.
     pub(in super::super) fn color_of(out: &FullOutput, words: &str) -> Color32 {
         let colors: Vec<Color32> = looks(out, words).into_iter().map(|(c, _)| c).collect();
@@ -1329,6 +1340,8 @@ pub(super) mod tests {
         };
         assert_eq!((lit_columns(pal.ok), lit_columns(pal.unlit)), (4, 6), "41% lights four of the ten");
         assert!(find(&out, "41%").max.x < find(&out, &running).min.x, "the share before the words");
+        let (share, words) = (baseline(&out, "41%"), baseline(&out, &running));
+        assert!((share - words).abs() < 0.5, "the share on its words' baseline, as the cells' one line: {share} and {words}");
         let left = texts(&out).into_iter().find(|(t, _)| t.contains("leaving the tab")).expect("the time left").0;
         assert!(left.starts_with("about ") && left.contains(" s left"), "{left:?}");
         // Done: a FAT card's row again, and where to fill it.
