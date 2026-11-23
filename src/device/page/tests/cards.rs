@@ -8,12 +8,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 
+use super::super::cells::{CARD_W, GATE_W, LABEL_W, MIN_W, Row, inset, wrap_spans};
 use super::*;
 use crate::device::board::{CardRef, CardRoot};
 use crate::device::card::cards::{Cards as Known, Seen};
 use crate::device::card::engine::Guard;
 use crate::device::card::volume::{Fs, Table};
 use crate::device::card::worker::{self, CardView, Fold, In, Link, Next, fixtures as cards};
+use crate::kit::dim;
 
 /// Unix seconds now: the cards' times are said from it.
 fn now() -> u64 {
@@ -154,12 +156,12 @@ fn every_locales_help_keeps_to_its_two_lines_at_the_floor_and_on_the_console() {
     let codes = crate::setup::LANGS.map(|(code, _)| code);
     let Some(code) = crate::setup::tests::in_own_process(&codes) else { return };
     for (area_w, tw) in [(100, 70), (MIN_W, 64)] {
-        assert_eq!(usize::from(card::sheet_widths(area_w).1), tw, "the sheet's text at {area_w} columns");
+        assert_eq!(usize::from(cells::card::sheet_widths(area_w).1), tw, "the sheet's text at {area_w} columns");
         for server in LONG_SERVERS {
             for row in &rows {
-                let text = card::row_help(row, &offered, server);
+                let text = cells::card::row_help(row, &offered, server);
                 assert!(!text.contains("dev."), "{code}: {row:?} has no words");
-                let lines: Vec<String> = card::help_lines(&text, tw).iter().map(|l| l.to_string()).collect();
+                let lines: Vec<String> = cells::card::help_lines(&text, tw).iter().map(|l| l.to_string()).collect();
                 let whole = wrap_spans(&[(text.clone(), dim())], tw).len() <= 2;
                 assert!(whole, "{code}, {row:?} in {tw} cells runs past its two lines: {lines:?}");
                 for line in &lines {
@@ -226,7 +228,7 @@ fn every_locales_facts_keep_to_their_line_with_the_longest_values() {
             let (mut page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![longest(drive, server, now)]);
             press(&mut page, KeyCode::Char('d'));
             let view = page.open_card().expect("the card in view");
-            let facts: Vec<(String, String)> = card::card_layout(&page, &view, content_w)
+            let facts: Vec<(String, String)> = cells::card::card_layout(&page, &view, content_w)
                 .into_iter()
                 .filter_map(|row| match row {
                     Row::Fact { label, value, .. } => Some((label, value)),
@@ -535,7 +537,7 @@ fn a_card_that_lacks_its_waveforms_says_so_and_enter_syncs_it() {
     assert_eq!(card::primary(&in_step), None, "nothing waits");
     let view = lacking(true);
     assert_eq!(card::primary(&view), Some(card::CardPrimary::Sync));
-    let (mark, _) = card::mark(&view);
+    let (mark, _) = cells::card::mark(&view);
     assert_eq!(mark, glyphs().warn, "something waits");
     let (mut page, _ends, inbox, _fold) = with_cards(|_| {}, vec![view]);
     let frame = window(&mut page);
@@ -620,7 +622,7 @@ fn a_card_for_someone_elses_plays_fact_says_they_are_not_sent() {
     for card_w in [CARD_W, 68] {
         let content_w = card_w - inset(card_w) * 2;
         let w = usize::from(content_w - LABEL_W);
-        let fact = card::card_layout(&page, &view, content_w).into_iter().find_map(|row| match row {
+        let fact = cells::card::card_layout(&page, &view, content_w).into_iter().find_map(|row| match row {
             Row::Fact { label, value, .. } if label == plays => Some(value),
             _ => None,
         });
@@ -650,7 +652,7 @@ fn a_card_for_someone_else_says_under_converts_what_it_goes_without() {
     for card_w in [CARD_W, 68] {
         let content_w = card_w - inset(card_w) * 2;
         let w = usize::from(content_w - LABEL_W);
-        let rows = card::card_layout(&page, &view, content_w);
+        let rows = cells::card::card_layout(&page, &view, content_w);
         let label = |r: &Row| matches!(r, Row::Value { label: Some(l), .. } if *l == converts);
         let at = rows.iter().position(label).expect("the Converts row");
         let under: Vec<String> = rows[at + 1..]
@@ -954,7 +956,7 @@ fn a_signed_out_cards_next_row_counts_the_plays_that_wait() {
     let rows_of = |plays: usize, content_w: u16| {
         let (page, _ends, _inbox, _fold) = with_cards(|_| {}, vec![signed_out(plays)]);
         let view = page.open_card().expect("the card in view");
-        card::card_layout(&page, &view, content_w)
+        cells::card::card_layout(&page, &view, content_w)
     };
     for card_w in [CARD_W, 68] {
         let content_w = card_w - inset(card_w) * 2;
@@ -998,7 +1000,7 @@ fn the_take_over_gate_counts_the_plays_that_wait_for_the_server_it_leaves() {
         let words = t!("dev.card.gate_server_plays", n = n, old = "Home").to_string();
         assert!(!words.contains("dev.") && words.contains(n), "{code}: {words}");
         for width in [usize::from(GATE_W) - 4, 64] {
-            let lines = card::gate_words(gate, width);
+            let lines = cells::card::gate_words(gate, width);
             assert!(lines.iter().all(|l| kit::width(l) <= width), "{code} in {width} cells: {lines:?}");
             assert!(bare(&lines.concat()).contains(&bare(&words)), "{code} in {width} cells: {lines:?}");
         }
@@ -1051,7 +1053,7 @@ fn the_take_over_gate_counts_the_plays_that_wait_for_the_server_it_leaves() {
     let gate = page.card.gate.clone().expect("the gate");
     assert_eq!(plays_of(&gate), 0, "{code}");
     let words = t!("dev.card.gate_server_plays", n = "2", old = "Home").to_string();
-    let lines = card::gate_words(&gate, usize::from(GATE_W) - 4);
+    let lines = cells::card::gate_words(&gate, usize::from(GATE_W) - 4);
     assert!(!bare(&lines.concat()).contains(&bare(&words)), "{code}: {lines:?}");
 }
 
@@ -1242,7 +1244,7 @@ fn the_busy_line_of_a_card_taken_out_ends_at_its_first_sentence_in_every_locale(
 #[test]
 fn the_sheets_labels_are_padded_by_display_width() {
     for words in ["Convert", "変換", "转换为", "名前がとても長いラベルです"] {
-        let label = card::sheet_label(words);
+        let label = cells::card::sheet_label(words);
         assert_eq!(crate::kit::width(&label), 14, "{words}: {label:?}");
     }
 }

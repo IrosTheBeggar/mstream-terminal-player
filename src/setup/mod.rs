@@ -3129,7 +3129,7 @@ pub(crate) mod tests {
     #[test]
     fn the_mp3_player_cards_labels_leave_a_gap_in_their_column_in_every_locale() {
         // The card's labels stand in a 14-cell column before the values
-        // (src/device/page.rs, LABEL_W): 13 cells at most, so one is left
+        // (src/device/page/cells.rs, LABEL_W): 13 cells at most, so one is left
         // between a label and its value.
         let labels = [
             "label_firmware",
