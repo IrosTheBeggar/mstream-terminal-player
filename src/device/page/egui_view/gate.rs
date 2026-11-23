@@ -384,7 +384,12 @@ fn lay_out(ui: &mut Ui, face: &Face, title: &str, pieces: &[(bool, Piece)], keep
         }
     };
     let m = fit.m;
-    let h = fit.height(pieces, kept).min(most.max(2.0 * m.pad + fit.title_h + fit.foot_h));
+    // The search above finds room up to half a point over the area's, and
+    // the window takes that half point: held to `most`, its floor would
+    // stand over the body's last line by as much, and the line would be
+    // left out.
+    let want = fit.height(pieces, kept);
+    let h = if want <= most + 0.5 { want } else { most.max(2.0 * m.pad + fit.title_h + fit.foot_h) };
     let window = Rect::from_center_size(over.center(), vec2(width, h));
     let inner = window.shrink(m.pad);
     let foot_top = inner.max.y - fit.foot_h;
@@ -951,5 +956,73 @@ mod tests {
             out.textures_delta.clear();
         }
         assert_eq!(last, Some(TIGHT), "at 240 points the frame is the tighter one");
+        // A point more than room for every gap but the last: the last gives
+        // way, the others stand, and the measures stay the kit's.
+        let face_in = |ui: &Ui| Face { pal: &pal, composition: "", key_hints: false, full: ui.max_rect(), space: super::super::ROOMY, ports: &["COM3"], live: true, inert: false };
+        let said = (title.as_str(), pieces.as_slice(), keep.as_str(), write.as_str());
+        let mut all_but_one = 0.0_f32;
+        let mut out = ctx.run_ui(input(824.0), |ui| {
+            let face = face_in(ui);
+            all_but_one = Fit::of(ui, &face, ROOMY, GATE_W, said).height(&pieces, gaps - 1);
+        });
+        out.textures_delta.clear();
+        let mut out = ctx.run_ui(input(all_but_one + ROOMY.clear + 1.0), |ui| {
+            let face = face_in(ui);
+            let laid = lay_out(ui, &face, &title, &pieces, &keep, &write);
+            assert_eq!(laid.m, ROOMY, "the kit's measures while a gap can give way");
+            let heights = measure(ui, &face, &pieces, laid.window.width() - 2.0 * laid.m.pad);
+            let tops: Vec<f32> = laid.tops.iter().map(|top| top.expect("every piece drawn")).collect();
+            let apart: Vec<f32> = tops.windows(2).zip(&heights).map(|(two, h)| two[1] - two[0] - h).collect();
+            let mut seen = 0;
+            let wanted: Vec<f32> = pieces[1..]
+                .iter()
+                .map(|(gap, _)| {
+                    seen += usize::from(*gap);
+                    if *gap && seen < gaps { ROOMY.apart } else { 0.0 }
+                })
+                .collect();
+            assert!(apart.iter().zip(&wanted).all(|(a, w)| (a - w).abs() < 0.01), "the last gap gone, the rest kept: {apart:?}, not {wanted:?}");
+        });
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_gate_the_search_finds_room_for_within_its_half_point_keeps_its_last_line() {
+        let _en = english();
+        let (page, _ends) = gate_on(vec![fixtures::old("COM3", "v0.7.0")]);
+        let probe = Headless::new(BOARD);
+        let gate = page.gate.clone().expect("the update gate");
+        let pal = Pal::now();
+        let pieces = body_of(&gate, &pal);
+        let gaps = pieces.iter().filter(|(gap, _)| *gap).count();
+        let (keep, write) = cells::gate_buttons(&gate);
+        let title = cells::gate_title(&gate);
+        let said = (title.as_str(), pieces.as_slice(), keep.as_str(), write.as_str());
+        let ctx = probe.ctx.clone();
+        let input = |h: f32| egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, h))), ..Default::default() };
+        let face_in = |ui: &Ui| Face { pal: &pal, composition: "", key_hints: false, full: ui.max_rect(), space: super::super::ROOMY, ports: &["COM3"], live: true, inert: false };
+        // The gate's height with the kit's measures and every gap.
+        let mut whole = 0.0_f32;
+        let mut out = ctx.run_ui(input(BOARD.y), |ui| {
+            let face = face_in(ui);
+            let width = GATE_W.min(face.full.width() - ROOMY.clear);
+            whole = Fit::of(ui, &face, ROOMY, width, said).height(&pieces, gaps);
+        });
+        out.textures_delta.clear();
+        // An area a few tenths of a point short of that: room enough for
+        // every gap as the search counts it, so the window stands as tall as
+        // its words and its last line is drawn over its answers.
+        let mut out = ctx.run_ui(input(whole + ROOMY.clear - 0.3), |ui| {
+            let face = face_in(ui);
+            let short = whole - (face.full.height() - ROOMY.clear);
+            assert!(short > 0.01 && short < 0.5, "the area {short} points short of the gate");
+            let laid = lay_out(ui, &face, &title, &pieces, &keep, &write);
+            assert_eq!(laid.m, ROOMY, "the kit's measures");
+            assert!(laid.tops.iter().all(Option::is_some), "every piece drawn: {:?}", laid.tops);
+            let heights = measure(ui, &face, &pieces, laid.window.width() - 2.0 * laid.m.pad);
+            let foot = laid.tops.last().copied().flatten().expect("the last piece") + heights.last().copied().unwrap_or(0.0);
+            assert!(foot <= laid.floor + 0.01, "the last line's foot {foot} over the floor {}", laid.floor);
+        });
+        out.textures_delta.clear();
     }
 }
