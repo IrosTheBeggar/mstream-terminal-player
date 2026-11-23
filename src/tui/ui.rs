@@ -134,13 +134,10 @@ pub(crate) fn folder() -> Color {
     Color::Blue
 }
 
-/// Which frame the spinner is on. The frame count differs between the two
-/// glyph sets — braille turns in ten, ASCII in four — so the modulo has to
-/// ask the set rather than a constant.
-fn spinner_frame(app: &App) -> &'static str {
-    app.spinner_shown.set(true);
-    let frames = glyphs().spinner;
-    frames[app.spinner % frames.len()]
+/// The mark beside a wait. The spinner's first frame, and only that: the
+/// loop that turned it was the terminal player's, and nothing turns it here.
+fn spinner_frame() -> &'static str {
+    glyphs().spinner[0]
 }
 
 /// Where the full-screen view's rows go, under its one-line title.
@@ -572,7 +569,7 @@ fn render_now_discover(frame: &mut Frame, area: Rect, app: &mut App) {
         return render_now_placeholder(frame, rest, "", "nothing playing to compare against");
     };
     if shown.pending {
-        return render_now_placeholder(frame, rest, "", &format!("{} looking…", spinner_frame(app)));
+        return render_now_placeholder(frame, rest, "", &format!("{} looking…", spinner_frame()));
     }
     if shown.tracks.is_empty() {
         // The server's own words when it has them — an unanalysed track and
@@ -908,7 +905,7 @@ fn fact_row(lines: &mut Vec<Line<'static>>, label: &str, value: Vec<Span<'static
 /// reply, which is the same thing happening.
 fn transport_state(app: &App) -> (&'static str, &'static str) {
     if app.is_starting() {
-        (spinner_frame(app), "starting")
+        (spinner_frame(), "starting")
     } else if app.status.paused {
         (glyphs().paused, "paused")
     } else if app.status.playing {
@@ -1599,7 +1596,6 @@ mod tests {
     /// one is open.
     fn render(frame: &mut Frame, app: &mut App) {
         let area = frame.area();
-        app.spinner_shown.set(false);
         frame.render_widget(Clear, area);
         render_now_view(frame, &now_regions(area), app, &NowExtras::default());
         render_dj_picker(frame, area, app);

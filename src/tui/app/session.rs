@@ -1,14 +1,12 @@
-//! The way in: the connect screen, and the [`Session`] it produces.
+//! The way in: the [`Session`], and the flow that seats one.
 //!
-//! Three paths lead here — a saved session reconnecting, an address
-//! typed into the form, a pairing code dialled into a tunnel — and each
-//! was maintaining five parallel identity fields on App by hand
-//! (audit #56). [`Session`] is those five as one value, and the flow
-//! that writes them lives next to it.
+//! Three paths lead here — a saved session reconnecting, an address a
+//! shell's form sends, a pairing code dialled into a tunnel — and each was
+//! maintaining five parallel identity fields on App by hand (audit #56).
+//! [`Session`] is those five as one value, and the flow that writes them
+//! lives next to it. The forms themselves are the shell's (`gui::servers`).
 
-use crate::discovery::DiscoveredServer;
-
-use super::{Action, App, Effect, Tab};
+use super::{App, Effect, Tab};
 use crate::tui::worker::{ApiCmd, AudioCmd, Event};
 
 /// Which server this session is talking to, as one value.
@@ -39,70 +37,6 @@ pub struct Session {
     /// row id on it. `server` and `token` are then the parent's, and
     /// `server_id` the peer's own identity (contract clauses 26–27).
     pub peer: Option<(String, i64)>,
-}
-
-/// Which step of the connect screen is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ConnectStage {
-    /// Pick how to reach the server.
-    #[default]
-    Choosing,
-    /// Server address plus credentials.
-    Direct,
-    /// Paste a pairing code and reach the server over its Iroh tunnel.
-    QuickConnect,
-}
-
-/// The two ways in, in menu order.
-pub const CONNECT_METHODS: [(&str, &str); 2] = [
-    ("Direct", "server address on your network"),
-    ("Quick Connect", "pairing code — works from anywhere"),
-];
-
-/// The connect screen, shown when there is no usable session.
-#[derive(Debug, Default)]
-pub struct ConnectForm {
-    pub stage: ConnectStage,
-    pub choice: usize,
-    pub server: String,
-    pub username: String,
-    pub password: String,
-    pub code: String,
-    pub field: usize,
-    pub submitting: bool,
-    /// Servers found on the network, for the Quick Connect screen.
-    pub found: Vec<DiscoveredServer>,
-    pub searching: bool,
-    /// Row selected on the Quick Connect screen: an index into `found`, or
-    /// `found.len()` for the paste-a-code row, which is always last.
-    pub row: usize,
-    /// The server URL whose plaintext warning has been acknowledged. Held as
-    /// the URL rather than a flag so that editing the address asks again
-    /// instead of carrying consent over to a different host.
-    pub insecure_ack: Option<String>,
-}
-
-impl ConnectForm {
-    /// The paste-a-code row sits after any discovered servers.
-    pub fn paste_row(&self) -> usize {
-        self.found.len()
-    }
-}
-
-impl ConnectForm {
-    pub const FIELDS: usize = 3;
-
-    fn value_mut(&mut self) -> &mut String {
-        match self.field {
-            0 => &mut self.server,
-            1 => &mut self.username,
-            _ => &mut self.password,
-        }
-    }
-
-    fn next_field(&mut self) {
-        self.field = (self.field + 1) % Self::FIELDS;
-    }
 }
 
 impl App {
@@ -267,16 +201,6 @@ impl App {
         }
     }
 
-    /// What a request to `base` is filed under and must carry: a tunnel's
-    /// identity and loopback token when `base` is its bridge, else the
-    /// address itself and nothing.
-    fn identity_at(&self, base: &str) -> (String, Option<String>) {
-        match self.tunnel_at(base) {
-            Some((id, token)) => (id.to_string(), Some(token.to_string())),
-            None => (base.to_string(), None),
-        }
-    }
-
     /// The saved server `old` was re-addressed as `new` (the servers room's
     /// edit; multi-server clause 1): every reference the App holds follows
     /// — the queued rows' origins and the plays owed under them, the
@@ -364,7 +288,6 @@ impl App {
     /// shows and nothing else (contract clause 11).
     pub(crate) fn adopt_server(&mut self, session: Session, last_path: Option<String>) -> Vec<Effect> {
         self.connected = false;
-        self.connect = ConnectForm::default();
         self.session = session;
         self.shed_server_state();
         self.path = last_path.unwrap_or_default();
@@ -412,232 +335,11 @@ impl App {
         self.keep_session_moved();
     }
 
-    pub(super) fn handle_connect_action(&mut self, action: Action) -> Vec<Effect> {
-        if action == Action::Quit {
-            self.should_quit = true;
-            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
-        }
-
-        // A connection attempt takes seconds. Keys pressed in the meantime
-        // must not edit the credentials or code being used, nor fire a second
-        // attempt — a few stray characters appended to a pairing code turn it
-        // into unreadable base64. Esc still abandons the attempt.
-        if self.connect.submitting {
-            return match action {
-                Action::Cancel => {
-                    self.connect.submitting = false;
-                    self.connecting = false;
-                    self.connect.stage = ConnectStage::Choosing;
-                    self.message = None;
-                    Vec::new()
-                }
-                _ => Vec::new(),
-            };
-        }
-
-        match self.connect.stage {
-            ConnectStage::Choosing => match action {
-                Action::Up => {
-                    self.connect.choice = self.connect.choice.saturating_sub(1);
-                    Vec::new()
-                }
-                Action::Down => {
-                    self.connect.choice = (self.connect.choice + 1).min(CONNECT_METHODS.len() - 1);
-                    Vec::new()
-                }
-                Action::Submit | Action::Activate => {
-                    self.message = None;
-                    if self.connect.choice == 0 {
-                        self.connect.stage = ConnectStage::Direct;
-                        return Vec::new();
-                    }
-                    self.connect.stage = ConnectStage::QuickConnect;
-                    self.connect.searching = true;
-                    self.connect.found.clear();
-                    self.connect.row = 0;
-                    vec![Effect::Discover]
-                }
-                _ => Vec::new(),
-            },
-
-            ConnectStage::Direct => match action {
-                Action::Input(c) => {
-                    self.connect.value_mut().push(c);
-                    Vec::new()
-                }
-                Action::Backspace => {
-                    self.connect.value_mut().pop();
-                    Vec::new()
-                }
-                Action::Down => {
-                    self.connect.next_field();
-                    Vec::new()
-                }
-                Action::Up => {
-                    self.connect.field =
-                        (self.connect.field + ConnectForm::FIELDS - 1) % ConnectForm::FIELDS;
-                    Vec::new()
-                }
-                Action::Cancel => {
-                    self.connect.stage = ConnectStage::Choosing;
-                    self.message = None;
-                    Vec::new()
-                }
-                Action::Submit => self.submit_connect(),
-                _ => Vec::new(),
-            },
-
-            ConnectStage::QuickConnect => match action {
-                Action::Up => {
-                    self.connect.row = self.connect.row.saturating_sub(1);
-                    Vec::new()
-                }
-                Action::Down => {
-                    self.connect.row = (self.connect.row + 1).min(self.connect.paste_row());
-                    Vec::new()
-                }
-                Action::Input(c) => {
-                    // Typing anywhere means "I have a code", so jump to it.
-                    self.connect.row = self.connect.paste_row();
-                    self.connect.code.push(c);
-                    Vec::new()
-                }
-                Action::Backspace => {
-                    self.connect.code.pop();
-                    Vec::new()
-                }
-                Action::Cancel => {
-                    self.connect.stage = ConnectStage::Choosing;
-                    self.message = None;
-                    Vec::new()
-                }
-                Action::Submit => {
-                    // A server found on this network is reachable directly —
-                    // no tunnel needed, and no code to paste.
-                    if let Some(server) = self.connect.found.get(self.connect.row).cloned() {
-                        self.connecting = true;
-                        self.connect.submitting = true;
-                        self.connect.server = server.base_url.clone();
-                        self.info(format!("connecting to {}…", server.name));
-                        return vec![Effect::Api(ApiCmd::Connect {
-                            identity: server.base_url.clone(),
-                            server: server.base_url,
-                            token: None,
-                            self_signed: false,
-                            peer: None,
-                            local_token: None,
-                        })];
-                    }
-                    self.submit_quick_connect()
-                }
-                _ => Vec::new(),
-            },
-        }
-    }
-
-    fn submit_quick_connect(&mut self) -> Vec<Effect> {
-        let code = self.connect.code.trim().to_string();
-        if code.is_empty() {
-            self.error("paste a pairing code first");
-            return Vec::new();
-        }
-        // The identity is in the code — the endpoint id, a public key — so
-        // the session is filed under it before anything is dialled, and a
-        // tunnel the queue already holds open for it is simply used.
-        let id = match crate::quickconnect::parse_code(&code) {
-            Ok(parsed) => parsed.server_id(),
-            Err(e) => {
-                self.error(e);
-                return Vec::new();
-            }
-        };
-        self.connecting = true;
-        self.connect.submitting = true;
-        // Kept from here on: it is the only way back to this server, and
-        // nothing is written until the connection actually succeeds.
-        self.session.tunnel_code = Some(code.clone());
-        self.session.server_id = id.clone();
-        self.session.peer = None;
-        self.info("dialling the tunnel — this can take a few seconds…");
-        self.connect_through(&id, code)
-    }
-
-    fn submit_connect(&mut self) -> Vec<Effect> {
-        // Everything that can be settled without the network is settled here:
-        // a round trip to learn that an address was mistyped is a slow way to
-        // be told something we already know.
-        let server = match crate::api::server_url::normalize(&self.connect.server) {
-            Ok(server) => server,
-            Err(message) => {
-                self.error(message);
-                return Vec::new();
-            }
-        };
-        // Show what was filled in. "nas:3000" becoming "http://nas:3000" is
-        // exactly what someone needs to see when it doesn't connect.
-        self.connect.server = server.clone();
-
-        let username = self.connect.username.trim().to_string();
-
-        // No username means the server is expected to be in public mode, where
-        // every request authenticates anyway.
-        if username.is_empty() {
-            self.connecting = true;
-            self.connect.submitting = true;
-            self.message = None;
-            self.session.server = server.clone();
-            let (identity, local_token) = self.identity_at(&server);
-            return vec![Effect::Api(ApiCmd::Connect {
-                server,
-                identity,
-                token: None,
-                self_signed: self.session.self_signed,
-                peer: None,
-                local_token,
-            })];
-        }
-
-        if self.connect.password.is_empty() {
-            self.error("enter a password, or clear the username for a public server");
-            return Vec::new();
-        }
-
-        // Plain http past the local network puts the password on the wire in
-        // the clear. Say so once, and let the answer be yes.
-        if crate::api::server_url::crosses_the_internet_unencrypted(&server)
-            && self.connect.insecure_ack.as_deref() != Some(server.as_str())
-        {
-            self.connect.insecure_ack = Some(server.clone());
-            self.error(format!(
-                "{server} is plain http — your password would cross the internet \
-                 unencrypted. Enter again to send it anyway."
-            ));
-            return Vec::new();
-        }
-
-        self.connecting = true;
-        self.connect.submitting = true;
-        self.message = None;
-        let (identity, local_token) = self.identity_at(&server);
-        let peer = self.peer_behind(&identity);
-        vec![Effect::Api(ApiCmd::Login {
-            server,
-            identity,
-            username,
-            password: std::mem::take(&mut self.connect.password),
-            self_signed: self.session.self_signed,
-            local_token,
-            peer,
-        })]
-    }
-
     /// Every reply about who we are connected to, and how.
     ///
     /// One door, like the DJ panel's (audit #57), for the same reason:
-    /// these five all land on the connect screen this module owns, and
-    /// they all decide the same three flags -- connected, connecting, and
-    /// whether the form is still submitting. Reading them together is how
-    /// you can see that they agree.
+    /// these all decide the same two flags -- connected and connecting.
+    /// Reading them together is how you can see that they agree.
     pub(super) fn consume_session(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Connected { server, id, username, token, ping } => {
@@ -661,25 +363,13 @@ impl App {
                     }
                     self.shed_server_state();
                 }
-                // A fresh session starts with no verdict on how its tunnel
-                // runs; the sampler speaks within a couple of seconds when
-                // there is one, and a direct server never sets it at all.
-                self.tunnel_path = None;
                 self.connected = true;
                 self.connecting = false;
-                self.connect.submitting = false;
                 self.session.server = server;
                 // A peer session is filed under the peer's own identity; the
                 // worker answered with the parent's.
                 if self.session.peer.is_none() {
                     self.session.server_id = id;
-                }
-                // A tunnel the worker already held reports its path only on
-                // change, so the badge is seeded from what is known.
-                if let Some(super::TunnelState::Up { path, .. }) =
-                    self.tunnels.get(self.session_transport())
-                {
-                    self.tunnel_path = *path;
                 }
                 if token.is_some() {
                     self.session.token = token;
@@ -789,25 +479,9 @@ impl App {
                 }
                 effects
             }
-            Event::ServersDiscovered(found) => {
-                // Results can land after the user has already made a choice.
-                // Row 0 means "the paste row" while the list is empty and
-                // "the first server" once it isn't, so without this the
-                // cursor silently retargets and Enter connects somewhere the
-                // user never picked.
-                let entered_a_code = !self.connect.code.trim().is_empty();
-                self.connect.searching = false;
-                self.connect.found = found;
-                self.connect.row = if entered_a_code {
-                    // Someone mid-paste keeps their place; otherwise the
-                    // cursor lands on the first server, which is what a user
-                    // who simply waited expects.
-                    self.connect.paste_row()
-                } else {
-                    self.connect.row.min(self.connect.paste_row())
-                };
-                Vec::new()
-            }
+            // What the network answered is the shell's to list (its servers
+            // room reads the event itself).
+            Event::ServersDiscovered(_) => Vec::new(),
             Event::NeedsLogin { server } => {
                 // A reply from a connection attempt that has been overtaken —
                 // we already reached somewhere else. Applying it would drag a
@@ -816,11 +490,10 @@ impl App {
                     return Vec::new();
                 }
                 self.connecting = false;
-                self.connect.submitting = false;
-                // A tunnel that came up and was asked to sign in: the form
-                // carries the loopback address, a real, working endpoint for
-                // the sign-in about to happen; the identity is what the
-                // session is filed under.
+                // A tunnel that came up and was asked to sign in: the
+                // shell's form carries the loopback address, a real, working
+                // endpoint for the sign-in about to happen; the identity is
+                // what the session is filed under.
                 match self.tunnel_at(&server).map(|(id, _)| id.to_string()) {
                     Some(id) => {
                         self.session.server_id = id;
@@ -828,9 +501,6 @@ impl App {
                     }
                     None => self.info("this server needs a sign-in"),
                 }
-                self.connect.server = server;
-                self.connect.stage = ConnectStage::Direct;
-                self.connect.field = 1; // straight to the username
                 Vec::new()
             }
             Event::Unauthorized => {
@@ -847,17 +517,10 @@ impl App {
                     self.info(format!("Renewing access to {what}…"));
                     return Vec::new();
                 }
-                // An established session went bad. Offer the login form for
-                // the server we were already using rather than dumping the
-                // user back at "how do you want to connect?".
+                // An established session went bad: the shell offers its
+                // sign-in for the server we were already using.
                 self.connected = false;
                 self.connecting = false;
-                self.connect.submitting = false;
-                if !self.session.server.is_empty() {
-                    self.connect.server = self.session.server.clone();
-                }
-                self.connect.stage = ConnectStage::Direct;
-                self.connect.field = 1;
                 self.session.token = None;
                 self.error("session expired — sign in again");
                 Vec::new()
@@ -927,7 +590,6 @@ impl App {
                 if self.pending_tunnel.as_deref() == Some(id.as_str()) {
                     self.pending_tunnel = None;
                     self.connecting = false;
-                    self.connect.submitting = false;
                     self.error(why.clone());
                 }
                 // A peer refusing its guest ticket is not a re-pair: the
@@ -957,14 +619,10 @@ impl App {
             Event::TunnelClosed { id } => {
                 let was_direct = self.session_is_direct()
                     && crate::config::same_server(&id, &self.session.server_id);
-                let was_transport = id == self.session_transport();
                 self.tunnels.remove(&id);
                 if self.pending_tunnel.as_deref() == Some(id.as_str()) {
                     self.pending_tunnel = None;
                     self.connecting = false;
-                }
-                if was_transport {
-                    self.tunnel_path = None;
                 }
                 // The browsed peer's own tunnel went: back through the
                 // parent's proxies, browse stack and all.
@@ -994,11 +652,6 @@ impl App {
             Event::TunnelPath { id, path } => {
                 if let Some(super::TunnelState::Up { path: current, .. }) = self.tunnels.get_mut(&id) {
                     *current = Some(path);
-                }
-                // A verdict about a tunnel this session is not on belongs
-                // to nobody: a direct URL must not wear a tunnel's badge.
-                if id == self.session_transport() {
-                    self.tunnel_path = Some(path);
                 }
                 Vec::new()
             }

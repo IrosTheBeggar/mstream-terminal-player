@@ -431,9 +431,9 @@ impl App {
         }
     }
 
-    /// The ← route into adjustment, the same shape [`App::settings_step`]
-    /// has: `Some` only when the cursor stands on the length row, so Back
-    /// keeps meaning back everywhere else on the tab.
+    /// The ← route into adjustment: `Some` only when the cursor stands on
+    /// the length row, so Back keeps meaning back everywhere else on the
+    /// tab.
     pub(super) fn sonic_step(&mut self, delta: i32) -> Option<Vec<Effect>> {
         if self.tab != Tab::SonicPath || self.focus != Focus::Browser {
             return None;
@@ -497,8 +497,6 @@ impl App {
         self.capture = None;
         match who {
             Capture::Sonic(side) => self.capture_sonic_side(side, track),
-            // Back to the tab that asked, on the two ways of looking.
-            Capture::Discover => self.seed_discover(track),
             // The opening song: the DJ arms for the server it was chosen
             // from and the session starts there (auto-dj contract, clause 4).
             Capture::DjSeed => self.dj_seed_chosen(track),

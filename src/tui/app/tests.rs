@@ -1,7 +1,6 @@
 //! The app's tests, moved out whole (audit #54): they had grown to 43%
 //! of app.rs. `use super::*;` keeps them exactly the tests they were.
 
-use super::session::{CONNECT_METHODS, ConnectStage};
 use super::*;
 use crate::api::types::{
     AlbumCredit, DirEntry, FileEntry, FileMetadata, GenreList, GenreSources, SearchResults, TrackMetadata,
@@ -571,17 +570,12 @@ fn a_shuffled_queue_still_ends_when_repeat_is_off() {
 }
 
 #[test]
-fn jump_to_playing_puts_the_queue_on_screen_before_handing_it_the_cursor() {
-    // `i` used to move focus without showing the column, leaving the
-    // arrows driving a list nobody could see, Enter restarting the
-    // current track, and `d` deleting an unseen row.
+fn jump_to_playing_hands_the_queue_the_cursor() {
     let mut app = connected_app();
     app.replace_queue(vec![track("a"), track("b")]);
     app.handle_action(Action::PlayPause);
-    assert!(!app.queue_column, "the column starts hidden");
 
     app.handle_action(Action::JumpToPlaying);
-    assert!(app.queue_column, "the cursor's list is put on screen with it");
     assert_eq!(app.focus, Focus::Queue);
     assert_eq!(app.queue.state.selected(), app.queue.current);
 }
@@ -600,7 +594,6 @@ fn jump_to_playing_in_the_fullscreen_view_turns_to_the_queue_tab() {
     app.handle_action(Action::JumpToPlaying);
     assert_eq!(app.now_tab(), NowTab::Queue, "the tab with the cursor comes up");
     assert_eq!(app.focus, Focus::Browser, "the other screen's focus is left alone");
-    assert!(!app.queue_column, "and no hidden column is armed behind the view");
 }
 
 #[test]
@@ -627,12 +620,6 @@ fn on_the_dj_tab(app: &mut App) {
 /// Index of the Sonic Path tab among the visible ones.
 fn sonic_tab(app: &App) -> usize {
     app.tabs().iter().position(|t| *t == Tab::SonicPath).expect("sonic path is available")
-}
-
-/// Index of the Settings tab, which slides along the strip as the optional
-/// tabs in front of it come and go.
-fn settings_tab(app: &App) -> usize {
-    app.tabs().iter().position(|t| *t == Tab::Settings).expect("settings is always there")
 }
 
 #[test]
@@ -773,37 +760,6 @@ fn adding_to_an_empty_idle_queue_starts_playback() {
     let effects = app.handle_action(Action::AddToQueue);
     assert_eq!(app.queue.items.len(), 2);
     assert!(effects.is_empty());
-}
-
-#[test]
-fn the_tunnel_path_is_the_sessions_and_resets_with_it() {
-    use crate::quickconnect::TunnelPath;
-    let mut app = connected_app();
-    let id = format!("{}abc123", crate::quickconnect::TUNNEL_ID_PREFIX);
-    // A direct-URL session refuses tunnel verdicts outright: the tunnels
-    // the queue keeps open report on, and their paths belong to nobody
-    // here.
-    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Relay });
-    assert_eq!(app.tunnel_path, None, "a direct session wears no tunnel badge");
-
-    app.session.server_id = id.clone();
-    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Relay });
-    assert_eq!(app.tunnel_path, Some(TunnelPath::Relay));
-    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Direct });
-    assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
-    // Another tunnel's verdict is not this session's.
-    app.apply_event(Event::TunnelPath { id: format!("{}other", crate::quickconnect::TUNNEL_ID_PREFIX), path: TunnelPath::Relay });
-    assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
-    // A fresh session starts with no verdict — a direct server would
-    // otherwise wear the last tunnel's badge.
-    app.apply_event(Event::Connected {
-        server: "http://direct:3000".into(),
-        id: "http://direct:3000".into(),
-        username: None,
-        token: None,
-        ping: Box::new(crate::api::types::Ping::default()),
-    });
-    assert_eq!(app.tunnel_path, None);
 }
 
 #[test]
@@ -996,88 +952,6 @@ fn on_the_now_discover_tab(app: &mut App) {
 }
 
 #[test]
-fn the_discover_tab_asks_what_to_look_around_from_before_anything_else() {
-    // The step that lets you ask about a track without playing it — which
-    // the full-screen panel cannot do, since it follows the speakers.
-    let mut app = connected_app();
-    app.replace_queue(vec![track("playing")]);
-    app.play_index(0);
-    app.select_tab(discover_tab(&app));
-    assert_eq!(*app.discover_node(), DiscoverNode::Root);
-    assert_eq!(labels(&app), vec!["What's playing", "Choose a song…"]);
-
-    // Taking what's playing settles the seed and offers the two ways of
-    // looking — no request yet, both menus are static.
-    let effects = app.handle_action(Action::Activate);
-    assert!(effects.is_empty(), "choosing a seed asks the server nothing: {effects:?}");
-    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
-    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "playing");
-    assert_eq!(labels(&app), vec!["..", "Similar tracks", "Similar artists"]);
-
-    // And then a list, which does cost one.
-    app.discover.state.select(Some(1));
-    let effects = app.handle_action(Action::Activate);
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, dest: DiscoverDest::Browser, seed })]
-            if seed.filepath == "playing"
-    ));
-
-    // Back walks out a level at a time, and both menus come back without
-    // asking again.
-    app.handle_action(Action::Back);
-    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
-    assert!(app.handle_action(Action::Back).is_empty());
-    assert_eq!(*app.discover_node(), DiscoverNode::Root);
-}
-
-#[test]
-fn a_discover_seed_can_be_pointed_at_rather_than_played() {
-    let mut app = connected_app();
-    browsing(&mut app, &["curious"], 0);
-    app.select_tab(discover_tab(&app));
-
-    app.handle_action(Action::Down); // "Choose a song…"
-    app.handle_action(Action::Activate);
-    assert_eq!(app.capture, Some(Capture::Discover));
-    assert_eq!(app.tab, Tab::Files, "and it puts you where the songs are");
-
-    let effects = app.handle_action(Action::Activate);
-    assert!(
-        !effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))),
-        "pointing at a track is not playing it"
-    );
-    assert!(app.queue.items.is_empty(), "nor queueing it");
-
-    // Back on the tab, on the seed just chosen, asking which way to look.
-    assert_eq!(app.tab, Tab::Discover);
-    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
-    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "curious");
-    assert_eq!(app.capture, None, "one track, then it disarms");
-}
-
-#[test]
-fn how_close_leads_the_row_rather_than_where_it_sits() {
-    // The rows arrive in order, so a rank says nothing a position does not.
-    let mut app = connected_app();
-    app.replace_queue(vec![track("playing")]);
-    app.play_index(0);
-    app.select_tab(discover_tab(&app));
-    app.handle_action(Action::Activate); // seed: what's playing
-    app.discover.state.select(Some(1));
-    app.handle_action(Action::Activate); // similar tracks
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("near-one", 0.9412), near("near-two", 0.836)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "playing".into(),
-    });
-    assert_eq!(labels(&app), vec!["..", " 94%  near-one", " 84%  near-two"]);
-}
-
-#[test]
 fn the_full_screen_panel_still_just_follows_the_speakers() {
     // It is glanced at while a track plays, so it steers itself: no seed to
     // choose, no menu, one question re-asked when the answer would change.
@@ -1090,10 +964,8 @@ fn the_full_screen_panel_still_just_follows_the_speakers() {
     assert_eq!(app.now_discover.as_ref().unwrap().seed, "first");
 
     app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]),
+        tracks: vec![near("near-one", 0.94), near("near-two", 0.9)],
         note: None,
-        dest: DiscoverDest::NowPlaying,
         seed: "first".into(),
     });
     assert_eq!(app.now_discover.as_ref().unwrap().tracks.len(), 2);
@@ -1107,24 +979,8 @@ fn the_full_screen_panel_still_just_follows_the_speakers() {
     // The track changing re-aims it, and the old answer is dropped.
     app.handle_action(Action::NextTrack);
     assert_eq!(app.now_discover.as_ref().unwrap().seed, "second");
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("stale", 0.5)]),
-        note: None,
-        dest: DiscoverDest::NowPlaying,
-        seed: "first".into(),
-    });
+    app.apply_event(Event::Discover { tracks: vec![near("stale", 0.5)], note: None, seed: "first".into() });
     assert!(app.now_discover.as_ref().unwrap().tracks.is_empty());
-    assert!(app.now_discover.as_ref().unwrap().pending);
-
-    // And the browser tab's reply never lands here.
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("browser", 0.8)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "second".into(),
-    });
     assert!(app.now_discover.as_ref().unwrap().pending);
 }
 
@@ -1240,132 +1096,6 @@ fn unauthorized_returns_to_the_connect_screen() {
 }
 
 #[test]
-fn a_public_mode_server_picked_from_the_network_connects_outright() {
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Open Server".into(),
-        base_url: "http://192.168.1.5:3000".into(),
-        version: None,
-        quick_connect: false,
-    }]));
-    app.handle_action(Action::Submit);
-
-    app.apply_event(Event::Connected {
-        server: "http://192.168.1.5:3000".into(),
-        id: "http://192.168.1.5:3000".into(),
-        username: None,
-        token: None,
-        ping: Box::new(Default::default()),
-    });
-    assert!(app.connected, "no login step when the server doesn't want one");
-}
-
-#[test]
-fn the_first_screen_offers_both_ways_in() {
-    let mut app = App::new(None, None, None);
-    assert_eq!(app.connect.stage, ConnectStage::Choosing);
-    assert_eq!(CONNECT_METHODS.len(), 2);
-
-    // Direct is the default choice.
-    app.handle_action(Action::Submit);
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-
-    // Esc returns to the chooser, where Down picks Quick Connect.
-    app.handle_action(Action::Cancel);
-    assert_eq!(app.connect.stage, ConnectStage::Choosing);
-    app.handle_action(Action::Down);
-    app.handle_action(Action::Submit);
-    assert_eq!(app.connect.stage, ConnectStage::QuickConnect);
-}
-
-#[test]
-fn the_chooser_selection_stays_in_range() {
-    let mut app = App::new(None, None, None);
-    for _ in 0..5 {
-        app.handle_action(Action::Up);
-    }
-    assert_eq!(app.connect.choice, 0);
-    for _ in 0..5 {
-        app.handle_action(Action::Down);
-    }
-    assert_eq!(app.connect.choice, CONNECT_METHODS.len() - 1);
-}
-
-#[test]
-fn opening_quick_connect_starts_a_network_search() {
-    let mut app = App::new(None, None, None);
-    app.handle_action(Action::Down); // onto Quick Connect
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(app.connect.stage, ConnectStage::QuickConnect);
-    assert!(effects.contains(&Effect::Discover));
-    assert!(app.connect.searching);
-}
-
-#[test]
-fn choosing_a_discovered_server_connects_to_it_directly() {
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Living Room".into(),
-        base_url: "http://192.168.1.71:3999".into(),
-        version: None,
-        quick_connect: true,
-    }]));
-    assert!(!app.connect.searching);
-
-    // A server on this network needs no tunnel and no code.
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Connect {
-            server: "http://192.168.1.71:3999".into(),
-            identity: "http://192.168.1.71:3999".into(),
-            token: None,
-            self_signed: false,
-            peer: None,
-            local_token: None,
-        })]
-    );
-}
-
-#[test]
-fn late_discovery_results_do_not_move_the_cursor_off_the_paste_row() {
-    // Found live: the browse takes seconds, so a pasted code can be
-    // submitted before it answers. Row 0 means "paste" with an empty list
-    // and "first server" with a populated one, so the arriving results
-    // used to retarget Enter at a server the user never chose.
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    assert!(app.connect.row >= app.connect.paste_row());
-
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Living Room".into(),
-        base_url: "http://192.168.1.71:3999".into(),
-        version: None,
-        quick_connect: true,
-    }]));
-    assert!(app.connect.row >= app.connect.paste_row(), "still aimed at the code the user pasted");
-
-    // …and Enter still dials the code rather than the newly-found server.
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::TunnelOpen {
-            id: crate::quickconnect::testing::sample_id(),
-            credential: code,
-        })]
-    );
-}
-
-#[test]
 fn a_late_needs_login_cannot_unseat_a_live_session() {
     // Found live: a second connection attempt answered after the tunnel
     // had already connected, and dragged the connected UI to a login form
@@ -1376,141 +1106,31 @@ fn a_late_needs_login_cannot_unseat_a_live_session() {
     assert_eq!(app.session.server, "http://host:3000", "and stays on its own server");
 }
 
-#[test]
-fn typing_a_code_jumps_past_the_discovered_servers() {
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Living Room".into(),
-        base_url: "http://host:3999".into(),
-        version: None,
-        quick_connect: true,
-    }]));
-    assert_eq!(app.connect.row, 0, "starts on the first server");
-
-    app.handle_action(Action::Input('m'));
-    assert!(app.connect.row >= app.connect.paste_row(), "typing means the user has a code");
-
-    // …and Enter now dials rather than connecting to the highlighted server.
-    let code = crate::quickconnect::testing::sample_code();
-    for c in code[1..].chars() {
-        app.handle_action(Action::Input(c));
-    }
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::TunnelOpen {
-            id: crate::quickconnect::testing::sample_id(),
-            credential: code,
-        })]
-    );
-}
-
-#[test]
-fn the_selection_cannot_run_past_the_paste_row() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    for _ in 0..5 {
-        app.handle_action(Action::Down);
-    }
-    assert_eq!(app.connect.row, app.connect.paste_row());
-}
-
-#[test]
-fn pasting_a_pairing_code_dials_the_tunnel() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
+/// A session on the sample pairing code with its tunnel asked for, which is
+/// what a launch on a saved tunnel server does: the app, the code's identity
+/// and the code.
+fn dialling() -> (App, String, String) {
     let code = crate::quickconnect::testing::sample_code();
     let id = crate::quickconnect::testing::sample_id();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::TunnelOpen { id: id.clone(), credential: code })]);
-    assert!(app.connecting);
-    assert_eq!(app.pending_tunnel.as_deref(), Some(id.as_str()), "waiting on that tunnel");
-    assert_eq!(app.session.server_id, id, "filed under the code's identity from the start");
-    assert_eq!(app.tunnels.get(&id), Some(&TunnelState::Dialling));
-
-    // The tunnel comes up: the session connects through it, and every
-    // request over the bridge carries its loopback token.
-    let effects = app.apply_event(Event::TunnelUp {
-        id: id.clone(),
-        local_url: "http://127.0.0.1:51234".into(),
-        local_token: "lt".into(),
-    });
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Connect {
-            server: "http://127.0.0.1:51234".into(),
-            identity: id.clone(),
-            token: None,
-            self_signed: false,
-            peer: None,
-            local_token: Some("lt".into()),
-        })]
-    );
-    assert!(app.pending_tunnel.is_none());
-}
-
-#[test]
-fn a_code_that_is_not_one_is_refused_before_any_dial() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:abc".chars() {
-        app.handle_action(Action::Input(c));
-    }
-    assert!(app.handle_action(Action::Submit).is_empty());
-    assert!(!app.connecting);
-    assert!(app.message.as_ref().is_some_and(|m| m.text.contains("pairing code")), "{:?}", app.message);
-}
-
-#[test]
-fn a_tunnel_the_queue_holds_open_is_used_rather_than_dialled_again() {
-    // Contract clause 38: the worker keeps a tunnel for the queue; a code
-    // pasted for that server connects through it at once.
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    let id = crate::quickconnect::testing::sample_id();
-    app.tunnels.insert(
-        id.clone(),
-        TunnelState::Up {
-            local_url: "http://127.0.0.1:4000".into(),
-            local_token: "lt".into(),
-            status: crate::quickconnect::TunnelStatus::Connected,
-            path: None,
-        },
-    );
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    let effects = app.handle_action(Action::Submit);
+    let mut app = App::new(Some(id.clone()), None, None).with_tunnel(Some(code.clone()));
+    let effects = app.start();
     assert!(
-        matches!(effects.as_slice(), [Effect::Api(ApiCmd::Connect { server, identity, .. })]
-            if server == "http://127.0.0.1:4000" && *identity == id),
+        matches!(effects.as_slice(), [Effect::Api(ApiCmd::TunnelOpen { id: asked, .. })] if *asked == id),
         "{effects:?}"
     );
+    (app, id, code)
 }
 
 #[test]
-fn a_dial_that_fails_says_so_and_frees_the_form() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    let id = crate::quickconnect::testing::sample_id();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    app.handle_action(Action::Submit);
+fn a_dial_that_fails_says_so_and_stops_connecting() {
+    let (mut app, id, _) = dialling();
+    assert!(app.connecting);
     app.apply_event(Event::TunnelFailed {
         id: id.clone(),
         rejected: true,
         why: "tunnel handshake rejected — wrong or rotated connect secret".into(),
     });
     assert!(!app.connecting);
-    assert!(!app.connect.submitting);
     assert!(app.message.as_ref().is_some_and(|m| m.text.contains("rejected")), "{:?}", app.message);
     assert_eq!(
         app.tunnels.get(&id),
@@ -1523,39 +1143,15 @@ fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
     // The bug this pins: the loopback bridge got saved as the server, so
     // the next run dialled a port that no longer existed, and the token
     // was filed under a URL that could never match again.
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    let id = crate::quickconnect::testing::sample_id();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    app.handle_action(Action::Submit);
-
+    let (mut app, id, code) = dialling();
     app.apply_event(Event::TunnelUp {
         id: id.clone(),
         local_url: "http://127.0.0.1:51234".into(),
         local_token: "lt".into(),
     });
-    // The server behind the tunnel wants a sign-in: the form aims at the
-    // bridge, the sign-in is filed under the identity and carries the
-    // bridge's token.
+    // The server behind the tunnel wants a sign-in, and gets one: the shell
+    // sends it to the bridge, filed under the identity.
     app.apply_event(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() });
-    app.connect.username = "alice".into();
-    app.connect.password = "pw".into();
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Login {
-            server: "http://127.0.0.1:51234".into(),
-            identity: id.clone(),
-            username: "alice".into(),
-            password: "pw".into(),
-            self_signed: false,
-            local_token: Some("lt".into()),
-            peer: None,
-        })]
-    );
     app.apply_event(Event::Connected {
         server: "http://127.0.0.1:51234".into(),
         id: id.clone(),
@@ -1576,16 +1172,10 @@ fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
 fn a_public_tunnel_server_is_still_worth_saving() {
     // No login means no token and no username — but without the pairing
     // code stored, the server is unreachable next time.
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    for c in crate::quickconnect::testing::sample_code().chars() {
-        app.handle_action(Action::Input(c));
-    }
-    app.handle_action(Action::Submit);
-
+    let (mut app, id, _) = dialling();
     let effects = app.apply_event(Event::Connected {
         server: "http://127.0.0.1:5000".into(),
-        id: crate::quickconnect::testing::sample_id(),
+        id,
         username: None,
         token: None,
         ping: Box::new(Default::default()),
@@ -1596,10 +1186,9 @@ fn a_public_tunnel_server_is_still_worth_saving() {
 #[test]
 fn reconnecting_to_a_tunnel_server_dials_its_code_again() {
     let app = App::new(Some("mstream+iroh://endpointabc".into()), Some("tok".into()), None);
-    // The identity is not an address, so it must not reach the form or
-    // the endpoint — only the dialler.
+    // The identity is not an address, so it must not reach the endpoint —
+    // only the dialler.
     assert!(app.session.server.is_empty(), "nothing can be requested from an identity");
-    assert!(app.connect.server.is_empty(), "and it cannot be typed or edited");
 
     let mut app = app.with_tunnel(Some("mstr1:saved".into()));
     let effects = app.start();
@@ -2513,49 +2102,6 @@ fn a_remembered_tunnel_with_no_code_says_so_instead_of_hanging() {
 }
 
 #[test]
-fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
-    // The tunnel outlives the token: the bridge is still up in the worker,
-    // so the login form must aim at it rather than at an identity no HTTP
-    // client can dial.
-    let mut app = App::new(None, None, None);
-    app.connected = true;
-    app.session.server = "http://127.0.0.1:51234".into();
-    app.session.server_id = "mstream+iroh://endpointabc".into();
-    app.session.token = Some("stale".into());
-    app.tunnels.insert(
-        "mstream+iroh://endpointabc".into(),
-        TunnelState::Up {
-            local_url: "http://127.0.0.1:51234".into(),
-            local_token: "lt".into(),
-            status: crate::quickconnect::TunnelStatus::Connected,
-            path: None,
-        },
-    );
-
-    app.apply_event(Event::Unauthorized);
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-    assert_eq!(app.connect.server, "http://127.0.0.1:51234", "aims at the live bridge");
-
-    app.connect.username = "alice".into();
-    app.connect.password = "pw".into();
-    let effects = app.handle_action(Action::Submit);
-    // Loopback, so no plaintext warning stands between the user and a
-    // re-login they didn't ask for in the first place.
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Login {
-            server: "http://127.0.0.1:51234".into(),
-            identity: "mstream+iroh://endpointabc".into(),
-            username: "alice".into(),
-            password: "pw".into(),
-            self_signed: false,
-            local_token: Some("lt".into()),
-            peer: None,
-        })]
-    );
-}
-
-#[test]
 fn a_tunnel_is_shown_by_name_rather_than_by_port() {
     let mut app = App::new(None, None, None);
     app.session.server = "http://127.0.0.1:51234".into();
@@ -2572,93 +2118,28 @@ fn a_tunnel_is_shown_by_name_rather_than_by_port() {
 }
 
 #[test]
-fn an_empty_pairing_code_is_refused_without_a_request() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    assert!(app.handle_action(Action::Submit).is_empty());
-    assert!(!app.connecting);
-}
-
-#[test]
-fn an_open_tunnel_leads_to_the_login_form() {
+fn an_open_tunnel_that_wants_a_sign_in_says_so() {
     // The secret gates the pipe, not the API — so the tunnel coming up
     // means "now sign in", not "you're in".
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    let id = crate::quickconnect::testing::sample_id();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    app.handle_action(Action::Submit);
+    let (mut app, id, _) = dialling();
     app.apply_event(Event::TunnelUp {
         id: id.clone(),
         local_url: "http://127.0.0.1:51234".into(),
         local_token: "lt".into(),
     });
     app.apply_event(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() });
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-    assert_eq!(app.connect.server, "http://127.0.0.1:51234");
-    assert_eq!(app.connect.field, 1, "focus lands on the username");
     assert!(!app.connecting);
     assert_eq!(app.session.server_id, id, "already filed under its identity");
     assert!(app.message.as_ref().is_some_and(|m| m.text.contains("tunnel open")), "{:?}", app.message);
 }
 
 #[test]
-fn a_picked_server_that_wants_credentials_opens_its_login_form() {
-    // Regression: choosing a server found on the network bounced back to
-    // "how do you want to connect?", losing the server that was picked —
-    // the connect path was reporting "needs a sign-in" as an
-    // authorization failure.
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Living Room".into(),
-        base_url: "http://192.168.1.71:3999".into(),
-        version: None,
-        quick_connect: true,
-    }]));
-    app.handle_action(Action::Submit);
-
-    app.apply_event(Event::NeedsLogin { server: "http://192.168.1.71:3999".into() });
-    assert_eq!(app.connect.stage, ConnectStage::Direct, "lands on the login form");
-    assert_eq!(
-        app.connect.server, "http://192.168.1.71:3999",
-        "the chosen server is kept, not blanked"
-    );
-    assert_eq!(app.connect.field, 1, "focus is on the username");
-    assert!(!app.connecting);
-}
-
-#[test]
-fn an_expired_session_offers_a_login_for_the_same_server() {
+fn an_expired_session_drops_its_token_and_stays_on_its_server() {
     let mut app = connected_app();
     app.apply_event(Event::Unauthorized);
     assert!(!app.connected);
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-    assert_eq!(app.connect.server, "http://host:3000", "stays on the server in use");
+    assert_eq!(app.session.server, "http://host:3000", "stays on the server in use");
     assert!(app.session.token.is_none());
-}
-
-#[test]
-fn connecting_without_a_username_uses_public_mode() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::Direct;
-    app.connect.server = "http://host:3000".into();
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Connect {
-            server: "http://host:3000".into(),
-            identity: "http://host:3000".into(),
-            token: None,
-            self_signed: false,
-            peer: None,
-            local_token: None,
-        })]
-    );
 }
 
 #[test]
@@ -3305,183 +2786,6 @@ fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
     assert!(app.queue.items.is_empty());
     assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Stop))));
     assert!(app.message.is_none(), "no toast for a sweep");
-}
-
-#[test]
-fn the_server_field_starts_empty_for_a_new_user() {
-    // It used to be prefilled with a guess at localhost, so the first
-    // thing anyone had to do was delete two dozen characters.
-    let app = App::new(None, None, None);
-    assert!(app.connect.server.is_empty());
-
-    // A server we actually know about is still offered.
-    let app = App::new(Some("http://host:3000".into()), None, None);
-    assert_eq!(app.connect.server, "http://host:3000");
-}
-
-#[test]
-fn connect_form_edits_the_focused_field_only() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::Direct;
-    app.handle_action(Action::Input('h'));
-    app.handle_action(Action::Down);
-    app.handle_action(Action::Input('u'));
-    assert_eq!(app.connect.server, "h");
-    assert_eq!(app.connect.username, "u");
-    assert!(app.connect.password.is_empty());
-}
-
-#[test]
-fn login_effect_carries_credentials_and_clears_the_password() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::Direct;
-    app.connect.server = "http://host:3000".into();
-    app.connect.username = "alice".into();
-    app.connect.password = "secret".into();
-
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Login {
-            server: "http://host:3000".into(),
-            identity: "http://host:3000".into(),
-            username: "alice".into(),
-            password: "secret".into(),
-            self_signed: false,
-            local_token: None,
-            peer: None,
-        })]
-    );
-    assert!(app.connect.password.is_empty(), "password is not kept in memory after use");
-}
-
-/// A connect screen sitting on `Direct` with the given server text.
-fn at_direct(server: &str) -> App {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::Direct;
-    app.connect.server = server.into();
-    app
-}
-
-#[test]
-fn a_typed_address_is_completed_before_it_is_used() {
-    // What used to happen here: "relative URL without a base", after a
-    // round trip, with the typed text still on screen.
-    let mut app = at_direct("nas:3000");
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Connect {
-            server: "http://nas:3000".into(),
-            identity: "http://nas:3000".into(),
-            token: None,
-            self_signed: false,
-            peer: None,
-            local_token: None,
-        })]
-    );
-    assert_eq!(app.connect.server, "http://nas:3000", "the field shows what was assumed");
-
-    let mut app = at_direct("music.example.com");
-    app.handle_action(Action::Submit);
-    assert_eq!(app.connect.server, "https://music.example.com");
-}
-
-#[test]
-fn an_unusable_address_is_refused_without_a_round_trip() {
-    let mut app = at_direct("ftp://host");
-    assert!(app.handle_action(Action::Submit).is_empty(), "nothing is dispatched");
-    assert!(!app.connecting, "and the screen doesn't pretend to be busy");
-    let message = app.message.as_ref().unwrap();
-    assert_eq!(message.kind, MessageKind::Error);
-    assert!(message.text.contains("http://"), "it says what to type instead");
-
-    let mut app = at_direct("   ");
-    assert!(app.handle_action(Action::Submit).is_empty());
-    assert!(app.message.as_ref().unwrap().text.contains("enter a server address"));
-}
-
-#[test]
-fn a_username_without_a_password_is_caught_here_not_by_the_server() {
-    let mut app = at_direct("http://host:3000");
-    app.connect.username = "alice".into();
-    assert!(app.handle_action(Action::Submit).is_empty());
-    let text = &app.message.as_ref().unwrap().text;
-    assert!(text.contains("password"), "got: {text}");
-    // The way out is spelled out, since public mode is a real mode.
-    assert!(text.contains("public"), "got: {text}");
-}
-
-#[test]
-fn sending_a_password_over_plain_http_asks_first() {
-    let mut app = at_direct("http://music.example.com");
-    app.connect.username = "alice".into();
-    app.connect.password = "secret".into();
-
-    // First Enter: warned, nothing sent, password still typed.
-    assert!(app.handle_action(Action::Submit).is_empty());
-    assert!(app.message.as_ref().unwrap().text.contains("unencrypted"));
-    assert_eq!(app.connect.password, "secret", "so the answer can just be yes");
-
-    // Second Enter: taken as consent.
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Login {
-            server: "http://music.example.com".into(),
-            identity: "http://music.example.com".into(),
-            username: "alice".into(),
-            password: "secret".into(),
-            self_signed: false,
-            local_token: None,
-            peer: None,
-        })]
-    );
-}
-
-#[test]
-fn consent_to_plaintext_does_not_follow_you_to_another_server() {
-    let mut app = at_direct("http://music.example.com");
-    app.connect.username = "alice".into();
-    app.connect.password = "secret".into();
-    app.handle_action(Action::Submit); // warned
-
-    app.connect.server = "http://other.example.com".into();
-    assert!(app.handle_action(Action::Submit).is_empty(), "the new host warns on its own");
-    assert!(app.message.as_ref().unwrap().text.contains("other.example.com"));
-}
-
-#[test]
-fn signing_in_to_a_lan_server_is_not_interrupted() {
-    // http on the LAN is how mStream is normally run: a warning every
-    // time would be noise, and noise is what gets clicked through.
-    for server in ["http://192.168.1.71:3999", "nas:3000", "http://localhost:3000"] {
-        let mut app = at_direct(server);
-        app.connect.username = "alice".into();
-        app.connect.password = "secret".into();
-        let effects = app.handle_action(Action::Submit);
-        assert!(
-            matches!(effects.as_slice(), [Effect::Api(ApiCmd::Login { .. })]),
-            "{server} should sign in without ceremony, got {effects:?}"
-        );
-    }
-}
-
-#[test]
-fn a_public_server_over_plain_http_needs_no_warning() {
-    // Nothing secret is being sent, so there is nothing to warn about.
-    let mut app = at_direct("http://music.example.com");
-    let effects = app.handle_action(Action::Submit);
-    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Connect { .. })]));
-}
-
-#[test]
-fn quitting_shuts_both_workers_down() {
-    let mut app = connected_app();
-    let effects = app.handle_action(Action::Quit);
-    assert!(app.should_quit);
-    assert!(effects.contains(&Effect::Audio(AudioCmd::Shutdown)));
-    assert!(effects.contains(&Effect::Api(ApiCmd::Shutdown)));
 }
 
 #[test]
@@ -4186,197 +3490,6 @@ fn stop(path: &str, t: f64) -> crate::api::types::JourneyStop {
         similarity: 0.9,
         ..Default::default()
     }
-}
-
-fn similar_artist(name: &str, similarity: f64, ways: &[&str]) -> crate::api::types::SimilarArtist {
-    crate::api::types::SimilarArtist {
-        artist: name.into(),
-        similarity,
-        analyzed_count: 12,
-        genre_tags: vec!["ambient".into()],
-        entry_points: ways.iter().map(|p| track(p)).collect(),
-    }
-}
-
-/// Index of the Discover tab among the visible ones.
-fn discover_tab(app: &App) -> usize {
-    app.tabs().iter().position(|t| *t == Tab::Discover).expect("discover is available")
-}
-
-#[test]
-fn hierarchical_model_tags_are_shown_by_their_leaf() {
-    // Live against a real index every row read "Electronic---Dubstep,
-    // Electroni…" — the shared prefix filled the column and said nothing.
-    assert_eq!(tidy_tag("Electronic---Dubstep"), "Dubstep");
-    assert_eq!(tidy_tag("Hip Hop---Trap"), "Trap");
-    assert_eq!(tidy_tag("Jazz"), "Jazz");
-    assert_eq!(tidy_tag(""), "");
-}
-
-#[test]
-fn the_discover_tab_is_absent_where_the_server_cannot_serve_it() {
-    let app = connected_app();
-    assert!(app.tabs().contains(&Tab::Discover));
-
-    let mut plain = connected_app();
-    plain.capabilities = Default::default();
-    assert!(!plain.tabs().contains(&Tab::Discover));
-    // And the numbers stay 1..n so no key points at a gap — Files, Library,
-    // Search, Settings, with the strip's positional numbers the truth.
-    assert_eq!(plain.tabs().len(), 4);
-    assert_eq!(plain.tabs()[3], Tab::Settings);
-    assert!(plain.select_tab(4).is_empty(), "there is no fifth tab");
-    assert_ne!(plain.tab, Tab::Discover);
-}
-
-#[test]
-fn opening_discover_asks_rather_than_guessing_what_you_meant() {
-    // The tab used to take whatever the cursor happened to be on, which
-    // made "more like this" mean something you never said out loud — and
-    // gave you no way to say anything else. Now it asks.
-    let mut app = connected_app();
-    browsing(&mut app, &["a", "b"], 1);
-    app.select_tab(discover_tab(&app));
-
-    assert_eq!(app.tab, Tab::Discover);
-    assert!(app.discover_seed.is_none(), "a highlighted row is not an answer");
-    // Two ways of answering, and the menu costs no request.
-    assert_eq!(app.discover.entries.len(), 2);
-}
-
-#[test]
-fn the_seed_row_names_the_track_it_would_take() {
-    // "What's playing" is only a useful thing to choose if you can see what
-    // it would choose without choosing it.
-    let mut app = connected_app();
-    let Entry::Discover { detail, .. } = &connected_app().discover_root_entries()[0] else {
-        panic!("the first row is the seed row");
-    };
-    assert_eq!(detail, "nothing playing");
-
-    app.replace_queue(vec![track("playing")]);
-    app.play_index(0);
-    app.select_tab(discover_tab(&app));
-    let Entry::Discover { detail, .. } = &app.discover.entries[0] else {
-        panic!("the first row is the seed row");
-    };
-    assert_eq!(detail, &track("playing").display_name());
-
-    // And taking it puts that track — not the cursor's — under the tab.
-    app.handle_action(Action::Activate);
-    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "playing");
-    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
-}
-
-#[test]
-fn similar_tracks_are_ordinary_playable_rows() {
-    let mut app = connected_app();
-    app.replace_queue(vec![track("seed")]);
-    app.play_index(0);
-    app.select_tab(discover_tab(&app));
-    app.handle_action(Action::Activate); // seed: what's playing
-
-    app.discover.state.select(Some(1)); // "Similar tracks"
-    let effects = app.handle_action(Action::Activate);
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, seed, dest: DiscoverDest::Browser })]
-            if seed.filepath == "seed"
-    ));
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "seed".into(),
-    });
-    // Parent row plus the two neighbours, and Enter plays them like any
-    // other list — no new concept to learn.
-    assert_eq!(app.discover.entries.len(), 3);
-
-    // A reply about a seed the tab is no longer pointed at is dropped. The
-    // node alone cannot catch this: "similar tracks" is the same node
-    // whatever it is similar *to*, so a slow first answer would land under
-    // the second seed's title and be read as being about it.
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("about-something-else", 0.99)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "a track we walked away from".into(),
-    });
-    assert_eq!(app.discover.entries.len(), 3, "the list is still the one we asked for");
-    app.discover.state.select(Some(1));
-    let effects = app.handle_action(Action::Activate);
-    assert_eq!(app.queue.items.len(), 2);
-    assert_eq!(app.queue.current, Some(0));
-    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
-}
-
-#[test]
-fn an_artist_drills_into_its_ways_in_without_asking_again() {
-    // The entry points arrived with the artist list, so going in costs
-    // nothing — the whole reason the server sends them inline.
-    let mut app = connected_app();
-    app.replace_queue(vec![track("seed")]);
-    app.play_index(0);
-    app.select_tab(discover_tab(&app));
-    app.handle_action(Action::Activate); // seed: what's playing
-    app.discover.state.select(Some(2)); // "Similar artists"
-    app.handle_action(Action::Activate);
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Artists,
-        data: DiscoverData::Artists(vec![
-            similar_artist("Near Artist", 0.91, &["in-one", "in-two"]),
-            similar_artist("Other", 0.80, &[]),
-        ]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "seed".into(),
-    });
-    assert_eq!(app.discover.entries.len(), 3, "parent plus two artists");
-
-    app.discover.state.select(Some(1));
-    let effects = app.handle_action(Action::Activate);
-    assert!(effects.is_empty(), "no request — the doorways were already here");
-    assert_eq!(*app.discover_node(), DiscoverNode::Artist("Near Artist".into()));
-    assert_eq!(app.discover.entries.len(), 3, "parent plus two ways in");
-
-    // And back out again, still without asking.
-    assert!(app.handle_action(Action::Back).is_empty());
-    assert_eq!(*app.discover_node(), DiscoverNode::Artists);
-    assert_eq!(app.discover.entries.len(), 3);
-}
-
-#[test]
-fn a_discover_reply_for_a_view_already_left_is_dropped() {
-    let mut app = connected_app();
-    browsing(&mut app, &["seed"], 0);
-    app.select_tab(discover_tab(&app));
-    app.handle_action(Action::Activate); // into Tracks
-    app.handle_action(Action::Back); // and straight back out
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("late", 0.8)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "seed".into(),
-    });
-    assert_eq!(*app.discover_node(), DiscoverNode::Root);
-    assert_eq!(app.discover.entries.len(), 2, "still the mode menu");
-}
-
-#[test]
-fn discovery_with_nothing_to_go_on_says_so() {
-    let mut app = connected_app();
-    app.select_tab(discover_tab(&app));
-    assert!(app.discover_seed.is_none(), "nothing playing, nothing chosen");
-
-    assert!(app.handle_action(Action::Activate).is_empty());
-    assert!(app.message.as_ref().unwrap().text.contains("nothing is playing"));
 }
 
 #[test]
@@ -6202,118 +5315,6 @@ fn gapless_repeat_one_announces_its_own_seam() {
 }
 
 #[test]
-fn the_logs_room_switches_the_log_on_and_walks_its_level() {
-    let mut app = connected_app();
-    app.select_tab(5);
-    app.handle_action(Action::Down); // Crossfade → Logs
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogsMenu, .. })),
-        "the root has a Logs row"
-    );
-    app.handle_action(Action::Activate);
-    assert_eq!(*app.settings_node(), SettingsNode::Logs);
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogWrite, .. })),
-        "the cursor rests on the write switch"
-    );
-
-    // In tests no subscriber is installed, so flipping the switch on takes
-    // the degraded road: the file cannot open, the switch snaps back to
-    // off, and the row says so — which is also what a read-only disk
-    // would do in a real session.
-    app.handle_action(Action::Activate);
-    assert!(!app.log_write);
-    assert!(app.message.as_ref().unwrap().text.contains("no log file"));
-    assert_eq!(app.chosen_log_write(), Some(false), "the switch was chosen here");
-    assert_eq!(app.chosen_log_level(), None, "but the level was not — it must not persist");
-
-    // The level is its own row, adjustable whether or not anything writes
-    // yet — it is the loudness the switch will use.
-    app.handle_action(Action::Down);
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogLevel, .. }))
-    );
-    app.handle_action(Action::Activate);
-    app.handle_action(Action::Activate);
-    assert_eq!(app.log_level, crate::logging::Level::Trace);
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("trace")),
-        "the row reads the level back"
-    );
-
-    // Untouched sessions remember nothing.
-    let fresh = connected_app();
-    assert_eq!(fresh.chosen_log_write(), None);
-    assert_eq!(fresh.chosen_log_level(), None);
-}
-
-/// The two switches persist independently: walking the level in a session
-/// that the environment turned logging on for must not also write
-/// `write = true` into the config and keep it on forever after.
-#[test]
-fn choosing_a_level_does_not_persist_the_write_switch() {
-    let mut app = connected_app();
-    // As if MSTREAM_LOG=1 had started this session writing.
-    app.log_write = true;
-    app.select_tab(5);
-    app.handle_action(Action::Down);      // Logs
-    app.handle_action(Action::Activate);  // into the room
-    app.handle_action(Action::Down);      // Log level
-    app.handle_action(Action::Activate);  // info -> debug
-
-    assert_eq!(app.log_level, crate::logging::Level::Debug);
-    assert_eq!(app.chosen_log_level(), Some(crate::logging::Level::Debug));
-    assert_eq!(app.chosen_log_write(), None, "the switch was never touched here");
-}
-
-#[test]
-fn the_settings_menu_reads_the_state_at_a_glance_and_backs_out_whole() {
-    let mut app = connected_app();
-    app.crossfade = 6.0;
-    app.select_tab(settings_tab(&app));
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("6s blend")),
-        "the root row summarises without opening"
-    );
-
-    // In, back out via h on the `..` row, and the menu is whole again.
-    app.handle_action(Action::Activate);
-    assert_eq!(*app.settings_node(), SettingsNode::Crossfade);
-    app.handle_action(Action::Up); // onto `..`
-    app.handle_action(Action::Back);
-    assert_eq!(*app.settings_node(), SettingsNode::Root);
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::CrossfadeMenu, .. })),
-        "back lands on the menu, not an empty pane"
-    );
-
-    // Leaving and returning keeps the live values fresh in the details.
-    app.select_tab(0);
-    app.crossfade = 0.0;
-    app.gapless = true;
-    app.select_tab(settings_tab(&app));
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("gapless")),
-        "a revisit reads the values as they are now"
-    );
-}
-
-#[test]
-fn a_fractional_crossfade_snaps_to_whole_steps() {
-    // A hand-written 4.5 must step to 5 and 4 — not 5.5 forever.
-    let mut app = connected_app();
-    app.crossfade = 4.5;
-    app.select_tab(settings_tab(&app));
-    app.handle_action(Action::Activate); // cursor rests on Blend length
-
-    app.handle_action(Action::Activate);
-    assert_eq!(app.crossfade, 5.0, "up from 4.5 lands on the next whole second");
-    app.crossfade = 4.5;
-    app.handle_action(Action::Back);
-    assert_eq!(app.crossfade, 4.0, "down from 4.5 lands on the previous");
-}
-
-#[test]
 fn a_lone_track_under_repeat_all_gets_its_seam() {
     // One track on repeat-all loops exactly like repeat-one, and the
     // engine's candidate logic treats them alike; the app was starving
@@ -6340,8 +5341,8 @@ fn a_lone_track_under_repeat_all_gets_its_seam() {
 fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
     // The seam announces the track to itself, which is lawful only while
     // gapless-without-blend holds. Crossfade coming on must take the seam
-    // with it in the same keystroke — left standing, the engine holds a
-    // self to blend into (the pending-seam bug).
+    // with it in the next batch — left standing, the engine holds a self to
+    // blend into (the pending-seam bug).
     let mut app = connected_app();
     app.gapless = true;
     app.queue.repeat = Repeat::One;
@@ -6355,78 +5356,18 @@ fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
     }));
     assert_eq!(announced_url(&effects).as_deref(), Some(url.as_str()), "the seam stands");
 
-    app.select_tab(settings_tab(&app));
-    app.handle_action(Action::Activate); // cursor rests on Blend length
-    let effects = app.handle_action(Action::Activate); // crossfade 0 -> 1
+    // The shell's Settings room sets the blend on the app; whatever batch
+    // comes next settles it.
+    app.crossfade = 1.0;
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url,
+        playing: true,
+        ..Default::default()
+    }));
     assert!(
         effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
-        "the keystroke that armed the blend disarmed the seam"
+        "the batch after the blend was armed disarmed the seam: {effects:?}"
     );
-}
-
-#[test]
-fn the_settings_tab_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
-    let mut app = connected_app();
-    app.select_tab(settings_tab(&app));
-    assert_eq!(app.tab, Tab::Settings, "6 lands on Settings");
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::CrossfadeMenu, .. })),
-        "the root offers Crossfade"
-    );
-
-    app.handle_action(Action::Activate);
-    // Rows: [.., Blend length, Gapless]; the cursor rests past the `..`,
-    // already on the blend.
-    let effects = app.handle_action(Action::Activate); // Enter steps up
-    assert_eq!(app.crossfade, 1.0);
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 1.0)),
-        "the engine hears the nudge at once"
-    );
-    let effects = app.handle_action(Action::Back); // <- steps down on a value row
-    assert_eq!(app.crossfade, 0.0, "and back down to off, never below");
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 0.0))
-    );
-    assert_eq!(app.tab, Tab::Settings, "a value row's Back adjusts, it does not leave");
-
-    app.handle_action(Action::Down); // Gapless
-    let effects = app.handle_action(Action::Activate);
-    assert!(app.gapless);
-    assert!(
-        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetGapless(true)))),
-        "gapless toggles through the same funnel"
-    );
-    // The rows show the change without losing the cursor.
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("on")),
-        "the row reads back the live value"
-    );
-
-    // The C6 pair toggle through the same rows.
-    app.handle_action(Action::Down); // Blend skips
-    let effects = app.handle_action(Action::Activate);
-    assert!(app.blend_skips);
-    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetBlendSkips(true)))));
-    app.handle_action(Action::Down); // Pause fade
-    let effects = app.handle_action(Action::Back); // toggles either way
-    assert!(app.pause_fade);
-    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetPauseFade(true)))));
-
-    // What the tab set is what the config remembers.
-    let prefs = app.prefs();
-    assert_eq!(prefs.crossfade_seconds, 0.0);
-    assert!(prefs.gapless);
-    assert!(prefs.blend_skips);
-    assert!(prefs.pause_fade);
-
-    // And the ways out: Esc steps back to the settings menu.
-    app.handle_action(Action::Cancel);
-    assert_eq!(*app.settings_node(), SettingsNode::Root);
 }
 
 #[test]
@@ -6454,18 +5395,13 @@ fn connecting_tells_the_engine_the_blend_length() {
 }
 
 #[test]
-fn the_connect_screen_swallows_playback_only_where_a_shell_shows_one() {
-    // The TUI draws the App's connect screen while no session is up, and a
-    // Space typed into it must not toggle anything; the GUI has no such
-    // screen and keeps the queue's transport live (multi-server contract,
-    // clauses 11 and 13).
+fn the_transport_answers_with_no_session_up() {
+    // No session is no bar to the transport: the queue's rows from other
+    // servers keep it live (multi-server contract, clauses 11 and 13).
     let mut app = App::new(Some("http://host:3000".into()), None, None);
     assert!(!app.connected);
     app.handle_action(Action::ToggleShuffle);
-    assert!(!app.queue.shuffle, "the connect screen swallows the key");
-    app.connect_screen = false;
-    app.handle_action(Action::ToggleShuffle);
-    assert!(app.queue.shuffle, "a shell without the screen lets it through");
+    assert!(app.queue.shuffle);
 }
 
 // ── Auto DJ (docs/ux-contracts/auto-dj.md) ──────────────────────────────────
@@ -9985,7 +8921,7 @@ fn a_re_login_on_a_proxied_peer_signs_in_through_the_parent_and_keeps_the_peer()
     // The review's finding: the parent's token expired while a peer was
     // browsed through it; the sign-in pinged the parent plainly, so the
     // header named the peer while the browser listed the parent's library
-    // and new rows carried the wrong origin. The login names the peer.
+    // and new rows carried the wrong origin. The sign-in names the peer.
     let mut app = App::new(None, None, None);
     let parent = "http://10.0.0.5:3000";
     app.connected = true;
@@ -9995,18 +8931,8 @@ fn a_re_login_on_a_proxied_peer_signs_in_through_the_parent_and_keeps_the_peer()
     app.session.token = Some("stale".into());
 
     app.apply_event(Event::Unauthorized);
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-    assert_eq!(app.connect.server, parent, "the form aims at the parent, which holds the accounts");
-    app.connect.username = "alice".into();
-    app.connect.password = "pw".into();
-    let effects = app.handle_action(Action::Submit);
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::Api(ApiCmd::Login { identity, peer: Some(3), .. })] if identity == parent
-        ),
-        "the sign-in is the parent's and carries the peer: {effects:?}"
-    );
+    assert_eq!(app.session.server, parent, "the sign-in aims at the parent, which holds the accounts");
+    assert_eq!(app.peer_behind(parent), Some(3), "and carries the peer");
     // A sign-in at a server that is not the peer's parent carries none.
     app.session.peer = Some(("http://10.0.0.9:3000".into(), 3));
     assert_eq!(app.peer_behind(parent), None);
@@ -10805,28 +9731,6 @@ fn the_whole_list_verbs_act_on_the_tab_in_front() {
     assert_eq!(app.queue.items.len(), 2, "replaced, not appended");
     assert!(app.queue.items.iter().all(|q| q.origin.peer.is_none()));
     assert!(matches!(effects.iter().find(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), Some(_)));
-}
-
-#[test]
-fn the_rooms_verbs_leave_the_tuis_discover_state_untouched() {
-    let mut app = answered_taste();
-    app.discover_seed = Some(track("music/tui-seed.mp3"));
-    app.discover.set(vec![Entry::Parent]);
-    let before = format!(
-        "{:?}",
-        (&app.discover.entries, &app.discover_stack, &app.discover_seed, &app.discover_artists, &app.now_discover, app.capture)
-    );
-    app.activate_taste_row(TasteRow::Song(0), TasteVerb::PlayFrom);
-    app.activate_taste_row(TasteRow::Song(1), TasteVerb::Now);
-    app.activate_taste_row(TasteRow::Peer { group: 0, row: 0 }, TasteVerb::Queue);
-    app.taste_queue_all();
-    app.set_taste_window(7);
-    app.taste_seeds_closed(&["h1".into()], &[], false);
-    let after = format!(
-        "{:?}",
-        (&app.discover.entries, &app.discover_stack, &app.discover_seed, &app.discover_artists, &app.now_discover, app.capture)
-    );
-    assert_eq!(before, after, "clause 67");
 }
 
 #[test]

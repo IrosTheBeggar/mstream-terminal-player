@@ -676,9 +676,6 @@ impl Gui {
         // The tests assert the modern glyphs whatever console runs them.
         #[cfg(test)]
         crate::kit::theme::pin_modern_terminal();
-        // No connect screen here: the servers surfaces are this shell's own,
-        // and the transport keeps working while a session is down.
-        app.connect_screen = false;
         // Play from is this shell's (the room's sheet, quick config): Start
         // goes to its home.
         app.dj_shows_play_from = true;
@@ -2788,10 +2785,9 @@ fn draw_marked_rows(
                 // Drill rows carry a dim right-hand column — a hit count,
                 // a closeness — the kit table's detail spot.
                 let detail = match other {
-                    Entry::Search { detail, .. }
-                    | Entry::Discover { detail, .. }
-                    | Entry::Setting { detail, .. }
-                    | Entry::Sonic { detail, .. } => Some(detail.as_str()),
+                    Entry::Search { detail, .. } | Entry::Sonic { detail, .. } => {
+                        Some(detail.as_str())
+                    }
                     _ => None,
                 };
                 if let Some(detail) = detail.filter(|d| !d.is_empty()) {

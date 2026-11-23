@@ -21,7 +21,7 @@ use std::time::Duration;
 use crate::api::types::{
     Album, AlbumCredit, ArtistAlbumRow, CancelAnswer, CollectionDestination, CollectionDestinationView, DirListing,
     DiscoveryPluginsResponse, Genre, GenreList, GenreSource, JobLanding, JobLookup, JobScope, JobStartAnswer, JobStarted,
-    JourneyStop, MoodFilter, MoodSong, Ping, PluginJobList, PluginLink, PlaylistSummary, SearchResults, SimilarArtist,
+    JourneyStop, MoodFilter, MoodSong, Ping, PluginJobList, PluginLink, PlaylistSummary, SearchResults,
     TasteRequest, TasteResponse, Track, various_artists,
 };
 use crate::api::{ApiError, Client, PluginFailure};
@@ -251,8 +251,8 @@ pub enum ApiCmd {
     /// whether the feature is switched off or merely not yet scanned — the
     /// route itself deliberately answers both the same way.
     DiscoveryProbe,
-    /// Fill a Discover view. `seed` is the track it all hangs off.
-    Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
+    /// The songs that sound like `seed`, for the Now Playing view's panel.
+    Discover { seed: Box<Track> },
     /// Ask the GUI's Discover room for one part of its answer
     /// (discovery-page contract, clause 30) — a destination on the command,
     /// not a second command (the D7 habit). `seq` and `generation` come
@@ -397,7 +397,6 @@ pub enum ApiCmd {
     /// `generation` is the session's, and the answer carries it back on
     /// [`Event::PeerRecs`].
     PeerRecs { generation: u64, cmd: crate::api::peer_recs_door::PeerRecsCmd },
-    Shutdown,
 }
 
 impl ApiCmd {
@@ -468,8 +467,7 @@ impl ApiCmd {
             | ApiCmd::Search { .. }
             // The Peer recs room asks only the session's own server.
             | ApiCmd::PeerRecs { .. }
-            | ApiCmd::ArtWithdraw { .. }
-            | ApiCmd::Shutdown => None,
+            | ApiCmd::ArtWithdraw { .. } => None,
         }
     }
 }
@@ -538,51 +536,6 @@ impl DjServerInfo {
     pub fn sonic_usable(&self) -> bool {
         self.discovery && self.discovery_ready != Some(false)
     }
-}
-
-/// A view in the Discover tab. Like [`LibraryNode`], it is both the request
-/// and the identity of what comes back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiscoverNode {
-    /// What to look around *from*: what is playing, or anything you care to
-    /// point at. Static, needs no request — and being able to ask about a
-    /// track without playing it is why the tab starts here.
-    Root,
-    /// What to look *at*: songs, or artists. Also static.
-    Mode,
-    /// Tracks that sound like the seed.
-    Tracks,
-    /// Artists that sound like the seed's artist.
-    Artists,
-    /// One artist's ways in. Answered from the artists reply already in
-    /// hand, so it costs nothing.
-    Artist(String),
-}
-
-#[derive(Debug)]
-pub enum DiscoverData {
-    /// Neighbours with how close each one is. Both views lead their rows
-    /// with the number: these arrive in order, so a position says nothing a
-    /// rank could not, where the cosine says how much of a neighbour each
-    /// one actually is. It used to be dropped on the way to the browser
-    /// tab, which is why this carries `SimilarTrack` and not `Track`.
-    Tracks(Vec<crate::api::types::SimilarTrack>),
-    Artists(Vec<SimilarArtist>),
-}
-
-/// Which Discover surface asked, echoed back on the reply.
-///
-/// Two of them want the same data about different seeds: the browser tab
-/// drills from a seed it captured when you opened it, and the now-playing
-/// panel follows whatever is on the speakers. Carrying the destination is
-/// what audit #64 asks for — the alternative is a second command whose only
-/// job is to be a different variant name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiscoverDest {
-    /// The Discover tab in the browser.
-    Browser,
-    /// The Discover tab of the full-screen view.
-    NowPlaying,
 }
 
 /// Which part of the Discover room's answer an ask fills (discovery-page
@@ -919,15 +872,14 @@ pub enum Event {
     /// is the sonic path's (`discoveryPath`), `taste` the Discover room's
     /// gate (`discovery && discoveryTaste >= 1`, discovery-page clause 82).
     DiscoveryProbe { available: bool, taste: bool },
-    /// A Discover view's contents, tagged with the node they belong to.
-    /// `seed` is the filepath it was asked about. The browser tab tells a
-    /// stale reply by its node; the now-playing panel follows the speakers,
-    /// where the node never changes and the seed is the only thing that does.
+    /// The Now Playing panel's neighbours, with how close each one is:
+    /// these arrive in order, so a position says nothing a rank could not,
+    /// where the cosine says how much of a neighbour each one actually is.
+    /// `seed` is the filepath they were asked about. The panel follows the
+    /// speakers, so the seed is what tells a stale reply.
     Discover {
-        node: DiscoverNode,
-        data: DiscoverData,
+        tracks: Vec<crate::api::types::SimilarTrack>,
         note: Option<String>,
-        dest: DiscoverDest,
         seed: String,
     },
     /// One part of the Discover room's answer, or why there is none —
@@ -1659,8 +1611,6 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
         // minute cold, so it runs on its own thread as well and reports
         // back through the events.
         let result = match cmd {
-            ApiCmd::Shutdown => break,
-
             ApiCmd::TunnelOpen { id, credential } => {
                 tracing::info!("tunnel {}: dialling", tunnel_log_name(&id));
                 open_tunnel(&tunnels, id, credential, events.clone());
@@ -2295,9 +2245,7 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::FederationPeers { parent } => {
             Ok(Event::FederationPeers { parent, peers: c.federation_peers().ok() })
         }
-        ApiCmd::Discover { node, seed, dest } => {
-            crate::api::wait(discover(c, &node, &seed, dest))
-        }
+        ApiCmd::Discover { seed } => crate::api::wait(discover(c, &seed)),
         ApiCmd::SavePlaylist { name, files } => {
             let count = files.len();
             c.playlist_save(&name, &files).map(|()| Event::PlaylistSaved { name, count })
@@ -2349,8 +2297,9 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         | ApiCmd::KeepFacts { .. }
         | ApiCmd::Retarget { .. }
         | ApiCmd::Probe { .. }
-        | ApiCmd::ArtWithdraw { .. }
-        | ApiCmd::Shutdown => return Event::Error("connection change routed as a read".into()),
+        | ApiCmd::ArtWithdraw { .. } => {
+            return Event::Error("connection change routed as a read".into());
+        }
     };
     match answered {
         Ok(event) => event,
@@ -3545,100 +3494,32 @@ pub(crate) async fn keep_facts(peer: Option<&Client>, local: &Client, ask: &Keep
     facts
 }
 
-/// How many neighbours a Discover view asks for. Deep enough to browse,
-/// short enough that the tail is still relevant rather than noise.
+/// How many neighbours the panel asks for. Deep enough to browse, short
+/// enough that the tail is still relevant rather than noise.
 const DISCOVER_LIMIT: u32 = 40;
 
-/// Fill a Discover view.
+/// The songs that sound like `seed`.
 ///
-/// Both routes have the same three non-answers — the feature is off, the
-/// seed hasn't been embedded yet, or the ranking was walked as far as the
-/// server was willing to go. None is a failure, so each gets a sentence and
-/// an empty list rather than an error.
-pub(crate) async fn discover(
-    client: &Client,
-    node: &DiscoverNode,
-    seed: &Track,
-    dest: DiscoverDest,
-) -> Result<Event, ApiError> {
-    let disabled = |data| Event::Discover {
-        node: node.clone(),
-        data,
-        note: Some("discovery is switched off on this server".into()),
-        dest,
+/// The route has three non-answers — the feature is off, the seed hasn't
+/// been embedded yet, or nothing is close. None is a failure, so each gets a
+/// sentence and an empty list rather than an error.
+pub(crate) async fn discover(client: &Client, seed: &Track) -> Result<Event, ApiError> {
+    let answer = |tracks, note: Option<&str>| Event::Discover {
+        tracks,
+        note: note.map(str::to_string),
         seed: seed.filepath.clone(),
     };
-
-    match node {
-        // All three are answered without asking the server: the two menus
-        // are static, and an artist's ways in arrived with the artist list.
-        DiscoverNode::Root | DiscoverNode::Mode | DiscoverNode::Artist(_) => Ok(Event::Discover {
-            node: node.clone(),
-            data: DiscoverData::Tracks(Vec::new()),
-            note: None,
-            dest,
-            seed: seed.filepath.clone(),
-        }),
-
-        DiscoverNode::Tracks => {
-            let Some(found) =
-                client.similar_tracks_async(&seed.filepath, DISCOVER_LIMIT).await?
-            else {
-                return Ok(disabled(DiscoverData::Tracks(Vec::new())));
-            };
-            let note = if found.not_analyzed {
-                Some("this track hasn't been analysed yet".to_string())
-            } else if found.results.is_empty() {
-                Some("nothing in your library sounds like this".to_string())
-            } else {
-                None
-            };
-            Ok(Event::Discover {
-                node: node.clone(),
-                data: DiscoverData::Tracks(found.results),
-                note,
-                dest,
-                seed: seed.filepath.clone(),
-            })
-        }
-
-        DiscoverNode::Artists => {
-            let Some(artist) = seed.metadata.artist.as_deref().filter(|a| !a.trim().is_empty())
-            else {
-                return Ok(Event::Discover {
-                    node: node.clone(),
-                    data: DiscoverData::Artists(Vec::new()),
-                    note: Some("this track has no artist tag to compare against".into()),
-                    dest,
-                    seed: seed.filepath.clone(),
-                });
-            };
-            let Some(found) = client.similar_artists_async(artist, DISCOVER_LIMIT).await? else {
-                return Ok(disabled(DiscoverData::Artists(Vec::new())));
-            };
-            let note = if found.not_analyzed {
-                Some(format!("none of {artist}'s tracks have been analysed yet"))
-            } else if found.results.is_empty() {
-                Some(format!("nothing in your library sounds like {artist}"))
-            } else if found.capped {
-                // The server stops walking a long ranking, so a short list
-                // here means "stopped looking", not "there is no more".
-                Some(format!(
-                    "{} artists — the server stopped searching before the list ran out",
-                    found.results.len()
-                ))
-            } else {
-                None
-            };
-            Ok(Event::Discover {
-                node: node.clone(),
-                data: DiscoverData::Artists(found.results),
-                note,
-                dest,
-                seed: seed.filepath.clone(),
-            })
-        }
-    }
+    let Some(found) = client.similar_tracks_async(&seed.filepath, DISCOVER_LIMIT).await? else {
+        return Ok(answer(Vec::new(), Some("discovery is switched off on this server")));
+    };
+    let note = if found.not_analyzed {
+        Some("this track hasn't been analysed yet")
+    } else if found.results.is_empty() {
+        Some("nothing in your library sounds like this")
+    } else {
+        None
+    };
+    Ok(answer(found.results, note))
 }
 
 /// Fetch a journey and translate the ways it can legitimately come up short
@@ -5491,7 +5372,7 @@ mod tests {
 
         api.send(ApiCmd::TunnelClose { id: pid.clone() }).unwrap();
         wait("TunnelClosed", &|e| matches!(e, Event::TunnelClosed { .. }));
-        api.send(ApiCmd::Shutdown).unwrap();
+        drop(api);
     }
 
     #[test]
@@ -5756,7 +5637,8 @@ mod tests {
             };
             order.push((name, started.elapsed()));
         }
-        tx.send(ApiCmd::Shutdown).unwrap();
+        // The worker ends with its last sender.
+        drop(tx);
         worker.join().unwrap();
 
         let names: Vec<&str> = order.iter().map(|(name, _)| *name).collect();
@@ -5802,7 +5684,8 @@ mod tests {
                 other => panic!("unexpected {other:?}"),
             }
         }
-        tx.send(ApiCmd::Shutdown).unwrap();
+        // The worker ends with its last sender.
+        drop(tx);
         worker.join().unwrap();
         // Reads answer on their own threads, so the first listing may pass
         // the second connect's answer — as it always could. What holds: the
@@ -5946,7 +5829,8 @@ mod tests {
         }
         assert!(events.recv_timeout(Duration::from_millis(300)).is_err(), "nothing more is answered");
         assert_eq!(asked_old.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
-        tx.send(ApiCmd::Shutdown).unwrap();
+        // The worker ends with its last sender.
+        drop(tx);
         worker.join().unwrap();
     }
 
@@ -5996,7 +5880,8 @@ mod tests {
             assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
         }
         assert_eq!(asked_old.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
-        tx.send(ApiCmd::Shutdown).unwrap();
+        // The worker ends with its last sender.
+        drop(tx);
         worker.join().unwrap();
     }
 }

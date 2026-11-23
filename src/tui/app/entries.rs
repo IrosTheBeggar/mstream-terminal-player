@@ -182,14 +182,6 @@ pub(super) fn entries_from_library(data: LibraryData) -> Vec<Entry> {
     entries
 }
 
-/// The model writes hierarchical tags — "Electronic---Dubstep". In a list of
-/// artists similar to each other the prefix is the same on every row, so only
-/// the leaf carries information; it is also the difference between two tags
-/// fitting on a line and none of them fitting.
-pub(crate) fn tidy_tag(tag: &str) -> &str {
-    tag.rsplit("---").next().unwrap_or(tag).trim()
-}
-
 /// Join a directory prefix and an entry name into a library path.
 pub(super) fn qualify(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {

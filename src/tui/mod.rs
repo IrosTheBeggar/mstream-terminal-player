@@ -609,7 +609,6 @@ pub(crate) fn remember(app: &App) {
         }
     };
     config.player.adopt(app.prefs());
-    adopt_log_level(&mut config, &app);
     // Keyed on the identity, never the endpoint: a tunnel session's loopback
     // port is meaningless by the next run.
     // A tunnel identity removed from the list is not put back by
@@ -703,24 +702,6 @@ fn pop_window_title() {
     let _ = std::io::stdout().flush();
 }
 
-/// Carry the session's chosen log level into a config about to be saved —
-/// only a level the user set in Settings, so an environment-forced one
-/// never silently becomes configuration. Off writes as empty, which keeps
-/// the [log] section out of the file entirely. Native beside its callers:
-/// the browser build has no config file to write.
-#[cfg(not(target_arch = "wasm32"))]
-fn adopt_log_level(config: &mut config::Config, app: &App) {
-    // Each switch persists only if this session's Settings actually set it:
-    // walking the level under MSTREAM_LOG=1 must not also write `write =
-    // true` and turn on disk logging for every run afterwards.
-    if let Some(write) = app.chosen_log_write() {
-        config.log.write = Some(write);
-    }
-    if let Some(level) = app.chosen_log_level() {
-        config.log.level = level.label().to_string();
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let mut config = config::load()?;
@@ -730,7 +711,6 @@ pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let owner = app.session.peer.as_ref().map_or(app.session.server_id.as_str(), |(parent, _)| parent.as_str());
     config::touch_server(&mut config, owner, app.session.username.clone());
     config.player.adopt(app.prefs());
-    adopt_log_level(&mut config, app);
     config::save(&config)?;
 
     let mut credentials = config::load_credentials()?;
@@ -887,7 +867,7 @@ mod tests {
         let play = Effect::Audio(AudioCmd::Play { url: "http://x/a.mp3".into(), duration_hint: None });
         assert!(awaits_answer(&play));
         assert!(awaits_answer(&Effect::Audio(AudioCmd::Seek(12.0))));
-        assert!(awaits_answer(&Effect::Api(ApiCmd::Shutdown)));
+        assert!(awaits_answer(&Effect::Api(ApiCmd::DiscoveryProbe)));
         assert!(awaits_answer(&Effect::Discover));
         assert!(!awaits_answer(&Effect::Audio(AudioCmd::SetVolume(0.5))));
         assert!(!awaits_answer(&Effect::SaveSession));
