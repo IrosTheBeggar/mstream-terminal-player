@@ -60,6 +60,23 @@ impl Probe {
         (out, told.expect("the pass ran"))
     }
 
+    /// One pass with `events` that egui runs twice, as it does for a modal
+    /// that took its body's height: the first run asks for the second, and
+    /// the runs egui made come back.
+    fn pass_twice(&self, page: &mut Page, events: Vec<Event>) -> u32 {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), events, ..Default::default() };
+        let mut runs = 0;
+        let mut out = self.ctx.run_ui(input, |ui| {
+            runs += 1;
+            let _ = show(ui, page, "", false);
+            if runs == 1 {
+                ui.ctx().request_discard("the test's second run");
+            }
+        });
+        out.textures_delta.clear();
+        runs
+    }
+
     /// Two passes (egui sizes some things on the first), the second's.
     fn settle(&self, page: &mut Page) -> FullOutput {
         let _ = self.pass(page, Vec::new());
@@ -186,6 +203,7 @@ fn the_text_buttons_ask_for_the_cells_acts_once_a_click() {
     let out = probe.settle(&mut page);
     probe.click(&mut page, find(&out, "Details").center());
     assert!(page.details, "Details open");
+    assert_eq!(ends.sent(), [Cmd::Facts { port: "COM3".into() }], "the facts asked, once");
     let out = probe.settle(&mut page);
     // The facts the default window has room for under the card at rest;
     // the rest are cut at the card's foot, as the cells cut them.
@@ -219,6 +237,85 @@ fn details_open_on_its_facts_and_its_log_pinned_to_the_newest_line_which_the_whe
     let down = Event::MouseWheel { unit: MouseWheelUnit::Line, delta: vec2(0.0, -1.0), phase: egui::TouchPhase::Move, modifiers: Default::default() };
     let _ = probe.pass(&mut page, vec![down]);
     assert_eq!(page.log_scroll, 0);
+}
+
+#[test]
+fn a_pass_egui_runs_twice_applies_its_click_and_its_wheel_once() {
+    let _en = english();
+    let probe = Probe::new(BOARD);
+    let (mut page, ends) = page_with(Ends::two);
+    let out = probe.settle(&mut page);
+    let at = find(&out, "Show on the player").center();
+    let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+    let _ = probe.pass(&mut page, vec![Event::PointerMoved(at)]);
+    let _ = probe.pass(&mut page, vec![button(true)]);
+    assert_eq!(probe.pass_twice(&mut page, vec![button(false)]), 2, "egui ran the release's pass twice");
+    assert_eq!(ends.sent(), [Cmd::Identify { port: "COM3".into() }], "the click acted once");
+    // The wheel over the log likewise: a notch is one line, not two.
+    let (mut page, ends) = page_with(Ends::up_to_date);
+    ends.tell((0..60).map(|i| log_line(&format!("line {i:02}"))));
+    page.pump();
+    page.act(Act::Details);
+    let out = probe.settle(&mut page);
+    let _ = probe.pass(&mut page, vec![Event::PointerMoved(find(&out, "line 59").center())]);
+    let wheel = Event::MouseWheel { unit: MouseWheelUnit::Line, delta: vec2(0.0, 1.0), phase: egui::TouchPhase::Move, modifiers: Default::default() };
+    assert_eq!(probe.pass_twice(&mut page, vec![wheel]), 2);
+    assert_eq!(page.log_scroll, 1, "the notch moved the log once");
+}
+
+#[test]
+fn reset_count_write_again_and_update_all_ask_for_the_cells_acts() {
+    let _en = english();
+    // Reset on a next write: the cells' Reset, the choice let go.
+    let probe = Probe::new(BOARD);
+    let (mut page, ends) = page_with(Ends::next_write);
+    let out = probe.settle(&mut page);
+    probe.click(&mut page, find(&out, "Reset").center());
+    assert_eq!(ends.sent(), [Cmd::Choose { port: "COM3".into(), choice: None }]);
+    // Count free space on a card not counted: the cells' Count.
+    let probe = Probe::new(BOARD);
+    let uncounted = fixtures::answering_with("COM3", "v0.8.0", |s| s.free = crate::device::board::Free::NotCounted);
+    let (mut page, ends) = page_with(|e| e.boards(vec![uncounted]));
+    let out = probe.settle(&mut page);
+    probe.click(&mut page, find(&out, "Count free space").center());
+    assert_eq!(ends.sent(), [Cmd::Count { port: "COM3".into() }]);
+    // Write again, in Details: the cells' WriteAgain, its gate.
+    let probe = Probe::new(BOARD);
+    let (mut page, _ends) = page_with(Ends::up_to_date);
+    page.act(Act::Details);
+    let out = probe.settle(&mut page);
+    probe.click(&mut page, find(&out, "Write v0.8.0 again").center());
+    assert!(page.gate.as_ref().is_some_and(|g| g.kind == Kind::Again), "the cells' WriteAgain: its gate");
+    // Update all at the row's right edge: its gate over the boards it
+    // writes, nothing written before its yes.
+    let probe = Probe::new(BOARD);
+    let boards = vec![fixtures::old("COM3", "v0.7.0"), fixtures::old("COM5", "v0.7.0"), fixtures::answering("COM9", "v0.8.0")];
+    let (mut page, ends) = page_with(|e| e.boards(boards));
+    let out = probe.settle(&mut page);
+    probe.click(&mut page, find(&out, "Update all (2)").center());
+    assert!(page.gate.as_ref().is_some_and(|g| g.kind == Kind::All), "the cells' UpdateAll: its gate");
+    assert!(ends.sent().is_empty());
+}
+
+#[test]
+fn under_the_write_the_tabs_still_switch_as_the_cells_let_them_and_nothing_else_is_offered() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let (mut page, ends) = page_with(Ends::two);
+    page.act(Act::Board(1));
+    page.act(Act::Primary);
+    page.act(Act::Write);
+    assert!(page.writing() && matches!(ends.sent().as_slice(), [Cmd::Write { port, .. }] if port == "COM5"));
+    let out = probe.settle(&mut page);
+    assert_drew(&out, &["writing COM5…"]);
+    assert!(!drew(&out, "Advanced…"), "nothing that writes or chooses under the lock");
+    // COM3's tab: the cells register it under the lock, and the view moves
+    // to the board not being written, which offers nothing either.
+    probe.click_id(&mut page, Id::new("mp3-tab").with(0usize));
+    assert_eq!(page.open.as_deref(), Some("COM3"));
+    let out = probe.settle(&mut page);
+    assert!(!drew(&out, "Show on the player") && !drew(&out, "Advanced…"), "{:?}", texts(&out));
+    assert!(ends.sent().is_empty(), "and the lock sends nothing");
 }
 
 /// A log line about COM3, as the worker tells one.
@@ -282,6 +379,13 @@ fn a_write_under_way_draws_its_words_and_its_bar_and_the_lock_keeps_only_what_th
     let out = probe.settle(&mut page);
     assert_drew(&out, &["writing v0.8.0… 62%"]);
     assert!(!drew(&out, "UPDATE"), "no primary on the board being written");
+    // The bar: the write's share of the value column's segments lit in the
+    // accent, as the cells fill their bar.
+    let pal = Pal::now();
+    let segments = |fill: Color32| out.shapes.iter().filter(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == fill && r.rect.height() == 10.0)).count();
+    let (lit, unlit) = (segments(pal.accent), segments(pal.unlit));
+    assert!(lit + unlit > 20, "the bar across the value column: {lit} lit, {unlit} not");
+    assert_eq!(lit, studio::fill_lit(620, lit + unlit), "62% of {} segments lit", lit + unlit);
     // Details still opens under the lock, as `d` does.
     probe.click(&mut page, find(&out, "Details").center());
     assert!(page.details && page.writing());
@@ -379,6 +483,85 @@ fn a_card_shares_the_subjects_row_and_its_tab_opens_its_view() {
     assert!(page.card_open.is_some(), "the cells' Card(0)");
     let out = probe.settle(&mut page);
     assert_drew(&out, &["Car music"]);
+}
+
+/// A page with no board and `card` in a reader, the transfer worker's
+/// inbox kept to read what the page asks of it.
+fn with_one_card(card: worker::CardView) -> (Page, std::sync::mpsc::Receiver<worker::In>) {
+    let (mut page, _ends) = Page::quiet();
+    let (link, inbox) = Link::pair();
+    let fold = Rc::new(RefCell::new(Fold::default()));
+    {
+        let mut f = fold.borrow_mut();
+        f.watched = true;
+        f.servers = vec![cards::home()];
+        f.apply(worker::Event::Card(Box::new(card)));
+    }
+    page.attach(Transfer { link, fold });
+    page.pump();
+    (page, inbox)
+}
+
+#[test]
+fn a_cards_gate_draws_over_the_inert_page_and_its_safe_answer_is_the_cells_keep() {
+    let _en = english();
+    let probe = Probe::new(BOARD);
+    let many: Vec<String> = (0..214).map(|i| format!("Velvet Static/Harbour Songs/{i:03} - Track.flac")).collect();
+    let card = cards::with(cards::ready("E:", now()), |c| {
+        if let worker::Next::Plan(plan) = &mut c.next {
+            plan.removals = many.clone();
+        }
+    });
+    let (mut page, inbox) = with_one_card(card.clone());
+    page.act(Act::Primary);
+    assert!(page.card.gate.is_some() && worker::sent(&inbox).is_empty(), "the gate first");
+    let _ = probe.settle(&mut page);
+    let (out, shown) = probe.pass(&mut page, Vec::new());
+    assert_drew(&out, &["Remove 214 tracks from Car music?"]);
+    assert!(shown.caret.is_none(), "a gate has no field");
+    probe.click_id(&mut page, Id::new("mp3-card-gate").with("foot").with(0usize));
+    assert!(page.card.gate.is_none(), "the cells' CardKeep");
+    assert_eq!(worker::sent(&inbox), [worker::Cmd::Dismiss { key: card.key.clone() }]);
+    // The stronger gate, its go waiting on its box: the keep alone answers.
+    let strong = cards::with(card, |c| {
+        if let worker::Next::Plan(plan) = &mut c.next {
+            plan.guards = vec![crate::device::card::engine::Guard::Removals { paths: many.clone(), strong: true }];
+            plan.removal_libs = (0..214).map(|i| if i < 200 { "Rock" } else { "Jazz" }.to_string()).collect();
+        }
+    });
+    let (mut page, inbox) = with_one_card(strong);
+    page.act(Act::Primary);
+    let half = |page: &Page| matches!(page.card.gate.as_ref().map(|g| &g.kind), Some(super::super::card::GateKind::Half { ticked: false, .. }));
+    assert!(half(&page), "the stronger gate, its box not ticked");
+    let _ = probe.settle(&mut page);
+    probe.click_id(&mut page, Id::new("mp3-card-gate").with("foot").with(0usize));
+    assert!(page.card.gate.is_none() && matches!(worker::sent(&inbox).as_slice(), [worker::Cmd::Dismiss { .. }]));
+}
+
+#[test]
+fn a_cards_sheet_draws_and_closes_and_its_name_field_gives_a_caret_only_with_the_keyboard() {
+    let _en = english();
+    let probe = Probe::new(BOARD);
+    let (mut page, inbox) = with_one_card(cards::new_card("F:"));
+    page.act(Act::Primary);
+    assert!(page.card.sheet.is_some(), "a new card's primary: its set-up sheet");
+    let _ = probe.settle(&mut page);
+    let (out, shown) = probe.pass(&mut page, Vec::new());
+    assert_drew(&out, &["Set up F:"]);
+    assert!(shown.caret.is_none(), "no field has the keyboard: no caret");
+    if let Some(sheet) = page.card.sheet.as_mut() {
+        sheet.field = Some(tui_input::Input::new("Gym".into()));
+    }
+    let _ = probe.settle(&mut page);
+    let (_, shown) = probe.pass(&mut page, Vec::new());
+    assert!(shown.caret.is_some(), "the Name field with the keyboard: its caret for the input method");
+    if let Some(sheet) = page.card.sheet.as_mut() {
+        sheet.field = None;
+    }
+    let _ = probe.settle(&mut page);
+    probe.click_id(&mut page, Id::new("mp3-card-sheet").with("close"));
+    assert!(page.card.sheet.is_none(), "its close, the cells' CardSheetClose");
+    assert!(worker::sent(&inbox).is_empty(), "a sheet closed writes nothing");
 }
 
 // ── The boards' type for the cells' marks and figures ───────────────────
