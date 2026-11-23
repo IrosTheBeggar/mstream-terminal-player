@@ -87,10 +87,6 @@ impl ConnectForm {
     pub fn paste_row(&self) -> usize {
         self.found.len()
     }
-
-    pub fn on_paste_row(&self) -> bool {
-        self.row >= self.paste_row()
-    }
 }
 
 impl ConnectForm {
@@ -445,7 +441,7 @@ impl App {
                     self.connect.choice = self.connect.choice.saturating_sub(1);
                     Vec::new()
                 }
-                Action::Down | Action::CycleFocus => {
+                Action::Down => {
                     self.connect.choice = (self.connect.choice + 1).min(CONNECT_METHODS.len() - 1);
                     Vec::new()
                 }
@@ -473,7 +469,7 @@ impl App {
                     self.connect.value_mut().pop();
                     Vec::new()
                 }
-                Action::CycleFocus | Action::Down => {
+                Action::Down => {
                     self.connect.next_field();
                     Vec::new()
                 }

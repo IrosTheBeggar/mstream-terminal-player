@@ -41,15 +41,6 @@ pub enum TunnelPath {
 }
 
 impl TunnelPath {
-    /// The word the UI shows for this state.
-    pub fn label(self) -> &'static str {
-        match self {
-            TunnelPath::Direct => "direct",
-            TunnelPath::Relay => "relay",
-            TunnelPath::Reconnecting => "reconnecting…",
-        }
-    }
-
     /// From the shared tunnel client's `path_kind()`: unknown (0) is what it
     /// reports whenever the tunnel is not connected, so that reads as
     /// between tunnels here.

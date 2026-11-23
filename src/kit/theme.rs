@@ -17,7 +17,7 @@
 //!
 //! `MSTREAM_SETUP_THEME=ansi|256|truecolor` overrides detection — the
 //! test matrix's lever, and the escape hatch for anyone whose terminal
-//! lies about its capabilities. The player TUI is deliberately untouched.
+//! lies about its capabilities.
 //!
 //! The GROUND is all-or-nothing. Terminals reserve margin pixels around
 //! the cell grid, painted with their DEFAULT background — cell fills

@@ -1,8 +1,7 @@
 # Tag-driven releases: push a `v*` tag to build all six native targets of
-# the terminal player, the desktop family beside them, and the browser
-# bundle, and publish a GitHub Release with the binaries, the web tarball,
-# and a sha256 manifest.json that mStream vendors for its pinned-version
-# download.
+# the terminal player and the desktop family beside them, and publish a
+# GitHub Release with the binaries and a sha256 manifest.json that mStream
+# vendors for its pinned-version download.
 #
 # Two products from one tree (Cargo.toml's [features]). The terminal
 # flavour (no features) is every asset that existed before the desktop
@@ -332,61 +331,19 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # The seventh artifact: the same player built for a tab (see src/web),
-  # tarred as a static bundle. It rides the same manifest — the asset name
-  # matches the `mstream-player*` glob below, so the sha256 entry is free —
-  # and mStream serves it same-origin next to the /api routes it calls,
-  # which is why no host or proxy configuration ships inside it.
-  web:
-    name: Build mstream-player-web
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: wasm32-release
-
-      # Pinned, not latest: index.html's data-wasm-opt-params needs >= 0.21,
-      # and trunk fetches its own wasm-bindgen and wasm-opt at build time.
-      - name: Install trunk
-        run: |
-          curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
-            | tar xz -C "$HOME/.cargo/bin"
-
-      # --public-url ./ keeps every asset link relative, so the bundle
-      # serves from /, /player/, or wherever a host mounts it — no rebuild
-      # per mount point.
-      - name: Build web bundle
-        run: |
-          trunk build --release --public-url ./
-          tar czf mstream-player-web.tar.gz -C dist .
-
-      - name: Upload web bundle
-        uses: actions/upload-artifact@v7
-        with:
-          name: mstream-player-web.tar.gz
-          path: mstream-player-web.tar.gz
-          retention-days: 1
-
   # A skipped need would skip this job too, the hold-back's skipped
   # build-desktop included, unless the `if` says otherwise; so it does:
-  # every terminal leg and the web bundle must have succeeded, and the
-  # desktop family either went through whole (binaries and packages) or
-  # was held back whole (both skipped). A failed desktop leg or package
-  # stops the release, as any failed leg always has; so does the pair
-  # disagreeing, which only a failure can cause.
+  # every terminal leg must have succeeded, and the desktop family either
+  # went through whole (binaries and packages) or was held back whole (both
+  # skipped). A failed desktop leg or package stops the release, as any
+  # failed leg always has; so does the pair disagreeing, which only a
+  # failure can cause.
   release:
     name: Publish release
-    needs: [build, build-desktop, package-desktop, web]
+    needs: [build, build-desktop, package-desktop]
     if: >-
       ${{ !cancelled()
           && needs.build.result == 'success'
-          && needs.web.result == 'success'
           && ((needs.build-desktop.result == 'success'
                && needs.package-desktop.result == 'success')
               || (needs.build-desktop.result == 'skipped'

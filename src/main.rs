@@ -1,9 +1,3 @@
-// On wasm the whole native half — config persistence, the HTTP client's
-// response shapes, the Auto-DJ math — is compiled (the types are shared) but
-// never called, and dead-code analysis would name every function of it. The
-// native build keeps the lint; it's the one where dead code means something.
-#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
-
 mod advance;
 mod api;
 mod clock;
@@ -11,9 +5,7 @@ mod config;
 mod console;
 mod dj;
 mod input;
-/// The debug log. Its file half is native-only inside the module; the
-/// level type and switches are shared, because the Settings tab that
-/// drives them is drawing code the browser build keeps.
+/// The debug log: the level and its switches, and the file it writes to.
 mod logging;
 /// Tests over Cargo.toml and Cargo.lock: dependency and profile choices.
 #[cfg(test)]
@@ -21,222 +13,56 @@ mod manifest;
 mod player;
 mod tui;
 
-#[cfg(not(target_arch = "wasm32"))]
 mod cmd_graphics;
-#[cfg(not(target_arch = "wasm32"))]
 mod cmd_library;
-#[cfg(not(target_arch = "wasm32"))]
 mod cmd_play;
-#[cfg(not(target_arch = "wasm32"))]
 mod cmd_viz;
-#[cfg(not(target_arch = "wasm32"))]
-mod replay;
-#[cfg(not(target_arch = "wasm32"))]
 mod runtime;
-#[cfg(not(target_arch = "wasm32"))]
 mod serve;
 /// The visualizer presets: their format, their GLSL, their audio texture,
-/// and the GPU renderer that draws them. Native only — the browser build has
-/// no GPU path yet, and none of this belongs in it until it does.
-#[cfg(not(target_arch = "wasm32"))]
+/// and the GPU renderer that draws them.
 mod shader;
 /// The wgpu instance and adapter every window and probe draws with: on
 /// Windows, DX12 or Vulkan alone, never GL, and a driver crash that ends the
 /// process instead of hanging it behind WER's dialog.
-#[cfg(not(target_arch = "wasm32"))]
 mod gpu_pick;
 /// On Windows, a window's picture put back in place after the graphics stack
 /// restarts (a driver reset, or the PC out of connected standby), for the
 /// player's window and the visualizer's; its rule is tested on every OS.
-#[cfg(all(not(target_arch = "wasm32"), any(windows, test)))]
+#[cfg(any(windows, test))]
 mod display_watch;
 /// The visualizer's window: a child process of the player (PLAN.md, Phase
 /// 11.1; docs/ux-contracts/visualizer-window.md).
-#[cfg(not(target_arch = "wasm32"))]
 mod viz_window;
-#[cfg(not(target_arch = "wasm32"))]
 mod gui;
 /// Add from YouTube's pure rules: links, the tag guess, where a song lands,
-/// formats, file names and failures (src/ytdl/mod.rs). Native only — the GUI
-/// is its one surface.
-#[cfg(not(target_arch = "wasm32"))]
+/// formats, file names and failures (src/ytdl/mod.rs). The GUI is its one
+/// surface.
 mod ytdl;
-#[cfg(not(target_arch = "wasm32"))]
 mod instance;
-#[cfg(not(target_arch = "wasm32"))]
 mod kit;
-#[cfg(not(target_arch = "wasm32"))]
 mod setup;
-#[cfg(not(target_arch = "wasm32"))]
 mod admin;
 /// The desktop flavour's launch contract: what an empty argv opens, its
 /// default instance lock, and the console a double-click leaves behind.
-#[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
+#[cfg(feature = "desktop")]
 mod desktop;
 /// The desktop app's identity: its app id and Windows AppUserModelID,
 /// shared with the Windows launcher stub. Only the window's builds.
-#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+#[cfg(feature = "window")]
 mod identity;
 /// The MP3 player (an M5Stack Core2) over USB: `device list`, `device
-/// flash`. Native only — a serial port is an OS handle.
-#[cfg(not(target_arch = "wasm32"))]
+/// flash`.
 mod device;
-
-/// The browser build (see its module note). Everything below this line that
-/// swaps a module out for a hand-written stand-in exists so the App, the
-/// drawing code and the worker message types compile unchanged there.
-#[cfg(target_arch = "wasm32")]
-mod web;
-/// The browser shell's timing rules and its canvas colours (src/web/pace.rs,
-/// src/web/colours.rs), which are pure: compiled here too so their tests
-/// run where `cargo test` does.
-#[cfg(all(test, not(target_arch = "wasm32")))]
-#[path = "web/pace.rs"]
-mod web_pace;
-#[cfg(all(test, not(target_arch = "wasm32")))]
-#[path = "web/colours.rs"]
-mod web_colours;
-
-#[cfg(not(target_arch = "wasm32"))]
 mod discovery;
-/// Stand-in for [discovery.rs]: the browse machinery is mDNS and can never
-/// run in a browser, but the found-server shape appears in the worker Event
-/// enum, so the type itself must exist. Kept field-for-field identical.
-#[cfg(target_arch = "wasm32")]
-mod discovery {
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct DiscoveredServer {
-        pub name: String,
-        pub base_url: String,
-        pub version: Option<String>,
-        pub quick_connect: bool,
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 mod engine;
-/// Only the tap: pure sample buffering the visualizer reads. The rest of the
-/// engine is rodio and the streaming pipeline, which stay native — the wasm
-/// stub feeds the tap a synthesised signal instead.
-#[cfg(target_arch = "wasm32")]
-mod engine {
-    #[path = "tap.rs"]
-    pub(crate) mod tap;
-
-    /// The crossfade prepare thread's name, which the panic-hook check
-    /// (worker::panics_are_caught) compares against. No such thread ever
-    /// runs here — the name just has to exist to be not-matched.
-    pub(crate) const PREPARE_THREAD: &str = "mstream-prepare";
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 mod quickconnect;
-/// Stand-in for the pure items of [quickconnect.rs] that the app logic
-/// reaches for (tunnel identities appear in saved-server lists, and the
-/// tunnel-path words appear in the header); the tunnel itself is iroh and
-/// stays native. The shared items are kept identical; the parse is a
-/// refusal.
-#[cfg(target_arch = "wasm32")]
-mod quickconnect {
-    /// Marks a remembered server as one reached through a tunnel rather than
-    /// at a URL. Deliberately not a real scheme: nothing may hand it to an
-    /// HTTP client.
-    pub const TUNNEL_ID_PREFIX: &str = "mstream+iroh://";
-
-    /// How the tunnel is reaching the server right now. iroh starts a
-    /// connection on its relay path and holepunches toward a direct one, so
-    /// this can change moments after connecting — and change back when a
-    /// network path dies.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum TunnelPath {
-        /// A holepunched peer-to-peer path carries the traffic.
-        Direct,
-        /// Traffic bounces through an iroh relay server.
-        Relay,
-        /// Between tunnels: the last one died and a fresh dial has not won yet.
-        Reconnecting,
-    }
-
-    impl TunnelPath {
-        /// The word the UI shows for this state.
-        pub fn label(self) -> &'static str {
-            match self {
-                TunnelPath::Direct => "direct",
-                TunnelPath::Relay => "relay",
-                TunnelPath::Reconnecting => "reconnecting…",
-            }
-        }
-
-        pub fn from_kind(kind: u8) -> TunnelPath {
-            match kind {
-                1 => TunnelPath::Direct,
-                2 => TunnelPath::Relay,
-                _ => TunnelPath::Reconnecting,
-            }
-        }
-    }
-
-    /// What a tunnel's supervisor is doing, as the shared client reports it.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum TunnelStatus {
-        Connecting,
-        Connected,
-        Reconnecting,
-        Rejected,
-        Down,
-    }
-
-    impl TunnelStatus {
-        pub fn from_code(code: u8) -> TunnelStatus {
-            match code {
-                0 => TunnelStatus::Connecting,
-                1 => TunnelStatus::Connected,
-                2 => TunnelStatus::Reconnecting,
-                3 => TunnelStatus::Rejected,
-                _ => TunnelStatus::Down,
-            }
-        }
-    }
-
-    pub fn is_tunnel_id(server: &str) -> bool {
-        server.starts_with(TUNNEL_ID_PREFIX)
-    }
-
-    pub fn local_url(port: u16) -> String {
-        format!("http://127.0.0.1:{port}")
-    }
-
-    /// The identity a code names; the browser cannot dial one, and it
-    /// cannot read a ticket either, so a pasted code is refused here.
-    pub struct PairingCode;
-
-    impl PairingCode {
-        pub fn server_id(&self) -> String {
-            String::new()
-        }
-    }
-
-    pub fn parse_code(_raw: &str) -> Result<PairingCode, String> {
-        Err("Quick Connect needs the native player — the tunnel is iroh, not HTTP".to_string())
-    }
-
-    /// A tunnel identity in a form worth showing someone, since the raw
-    /// endpoint id is a 52-character public key. Anything else is returned
-    /// unchanged.
-    pub fn display_server(server: &str) -> String {
-        match server.strip_prefix(TUNNEL_ID_PREFIX) {
-            Some(id) => format!("quick connect · {}", id.chars().take(12).collect::<String>()),
-            None => server.to_string(),
-        }
-    }
-}
 
 // The locale table, embedded at compile time from locales/*.yml: the
-// wizard's, the GUI's, and the shared App's own notes — every target.
+// wizard's, the GUI's, and the shared App's own notes.
 // Crate root because t!() resolves crate::_rust_i18n_translate.
 rust_i18n::i18n!("locales", fallback = "en");
 
-#[cfg(not(target_arch = "wasm32"))]
 use clap::{Args, Parser, Subcommand};
 
 /// What `-V` and `--version` print after the name: the first line is
@@ -245,7 +71,6 @@ use clap::{Args, Parser, Subcommand};
 /// window (the desktop flavour) adds a second line saying so. The version
 /// itself rather than clap's `long_version`, which only `--version` prints
 /// (`-V` is clap's short form): both flags answer the same.
-#[cfg(not(target_arch = "wasm32"))]
 const VERSION: &str = if cfg!(feature = "window") {
     // One second line, space-separated words, never a third: mStream's
     // launcher reads only line 2, strips `features:` and splits on commas or
@@ -258,7 +83,6 @@ const VERSION: &str = if cfg!(feature = "window") {
     env!("CARGO_PKG_VERSION")
 };
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser)]
 #[command(
     name = "mstream-player",
@@ -275,24 +99,16 @@ struct Cli {
     command: Option<Command>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Subcommand)]
 enum Command {
-    // A bare `mstream-player` opens this in the terminal flavour; the
-    // desktop flavour opens the GUI's window instead, unless no window can
-    // be expected (desktop.rs).
-    #[cfg_attr(
-        not(feature = "desktop"),
-        doc = "Launch the interactive terminal player (the default)"
-    )]
-    #[cfg_attr(
-        feature = "desktop",
-        doc = "Launch the interactive terminal player (the default where no window can open)"
-    )]
-    Tui(TuiArgs),
-    /// Launch the GUI player — the mouse-first surface the installers open:
-    /// the library rooms, the queue, Auto DJ, servers and tunnels, Now Playing,
-    /// Stats, Admin, and the MP3 player's firmware
+    // A bare `mstream-player` opens this: in the terminal in the terminal
+    // flavour, and in the desktop flavour in the GUI's window, or in the
+    // terminal where no window can be expected (desktop.rs). `tui` named
+    // the player this one replaced, and still parses, to this.
+    /// Launch the GUI player (the default) — the mouse-first surface the
+    /// installers open: the library rooms, the queue, Auto DJ, servers and
+    /// tunnels, Now Playing, Stats, Admin, and the MP3 player's firmware
+    #[command(alias = "tui")]
     Gui(GuiArgs),
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),
@@ -331,10 +147,6 @@ enum Command {
     /// The visualizer's window — the player opens it as a child process
     #[command(hide = true)]
     VizWindow(viz_window::WindowArgs),
-    /// Drive the interactive player from a script (smoke testing)
-    Replay(replay::ReplayArgs),
-    /// Print the key bindings as a config.toml section, ready to edit
-    Keys,
     /// List mStream servers advertising themselves on this network
     Discover {
         /// How long to listen for adverts
@@ -349,33 +161,6 @@ enum Command {
     Playlists(cmd_library::PlaylistArgs),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Args)]
-struct TuiArgs {
-    #[command(flatten)]
-    conn: cmd_library::ConnArgs,
-
-    /// The server this player was installed beside — the installers'
-    /// launcher passes it. The entry is seeded as the default on first boot
-    /// and can never be removed from here; other servers come and go as
-    /// usual. A launch property: nothing is persisted about the mode.
-    #[arg(long, value_name = "URL")]
-    bundled_server: Option<String>,
-
-    /// The launcher passes it beside `--bundled-server` (multi-server
-    /// contract, clause 57); the player has nothing to do with it yet.
-    #[arg(long, hide = true)]
-    same_machine: bool,
-
-    /// The launcher's instance lock: an exclusive lock on this file for the
-    /// player's lifetime, so the tray never opens a second desktop player
-    /// beside one that is open (instance.rs). A player started by hand
-    /// passes nothing and is not counted.
-    #[arg(long, hide = true, value_name = "PATH")]
-    instance_lock: Option<std::path::PathBuf>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Args)]
 struct GuiArgs {
     #[command(flatten)]
@@ -427,7 +212,6 @@ struct GuiArgs {
     window: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Args)]
 struct ServeArgs {
     /// Port for the JSON control API
@@ -481,7 +265,6 @@ fn crossfade_seconds(raw: &str) -> Result<f32, String> {
 /// A token for the control face: 128 random bits as hex. It lives only in
 /// the sidecar (the launcher's data home, the user's own) and in the
 /// requests the server signs with it.
-#[cfg(not(target_arch = "wasm32"))]
 fn fresh_token() -> String {
     format!("{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..))
 }
@@ -490,7 +273,6 @@ fn fresh_token() -> String {
 ///
 /// The upper bound is a day rather than the type's limit: past that the flag
 /// is a typo, and a browse that never returns looks exactly like a hang.
-#[cfg(not(target_arch = "wasm32"))]
 fn listening_seconds(raw: &str) -> Result<f64, String> {
     let seconds: f64 = raw.parse().map_err(|_| format!("'{raw}' is not a number"))?;
     if !seconds.is_finite() || seconds < 0.0 {
@@ -502,7 +284,6 @@ fn listening_seconds(raw: &str) -> Result<f64, String> {
     Ok(seconds)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     // The desktop flavour's empty argv (desktop.rs): the GUI's window, when
     // one can be expected — decided before clap, from the argv and the
@@ -532,7 +313,6 @@ fn main() {
     // held, says so and leaves — before the log, the spool sweep or the
     // terminal are touched, so the window it was opened in closes at once.
     let (lock_path, face) = match &cli.command {
-        Some(Command::Tui(args)) => (args.instance_lock.as_deref(), "tui"),
         Some(Command::Gui(args)) => (args.instance_lock.as_deref(), "gui"),
         None if desktop_window => (default_lock.as_deref(), "gui"),
         _ => (None, ""),
@@ -584,16 +364,14 @@ fn main() {
 
     // The debug log first, before anything can dial: a subscriber installed
     // after the first connection has already missed the interesting part.
-    // The boot line goes to stderr — in the TUI it scrolls away under the
-    // alternate screen and comes back in scrollback after quit, and the
+    // The boot line goes to stderr — in the terminal it scrolls away under
+    // the alternate screen and comes back in scrollback after quit, and the
     // goodbye line at teardown says it again for whoever missed it.
     //
     // A one-shot subcommand keeps its hands off the default location: see
     // logging::init.
     let run = match &cli.command {
-        None | Some(Command::Tui(_)) | Some(Command::Gui(_)) | Some(Command::Serve(_)) => {
-            logging::Run::Session
-        }
+        None | Some(Command::Gui(_)) | Some(Command::Serve(_)) => logging::Run::Session,
         Some(_) => logging::Run::OneShot,
     };
     if let Some(path) = logging::init(run) {
@@ -613,14 +391,9 @@ fn main() {
     engine::http::clean_spool_dir(&sweep);
     engine::http::set_spool_dir(spool_dir);
 
-    let serve_args = match (cli.command, cli.port) {
-        // The faces return their exit code so the instance lock's sidecar
+    let args = match (cli.command, cli.port) {
+        // The player returns its exit code so the instance lock's sidecar
         // is removed on the way out (process::exit runs no destructors).
-        (Some(Command::Tui(args)), _) => {
-            let code = tui::run(args.conn.server, args.conn.token, args.bundled_server);
-            drop(instance);
-            std::process::exit(code);
-        }
         (Some(Command::Gui(args)), _) => {
             // `window` is the flag where the window exists (GuiArgs::window),
             // false where it does not.
@@ -662,65 +435,44 @@ fn main() {
         (Some(Command::GraphicsProbe), _) => std::process::exit(cmd_graphics::run()),
         (Some(Command::VizProbe(args)), _) => std::process::exit(cmd_viz::run(args)),
         (Some(Command::VizWindow(args)), _) => std::process::exit(viz_window::run(args)),
-        (Some(Command::Replay(args)), _) => std::process::exit(replay::run(args)),
-        (Some(Command::Keys), _) => {
-            // The bindings in force, not the built-in ones: someone asking
-            // what their keys are wants the answer for their config.
-            let start = tui::startup(None, None, None);
-            print!("{}", tui::keymap_for(&start.keys).to_config_toml());
-            std::process::exit(0);
-        }
         (Some(Command::Discover { seconds }), _) => {
             std::process::exit(discovery::print_found(seconds));
         }
         (Some(Command::Playlists(args)), _) => std::process::exit(cmd_library::playlists(args)),
-        (Some(Command::Serve(args)), _) => Some(args),
+        (Some(Command::Serve(args)), _) => args,
         // Legacy spawn contract: bare `--port N`.
-        (None, Some(port)) => Some(ServeArgs {
+        (None, Some(port)) => ServeArgs {
             port,
             host: "127.0.0.1".to_string(),
             auth_token: std::env::var("MSTREAM_AUDIO_TOKEN").ok(),
             exit_with_parent: false,
             crossfade: 0.0,
             gapless: false,
-        }),
-        // The desktop flavour's empty argv: what `gui --window` opens, with
-        // nothing else asked for — no server override, no torrent, no
-        // bundled server, no control face — under its default lock.
-        #[cfg(feature = "desktop")]
-        (None, None) if desktop_window => {
-            let code = gui::run(None, None, None, None, None, true, &mut instance);
+        },
+        // An empty argv is the player with nothing else asked for — no
+        // server override, no torrent, no bundled server, no control face.
+        // The terminal flavour opens it in this terminal. The desktop
+        // flavour opens what `gui --window` opens, under its default lock,
+        // and this terminal where no window can be expected.
+        (None, None) => {
+            let code = gui::run(None, None, None, None, None, desktop_window, &mut instance);
             drop(instance);
             std::process::exit(code);
         }
-        (None, None) => None,
     };
 
-    match serve_args {
-        Some(args) => {
-            let opts = serve::ServeOptions {
-                host: args.host,
-                port: args.port,
-                auth_token: args.auth_token,
-                exit_with_parent: args.exit_with_parent,
-                crossfade: args.crossfade,
-                gapless: args.gapless,
-            };
-            if let Err(e) = serve::run(opts) {
-                eprintln!("mstream-player: {e}");
-                std::process::exit(1);
-            }
-        }
-        // Bare `mstream-player` launches the player: the TUI in the
-        // terminal flavour, and in the desktop one where no window can be
-        // expected (the window's arm above takes every other).
-        None => std::process::exit(tui::run(None, None, None)),
+    let opts = serve::ServeOptions {
+        host: args.host,
+        port: args.port,
+        auth_token: args.auth_token,
+        exit_with_parent: args.exit_with_parent,
+        crossfade: args.crossfade,
+        gapless: args.gapless,
+    };
+    if let Err(e) = serve::run(opts) {
+        eprintln!("mstream-player: {e}");
+        std::process::exit(1);
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn main() {
-    web::run();
 }
 
 #[cfg(test)]
@@ -843,6 +595,38 @@ mod tests {
         }
         let rendered = Cli::command().render_version();
         assert_eq!(rendered.lines().next(), Some(first.as_str()));
+    }
+
+    /// `tui` named the terminal player the GUI replaced: the word still
+    /// parses, to the GUI, with the flags that player took, and the help
+    /// names one player. The commands that served the old one alone are
+    /// gone.
+    #[test]
+    fn tui_still_opens_the_player_and_its_own_commands_are_gone() {
+        use clap::CommandFactory;
+        let parsed = Cli::try_parse_from([
+            "mstream-player",
+            "tui",
+            "--server",
+            "nas:3000",
+            "--bundled-server",
+            "http://localhost:3000",
+        ])
+        .expect("`tui` parses");
+        let Some(Command::Gui(args)) = parsed.command else {
+            panic!("`tui` is the gui command");
+        };
+        assert_eq!(args.conn.server.as_deref(), Some("nas:3000"));
+        assert_eq!(args.bundled_server.as_deref(), Some("http://localhost:3000"));
+
+        let help = Cli::command().render_help().to_string();
+        assert!(help.lines().any(|l| l.trim_start().starts_with("gui ")), "{help}");
+        assert!(!help.lines().any(|l| l.trim_start().starts_with("tui")), "{help}");
+
+        for gone in ["keys", "replay"] {
+            let err = Cli::try_parse_from(["mstream-player", gone]).err().expect("no such command");
+            assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand, "{gone}");
+        }
     }
 
     /// The flavours' one difference is what an empty argv parses to being

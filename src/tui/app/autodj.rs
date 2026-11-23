@@ -972,8 +972,6 @@ impl App {
         match action {
             Action::Up => chooser.row = chooser.row.saturating_sub(1),
             Action::Down => chooser.row = (chooser.row + 1).min(DJ_CHOOSER_ROWS - 1),
-            Action::First => chooser.row = 0,
-            Action::Last => chooser.row = DJ_CHOOSER_ROWS - 1,
             Action::PlayPause => chooser.remember = !chooser.remember,
             Action::Cancel => {
                 self.dj_chooser = None;
@@ -2135,8 +2133,6 @@ impl App {
             Action::Down => {
                 picker.row = (picker.row + 1).min(picker.all.len().saturating_sub(1));
             }
-            Action::First => picker.row = 0,
-            Action::Last => picker.row = picker.all.len().saturating_sub(1),
             Action::PlayPause => {
                 let Some(name) = picker.all.get(picker.row).cloned() else { return Vec::new() };
                 if sources {

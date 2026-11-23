@@ -11,9 +11,10 @@
 #   * A struct-form enum variant carrying a doc comment or attribute is always
 #     exploded onto separate lines, at any `struct_variant_width`. There are 16
 #     of those written inline here -- 11 in src/tui/worker.rs alone.
-#   * 17 code lines run past 100 columns (src/replay.rs:409 at 110,
-#     src/dj.rs:678 at 109). Keeping them needs max_width >= 116, which would
-#     then collapse hundreds of lines this source deliberately wraps.
+#   * 17 code lines ran past 100 columns when this was measured (the longest
+#     at 110; src/dj.rs:678 at 109). Keeping them needs max_width >= 116,
+#     which would then collapse hundreds of lines this source deliberately
+#     wraps.
 #
 # The closest reachable config left 839 lines differing, found by coordinate
 # descent over the stable options:

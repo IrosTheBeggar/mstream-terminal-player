@@ -9,11 +9,6 @@ repository = "https://github.com/IrosTheBeggar/mstream-terminal-player"
 # needs to be told which one is the player.
 default-run = "mstream-player"
 
-# Two targets, one crate. The wasm32 build is the browser demo (see src/web):
-# the same App and drawing code rendered by ratzilla, with the OS-bound layers
-# — audio device, threads, sockets, filesystem — either stubbed or compiled
-# out. Everything in plain [dependencies] must build for both.
-
 # One codebase, two products. The terminal releases (the plain binaries,
 # deb/rpm, Homebrew, Scoop, the install scripts, `cargo install`) build
 # with no features: the terminal player, its visualizer window included,
@@ -22,8 +17,7 @@ default-run = "mstream-player"
 # the GUI in a window of its own. `window` is that window alone, for a
 # source build that wants `gui --window` without the desktop defaults that
 # `desktop` carries (an empty argv opens the window, under a default
-# instance lock; the Windows launcher stub; src/desktop.rs); both are inert
-# on wasm32, where no gui exists.
+# instance lock; the Windows launcher stub; src/desktop.rs).
 [features]
 default = []
 # The backend's `png` decodes the colour bitmap glyphs of the system's emoji
@@ -53,16 +47,15 @@ required-features = ["desktop"]
 
 [dependencies]
 # i18n: compile-time-embedded YAML locales (locales/*.yml), t!() with
-# interpolation and per-call locale. Every target: the shared App's Auto
-# DJ notes are keys, and the browser build shows them too (in English
-# until the web shell sets a locale).
+# interpolation and per-call locale.
 # 4.x, not 3.x: the 3.x macro emitted one statement per translation into a
 # single closure — ten locales × 1,700 keys = 17,000 statements in one
 # function — and LLVM's time and memory on that grew past what the release
-# runner has (v0.8.0's web-bundle job was killed at 7 GB; the same crate at
-# 0.7.0's 1,000 keys built in a minute). 4.x packs each locale into one
-# string and decodes it at runtime, so the table is data again: 58 s and
-# under 1 GB for the wasm release, measured on the 0.8.0 tree.
+# runner has (the browser build v0.8.0 still had was killed at 7 GB in its
+# release job; the same crate at 0.7.0's 1,000 keys built in a minute). 4.x
+# packs each locale into one string and decodes it at runtime, so the table
+# is data again: 58 s and under 1 GB for that build, measured on the 0.8.0
+# tree.
 rust-i18n = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -71,48 +64,21 @@ fastrand = "2"
 # character, and ratatui measures the same way.
 unicode-width = "0.2"
 toml = "1.1.4"
-# Shared: on wasm this is the fetch backend (its TLS/socket internals are
-# target-gated inside reqwest itself), which is what makes api::Client's
-# async core one implementation for both builds. default-features = false
-# is load-bearing: the default TLS is rustls on aws-lc-rs, and the native
-# block below asks for rustls with no provider instead. The rest of the
-# default set is named back in — charset for `.text()`, http2, and
-# system-proxy, which corporate networks route through.
-reqwest = { version = "0.13.4", default-features = false, features = [
-    "charset",
-    "http2",
-    "system-proxy",
-] }
-# The Url type api::urls builds with. On native this is the same crate
-# reqwest re-exports (cargo unifies the 2.x line), so the two spellings are
-# one type where they meet.
+# The Url type api::urls builds with: the same crate reqwest re-exports
+# (cargo unifies the 2.x line), so the two spellings are one type where
+# they meet.
 url = "2"
-# default-features = false drops the crossterm backend, which has no wasm
-# build; the native block below turns it back on. "std" must be named
-# explicitly here — the default set only implies it through crossterm, and
-# without it ratatui-core goes no-std and expects the app to provide a
-# critical-section implementation, which surfaces as unresolvable `env`
-# imports in the .wasm. "unstable-rendered-line-info" is Paragraph::line_count:
-# the rows a wrapped paragraph takes, counted by the wrapper that draws it, so
-# the setup wizard's Done page gives a translated sentence the rows it needs
-# instead of a guess. It only makes the method public; it adds no package.
-ratatui = { version = "0.30.2", default-features = false, features = [
-    "std",
-    "all-widgets",
-    "layout-cache",
-    "macros",
-    "underline-color",
-    "unstable-rendered-line-info",
-] }
+# The default features, the crossterm backend among them, and one more:
+# "unstable-rendered-line-info" is Paragraph::line_count, the rows a wrapped
+# paragraph takes, counted by the wrapper that draws it, so the setup
+# wizard's Done page gives a translated sentence the rows it needs instead
+# of a guess. It only makes the method public; it adds no package.
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 # Decodes cover art, nothing else. jpeg and png are what mStream's art cache
 # actually holds; the default features would compile every codec the crate
-# knows plus rayon, for images this player never meets. Shared: both decoders
-# are pure Rust, and tui::art is part of the drawing path the wasm build keeps.
+# knows plus rayon, for images this player never meets.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-ratatui = { version = "0.30.2", features = ["crossterm"] }
-# The native TLS: rustls, still checked against what the operating system
+# The TLS: rustls, still checked against what the operating system
 # trusts (rustls-platform-verifier comes with it — the corporate-proxy case
 # the tunnel line below explains), but on ring, the provider iroh already
 # brings, instead of reqwest's default aws-lc-rs. That was a second crypto
@@ -134,20 +100,27 @@ ratatui = { version = "0.30.2", features = ["crossterm"] }
 # with metadata ~2.8 MB, ~0.4 MB — travels compressed wherever mStream's
 # compression toggle or a proxy in front (Caddy, nginx, Cloudflare) will
 # do it; below ~1.6 Mbit/s the plain album list outlasts the 20 s request
-# ceiling (performance audit #98). The browser build's fetch already does
-# this. gzip alone, not brotli too: mStream's brotli mode answers a
-# gzip-only client with gzip, and brotli's extra ~8% (measured on a real
-# mStream's album and folder answers) would be a decoder crate compiled
-# into every triple. The engine's stream clients opt out (engine::http):
-# a decoded body loses the Content-Length seeking needs.
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "gzip"] }
+# ceiling (performance audit #98). gzip alone, not brotli too: mStream's
+# brotli mode answers a gzip-only client with gzip, and brotli's extra ~8%
+# (measured on a real mStream's album and folder answers) would be a
+# decoder crate compiled into every triple. The engine's stream clients opt
+# out (engine::http): a decoded body loses the Content-Length seeking
+# needs.
+#
+# default-features = false is load-bearing: the default TLS is rustls on
+# aws-lc-rs. The rest of the default set is named back in — charset for
+# `.text()`, http2, and system-proxy, which corporate networks route
+# through.
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "charset",
+    "gzip",
+    "http2",
+    "rustls-no-provider",
+    "system-proxy",
+] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # Album art at the terminal's own resolution, where the terminal has one:
-# kitty, sixel or iTerm2. Native only, and for two reasons — the wasm build
-# draws through ratzilla (a WebGL canvas, or its DOM grid), where a sixel
-# escape sequence is just a run of glyphs, and the crate's rustix
-# dependency is gated `cfg(not(windows))`, which wasm32-unknown-unknown
-# satisfies.
+# kitty, sixel or iTerm2.
 #
 # default-features = false is load-bearing, not tidiness. The defaults are
 # ["image-defaults", "crossterm", "chafa-dyn"]: chafa-dyn probes pkg-config
@@ -174,8 +147,6 @@ ratatui-image = { version = "~11.1", default-features = false, features = ["cros
 # here for one call each way.
 miniz_oxide = "0.8"
 # sys-locale answers "what language is this machine?" for the wizard.
-# Native-only — the wasm build has no wizard (rust-i18n itself is a plain
-# dependency: the shared App's notes go through t!() on every target).
 sys-locale = "0.3"
 # rodio brings cpal with it (0.23 is 0.22 moved to cpal 0.18, and nothing
 # else), and the engine makes its own cpal calls through `rodio::cpal`
@@ -257,8 +228,7 @@ mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tun
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The Add-torrent room's release-name parser: a ladder of the record's
 # own patterns (scene grammar, "Artist - Album (1999)", dot names). Already
-# in the tree through tracing-subscriber's env-filter, just above. Native
-# only, like its users (gui/ and replay.rs): on wasm32 cargo flags it unused.
+# in the tree through tracing-subscriber's env-filter, just above.
 regex = "1"
 # The player's own voice in the same stream as its dependencies': the
 # engine's flight-recorder lines are emitted as tracing events too, so the
@@ -284,7 +254,7 @@ tui-input = "0.15.4"
 # Metal, HLSL, SPIR-V or GLSL. `glsl` is what reads the presets, `wgsl` the
 # one vertex shader of our own — and 30.0.1's GLSL frontend does not build
 # without it. default-features = false only to leave out the browser
-# backends (`webgpu`), which this half of the build never runs. On Linux
+# backends (`webgpu`), which the player never runs. On Linux
 # the backend libraries (libvulkan, libEGL, libGL) are opened at run time,
 # never linked; CI's NEEDED guard holds the binary to that.
 wgpu = { version = "30", default-features = false, features = [
@@ -480,40 +450,6 @@ libc = "0.2"
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-ratzilla = "0.3.1"
-# Closure — the shell's own document-level keydown listener (see
-# src/web/mod.rs for why ratzilla's on_key_event can't be trusted with it).
-wasm-bindgen = "0.2"
-# spawn_local — how the web api worker runs the async client without a
-# runtime: the browser's event loop is the executor.
-wasm-bindgen-futures = "0.4"
-# The playback path: an <audio> element for sound, an AudioContext with
-# per-channel analysers for the visualizer tap. See src/web/audio.rs for
-# why this and not cpal or an AudioWorklet.
-web-sys = { version = "0.3", features = [
-    "AnalyserNode",
-    "AudioContext",
-    "AudioContextState",
-    "AudioDestinationNode",
-    "AudioNode",
-    "BaseAudioContext",
-    "ChannelSplitterNode",
-    "HtmlAudioElement",
-    "HtmlMediaElement",
-    "Location",
-    "MediaElementAudioSourceNode",
-    "MediaError",
-    "Window",
-] }
-# std::time::Instant panics on wasm32-unknown-unknown; this is the same API
-# over performance.now(). See src/clock.rs.
-web-time = "1"
-console_error_panic_hook = "0.1"
-# Without "js" the browser build has no entropy source and every shuffle
-# deals the same hand.
-fastrand = { version = "2", features = ["js"] }
-
 [profile.release]
 # One distributed binary, built rarely: spend the compile time on it. Thin
 # LTO and a single codegen unit trim a dependency tree this size (iroh,
@@ -632,13 +568,11 @@ alsa-lib = "*"
 [package.metadata.generate-rpm.recommends]
 libxkbcommon-x11 = "*"
 
+[dev-dependencies]
 # The tests' fake mStream endpoint — the server half of the tunnel protocol,
 # relay-free — speaks iroh directly; the player itself no longer does.
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 iroh = "1"
 iroh-tickets = "1"
-
-[dev-dependencies]
 # The locale-completeness test parses locales/*.yml directly.
 serde_yaml = "0.9"
 # The visualizer presets' compile matrix (src/shader/matrix.rs): every pass

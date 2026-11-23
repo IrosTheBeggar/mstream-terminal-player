@@ -156,34 +156,6 @@ jobs:
           target/debug/mstream-player --version
           test "$(target/debug/mstream-player --version | sed -n 2p)" = 'features: window window-pages'
 
-  # The browser build has no test runner, but it has a type system: a plain
-  # check catches the native-only import or the unhandled worker command that
-  # main once grew without noticing, and costs a minute. Everything in plain
-  # [dependencies] must build for this target too — see Cargo.toml.
-  wasm:
-    name: Check (wasm32)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      # Main's cache only, as in the test job.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: wasm32
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Check
-        run: cargo check --target wasm32-unknown-unknown
-
-      # The browser build has no gui, so the desktop feature must change
-      # nothing here (gui is cfg(not(wasm32)) in main.rs).
-      - name: Check (desktop feature)
-        run: cargo check --target wasm32-unknown-unknown --features desktop
-
   e2e:
     name: E2E (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

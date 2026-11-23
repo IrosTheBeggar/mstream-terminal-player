@@ -9,10 +9,6 @@ use rust_i18n::t;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-// Key handling lives in `super::keymap` now; the app only meets key events
-// in its tests, which drive `map_key` below.
-#[cfg(test)]
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
 use crate::api::types::{Album, DirListing, Genre, GenreSource, MoodFilter, Track};
@@ -28,15 +24,7 @@ use super::worker::{
     LibraryNode,
 };
 
-/// How much of the log the viewer holds — enough to scroll a real session,
-/// small enough to re-read on a one-second clock without noticing.
-const LOG_VIEW_LINES: usize = 500;
-const SEEK_STEP: f64 = 5.0;
-/// The shifted seek keys. Five seconds is the wrong unit for a long mix or a
-/// set recording, where the interesting distance is minutes.
-const SEEK_STEP_FAR: f64 = 60.0;
-const VOLUME_STEP: f32 = 0.05;
-/// Rows a page key moves. Ctrl+u/d move half of this, as they do in vim.
+/// Rows a page key moves.
 const PAGE_STEP: isize = 10;
 /// Covers and shapes kept decoded; past it the oldest go, whatever is on
 /// screen aside. The point is that a player left running for a week cannot
@@ -90,17 +78,6 @@ impl Tab {
         Tab::SonicPath,
         Tab::Settings,
     ];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Tab::Files => "Files",
-            Tab::Library => "Library",
-            Tab::Search => "Search",
-            Tab::Discover => "Discover",
-            Tab::SonicPath => "Sonic Path",
-            Tab::Settings => "Settings",
-        }
-    }
 
     /// Whether this server can serve the tab at all. A tab that can only ever
     /// say "not available here" is worse than no tab.
@@ -158,26 +135,6 @@ pub enum SettingRow {
     LogWrite,
     /// How loud the debug log is; ← and → walk it, Enter steps it up.
     LogLevel,
-    /// Opens the in-app viewer on the current log file.
-    ViewLog,
-}
-
-/// The in-app log viewer: a tail of what has been captured, refreshed
-/// while open. Its source is the in-memory ring, so it reads the same
-/// whether or not a file is being written — the label just says which of
-/// those is true.
-///
-/// Times come from [`crate::clock`], never `std::time::Instant`: std's
-/// `now()` panics on wasm32-unknown-unknown, and this is drawing code the
-/// browser build compiles and runs (PR #5 review).
-pub struct LogView {
-    pub source: String,
-    pub lines: Vec<String>,
-    pub scroll: usize,
-    /// Stick to the end as new lines arrive, until the user scrolls away;
-    /// `G` re-attaches.
-    pub follow: bool,
-    refreshed: crate::clock::Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,21 +188,6 @@ impl From<Repeat> for crate::advance::Loop {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputMode {
-    Normal,
-    Editing,
-    /// A modal overlay is up and owns the keyboard. Its own bindings apply,
-    /// so a letter that means "previous track" outside it can mean something
-    /// else inside without the two fighting.
-    Panel,
-    /// The full-screen now-playing view. Unlike [`InputMode::Panel`] this is a
-    /// *view*, not a modal: it claims the arrows for its own tabs and falls
-    /// through to the normal bindings for everything else, so play/pause,
-    /// skip, seek and volume keep working — and keep obeying `[keys]`.
-    Now,
-}
-
 /// A tab in the full-screen now-playing view.
 ///
 /// Deliberately not [`Tab`]: those are places to browse, these are things to
@@ -280,17 +222,10 @@ impl NowTab {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Quit,
-    ToggleHelp,
-    CycleFocus,
-    SelectTab(usize),
     Up,
     Down,
     PageUp,
     PageDown,
-    HalfPageUp,
-    HalfPageDown,
-    First,
-    Last,
     Activate,
     Back,
     AddToQueue,
@@ -305,20 +240,13 @@ pub enum Action {
     PlayPause,
     NextTrack,
     PrevTrack,
-    SeekForward,
-    SeekBackward,
-    /// Coarse seek — the same idea shifted, for tracks where five seconds is
-    /// not a useful unit.
-    SeekForwardFar,
-    SeekBackwardFar,
     /// Put the cursor back on the track that's playing.
     JumpToPlaying,
-    ToggleNowPlaying,
     NowTabNext,
     NowTabPrev,
     /// One of the full-screen view's tabs, by position among the visible
-    /// ones — the same rule the browser's numbers follow, so they stay 1..n
-    /// with no gaps whichever tabs this track and this server allow.
+    /// ones, so they stay 1..n with no gaps whichever tabs this track and
+    /// this server allow.
     SelectNowTab(usize),
     /// ←/→ in the full-screen view, offered to whichever tab is in front.
     /// Auto-DJ takes them to adjust the row under the cursor; the rest have
@@ -329,8 +257,6 @@ pub enum Action {
     /// was different. Navigation is the numbers now.
     NowLeft,
     NowRight,
-    VolumeUp,
-    VolumeDown,
     RemoveFromQueue,
     ClearQueue,
     ToggleRepeat,
@@ -341,8 +267,6 @@ pub enum Action {
     /// empty-state buttons and chooser send these.
     DjSurprise,
     DjPick,
-    /// `J` — open the Sonic Path tab aimed at the highlighted track.
-    StartJourney,
     StartSearch,
     StartFilter,
     CycleViz,
@@ -600,18 +524,6 @@ impl Pane {
         let last = self.entries.len() as isize - 1;
         let current = self.state.selected().unwrap_or(0) as isize;
         self.state.select(Some((current + delta).clamp(0, last) as usize));
-    }
-
-    pub fn select_first(&mut self) {
-        if !self.entries.is_empty() {
-            self.state.select(Some(0));
-        }
-    }
-
-    pub fn select_last(&mut self) {
-        if !self.entries.is_empty() {
-            self.state.select(Some(self.entries.len() - 1));
-        }
     }
 
     /// Every playable row, plus where `selected` sits among them — used to
@@ -1446,20 +1358,6 @@ impl Queue {
             Some(cur) => Some(cur - 1),
         }
     }
-
-    // The cursor, not playback: these move what Enter and `d` act on.
-
-    pub fn select_first(&mut self) {
-        if !self.items.is_empty() {
-            self.state.select(Some(0));
-        }
-    }
-
-    pub fn select_last(&mut self) {
-        if !self.items.is_empty() {
-            self.state.select(Some(self.items.len() - 1));
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1513,9 +1411,8 @@ pub(crate) use taste::peer_recs;
 // go on naming them exactly as they did.
 use entries::*;
 pub use nav::Drill;
-pub use session::{CONNECT_METHODS, ConnectForm, ConnectStage, Session};
-// The GUI's Discover room names these; the browser shell has no room yet.
-#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
+pub use session::{ConnectForm, Session};
+// The GUI's Discover room names these.
 pub use taste::{
     TASTE_MAX_PINS, TasteLatch, TastePinRefusal, TasteRow, TasteSlot, TasteTab, TasteVerb,
 };
@@ -1706,19 +1603,6 @@ pub enum Capture {
     Seeds(SeedList),
 }
 
-impl Capture {
-    /// What the banner along the foot calls it.
-    pub fn shout(self) -> &'static str {
-        match self {
-            Capture::Sonic(side) => side.shout(),
-            Capture::Discover => "SEED",
-            Capture::DjSeed => "OPENER",
-            Capture::TasteSeed => "SEED",
-            Capture::Seeds(_) => "SEED",
-        }
-    }
-}
-
 /// Which end of the path a row or an armed picker is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SonicSide {
@@ -1731,15 +1615,6 @@ impl SonicSide {
         match self {
             SonicSide::Start => "Start song",
             SonicSide::End => "End song",
-        }
-    }
-
-    /// How the arming banner names it — shouted, because the banner is the
-    /// only thing on screen saying why Enter is not doing its usual job.
-    pub fn shout(self) -> &'static str {
-        match self {
-            SonicSide::Start => "START",
-            SonicSide::End => "END",
         }
     }
 }
@@ -2278,8 +2153,6 @@ pub struct App {
     /// (PR #5 review).
     log_write_touched: bool,
     log_level_touched: bool,
-    /// The log viewer, while it is open — it owns the movement keys.
-    pub log_view: Option<LogView>,
     /// How the Quick Connect tunnel is reaching the server, when this
     /// session rides one. Fed by the worker's sampler; the header shows it
     /// beside the session name. None outside tunnel sessions.
@@ -2414,11 +2287,7 @@ pub struct App {
     pub now_offset: usize,
 
     pub message: Option<Message>,
-    pub show_help: bool,
     pub should_quit: bool,
-    /// The bindings in force. Held here rather than looked up globally so the
-    /// help screen and the key handler can never disagree about them.
-    pub keymap: Keymap,
 }
 
 impl App {
@@ -2533,7 +2402,6 @@ impl App {
             log_level: crate::logging::level(),
             log_write_touched: false,
             log_level_touched: false,
-            log_view: None,
             tunnel_path: None,
             seek_goal: None,
             volume: 1.0,
@@ -2567,9 +2435,7 @@ impl App {
             now_scroll: 0,
             now_offset: 0,
             message: None,
-            show_help: false,
             should_quit: false,
-            keymap: Keymap::default(),
         };
         // A tunnel identity is not an address: it can't be typed, edited or
         // connected to directly, so it stays out of both the endpoint and the
@@ -2583,27 +2449,6 @@ impl App {
             app.connect.server = server.unwrap_or_default();
         }
         app
-    }
-
-    /// Apply the `[keys]` section. Anything wrong with it is reported on the
-    /// first screen rather than thrown, because a mistyped binding should
-    /// cost you that binding and nothing else.
-    pub fn with_keys(
-        mut self,
-        overrides: &std::collections::BTreeMap<String, Vec<String>>,
-    ) -> Self {
-        if overrides.is_empty() {
-            return self;
-        }
-        let (keymap, warnings) = Keymap::default().with_overrides(overrides);
-        self.keymap = keymap;
-        if let Some(first) = warnings.first() {
-            self.error(match warnings.len() {
-                1 => first.clone(),
-                n => format!("{first} (and {} more)", n - 1),
-            });
-        }
-        self
     }
 
     /// Supply the pairing code for a remembered tunnel server, which is what
@@ -2703,28 +2548,6 @@ impl App {
         }
         self.note_pending(&effects);
         effects
-    }
-
-    pub fn input_mode(&self) -> InputMode {
-        if !self.connected
-            || self.editing_query
-            || self.filtering
-            || self.sonic_playlist_name.is_some()
-            || self.dj_keyword.is_some()
-        {
-            InputMode::Editing
-        } else if self.dj_panel.genres.is_some()
-            || self.dj_panel.sources.is_some()
-            || self.dj_chooser.is_some()
-        {
-            // The DJ's choosers are modals drawn over either screen, so they
-            // own the keyboard there.
-            InputMode::Panel
-        } else if self.fullscreen {
-            InputMode::Now
-        } else {
-            InputMode::Normal
-        }
     }
 
     /// The now-playing tabs this session can actually fill. Lyrics turns on
@@ -2970,19 +2793,10 @@ impl App {
         self.discover_stack.here()
     }
 
-    pub fn sonic_node(&self) -> &SonicNode {
-        self.sonic_stack.here()
-    }
-
     /// The tabs this server can actually serve, in order. The numbers on the
     /// header are positions in *this* list, so they stay 1..n with no gaps.
     pub fn tabs(&self) -> Vec<Tab> {
         Tab::ALL.into_iter().filter(|t| t.available(self.capabilities)).collect()
-    }
-
-    /// Where the current tab sits among the visible ones.
-    pub fn tab_index(&self) -> usize {
-        self.tabs().iter().position(|t| *t == self.tab).unwrap_or(0)
     }
 
     /// The current server as it should be shown. A tunnel session's endpoint
@@ -3086,9 +2900,6 @@ impl App {
         // so playback shortcuts can't fire while one is up. Auto-DJ is no
         // longer one of them — it is a tab in the full-screen view now — but
         // the genre chooser it opens still is.
-        if self.log_view.is_some() {
-            return self.handle_log_view_action(action);
-        }
         if self.dj_keyword.is_some() {
             return self.handle_dj_keyword_action(action);
         }
@@ -3121,17 +2932,7 @@ impl App {
                 self.should_quit = true;
                 vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)]
             }
-            Action::ToggleHelp => {
-                self.show_help = !self.show_help;
-                Vec::new()
-            }
             Action::Cancel => {
-                // The overlay is drawn over everything, so it is what the
-                // user is looking at and the first thing Esc takes away.
-                if self.show_help {
-                    self.show_help = false;
-                    return Vec::new();
-                }
                 // An armed picker is the loudest thing on screen, so Esc
                 // means "stop picking" before it means anything else — and
                 // it goes back to whichever panel did the asking, the way
@@ -3163,73 +2964,14 @@ impl App {
                 if self.tab == Tab::SonicPath && !self.sonic_stack.wants(&SonicNode::Root) {
                     return self.go_back();
                 }
-                // Nothing to call off. Esc has meant "the key list" since
-                // before it meant anything else, and a listing with nothing
-                // open is exactly where people still reach for it.
-                self.show_help = true;
+                // Nothing to call off.
                 Vec::new()
             }
-            Action::CycleFocus if !self.fullscreen => {
-                self.queue_column = !self.queue_column;
-                self.focus = if self.queue_column { Focus::Queue } else { Focus::Browser };
-                Vec::new()
-            }
-            Action::CycleFocus => {
-                self.focus = match self.focus {
-                    Focus::Browser => Focus::Queue,
-                    Focus::Queue => Focus::Browser,
-                };
-                Vec::new()
-            }
-            Action::SelectTab(i) => self.select_tab(i),
 
             Action::Up => self.move_selection(-1),
             Action::Down => self.move_selection(1),
             Action::PageUp => self.move_selection(-PAGE_STEP),
             Action::PageDown => self.move_selection(PAGE_STEP),
-            Action::HalfPageUp => self.move_selection(-PAGE_STEP / 2),
-            Action::HalfPageDown => self.move_selection(PAGE_STEP / 2),
-            Action::First => {
-                // The same ownership rule as `move_selection`: the
-                // full-screen view keeps the jump keys while it is up, and
-                // on its scrolling tabs First means the top.
-                if self.fullscreen {
-                    match self.now_tab() {
-                        NowTab::Queue => self.queue.select_first(),
-                        NowTab::AutoDj => self.dj_panel.row = 0,
-                        _ => {
-                            self.now_scroll = 0;
-                            self.now_offset = 0;
-                        }
-                    }
-                } else {
-                    match self.focus {
-                        Focus::Browser => self.pane_mut().select_first(),
-                        Focus::Queue => self.queue.select_first(),
-                    }
-                }
-                Vec::new()
-            }
-            Action::Last => {
-                if self.fullscreen {
-                    // The scrolling tabs have no bottom to know about, so
-                    // in the full-screen view Last only means something on
-                    // the two that are lists.
-                    match self.now_tab() {
-                        NowTab::Queue => self.queue.select_last(),
-                        NowTab::AutoDj => {
-                            self.dj_panel.row = self.dj_panel.rows.len().saturating_sub(1);
-                        }
-                        _ => {}
-                    }
-                } else {
-                    match self.focus {
-                        Focus::Browser => self.pane_mut().select_last(),
-                        Focus::Queue => self.queue.select_last(),
-                    }
-                }
-                Vec::new()
-            }
 
             Action::Activate => self.activate(),
             Action::Back => {
@@ -3253,15 +2995,7 @@ impl App {
             // Auto DJ reads a quick skip off it first (auto-dj clause 23).
             Action::NextTrack => self.next_track(),
             Action::PrevTrack => self.skip_previous(),
-            Action::SeekForward => self.seek_by(SEEK_STEP),
-            Action::SeekBackward => self.seek_by(-SEEK_STEP),
-            Action::SeekForwardFar => self.seek_by(SEEK_STEP_FAR),
-            Action::SeekBackwardFar => self.seek_by(-SEEK_STEP_FAR),
             Action::JumpToPlaying => self.jump_to_playing(),
-            Action::ToggleNowPlaying => {
-                self.fullscreen = !self.fullscreen;
-                Vec::new()
-            }
             Action::NowTabNext => self.move_now_tab(1),
             Action::NowTabPrev => self.move_now_tab(-1),
             Action::SelectNowTab(index) => {
@@ -3281,8 +3015,6 @@ impl App {
             Action::NowLeft if self.on_dj_tab() => self.adjust_dj_row(-1),
             Action::NowRight if self.on_dj_tab() => self.adjust_dj_row(1),
             Action::NowLeft | Action::NowRight => Vec::new(),
-            Action::VolumeUp => self.change_volume(VOLUME_STEP),
-            Action::VolumeDown => self.change_volume(-VOLUME_STEP),
 
             // On the Auto-DJ tab's Keywords row, x takes the last word back.
             Action::RemoveFromQueue if self.on_dj_tab() && self.dj_panel.selected() == DjRow::Keywords => {
@@ -3306,7 +3038,6 @@ impl App {
             Action::ToggleAutoDj => self.toggle_autodj(),
             Action::DjSurprise => self.dj_surprise(),
             Action::DjPick => self.dj_pick_from_library(),
-            Action::StartJourney => self.start_journey(),
 
             Action::StartSearch => {
                 self.tab = Tab::Search;
@@ -3483,8 +3214,7 @@ impl App {
         self.pointer = Some(at);
     }
 
-    /// A click on the progress bar, in seconds from the start. A seek key
-    /// pressed while it is in flight builds on where the click aimed.
+    /// A click on the progress bar, in seconds from the start.
     pub fn seek_to(&mut self, position: f64) -> Vec<Effect> {
         if self.status.is_idle() || !position.is_finite() {
             return Vec::new();
@@ -3647,7 +3377,6 @@ impl App {
                     self.settings.set(self.logs_setting_entries());
                     Vec::new()
                 }
-                SettingRow::ViewLog => self.open_log_view(),
                 // Enter walks a value the same way → does; ← walks it back.
                 SettingRow::BlendLength
                 | SettingRow::Gapless
@@ -3949,19 +3678,10 @@ impl App {
             "{} · what gets captured, viewed and written · ←→ adjust",
             self.log_level.label()
         );
-        let held = crate::logging::captured();
-        let view = if held == 0 {
-            "nothing captured yet".to_string()
-        } else if crate::logging::active().is_some() {
-            format!("Enter · {held} lines held, and going to disk")
-        } else {
-            format!("Enter · {held} lines held in memory")
-        };
         vec![
             Entry::Parent,
             Entry::Setting { label: "Write log".into(), detail: write, row: SettingRow::LogWrite },
             Entry::Setting { label: "Log level".into(), detail: level, row: SettingRow::LogLevel },
-            Entry::Setting { label: "View log".into(), detail: view, row: SettingRow::ViewLog },
         ]
     }
 
@@ -3985,13 +3705,9 @@ impl App {
             return None;
         }
         match self.pane().selected() {
-            // Value rows adjust; menu rows and action rows (View log) keep
-            // Back meaning back.
+            // Value rows adjust; menu rows keep Back meaning back.
             Some(Entry::Setting { row, .. })
-                if !matches!(
-                    row,
-                    SettingRow::CrossfadeMenu | SettingRow::LogsMenu | SettingRow::ViewLog
-                ) =>
+                if !matches!(row, SettingRow::CrossfadeMenu | SettingRow::LogsMenu) =>
             {
                 Some(self.adjust_setting(delta))
             }
@@ -4058,7 +3774,7 @@ impl App {
                 self.refresh_settings_rows();
                 return Vec::new();
             }
-            SettingRow::CrossfadeMenu | SettingRow::LogsMenu | SettingRow::ViewLog => {
+            SettingRow::CrossfadeMenu | SettingRow::LogsMenu => {
                 return Vec::new();
             }
         };
@@ -4076,82 +3792,6 @@ impl App {
     /// keep one.
     pub fn chosen_log_level(&self) -> Option<crate::logging::Level> {
         self.log_level_touched.then_some(self.log_level)
-    }
-
-    /// Open the log viewer on the current file, tail-first — or say why not.
-    fn open_log_view(&mut self) -> Vec<Effect> {
-        let lines = crate::logging::tail(LOG_VIEW_LINES);
-        if lines.is_empty() {
-            self.info("nothing captured yet");
-            return Vec::new();
-        }
-        self.log_view = Some(LogView {
-            source: self.log_source_label(),
-            lines,
-            scroll: usize::MAX, // clamped to the end at render
-            follow: true,
-            refreshed: crate::clock::Instant::now(),
-        });
-        Vec::new()
-    }
-
-    /// What the viewer's title says it is showing: the file when one is
-    /// being written, and otherwise the honest truth that this session is
-    /// only in memory.
-    fn log_source_label(&self) -> String {
-        match crate::logging::active() {
-            Some(path) => path.display().to_string(),
-            None => "in memory · not written to disk".to_string(),
-        }
-    }
-
-    /// The viewer is modal: movement scrolls it, and the ways out are the
-    /// ways out of everything else. All other keys are consumed — a stray
-    /// `n` while reading must not skip the music.
-    fn handle_log_view_action(&mut self, action: Action) -> Vec<Effect> {
-        let Some(view) = &mut self.log_view else { return Vec::new() };
-        match action {
-            Action::Down => {
-                view.scroll = view.scroll.saturating_add(1);
-                view.follow = false;
-            }
-            Action::Up => {
-                view.scroll = view.scroll.saturating_sub(1);
-                view.follow = false;
-            }
-            Action::PageDown => {
-                view.scroll = view.scroll.saturating_add(20);
-                view.follow = false;
-            }
-            Action::PageUp => {
-                view.scroll = view.scroll.saturating_sub(20);
-                view.follow = false;
-            }
-            Action::First => {
-                view.scroll = 0;
-                view.follow = false;
-            }
-            Action::Last => {
-                view.scroll = usize::MAX;
-                view.follow = true;
-            }
-            Action::Quit | Action::Cancel | Action::Back => {
-                self.log_view = None;
-            }
-            _ => {}
-        }
-        Vec::new()
-    }
-
-    /// Re-read the tail while the viewer follows the end, on the render
-    /// clock but no more than once a second.
-    pub fn refresh_log_view(&mut self) {
-        let Some(view) = &mut self.log_view else { return };
-        if !view.follow || view.refreshed.elapsed() < std::time::Duration::from_secs(1) {
-            return;
-        }
-        view.lines = crate::logging::tail(LOG_VIEW_LINES);
-        view.refreshed = crate::clock::Instant::now();
     }
 
     // ── Discover ────────────────────────────────────────────────────────────
@@ -4402,20 +4042,6 @@ impl App {
             crate::api::BEST_START.to_string()
         } else {
             self.path.clone()
-        }
-    }
-
-    /// The track under the cursor, wherever the cursor is. Directories and
-    /// playlist rows are not tracks and give nothing.
-    fn selected_track(&self) -> Option<Track> {
-        match self.focus {
-            Focus::Browser => match self.pane().selected() {
-                Some(Entry::Track { track, .. }) => Some((**track).clone()),
-                _ => None,
-            },
-            Focus::Queue => {
-                self.queue.state.selected().and_then(|i| self.queue.items.get(i)).map(|item| item.track.clone())
-            }
         }
     }
 
@@ -6290,34 +5916,10 @@ impl App {
         }
     }
 
-    fn seek_by(&mut self, delta: f64) -> Vec<Effect> {
-        if self.status.is_idle() {
-            return Vec::new();
-        }
-        // Build on the seek still in flight, not the position it is about
-        // to replace, for as long as it is in flight: a 2.5 s window used to
-        // run out under seeks still waiting on the network, and the next
-        // press jumped from wherever the first of them had landed.
-        let mut target = (self.aimed_position() + delta).max(0.0);
-        // The bar's end is as far as chaining may bank; where exactly a
-        // near-end landing stops is the engine's call (its transition
-        // runway clamp), not something to duplicate here.
-        if self.status.duration > 0.0 {
-            target = target.min(self.status.duration);
-        }
-        self.seek_goal = Some((target, false));
-        vec![Effect::Audio(AudioCmd::Seek(target))]
-    }
-
     /// Where playback is headed: the seek still in flight, else the last
     /// position heard.
     fn aimed_position(&self) -> f64 {
         self.seek_goal.map_or(self.status.position, |(goal, _)| goal)
-    }
-
-    fn change_volume(&mut self, delta: f32) -> Vec<Effect> {
-        self.volume = (self.volume + delta).clamp(0.0, 1.0);
-        vec![Effect::Audio(AudioCmd::SetVolume(self.volume))]
     }
 
     // ── Worker events ───────────────────────────────────────────────────────
@@ -6972,22 +6574,6 @@ impl App {
             }
         }
     }
-}
-
-
-// The keymap lives in `super::keymap` (audit #55); these imports keep
-// the app's tests reading exactly as they did through `use super::*`.
-use crate::tui::keymap::Keymap;
-#[cfg(test)]
-use crate::tui::keymap::{Key, ctrl, key};
-
-/// Map a key press using the *default* bindings.
-///
-/// Test-only: the player reads `app.keymap`, which may have been rebound.
-#[cfg(test)]
-pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
-    static DEFAULTS: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
-    DEFAULTS.get_or_init(Keymap::default).action(key, mode)
 }
 
 

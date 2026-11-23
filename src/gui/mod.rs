@@ -1,15 +1,14 @@
 //! The GUI player — the mouse-first surface the Windows/macOS installers
-//! launch in the branded terminal window (`mstream-player gui`).
+//! launch (`mstream-player gui`), and what a bare `mstream-player` opens.
 //!
 //! Built the wizard's way: the kit's fixed palette and OSC 11 ground lease,
 //! a `Surface` per frame, every action clickable AND keyed. Underneath it is
-//! the SAME `App` and worker pair as the classic TUI — the GUI is a second
-//! front end on the proven state machine (the wasm shell and the replay
-//! harness are the other two), so queueing, crossfade announcements,
-//! track-end advance and session handling are shared, not re-implemented.
-//! Mouse clicks translate to the App's own actions (select the row, then
+//! the `App` state machine and its worker pair (`crate::tui`), written for
+//! the terminal player this one replaced: queueing, crossfade announcements,
+//! track-end advance and session handling live there, not here. Mouse
+//! clicks translate to the App's own actions (select the row, then
 //! `Activate`), which keeps `handle_action`'s follow-up work — waveform
-//! prefetch, the crossfade announcement — running exactly as the TUI's.
+//! prefetch, the crossfade announcement — running.
 //!
 //! The shell: the left nav's rooms (each a module of its own under this
 //! one), the live queue panel, both bottom bars against real playback, and

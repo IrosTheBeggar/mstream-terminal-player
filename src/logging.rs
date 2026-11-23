@@ -3,43 +3,36 @@
 //! iroh, reqwest, hyper and stream-download all speak `tracing` — relay
 //! connects, holepunch attempts, path upgrades, reconnects — and without a
 //! subscriber every word of it is discarded. This installs one at startup,
-//! writing to a file and never to the terminal: the TUI's screen stays a
-//! screen, and serve mode's stderr stays the concise log it already is.
+//! writing to a file and never to the terminal: the player's screen stays
+//! a screen, and serve mode's stderr stays the concise log it already is.
 //!
-//! The level can change while the player runs — the Settings tab has a Logs
-//! room — so the subscriber is always installed, wearing a reloadable filter
-//! that costs nothing while it says `off`, over a writer whose file can
-//! arrive later than the subscriber did.
+//! The level and the write switch can change while the player runs
+//! (`set_level`, `set_write`), so the subscriber is always installed,
+//! wearing a reloadable filter that costs nothing while it says `off`, over
+//! a writer whose file can arrive later than the subscriber did.
 //!
 //! Ways in, strongest first:
 //!
 //!   MSTREAM_LOG=/path/to/file    → exactly that file, truncated
 //!   MSTREAM_LOG=1                 → the default location, rotated
-//!   [log] level = "debug"         → config.toml, written by the Settings tab
+//!   [log] level = "debug"         → config.toml
 //!
-//! With only a level (config or Settings), the file is the default location:
+//! With only a level (config), the file is the default location:
 //! `<cache>/logs/mstream-player.log`, the last few runs kept beside it as
 //! `.1` through `.4`. `RUST_LOG` chooses *what* is said when set (the usual
 //! filter grammar); otherwise the level speaks for everything.
 //!
 //! This is the third-party channel. The player's own transition decisions
 //! have their own recorder (`MSTREAM_ENGINE_TRACE`, engine::trace), which
-//! also collects the `stderrln!` diagnostics the TUI would otherwise
+//! also collects the `stderrln!` diagnostics the player would otherwise
 //! silence — the two files answer different questions and stay separate.
 //!
 //! Two destinations, one capture. Every event the level admits is kept in a
-//! bounded in-memory ring — which is what **View log** reads, so a session
-//! can be inspected without writing a byte to disk — and, when **Write log**
-//! is on, the same formatted line also goes to the file. The level therefore
-//! governs both: it is what gets captured at all, not merely what gets
-//! persisted. The ring dies with the process; the file is what survives to
-//! be sent to someone.
-//!
-//! The browser build keeps the level type and the switches — the Settings
-//! tab that drives them is drawing code wasm compiles unchanged — and drops
-//! the half that needs a filesystem. Nothing installs a subscriber there,
-//! so Write log honestly answers "no file could be opened", and a browser's
-//! own devtools console stays where its diagnostics live.
+//! bounded in-memory ring and, when the write switch is on, the same
+//! formatted line also goes to the file — a file that opens later starts
+//! with what the ring already holds. The level therefore governs both: it
+//! is what gets captured at all, not merely what gets persisted. The ring
+//! dies with the process; the file is what survives to be sent to someone.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -230,11 +223,6 @@ fn scrub(text: &str) -> String {
 /// The last `max` lines the ring holds, oldest first.
 pub fn tail(max: usize) -> Vec<String> {
     RING.lock().unwrap().tail(max)
-}
-
-/// How many lines have been captured this session.
-pub fn captured() -> usize {
-    RING.lock().unwrap().lines.len()
 }
 
 /// How many lines have ever been captured — the mark writing resumes from.
