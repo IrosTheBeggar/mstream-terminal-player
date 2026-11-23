@@ -206,7 +206,11 @@ pub(crate) fn waiting(ui: &mut Ui, words: &str) {
 /// The measures for this pass: the boards' where the card in view at rest
 /// (Details aside) stands whole under them, else the tighter set. Found by
 /// an invisible run of the card's own drawing in a room with no floor, so
-/// the measuring and the drawing never disagree about its height.
+/// the measuring and the drawing never disagree about its height; and held
+/// to the hundredth's grace the drawing's floor allows a row (board.rs's
+/// `Paint`), so a card a fraction of a point too tall for the boards'
+/// measures never takes them and loses its last value line under the
+/// floor.
 fn measures(ui: &mut Ui, page: &mut Page, face: &Face) -> Space {
     let at = parts(face.full, ROOMY, page);
     let room = Rect::from_min_size(at.card.min, vec2(at.card.width(), 100_000.0));
@@ -214,7 +218,7 @@ fn measures(ui: &mut Ui, page: &mut Page, face: &Face) -> Space {
     probe.set_invisible();
     let probing = Face { space: ROOMY, live: false, ..*face };
     let rest = subject(&mut probe, page, &probing, room).rest;
-    if rest <= at.card.height() + 0.5 { ROOMY } else { TIGHT }
+    if rest <= at.card.height() + 0.01 { ROOMY } else { TIGHT }
 }
 
 /// Where the frame's parts stand: the subjects row (with two subjects or

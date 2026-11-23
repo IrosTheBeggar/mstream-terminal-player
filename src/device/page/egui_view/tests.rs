@@ -412,6 +412,39 @@ fn at_the_guis_floor_the_card_tightens_and_keeps_its_bottom_row_whole() {
 }
 
 #[test]
+fn a_card_a_fraction_of_a_point_too_tall_for_its_room_tightens_and_keeps_its_every_line() {
+    let _en = english();
+    let (mut page, _ends) = page_with(Ends::up_to_date);
+    let roomy = Probe::new(BOARD);
+    let whole: Vec<String> = texts(&roomy.settle(&mut page)).into_iter().map(|(t, _)| t).collect();
+    // The card's height at rest with the boards' measures, as the frame's
+    // invisible run measures it, and the room the frame leaves it there.
+    let (mut rest, mut room) = (0.0_f32, 0.0_f32);
+    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, BOARD)), ..Default::default() };
+    let mut out = roomy.ctx.run_ui(input, |ui| {
+        let pal = Pal::now();
+        let full = ui.max_rect();
+        let face = Face { pal: &pal, composition: "", key_hints: false, full, space: ROOMY, ports: &["COM3"], live: false, inert: false };
+        let at = parts(full, ROOMY, &page);
+        room = at.card.height();
+        rest = subject(ui, &mut page, &face, Rect::from_min_size(at.card.min, vec2(at.card.width(), 100_000.0))).rest;
+    });
+    out.textures_delta.clear();
+    // An area that leaves the card a few tenths of a point less than that:
+    // the boards' measures would stand its last value line past the floor,
+    // so the frame takes the tighter set and every line stands.
+    let short = Probe::new(vec2(BOARD.x, BOARD.y - room + rest - 0.3));
+    let out = short.settle(&mut page);
+    let drawn: Vec<String> = texts(&out).into_iter().map(|(t, _)| t).collect();
+    let lost: Vec<&String> = whole.iter().filter(|t| !drawn.contains(t)).collect();
+    assert!(lost.is_empty(), "every line of the card stands: {lost:?} left out");
+    assert!(find(&out, "M5Stack Core2").center().y < ROOMY.top + ROOMY_HEAD_MID - 4.0, "the tighter measures");
+}
+
+/// Where the head's name stands its middle under the column's top.
+const ROOMY_HEAD_MID: f32 = studio::HEAD_H / 2.0 + ROOMY.pad_y;
+
+#[test]
 fn the_waiting_line_says_its_words_under_the_blank_first_row() {
     let _en = english();
     let ctx = Probe::new(WINDOW).ctx;
