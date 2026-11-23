@@ -1714,6 +1714,125 @@ comes from the cache, or a download, beside them.
     "yes". The lines are plain English, as `device list`'s are: lines a
     script reads.
 
+### Drawn by egui in the window
+
+68. **In the desktop window, egui draws the tab's page**, in the Studio
+    look of the "MP3 Player in egui" canvas, over the cells the GUI leaves
+    blank; everything else stays cells: the top bar, the footer with the
+    page's hint (clause 15: the cells' own hint, given way at the same 99
+    cells), a GUI modal (the quit gate, clause 57) and the server menu. The
+    page's area is the one region: its blank first row, the subjects row
+    with two subjects or more (clause 25), one card under it — the board in
+    view, a card in view, or the card with no board (clause 30) — and the
+    busy line along the area's foot, across the window; and, over the kit's
+    scrim with the page inert beneath, the board's gate (clauses 23 and
+    39), the Advanced options sheet (clause 34), a card's gate (clause 58)
+    or a card's Settings sheet (clause 48), in the cells' order. The column
+    is the boards' 760 points at most, centred, narrowing with the window.
+    The measures are the boards' (20 points under the top bar, blocks 18
+    apart, the card 24 in at its sides and 20 at its top and foot) wherever
+    the card in view stands whole under them at rest, Details aside, and a
+    tighter set where it does not, so at the GUI's floor the card keeps its
+    bottom row and the page never scrolls (clause 4). While a visit waits
+    for the last page to let its ports go, the region holds that one dim
+    line where the page's first line stands (clause 5).
+
+    `MSTREAM_WINDOW_CELLS=1` (no panel), a terminal, the standalone `device
+    flash` (clause 31) and the frames before the window exists keep the
+    whole tab in cells, as clauses 1–67 tell it. A GUI overlay over the
+    region — a GUI modal, the server menu, a GUI tooltip — stands it down
+    while it is up, as on the other egui pages.
+69. **The model stays the model.** Keys never reach egui: the page's
+    keymap still moves the view, opens Details, answers the gates, walks
+    the sheets' stops and edits their fields (clause 12), and egui draws
+    what the page holds each frame. A click asks for the act the cells
+    register for the same control, and only while they register it: under
+    the write's lock only theirs (clause 9), under a gate or a sheet only
+    its own, and under the Advanced sheet's hanging release list only its
+    entries, any other click closing it. Each goes through the page's own
+    act path once a click, however many runs egui makes of a pass, the
+    chained gates' guard and the lock with it; an end it brings ends the
+    page as the cells' click would. The wheel over the log moves the
+    page's own count, a line a notch (clause 14). The pointer's hover and
+    the hand are egui's; tooltips are the cells' words — a waiting
+    primary's why, a cut path whole, a sheet's close with its key only
+    while the GUI names keys. The Advanced sheet's path field and the
+    Settings sheet's Name field are the kit's field drawn from the model's
+    value and caret, the input method's composition in the field with the
+    keys alone, its caret's foot handed up to the GUI's surface for the
+    candidates, and none while no field has the keys. The native dialogs
+    stay the model's, on a thread of their own (clause 36). The worker's
+    reports drive the frame as they do the cells'; egui asks for a pass
+    only when a tooltip ripens or a modal settles its height.
+70. **The board card and a card's view are the cells' rows in points**,
+    made by the same functions (cells.rs's and cells/card.rs's rows, with a
+    value column too wide to wrap in), so the two faces say the same words
+    under the same conditions: a hairline card; the head, its name in the
+    16-point semibold and the port, the serial or the card's drive and
+    size dim in the monospace on the name's baseline, gone whole within 16
+    points of it; the labels in tracked small capitals in their 140-point
+    column; the cells' verdict glyphs (✓ ! ✗ ?) as the kit's LED in their
+    colour; their bar as the kit's LED meter, lit as the cells fill it (one
+    segment for a sliver, the last only when whole); their scan as the
+    kit's ten segments, its share on its words' baseline; the figures —
+    sizes, versions, counts, times, serials, ports, a card's drive letter —
+    in the monospace on their words' baseline; the text buttons with the
+    cells' ▸ and ▾ as the kit's leads; the one tall primary at the
+    content's end, its why in a tooltip while it waits. Short of room the
+    value rows give way as the cells give theirs (a card's dim lines first,
+    then Converts), then whole lines from the foot; never the bottom row,
+    whose links drop from the end, a card's Send the plays first. Details
+    takes what is left under it: its facts a line each, never wrapped (a
+    card's Drive gives way a piece at a time and its Removes cuts its path,
+    never its count), its log the newest lines that fit, a line a notch
+    under the wheel, a thumb while it overflows.
+
+    The subjects row is runs per tab, not the kit's segmented control: a
+    name in its own case (a port whole in the monospace, a card's drive
+    with it), each mark in its own colour (the cells' ✓ and ✗ as the kit's
+    check and cross, a write's or a sync's percentage in the monospace),
+    the subject in view on the accent's slab, another raised under the
+    pointer; at the row's right edge one slot of words — a count, a write
+    or a sync under way, or Update all as a text button. Short of room the
+    cards' names shrink first, then the right edge's words go whole, then
+    the last tabs; the arrows still reach them.
+71. **Every gate is the kit's gold gate** over the page's area: its title
+    in the gold, the cells' sentences in their order and their tones as
+    paragraphs 6 points apart, and 20 points under them the two answers —
+    the safe one lit, its words in the form buttons' capitals led by the
+    cells' ◂ as the kit's pointer turned back, a version in it in the
+    monospace in its own case, and the go as the hairline; side by side at
+    the foot's end, or the go above the keep where the two will not fit.
+    Nothing makes the go the default. The board's gate never scrolls
+    (clause 4): short of room its paragraphs' gaps give way from the end,
+    then its frame tightens, then its last lines are left out whole over
+    answers that stand whole. A card's gate scrolls its body where the area
+    is too short; it opens at its top, and at its top again when a chained
+    answer puts the next gate in its place. The stronger gate's box is the
+    kit's check line among its sentences, and its go is drawn only once the
+    box is ticked (clause 58); the install's erase box is the same line,
+    its cost hung under it.
+72. **The sheets are the kit's modal** over the page's area, their close
+    the kit's with the cells' tooltip. The Advanced options sheet is held
+    at its tallest state's top; where the window is short its rows close up
+    together toward a tighter set, its help giving way first, and short of
+    even that its body scrolls, the keyboard's stop brought into view. The
+    Settings sheet is held so too, its help and then its gaps giving way,
+    its body scrolled with the keyboard's row in view and brought in again
+    when its field or its list opens. On both: each choice is the kit's
+    round mark, its chosen one in the accent where the keyboard is (the
+    Advanced sheet's group, the Settings sheet's row) and the text colour
+    elsewhere, as the cells colour theirs; each closed list (the release,
+    From, Into) is the kit's box, its words in the accent's semibold while
+    the keyboard is on it; each list that hangs is the kit's, framed in the
+    accent, the keyboard's cursor filled, an entry raised under the
+    pointer, its figures in the monospace — the release list inside the
+    sheet's body, its words under its control's, From's and Into's on a
+    layer of their own down to the area's foot, and only from a box in the
+    body's view. The keyboard's button in a foot wears the accent's ring 3
+    points out of it; an Apply with no whole image is drawn dim and takes
+    nothing.
+
 ## Wording
 
 The page's strings are `dev.*`. The card's: the labels (`label_firmware`
@@ -3255,3 +3374,64 @@ setting no locale, prints in English.
     it read: its root's card id when it read one, else the listing's
     label and size. Another card is another card: the slot is taken out
     and the card put in gets a tab of its own.
+- **2026-11-23 — The tab drawn by egui in the window (clauses 68–72).**
+  The page's egui face landed on its frame and the board card, then in
+  four groups: the write on the board card, the Advanced options sheet, a
+  card's view and its gates, and a card's Settings sheet. Deliberate,
+  each:
+  - **The boards' looks that the cells do not have**, adopted: the gates
+    and the sheets over the kit's scrim, which the cells draw without; the
+    keep drawn with the cells' ◂ as its lead and its figure in its own
+    case ("◂ KEEP v0.13.0"), not bare in the form buttons' capitals; the
+    subjects row as runs per tab, its port names in their own case and
+    each mark in its own colour, not the kit's segmented control; the
+    cells' marks and dots as the kit's LEDs where the boards draw LEDs;
+    hairline cards and the kit's look throughout.
+  - **One look per thing**, the kit's (window/studio.rs), where the groups
+    had each drawn their own: a gate's answers and the keep led back, the
+    gate whose body is the page's own (the stronger gate's box among its
+    sentences), a closed list's box and the list that hangs from it inside
+    a modal, a choice's round mark, a check line in a row of the page's,
+    the searching shape and a scan's share, a card's hairline frame and its
+    head, a dim line, a rule, the keyboard's ring round a foot's button and
+    the log's thumb are the kit's pieces now, shared by every surface of
+    the tab. What that changed: a choice's chosen mark is in the accent
+    only where the keyboard is on the Settings sheet as on the Advanced
+    one, as the cells colour it (it was always the accent there); a closed
+    list's box keeps its strong hairline and its dim chevron while the
+    keyboard is on it, its words in the accent, as the Settings board
+    draws it (the release control's turned the accent); a closed list's
+    words and a hanging list's entries set their figures in the monospace
+    on both sheets (Into's "Opus 192k" too); a card's scan stands its share
+    on its words' baseline, as the board card's does.
+  - **The code, not the boards**, where they part: a board that shows
+    words or a control the code does not have is drawn without them, and
+    no click does what the cells' clicks do not. The card readers' line
+    under *Not showing up?* that clause 30 promises is drawn by neither
+    face: no code draws it.
+  - **Fixed on the way**: the frame took the boards' measures for a card
+    up to half a point too tall for them, and the card's last value line
+    was left out under its floor; it takes them only within the
+    hundredth's grace the card's floor allows a row now.
+  - **Looks left as they are**: at the GUI's floor the removals gate's
+    foot stands half under its body's view until the body is scrolled, as
+    the kit's gate does; the Advanced sheet's erase line takes the click on
+    its box and its words, the kit's check line, where the cells take the
+    whole row; a Settings row the cells cut at a small size can still be
+    scrolled to and clicked; the Name field's caret goes up to the GUI
+    while the field is scrolled out of view, since the field has the keys.
+  - **Left for the owner's ruling**: what the spec checks found of the
+    code against this contract, which the egui face draws as the model
+    holds it, as the cells do:
+    - the write's progress is on the busy line only with two boards or
+      more, and never when the view goes from the writing board to a card
+      (clause 26 says whichever card is open);
+    - the board card has no give-way of its own for its card line (clauses
+      4 and 20a): its rows past its room are cut from the foot;
+    - a "Read the board" that failed offers no *Ask again*: the link and
+      its hint come only for a port in use or one that would not open;
+    - the worker's refusal notes are dim, not gold;
+    - with one board and a card, the subjects row's right edge reads "1 of
+      1 needs an update";
+    - the footer's hint gives way at the cells' 99 (`hint_line`) where the
+      window has the room for more.
