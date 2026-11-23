@@ -100,9 +100,8 @@ pub(super) struct Face<'a> {
     pub(super) composition: &'a str,
     /// Tooltips name the key that does the same, as the cells' surface
     /// says (`Surface::key_hints`, the GUI's setting), for the parts whose
-    /// cells register a keyed tooltip. None reads it yet: the board's one
-    /// tooltip, a waiting primary's why, names no key.
-    #[allow(dead_code)]
+    /// cells register a keyed tooltip: the sheets' close ([`close_tip`]).
+    /// The board's one tooltip, a waiting primary's why, names no key.
     pub(super) key_hints: bool,
     /// The page's area in points, the pass's screen: what a modal's scrim
     /// covers.
@@ -276,6 +275,28 @@ fn busy_line(ui: &Ui, rect: Rect, page: &Page, pal: &Pal) {
     let busy = page.busy();
     let note = page.note.as_ref().map(|n| (n.text.clone(), n.gold));
     studio::note_line(ui, rect, busy.as_deref(), note.as_ref(), pal);
+}
+
+/// A keep's words bare of the cells' ◂ before them (cells.rs's
+/// `gate_buttons`, cells/card.rs's `gate_buttons_of`), and whether it was
+/// there: the kit's keep leads them with its pointer turned back
+/// (`studio::keep_button`).
+pub(super) fn unled(label: &str) -> (&str, bool) {
+    match label.trim_start().strip_prefix(glyphs().back) {
+        Some(words) => (words.trim_start(), true),
+        None => (label.trim(), false),
+    }
+}
+
+/// The cells' tooltip on a sheet's close (the kit's `modal_close`), on the
+/// close the kit's Dialog drew under `id`, its key named only while the
+/// GUI names keys, as the cells' surface registers it.
+pub(super) fn close_tip(ui: &Ui, id: Id, face: &Face) {
+    if let Some(close) = ui.ctx().read_response(id.with("close")) {
+        let tip = t!("path_modal.tip_close").to_string();
+        let tip = if face.key_hints { tip } else { tip.rsplit_once(" — ").map_or(tip.clone(), |(words, _)| words.to_string()) };
+        let _ = close.on_hover_text(tip);
+    }
 }
 
 /// The colour the cells give `style`, in the desk's palette: their gold,

@@ -13,45 +13,32 @@
 //! install's erase box with its cost under it. The cells' blank lines are
 //! the paragraphs' gaps.
 //!
-//! The answers are the cells' two at the window's foot: the safe one first
-//! and lit, named for what stays and led by the cells' ◂ as the kit's
-//! pointer turned back, its figure in the monospace in its own case; then
-//! the write as the dim secondary. Keys never reach egui, so Enter, Esc and
-//! `n` keep and `y` writes through the page's own keymap as in the cells,
-//! and nothing here can make the write the default. A click asks for the
-//! cells' act: [`Act::Keep`], [`Act::Write`], or [`Act::Erase`] on the
-//! install's box.
+//! The answers are the cells' two at the window's foot, the kit's gate's
+//! ([`studio::answers_at`]): the safe one first and lit, named for what
+//! stays and led by the cells' ◂ as the kit's pointer turned back, its
+//! figure in the monospace in its own case; then the write as the dim
+//! secondary. Keys never reach egui, so Enter, Esc and `n` keep and `y`
+//! writes through the page's own keymap as in the cells, and nothing here
+//! can make the write the default. A click asks for the cells' act:
+//! [`Act::Keep`], [`Act::Write`], or [`Act::Erase`] on the install's box
+//! (the kit's check line).
 //!
 //! The gate never scrolls and its answers stand whole at every size the
 //! page is drawn at (clause 4): short of room its paragraphs' gaps give way
 //! first, from the end, as the cells drop their blank lines; then its frame
-//! tightens; then its last lines are left out whole.
-//!
-//! What the kit has no piece for yet is drawn here: its gate takes no
-//! control in its body and sets its answers in bare capitals, and its gold
-//! window ([`studio::Dialog`]'s gate look) is its own.
+//! tightens; then its last lines are left out whole. So it lays its window
+//! out here, in the kit's gate look ([`studio::modal_window`] in the gold,
+//! [`studio::modal_title`]), rather than in the kit's Dialog, whose body
+//! scrolls.
 
-use std::sync::Arc;
-
-use egui::epaint::{Shadow, StrokeKind};
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align2, Color32, Galley, Id, Order, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Color32, Id, Order, Pos2, Rect, Ui, UiBuilder, pos2, vec2};
 
 use super::super::cells;
 use super::super::*;
-use super::{Drawn, Face};
+use super::{Drawn, Face, unled};
 use crate::device::board::gb;
-use crate::gui::window::studio::{self, FORM_BUTTON_H, HIT, Pal, Para, body, mono, strong};
+use crate::gui::window::studio::{self, Answers, HIT, Pal, Para, Title, body, mono};
 
-/// The gate's window, the kit's gate's: room for the longest sentence to
-/// break into whole lines.
-const GATE_W: f32 = 600.0;
-/// The kit's scrim over the page's area (studio.rs's own): the canvas's
-/// rgba(9, 10, 15, .62).
-const SCRIM: Color32 = Color32::from_rgba_premultiplied(6, 6, 9, 158);
-/// The title's row and its words, as the kit's modals set them.
-const TITLE_H: f32 = 20.0;
-const TITLE: f32 = 16.0;
 /// The sentences' words, and their figures a point under them (the
 /// Format board's 13 under its 14).
 const WORDS: f32 = 14.0;
@@ -60,14 +47,6 @@ const FIGURES: f32 = 13.0;
 const LINE: f32 = WORDS * 1.3;
 /// The erase box's cost under it: dim words, hung under the box's.
 const COST: (f32, f32) = (13.0, 18.0);
-/// The answers: apart beside one another or a row apart (the kit's foot),
-/// the room either side of a button's words, the keep's lead and the room
-/// after it, and the buttons' capitals.
-const FOOT_GAP: f32 = 10.0;
-const BUTTON_PAD: f32 = 18.0;
-const LEAD_W: f32 = 6.0;
-const LEAD_GAP: f32 = 8.0;
-const CAPS: f32 = 11.5;
 /// Update all's boards and its left-out ones share six lines, the cells'
 /// six: the most the GUI's floor holds.
 const GATE_ROWS: usize = 6;
@@ -86,7 +65,7 @@ struct Measures {
 
 /// The kit's gate's measures: 16 points clear of the area, 24 in, 20
 /// under the title and over the answers, sentences 6 apart.
-const ROOMY: Measures = Measures { clear: 32.0, pad: 24.0, under_title: 20.0, apart: 6.0, over_foot: 20.0 };
+const ROOMY: Measures = Measures { clear: 32.0, pad: 24.0, under_title: 20.0, apart: studio::GATE_APART, over_foot: studio::GATE_OVER_FOOT };
 /// Where the page's area is too short for those even with no gaps between
 /// the paragraphs (Update all's six boards at the GUI's floor).
 const TIGHT: Measures = Measures { clear: 16.0, pad: 16.0, under_title: 10.0, apart: 0.0, over_foot: 12.0 };
@@ -238,8 +217,10 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
     let pal = face.pal;
     let title = cells::gate_title(&gate);
     let (keep, write) = cells::gate_buttons(&gate);
+    let (words, lead) = unled(&keep);
+    let answers = Answers { keep: words, lead, go: Some(&write), also: face.ports };
     let pieces = body_of(&gate, pal);
-    let laid = lay_out(ui, face, &title, &pieces, &keep, &write);
+    let laid = lay_out(ui, face, &title, &pieces, &answers);
     let id = Id::new("mp3-gate");
     let over = face.full;
     let ctx = ui.ctx().clone();
@@ -247,16 +228,9 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
     let shown = area.show(&ctx, |ui| {
         // The scrim takes every press outside the window: the page under
         // it is inert.
-        let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
-        ui.painter().rect_filled(over, 0.0, SCRIM);
-        let window = laid.window;
-        let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
-        ui.painter().add(shadow.as_shape(window, studio::square()));
-        ui.painter().rect_filled(window, studio::square(), pal.panel);
-        ui.painter().rect_stroke(window, studio::square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
-        let inner = window.shrink(laid.m.pad);
-        let title_mid = inner.min.y + TITLE_H / 2.0;
-        ui.painter().galley(pos2(inner.min.x, title_mid - laid.title_line / 2.0), laid.title.clone(), pal.gold);
+        studio::modal_window(ui, over, laid.window, pal.gold, pal);
+        let inner = laid.window.shrink(laid.m.pad);
+        laid.title.paint(ui, inner.min);
         let mut act = None;
         for ((_, piece), top) in pieces.iter().zip(&laid.tops) {
             let Some(top) = *top else { continue };
@@ -267,9 +241,8 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
                 }
                 Piece::Erase { on, cost } => {
                     let row = Rect::from_min_size(at, vec2(inner.width(), HIT));
-                    let mut line = ui.new_child(UiBuilder::new().id_salt("mp3-gate-erase").max_rect(row));
                     let words = t!("dev.gate_erase").to_string();
-                    if studio::check_line(&mut line, id.with("erase"), *on, &words, "", false, pal).clicked() {
+                    if studio::check_line_at(ui, id.with("erase"), row, *on, &words, "", false, pal).clicked() {
                         act = Some(Act::Erase);
                     }
                     let hung = pos2(at.x + ERASE_HANG, at.y + HIT);
@@ -277,14 +250,11 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
                 }
             }
         }
-        let (words, led) = unled(&keep);
-        if keep_button(ui, id.with("foot").with(0usize), laid.keep, words, led, face.ports, pal).clicked() {
-            act = Some(Act::Keep);
+        match studio::answers_at(ui, id.with("foot"), pos2(inner.min.x, laid.foot_top), &answers, inner.width(), pal) {
+            Some(true) => Some(Act::Write),
+            Some(false) => Some(Act::Keep),
+            None => act,
         }
-        if studio::form_button(ui, id.with("foot").with(1usize), laid.go, &write, false, pal).clicked() {
-            act = Some(Act::Write);
-        }
-        act
     });
     drawn.acts.extend(shown.inner);
     drawn
@@ -302,8 +272,7 @@ const ERASE_HANG: f32 = studio::BOX + 10.0;
 fn words_para(piece: &Piece, face: &Face) -> Para {
     let Piece::Words { text, tone, line } = piece else { return Para::new("", body(WORDS), face.pal.text) };
     let runs = studio::figured(text, face.ports, body(WORDS), mono(FIGURES), *tone);
-    let first = runs.first().map_or(WORDS, |(_, font, _)| font.size);
-    let para = Para::runs(&runs).line(LINE / first);
+    let para = Para::runs(&runs).spaced(LINE);
     if *line { para.rows(1) } else { para }
 }
 
@@ -312,54 +281,46 @@ fn words_para(piece: &Piece, face: &Face) -> Para {
 /// every sentence of the gate sets them.
 fn cost_para(cost: &str, face: &Face) -> Para {
     let runs = studio::figured(cost, face.ports, body(COST.0), mono(COST.0 - 1.0), face.pal.dim);
-    let first = runs.first().map_or(COST.0, |(_, font, _)| font.size);
-    Para::runs(&runs).line(COST.1 / first)
+    Para::runs(&runs).spaced(COST.1)
 }
 
-/// The gate laid out for its room: its measures, its window, its title set
-/// and the height of a line of it, each piece's top (none for one left
-/// out), the floor no line of the body passes, and the answers' places.
+/// The gate laid out for its room: its measures, its window, its title set,
+/// each piece's top (none for one left out), the floor no line of the body
+/// passes, and where its answers' foot starts.
 struct Laid {
     m: Measures,
     window: Rect,
-    title: Arc<Galley>,
-    title_line: f32,
+    title: Title,
     tops: Vec<Option<f32>>,
     floor: f32,
-    keep: Rect,
-    go: Rect,
+    foot_top: f32,
 }
 
 /// The gate measured with one set of [`Measures`] in a window `width`
-/// wide: its title set, a line of it and its height, each piece's height,
-/// and its answers' places from the foot's top left with the foot's
+/// wide: its title set, each piece's height, and its answers' foot's
 /// height.
 struct Fit {
     m: Measures,
-    title: Arc<Galley>,
-    title_line: f32,
-    title_h: f32,
+    title: Title,
     heights: Vec<f32>,
-    keep: Rect,
-    go: Rect,
     foot_h: f32,
 }
 
 impl Fit {
-    fn of(ui: &mut Ui, face: &Face, m: Measures, width: f32, gate: (&str, &[(bool, Piece)], &str, &str)) -> Fit {
-        let (title, pieces, keep, write) = gate;
+    fn of(ui: &mut Ui, face: &Face, m: Measures, width: f32, gate: (&str, &[(bool, Piece)], &Answers)) -> Fit {
+        let (title, pieces, answers) = gate;
         let inner_w = (width - 2.0 * m.pad).max(1.0);
-        let (title, title_line, title_h) = set_title(ui, title, inner_w, face.pal.gold);
+        let title = studio::modal_title(ui, title, inner_w, face.pal.gold);
         let heights = measure(ui, face, pieces, inner_w);
-        let (keep, go, foot_h) = foot(ui, keep, write, face.ports, inner_w);
-        Fit { m, title, title_line, title_h, heights, keep, go, foot_h }
+        let foot_h = studio::answers_rects(ui, answers, inner_w).1;
+        Fit { m, title, heights, foot_h }
     }
 
     /// How tall the window stands with the first `kept` of the body's gaps.
     fn height(&self, pieces: &[(bool, Piece)], kept: usize) -> f32 {
         let gaps = pieces.iter().filter(|(gap, _)| *gap).count().min(kept);
         let body_h = self.heights.iter().sum::<f32>() + gaps as f32 * self.m.apart;
-        2.0 * self.m.pad + self.title_h + self.m.under_title + body_h + self.m.over_foot + self.foot_h
+        2.0 * self.m.pad + self.title.h + self.m.under_title + body_h + self.m.over_foot + self.foot_h
     }
 }
 
@@ -369,18 +330,18 @@ impl Fit {
 /// or, short of room, with its paragraphs' gaps given way from the end,
 /// then with the tighter measures, no gaps and half the clearance, and its
 /// last lines left out whole over its answers, which stand whole.
-fn lay_out(ui: &mut Ui, face: &Face, title: &str, pieces: &[(bool, Piece)], keep: &str, write: &str) -> Laid {
+fn lay_out(ui: &mut Ui, face: &Face, title: &str, pieces: &[(bool, Piece)], answers: &Answers) -> Laid {
     let over = face.full;
     // The window's width and its most height with `m`'s clearance.
-    let room = |m: Measures| (GATE_W.min(over.width() - m.clear).max(over.width().min(160.0)), (over.height() - m.clear).max(0.0));
+    let room = |m: Measures| (studio::GATE_W.min(over.width() - m.clear).max(over.width().min(160.0)), (over.height() - m.clear).max(0.0));
     let gaps = pieces.iter().filter(|(gap, _)| *gap).count();
     let (width, most) = room(ROOMY);
-    let roomy = Fit::of(ui, face, ROOMY, width, (title, pieces, keep, write));
+    let roomy = Fit::of(ui, face, ROOMY, width, (title, pieces, answers));
     let (fit, kept, width, most) = match (0..=gaps).rev().find(|kept| roomy.height(pieces, *kept) <= most + 0.5) {
         Some(kept) => (roomy, kept, width, most),
         None => {
             let (width, most) = room(TIGHT);
-            (Fit::of(ui, face, TIGHT, width, (title, pieces, keep, write)), 0, width, most)
+            (Fit::of(ui, face, TIGHT, width, (title, pieces, answers)), 0, width, most)
         }
     };
     let m = fit.m;
@@ -389,12 +350,12 @@ fn lay_out(ui: &mut Ui, face: &Face, title: &str, pieces: &[(bool, Piece)], keep
     // stand over the body's last line by as much, and the line would be
     // left out.
     let want = fit.height(pieces, kept);
-    let h = if want <= most + 0.5 { want } else { most.max(2.0 * m.pad + fit.title_h + fit.foot_h) };
+    let h = if want <= most + 0.5 { want } else { most.max(2.0 * m.pad + fit.title.h + fit.foot_h) };
     let window = Rect::from_center_size(over.center(), vec2(width, h));
     let inner = window.shrink(m.pad);
     let foot_top = inner.max.y - fit.foot_h;
     let floor = foot_top - m.over_foot;
-    let mut y = inner.min.y + fit.title_h + m.under_title;
+    let mut y = inner.min.y + fit.title.h + m.under_title;
     let mut seen = 0;
     let mut tops: Vec<Option<f32>> = Vec::new();
     for ((gap, piece), h) in pieces.iter().zip(&fit.heights) {
@@ -414,22 +375,7 @@ fn lay_out(ui: &mut Ui, face: &Face, title: &str, pieces: &[(bool, Piece)], keep
         tops.push(fits.then_some(y));
         y += h;
     }
-    let place = |r: Rect| r.translate(vec2(inner.min.x, foot_top));
-    let (keep, go) = (place(fit.keep), place(fit.go));
-    Laid { m, window, title: fit.title, title_line: fit.title_line, tops, floor, keep, go }
-}
-
-/// The title as the kit's modals set it: the 16-point semibold in `color`
-/// wrapped at `w` in three lines at most, its first standing on the title's
-/// row. The title set, a line's height, and the height its rows take.
-fn set_title(ui: &Ui, title: &str, w: f32, color: Color32) -> (Arc<Galley>, f32, f32) {
-    let format = TextFormat { font_id: strong(TITLE), color, ..Default::default() };
-    let mut job = LayoutJob::single_section(title.to_string(), format);
-    job.wrap = TextWrapping { max_width: w, max_rows: 3, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let lines = galley.rows.len().max(1);
-    let line = galley.size().y / lines as f32;
-    (galley, line, TITLE_H + (lines - 1) as f32 * line)
+    Laid { m, window, title: fit.title, tops, floor, foot_top }
 }
 
 /// Each piece's height at `w`, measured by drawing it where nothing shows.
@@ -444,98 +390,6 @@ fn measure(ui: &mut Ui, face: &Face, pieces: &[(bool, Piece)], w: f32) -> Vec<f3
             Piece::Erase { cost, .. } => HIT + cost_para(cost, face).paint(&probe, Pos2::ZERO, (w - ERASE_HANG).max(1.0)).height(),
         })
         .collect()
-}
-
-/// The answers in a foot `w` wide, from its top left: the safe one and the
-/// write, each as wide as its words, side by side at the foot's end, 10
-/// apart — or, where the two will not fit, the write on a row of its own
-/// above the safe one, as the kit's foot moves its confirmation up. Their
-/// places and the foot's height.
-fn foot(ui: &Ui, keep: &str, write: &str, ports: &[&str], w: f32) -> (Rect, Rect, f32) {
-    let (words, led) = unled(keep);
-    let keep_w = keep_width(ui, words, led, ports).min(w);
-    let go_w = studio::form_button_width(ui, write).min(w);
-    let go = Rect::from_min_size(pos2(w - go_w, 0.0), vec2(go_w, FORM_BUTTON_H));
-    if keep_w + FOOT_GAP + go_w <= w {
-        let keep = Rect::from_min_size(pos2(go.min.x - FOOT_GAP - keep_w, 0.0), vec2(keep_w, FORM_BUTTON_H));
-        return (keep, go, FORM_BUTTON_H);
-    }
-    let keep = Rect::from_min_size(pos2(w - keep_w, FORM_BUTTON_H + FOOT_GAP), vec2(keep_w, FORM_BUTTON_H));
-    (keep, go, 2.0 * FORM_BUTTON_H + FOOT_GAP)
-}
-
-/// The safe answer's words bare of the cells' ◂ before them, and whether
-/// it was there.
-fn unled(label: &str) -> (&str, bool) {
-    match label.strip_prefix(glyphs().back).and_then(|rest| rest.strip_prefix(' ')) {
-        Some(words) => (words, true),
-        None => (label, false),
-    }
-}
-
-/// The safe answer's words as runs: its words in the buttons' semibold,
-/// its figures (a version) in the monospace at the same size.
-fn keep_runs(words: &str, ports: &[&str], ink: Color32) -> Vec<(String, bool)> {
-    let runs = studio::figured(words, ports, strong(CAPS), mono(CAPS), ink);
-    runs.into_iter().map(|(s, font, _)| (s, font == mono(CAPS))).collect()
-}
-
-/// How wide the safe answer's words draw: the words in spaced capitals, the
-/// figures as they are.
-fn keep_words_width(ui: &Ui, words: &str, ports: &[&str]) -> f32 {
-    let run_w = |(s, figure): &(String, bool)| if *figure { studio::width_of(ui, s, mono(CAPS)) } else { studio::caps_width(ui, s, CAPS) };
-    keep_runs(words, ports, Color32::WHITE).iter().map(run_w).sum()
-}
-
-/// How wide the safe answer wants to be: its words, its lead, and its room
-/// either side.
-fn keep_width(ui: &Ui, words: &str, led: bool, ports: &[&str]) -> f32 {
-    let lead = if led { LEAD_W + LEAD_GAP } else { 0.0 };
-    2.0 * BUTTON_PAD + lead + keep_words_width(ui, words, ports)
-}
-
-/// The safe answer at `rect`, lit as the modal's primary (the boards'
-/// KEEP v0.13.0): the accent's fill, the hot accent under the pointer, with
-/// the hand; on it, in the ink on the accent, the cells' ◂ as the kit's
-/// pointer turned back (`led`), 8 points before the words, the words in the
-/// form buttons' spaced capitals and their figures in the monospace in
-/// their own case, cut at the button's end. Kit candidate: a form button
-/// with a lead and figures.
-fn keep_button(ui: &Ui, id: Id, rect: Rect, words: &str, led: bool, ports: &[&str], pal: &Pal) -> Response {
-    let response = studio::hand(ui.interact(rect, id, Sense::click()));
-    let fill = if response.hovered() { pal.accent_hot } else { pal.accent };
-    ui.painter().rect_filled(rect, studio::square(), fill);
-    let ink = pal.on_accent;
-    let lead = if led { LEAD_W + LEAD_GAP } else { 0.0 };
-    let want = lead + keep_words_width(ui, words, ports);
-    let mid = rect.center().y;
-    let end = rect.max.x - BUTTON_PAD;
-    let mut x = (rect.center().x - want / 2.0).max(rect.min.x + BUTTON_PAD);
-    if led {
-        back_pointer(ui, pos2(x, studio::led_mid(ui, mid, &strong(CAPS), true)), ink);
-        x += lead;
-    }
-    for (s, figure) in keep_runs(words, ports, ink) {
-        let room = end - x;
-        if room < 1.0 {
-            break;
-        }
-        let drawn = if figure {
-            studio::text(ui, pos2(x, mid), &s, mono(CAPS), ink, room, Align2::LEFT_CENTER)
-        } else {
-            studio::caps(ui, pos2(x, mid), &s, CAPS, ink, room, Align2::LEFT_CENTER)
-        };
-        x = drawn.max.x;
-    }
-    response
-}
-
-/// The kit's pointer turned back, the cells' ◂: a small solid triangle
-/// pointing left, 6 points wide and 8 tall, its left point at `at`. Kit
-/// candidate: the left twin of `studio::pointer`.
-fn back_pointer(ui: &Ui, at: Pos2, color: Color32) {
-    let points = vec![at, at + vec2(LEAD_W, -4.0), at + vec2(LEAD_W, 4.0)];
-    ui.painter().add(Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
 #[cfg(test)]
@@ -555,6 +409,20 @@ mod tests {
     use crate::device::board::{By, CardRoot, Clock};
     use crate::device::firmware::{Image, Mode};
     use crate::device::page::fixtures;
+    use crate::gui::window::studio::strong;
+
+    /// The kit's modal title's size, its form buttons' capitals', the room
+    /// after a keep's lead and between a foot's buttons.
+    const TITLE: f32 = 16.0;
+    const CAPS: f32 = 11.5;
+    const LEAD_GAP: f32 = 8.0;
+    const FOOT_GAP: f32 = 10.0;
+
+    /// The gate's answers as its pass makes them of the cells' two.
+    fn answers_of<'a>(keep: &'a str, write: &'a str) -> Answers<'a> {
+        let (words, lead) = unled(keep);
+        Answers { keep: words, lead, go: Some(write), also: &["COM3"] }
+    }
 
     /// The cells' gate as they draw it over the page in a tall window, its
     /// words joined: every row from its title's to its answers', inside its
@@ -843,7 +711,7 @@ mod tests {
 
     /// What the gate drew: everything from its scrim on, over the page.
     fn gate_shapes(out: &FullOutput) -> &[egui::epaint::ClippedShape] {
-        let scrim = out.shapes.iter().position(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == SCRIM)).expect("the gate's scrim");
+        let scrim = out.shapes.iter().position(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == studio::SCRIM)).expect("the gate's scrim");
         &out.shapes[scrim..]
     }
 
@@ -943,7 +811,7 @@ mod tests {
         for h in [824.0, 400.0, 360.0, 330.0, 300.0, 240.0] {
             let mut out = ctx.run_ui(input(h), |ui| {
                 let face = Face { pal: &pal, composition: "", key_hints: false, full: ui.max_rect(), space: super::super::ROOMY, ports: &["COM3"], live: true, inert: false };
-                let laid = lay_out(ui, &face, &title, &pieces, &keep, &write);
+                let laid = lay_out(ui, &face, &title, &pieces, &answers_of(&keep, &write));
                 assert!(laid.window.height() <= (h - laid.m.clear).max(0.0) + 0.5, "{h}: {:?}", laid.window);
                 if h == 824.0 {
                     assert_eq!(laid.m, ROOMY, "the boards' window: the kit's measures");
@@ -959,16 +827,17 @@ mod tests {
         // A point more than room for every gap but the last: the last gives
         // way, the others stand, and the measures stay the kit's.
         let face_in = |ui: &Ui| Face { pal: &pal, composition: "", key_hints: false, full: ui.max_rect(), space: super::super::ROOMY, ports: &["COM3"], live: true, inert: false };
-        let said = (title.as_str(), pieces.as_slice(), keep.as_str(), write.as_str());
+        let answers = answers_of(&keep, &write);
+        let said = (title.as_str(), pieces.as_slice(), &answers);
         let mut all_but_one = 0.0_f32;
         let mut out = ctx.run_ui(input(824.0), |ui| {
             let face = face_in(ui);
-            all_but_one = Fit::of(ui, &face, ROOMY, GATE_W, said).height(&pieces, gaps - 1);
+            all_but_one = Fit::of(ui, &face, ROOMY, studio::GATE_W, said).height(&pieces, gaps - 1);
         });
         out.textures_delta.clear();
         let mut out = ctx.run_ui(input(all_but_one + ROOMY.clear + 1.0), |ui| {
             let face = face_in(ui);
-            let laid = lay_out(ui, &face, &title, &pieces, &keep, &write);
+            let laid = lay_out(ui, &face, &title, &pieces, &answers_of(&keep, &write));
             assert_eq!(laid.m, ROOMY, "the kit's measures while a gap can give way");
             let heights = measure(ui, &face, &pieces, laid.window.width() - 2.0 * laid.m.pad);
             let tops: Vec<f32> = laid.tops.iter().map(|top| top.expect("every piece drawn")).collect();
@@ -997,7 +866,8 @@ mod tests {
         let gaps = pieces.iter().filter(|(gap, _)| *gap).count();
         let (keep, write) = cells::gate_buttons(&gate);
         let title = cells::gate_title(&gate);
-        let said = (title.as_str(), pieces.as_slice(), keep.as_str(), write.as_str());
+        let answers = answers_of(&keep, &write);
+        let said = (title.as_str(), pieces.as_slice(), &answers);
         let ctx = probe.ctx.clone();
         let input = |h: f32| egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, h))), ..Default::default() };
         let face_in = |ui: &Ui| Face { pal: &pal, composition: "", key_hints: false, full: ui.max_rect(), space: super::super::ROOMY, ports: &["COM3"], live: true, inert: false };
@@ -1005,7 +875,7 @@ mod tests {
         let mut whole = 0.0_f32;
         let mut out = ctx.run_ui(input(BOARD.y), |ui| {
             let face = face_in(ui);
-            let width = GATE_W.min(face.full.width() - ROOMY.clear);
+            let width = studio::GATE_W.min(face.full.width() - ROOMY.clear);
             whole = Fit::of(ui, &face, ROOMY, width, said).height(&pieces, gaps);
         });
         out.textures_delta.clear();
@@ -1016,7 +886,7 @@ mod tests {
             let face = face_in(ui);
             let short = whole - (face.full.height() - ROOMY.clear);
             assert!(short > 0.01 && short < 0.5, "the area {short} points short of the gate");
-            let laid = lay_out(ui, &face, &title, &pieces, &keep, &write);
+            let laid = lay_out(ui, &face, &title, &pieces, &answers_of(&keep, &write));
             assert_eq!(laid.m, ROOMY, "the kit's measures");
             assert!(laid.tops.iter().all(Option::is_some), "every piece drawn: {:?}", laid.tops);
             let heights = measure(ui, &face, &pieces, laid.window.width() - 2.0 * laid.m.pad);

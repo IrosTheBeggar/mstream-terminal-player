@@ -30,59 +30,40 @@
 
 use std::path::Path;
 
-use egui::emath::GuiRounding;
-use egui::epaint::{CornerRadius, Shadow, StrokeKind};
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Ui, pos2, vec2};
 
 use super::super::sheet::{Chooser, Entry, Local, Picked, Source, Stop};
 use super::super::*;
-use super::{Drawn, Face};
+use super::{Drawn, Face, close_tip};
 use crate::device::firmware::{Images, Release, clock_at, header_mhz};
 use crate::gui::window::studio::{self, Dialog, Pal, Para, body, mono, strong};
 
 /// The sheet's window: the board's 640 points.
 const SHEET_W: f32 = 640.0;
-/// The kit's Dialog round its body (studio.rs's own): its padding, its
-/// title's row, the room under the title and the close's room beside it,
-/// so the room it leaves its body is known before it is drawn and the
-/// sheet's measures and its hold are chosen for it.
-const MODAL_PAD: f32 = 24.0;
-const TITLE_H: f32 = 20.0;
-const MODAL_GAP: f32 = 20.0;
-const CLOSE_ROOM: f32 = 40.0;
 /// A group's label row (the kit's small capitals), and a dim line's row: a
 /// choice's facts, the mode's note, the help's.
 const LABEL_H: f32 = 14.0;
 const LINE_H: f32 = 18.0;
-/// Where a choice's name and its lines start: past its 14-point mark and
-/// the 10 after it.
-const NAME_IN: f32 = 24.0;
+/// Where a choice's name and its lines start: the kit's choice's words,
+/// past its 14-point mark and the 10 after it.
+const NAME_IN: f32 = studio::RADIO_IN;
 /// The room between a choice's name and what follows it, its detail or the
 /// release control.
 const DETAIL_GAP: f32 = 10.0;
-/// How far a radio row's look reaches past the column at either side.
-const REACH: f32 = 8.0;
 /// The choosers, the boards' text buttons 24 points apart.
 const APART: f32 = 24.0;
 /// Where a refusal's words start: past the cross and the 8 after it.
 const MARK_IN: f32 = 20.0;
-/// The release control's height at most, its width at least (the Settings
-/// board's closed dropdown's 120, so it keeps its width from "pick one" to
-/// the tag picked), and the room beside its words: 10 at either end and 10
-/// before its chevron's 12.
+/// The release control's height at most: the kit's closed list's box, in a
+/// radio row 4 points taller.
 const CONTROL_H: f32 = 26.0;
-const CONTROL_LEAST: f32 = 120.0;
-const CONTROL_PAD: f32 = 10.0;
-const CHEVRON_W: f32 = 12.0;
-/// The release list: its entries, their padding, the lead column (a picked
-/// release's LED and the 8 after it), and the room between its columns.
-const ENTRY_H: f32 = 28.0;
-const ENTRY_PAD: f32 = 10.0;
+/// The release control's words: a choice's detail's 13 points.
+const CONTROL_SIZE: f32 = 13.0;
+/// The release list's lead column (a picked release's LED and the 8 after
+/// it), and the room between its columns.
 const LEAD_W: f32 = 14.0;
 const COLUMN_GAP: f32 = 16.0;
-/// How far out of the keyboard's button its ring stands.
-const RING_OUT: f32 = 3.0;
 
 // ── The measures ──────────────────────────────────────────────────────────
 
@@ -677,44 +658,23 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
     let Some(board) = page.boards.iter().find(|b| b.port() == sheet.port).cloned() else { return drawn };
     let view = View::of(page, &sheet, &board);
     let id = Id::new("mp3-sheet");
-    let (inner_w, budget) = room(ui, face.full, &view.title);
-    let foot_h = foot(ui, inner_w).1;
-    let measures = Measures::for_room(&Shape { help_lines: 0, ..Shape::tallest(foot_h) }, budget);
+    let dialog = Dialog::new(id, face.full, SHEET_W, &view.title);
+    let room = dialog.body_room(ui);
+    let foot_h = foot(ui, room.x).1;
+    let measures = Measures::for_room(&Shape { help_lines: 0, ..Shape::tallest(foot_h) }, room.y);
     let hold = Shape::tallest(foot_h).height(&measures);
     let mut acts = Vec::new();
-    let shown = Dialog::new(id, face.full, SHEET_W, &view.title)
-        .hold(hold)
-        .show(ui, face.pal, |ui| sheet_body(ui, id, &view, &sheet, &measures, face, &mut acts));
+    let shown = dialog.hold(hold).show(ui, face.pal, |ui| sheet_body(ui, id, &view, &sheet, &measures, face, &mut acts));
     // Under the hanging list the close, as every click off its rows, only
     // closes the list (the body's catch says so).
     if shown.closed && view.list.is_none() {
         acts.push(Act::SheetClose);
     }
     // The cells' keyed tooltip on their close, which the kit's has not.
-    if let Some(close) = ui.ctx().read_response(id.with("close")) {
-        let tip = t!("path_modal.tip_close").to_string();
-        let tip = if face.key_hints { tip } else { tip.rsplit_once(" — ").map_or(tip.clone(), |(label, _)| label.to_string()) };
-        let _ = close.on_hover_text(tip);
-    }
+    close_tip(ui, id, face);
     drawn.acts = acts;
     drawn.caret = shown.inner;
     drawn
-}
-
-/// The room the kit's Dialog gives its body over `over` with `title`: its
-/// width, and its height to the 32nd of a point, as the Dialog finds them.
-fn room(ui: &Ui, over: Rect, title: &str) -> (f32, f32) {
-    let width = SHEET_W.min(over.width() - 32.0).max(over.width().min(160.0));
-    let inner_w = (width - 2.0 * MODAL_PAD).max(1.0);
-    let format = TextFormat { font_id: strong(16.0), ..Default::default() };
-    let mut job = LayoutJob::single_section(title.to_string(), format);
-    job.wrap = TextWrapping { max_width: (inner_w - CLOSE_ROOM).max(1.0), max_rows: 3, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let lines = galley.rows.len().max(1);
-    let title_h = TITLE_H + (lines - 1) as f32 * galley.size().y / lines as f32;
-    let fixed = 2.0 * MODAL_PAD + title_h + MODAL_GAP;
-    let max_h = (over.height() - 32.0).max(fixed);
-    (inner_w, ((max_h - fixed).max(0.0) + 1.0 / 1024.0).floor_ui())
 }
 
 /// The foot's two buttons, Use defaults and Apply, ending at the right of
@@ -784,7 +744,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
         }
         if k == 1 {
             if let Some(line) = &view.release_line {
-                dim_line(ui, sub, sub_w, line, face.ports, pal);
+                studio::dim_line(ui, sub, sub_w, line, face.ports, pal);
                 y += LINE_H;
             }
             continue;
@@ -792,11 +752,13 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
         stops[0] = Some(Rect::from_min_max(pos2(col.min.x, rows_top), pos2(col.max.x, y)));
         match &view.read {
             Read::Nothing => {}
-            Read::Reading(words) => dim_line(ui, sub, sub_w, words, face.ports, pal),
+            Read::Reading(words) => {
+                studio::dim_line(ui, sub, sub_w, words, face.ports, pal);
+            }
             Read::Facts(first, second, file) => {
                 let also: Vec<&str> = std::iter::once(file.as_str()).chain(face.ports.iter().copied()).collect();
-                dim_line(ui, sub, sub_w, first, &also, pal);
-                dim_line(ui, sub + vec2(0.0, LINE_H), sub_w, second, face.ports, pal);
+                studio::dim_line(ui, sub, sub_w, first, &also, pal);
+                studio::dim_line(ui, sub + vec2(0.0, LINE_H), sub_w, second, face.ports, pal);
             }
             Read::Refused(why) => refusal(ui, sub, sub_w, why, pal),
         }
@@ -840,7 +802,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
     stops[2] = Some(Rect::from_min_max(pos2(col.min.x, modes_top), pos2(col.max.x, y)));
     if let Some(note) = &view.mode_note {
         y += m.note_gap;
-        dim_line(ui, pos2(col.min.x + NAME_IN, y), col.width() - NAME_IN, note, face.ports, pal);
+        studio::dim_line(ui, pos2(col.min.x + NAME_IN, y), col.width() - NAME_IN, note, face.ports, pal);
         y += LINE_H;
     }
 
@@ -849,7 +811,8 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
     group_label(ui, col, y, &view.groups[2], pal);
     y += LABEL_H + m.label_gap;
     let row = Rect::from_min_size(pos2(col.min.x, y), vec2(col.width(), m.check));
-    if erase_line(ui, id.with("erase"), row, view.erase, view.erase_focus, pal) && live {
+    let (label, detail) = (t!("dev.adv_erase").to_string(), format!(" — {}", t!("dev.adv_erase_desc")));
+    if studio::check_line_at(ui, id.with("erase"), row, view.erase, &label, &detail, view.erase_focus, pal).clicked() && live {
         acts.push(Act::SheetErase);
     }
     stops[3] = Some(row);
@@ -858,9 +821,9 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
     // The help: a rule, and its words about the group with the keyboard.
     if shape.help_lines > 0 {
         y += m.gap;
-        ui.painter().line_segment([pos2(col.min.x, y + 0.5), pos2(col.max.x, y + 0.5)], Stroke::new(1.0, pal.edge));
+        studio::rule(ui, col.min.x, col.max.x, y, pal);
         let at = pos2(col.min.x, y + 1.0 + m.help_gap);
-        Para::new(&view.help, body(13.0), pal.dim).line(LINE_H / 13.0).rows(2).paint(ui, at, col.width());
+        Para::new(&view.help, body(13.0), pal.dim).spaced(LINE_H).rows(2).paint(ui, at, col.width());
         y += shape.help(m);
     }
 
@@ -884,8 +847,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
     if let Some(on_apply) = view.buttons_focus
         && (view.can_apply || !on_apply)
     {
-        let rect = rects[usize::from(on_apply)].expand(RING_OUT);
-        ui.painter().rect_stroke(rect, studio::square(), Stroke::new(1.0, pal.accent), StrokeKind::Inside);
+        studio::button_ring(ui, rects[usize::from(on_apply)], pal);
     }
     stops[4] = Some(rects[0].union(rects[1]));
 
@@ -908,46 +870,34 @@ fn group_label(ui: &Ui, col: Rect, y: f32, words: &str, pal: &Pal) {
     studio::small_caps(ui, pos2(col.min.x, y + LABEL_H / 2.0), words, pal.dim, col.width(), Align2::LEFT_CENTER);
 }
 
-/// One dim line from `at`, its row's top left, `w` wide: its figures in the
-/// monospace (`also` among them), cut with an ellipsis.
-fn dim_line(ui: &Ui, at: Pos2, w: f32, words: &str, also: &[&str], pal: &Pal) {
-    let runs = studio::figured(words, also, body(13.0), mono(12.5), pal.dim);
-    studio::runs(ui, pos2(at.x, at.y + LINE_H / 2.0), &runs, w.max(1.0), Align2::LEFT_CENTER);
-}
-
 /// A refusal from `at`, `w` wide: the kit's cross in gold on its first
 /// line, and the words in gold beside it, in two lines at most.
 fn refusal(ui: &Ui, at: Pos2, w: f32, why: &str, pal: &Pal) {
     studio::cross(ui, pos2(at.x + 6.0, at.y + LINE_H / 2.0), pal.gold);
     let words = at + vec2(MARK_IN, 0.0);
-    Para::new(why, body(13.0), pal.gold).line(LINE_H / 13.0).rows(2).paint(ui, words, (w - MARK_IN).max(1.0));
+    Para::new(why, body(13.0), pal.gold).spaced(LINE_H).rows(2).paint(ui, words, (w - MARK_IN).max(1.0));
 }
 
 /// A choice of a group in `row`, the column's width, as the board draws
-/// one: its 14-point mark (a ring and a dot when chosen, in the accent in
-/// the group with the keyboard, else the text colour; the strong edge's
-/// ring when not), its name (semibold when chosen, dim when the source has
-/// it not, a version in the monospace) and after it its detail — its dim
-/// description, a picked path cut at its front with the whole in a
-/// tooltip, or the release control. A row with an act takes the click
-/// across its look, which reaches 8 points past the column, raised under
-/// the pointer; one without takes nothing. Its release control's rect.
+/// one: the kit's round mark (its chosen one in the accent in the group
+/// with the keyboard, else the text colour), its name (semibold when
+/// chosen, dim when the source has it not, a version in the monospace) and
+/// after it its detail — its dim description, a picked path cut at its
+/// front with the whole in a tooltip, or the release control. A row with
+/// an act takes the click across its look, which reaches 8 points past the
+/// column, raised under the pointer, as the kit's choice's; one without
+/// takes nothing. Its release control's rect.
 #[allow(clippy::too_many_arguments)]
 fn radio_row(ui: &Ui, id: Id, row: Rect, radio: &Radio, m: &Measures, live: bool, face: &Face, acts: &mut Vec<Act>) -> Option<Rect> {
     let pal = face.pal;
-    let hit = row.expand2(vec2(REACH, 0.0));
+    let hit = row.expand2(vec2(studio::RADIO_REACH, 0.0));
     let mut response = radio.act.as_ref().map(|_| studio::hand(ui.interact(hit, id, Sense::click())));
     if response.as_ref().is_some_and(|r| r.hovered()) {
         ui.painter().rect_filled(hit, studio::square(), pal.raised);
     }
     let mid = row.center().y;
-    let centre = pos2(row.min.x + 7.0, mid);
     let lit = if radio.focused { pal.accent } else { pal.text };
-    ui.painter().circle_filled(centre, 7.0, pal.ground);
-    ui.painter().circle_stroke(centre, 6.5, Stroke::new(1.0, if radio.on { lit } else { pal.edge_strong }));
-    if radio.on {
-        ui.painter().circle_filled(centre, 3.0, lit);
-    }
+    studio::radio_mark(ui, pos2(row.min.x + 7.0, mid), radio.on, lit, pal);
     let x = row.min.x + NAME_IN;
     let ink = if radio.usable { pal.text } else { pal.dim };
     let font = if radio.on { strong(13.5) } else { body(13.5) };
@@ -970,9 +920,13 @@ fn radio_row(ui: &Ui, id: Id, row: Rect, radio: &Radio, m: &Measures, live: bool
             }
         }
         Detail::Control(words, focused) => {
+            // The kit's closed list, its words a choice's detail's size,
+            // standing in the row 2 points clear of its look.
             let h = (m.row - 4.0).min(CONTROL_H);
-            let at = pos2(from + 2.0, mid);
-            let (rect, clicked) = dropdown(ui, id.with("control"), at, h, words, *focused, (row.max.x - at.x).max(1.0), face);
+            let x = from + 2.0;
+            let w = studio::select_box_width(ui, words, face.ports, CONTROL_SIZE).min((row.max.x - x).max(1.0));
+            let rect = Rect::from_min_size(pos2(x, mid - h / 2.0), vec2(w, h));
+            let clicked = studio::select_button(ui, id.with("control"), rect, words, face.ports, CONTROL_SIZE, *focused, pal).clicked();
             if clicked && live {
                 acts.push(Act::ListOpen);
             }
@@ -989,38 +943,11 @@ fn radio_row(ui: &Ui, id: Id, row: Rect, radio: &Radio, m: &Measures, live: bool
     control
 }
 
-/// The release control, its left middle at `at`, `h` tall: a closed
-/// dropdown as the canvas's Settings board draws one — its words and the
-/// kit's chevron at its right end in a box on the ground's fill inside a
-/// strong hairline, at least [`CONTROL_LEAST`] wide — raised under the
-/// pointer with its words semibold, its words and its edge in the accent
-/// while the keyboard is on it, as the cells light it. Its rect, and
-/// whether a click landed.
-#[allow(clippy::too_many_arguments)]
-fn dropdown(ui: &Ui, id: Id, at: Pos2, h: f32, words: &str, focused: bool, max_w: f32, face: &Face) -> (Rect, bool) {
-    let pal = face.pal;
-    let wide = studio::runs_width(ui, &studio::figured(words, face.ports, strong(13.0), mono(12.5), pal.text));
-    let w = (CONTROL_PAD + wide + CONTROL_PAD + CHEVRON_W + CONTROL_PAD).max(CONTROL_LEAST).min(max_w);
-    let rect = Rect::from_min_size(pos2(at.x, at.y - h / 2.0), vec2(w, h));
-    let response = studio::hand(ui.interact(rect, id, Sense::click()));
-    let hovered = response.hovered();
-    ui.painter().rect_filled(rect, studio::square(), if hovered { pal.raised } else { pal.ground });
-    let edge = if focused { pal.accent } else { pal.edge_strong };
-    ui.painter().rect_stroke(rect, studio::square(), Stroke::new(1.0, edge), StrokeKind::Inside);
-    let ink = if focused { pal.accent } else { pal.text };
-    let font = if focused || hovered { strong(13.0) } else { body(13.0) };
-    let room = (w - 2.0 * CONTROL_PAD - CHEVRON_W - CONTROL_PAD).max(1.0);
-    studio::runs(ui, pos2(rect.min.x + CONTROL_PAD, at.y), &studio::figured(words, face.ports, font, mono(12.5), ink), room, Align2::LEFT_CENTER);
-    let chevron = if focused { pal.accent } else if hovered { pal.text } else { pal.dim };
-    studio::chevron(ui, pos2(rect.max.x - CONTROL_PAD - CHEVRON_W / 2.0, at.y), chevron, false);
-    (rect, response.clicked())
-}
-
 /// The local build's choosers across `row` (the cells' `draw_choosers`):
-/// the system's dialog up, said dim; else each chooser on offer as a text
-/// button, 24 points apart, one that would not fit left out — the
-/// keyboard's one in the accent while the row has it — and, where no dialog
-/// can open here, why, dim after them.
+/// the system's dialog up, said dim; else each chooser on offer as the
+/// kit's text button, 24 points apart, one that would not fit left out —
+/// the keyboard's one in the accent while the row has it — and, where no
+/// dialog can open here, why, dim after them.
 fn choosers(ui: &Ui, id: Id, row: Rect, view: &View, face: &Face, live: bool, acts: &mut Vec<Act>) {
     let pal = face.pal;
     let mid = row.center().y;
@@ -1043,8 +970,9 @@ fn choosers(ui: &Ui, id: Id, row: Rect, view: &View, face: &Face, live: bool, ac
         }
         let at = Chooser::ALL.iter().position(|c| c == chooser).unwrap_or(0);
         let focused = view.chooser_focus == Some(*chooser);
-        let rect = Rect::from_min_size(pos2(x, row.min.y), vec2(w, row.height()));
-        if text_button(ui, id.with("chooser").with(at), rect, &words, focused, face) && live {
+        // A point over, so the words' own width never reads as a cut.
+        let button = studio::text_button_keyed(ui, id.with("chooser").with(at), pos2(x, mid), &words, face.ports, w + 1.0, focused, pal);
+        if button.clicked() && live {
             acts.push(Act::SheetChooser(at));
         }
         x += w + APART;
@@ -1057,68 +985,19 @@ fn choosers(ui: &Ui, id: Id, row: Rect, view: &View, face: &Face, live: bool, ac
     }
 }
 
-/// A button that is only its words in `rect`, as the kit's text button: dim
-/// at rest, the text colour and the semibold under the pointer, with the
-/// hand; and, while the keyboard is on it, in the accent and the semibold,
-/// as the cells light the keyboard's chooser. Whether a click landed.
-fn text_button(ui: &Ui, id: Id, rect: Rect, words: &str, focused: bool, face: &Face) -> bool {
-    let pal = face.pal;
-    let response = studio::hand(ui.interact(rect, id, Sense::click()));
-    let hot = response.hovered();
-    let ink = if hot {
-        pal.text
-    } else if focused {
-        pal.accent
-    } else {
-        pal.dim
-    };
-    let font = if hot || focused { strong(13.5) } else { body(13.5) };
-    let runs = studio::figured(words, face.ports, font, mono(12.5), ink);
-    studio::runs(ui, rect.left_center(), &runs, rect.width() + 1.0, Align2::LEFT_CENTER);
-    response.clicked()
-}
-
-/// The erase box's line in `row`, as the kit's check line draws one: the
-/// box at the column's edge on the ground's fill (the ok green's edge and
-/// the kit's check when ticked, its edge lifted under the pointer), the
-/// box's words and its dim detail after them, the box and its words the
-/// click; while the keyboard is on it, the keyboard's look reaching 6
-/// points past them, the words semibold. Whether a click landed.
-fn erase_line(ui: &Ui, id: Id, row: Rect, on: bool, focused: bool, pal: &Pal) -> bool {
-    let (label, detail) = (t!("dev.adv_erase").to_string(), format!(" — {}", t!("dev.adv_erase_desc")));
-    let font = if focused { strong(14.0) } else { body(14.0) };
-    let words = studio::width_of(ui, &label, font.clone()) + studio::width_of(ui, &detail, body(14.0));
-    let hit = Rect::from_min_size(row.min, vec2((studio::BOX + 10.0 + words).min(row.width()), row.height()));
-    if focused {
-        let look = hit.expand2(vec2(6.0, 0.0));
-        ui.painter().rect_filled(look, studio::square(), pal.raised);
-        studio::ring(ui, look, pal);
-    }
-    let response = studio::hand(ui.interact(hit, id, Sense::click()));
-    let mark = Rect::from_min_size(pos2(row.min.x, row.center().y - studio::BOX / 2.0), vec2(studio::BOX, studio::BOX));
-    studio::tick_box(ui, mark, on, response.hovered(), pal.ground, pal);
-    let x = mark.max.x + 10.0;
-    let drawn = studio::text(ui, pos2(x, row.center().y), &label, font, pal.text, (row.max.x - x).max(1.0), Align2::LEFT_CENTER);
-    if drawn.max.x < row.max.x {
-        studio::text(ui, pos2(drawn.max.x, row.center().y), &detail, body(14.0), pal.dim, row.max.x - drawn.max.x, Align2::LEFT_CENTER);
-    }
-    response.clicked()
-}
-
 // ── The release list ─────────────────────────────────────────────────────
 
 /// The release list hanging from `anchor`, its control, over the sheet's
-/// lower rows (the cells' `draw_list`): a framed list on the panel's fill
-/// in the accent's hairline with the canvas's shadow, as the Settings board
-/// draws one, its entries 28 points tall — the release a release row is
-/// for, its date and its builds in columns as wide as every release's, the
-/// picked one's LED before it; the asking line, the failure, the switch,
-/// what is on this computer and Try again — the keyboard's cursor lit, an
-/// entry raised under the pointer. Its column's words stand under the
-/// control's; it is as wide as its widest entry, no wider than the column,
-/// and keeps inside it; as tall as its entries, no lower than the body's
-/// view, its cursor kept in sight. With not one entry of room it is not
-/// drawn and still holds the keys.
+/// lower rows (the cells' `draw_list`): the kit's list that hangs
+/// (`studio::hung_list`), as the Settings board draws one, its entries —
+/// the release a release row is for, its date and its builds in columns as
+/// wide as every release's, the picked one's LED before it; the asking
+/// line, the failure, the switch, what is on this computer and Try again —
+/// the keyboard's cursor lit, an entry raised under the pointer. Its
+/// column's words stand under the control's; it is as wide as its widest
+/// entry, no wider than the column, and keeps inside it; as tall as its
+/// entries, no lower than the body's view, its cursor kept in sight. With
+/// not one entry of room it is not drawn and still holds the keys.
 ///
 /// A click on an entry that picks asks for [`Act::ListPick`]; one anywhere
 /// else in the page's area, the sheet's controls under it, its close and
@@ -1144,59 +1023,45 @@ fn release_list(ui: &Ui, id: Id, list: &List, anchor: Rect, col: Rect, face: &Fa
     let natural = |row: &ListRow| -> f32 {
         let lead = if row.said.in_column() { LEAD_W } else { 0.0 };
         let said = match &row.said {
-            Said::Asking(words) => 68.0 + 10.0 + studio::width_of(ui, words, body(13.0)),
+            Said::Asking(words) => studio::searching_width(ui, words),
             Said::Failed(why) => MARK_IN + studio::width_of(ui, why, body(13.5)),
             Said::Release { words, .. } => tag_w + date_w + words_w(words),
             Said::Words { words, .. } => words_w(words),
         };
-        2.0 * ENTRY_PAD + lead + said
+        lead + said
     };
     let widest = list.rows.iter().map(natural).fold(0.0, f32::max);
-    let w = (widest + 4.0).min(col.width());
+    let w = studio::hung_width(widest).min(col.width());
     // Its column's words under the control's, as the cells hang theirs and
     // the Settings board lines its entries up with its box's words: the
-    // frame's hairline and padding, an entry's padding and the lead's room
-    // stand left of them.
-    let left = (anchor.min.x + CONTROL_PAD - 2.0 - ENTRY_PAD - LEAD_W).min(col.max.x - w).max(col.min.x);
+    // lead's room stands left of them.
+    let left = (studio::hung_left(anchor.min.x) - LEAD_W).min(col.max.x - w).max(col.min.x);
     let top = anchor.max.y + 2.0;
     let bottom = view.max.y.min(face.full.max.y);
-    let fits = (((bottom - top - 4.0) / ENTRY_H).floor().max(0.0) as usize).min(list.rows.len());
+    let fits = studio::hung_fits(top, bottom).min(list.rows.len());
     if fits == 0 {
         return;
     }
-    let at = list.rows.iter().position(|r| r.pick == Some(list.cursor)).unwrap_or(0);
-    let start = (at + 1).saturating_sub(fits).min(list.rows.len() - fits);
-    let frame = Rect::from_min_size(pos2(left, top), vec2(w, fits as f32 * ENTRY_H + 4.0));
-    let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
-    ui.painter().add(shadow.as_shape(frame, studio::square()));
-    ui.painter().rect_filled(frame, studio::square(), pal.panel);
-    ui.painter().rect_stroke(frame, studio::square(), Stroke::new(1.0, pal.accent), StrokeKind::Inside);
-    for (k, row) in list.rows.iter().enumerate().skip(start).take(fits) {
-        let rect = Rect::from_min_size(pos2(frame.min.x + 2.0, frame.min.y + 2.0 + (k - start) as f32 * ENTRY_H), vec2(w - 4.0, ENTRY_H));
-        let response = row.pick.map(|pick| studio::hand(ui.interact(rect, id.with("entry").with(pick), Sense::click())));
-        let selected = row.pick.is_some() && row.pick == Some(list.cursor);
-        if selected {
-            ui.painter().rect_filled(rect, CornerRadius::same(2), pal.accent);
-        } else if response.as_ref().is_some_and(|r| r.hovered()) {
-            ui.painter().rect_filled(rect, CornerRadius::same(2), pal.raised);
-        }
-        entry(ui, rect, row, selected, tag_w, date_w, face);
-        if let (Some(pick), Some(response)) = (row.pick, response)
-            && response.clicked()
-        {
-            acts.push(Act::ListPick(pick));
-        }
+    let cursor = list.rows.iter().position(|r| r.pick == Some(list.cursor));
+    let start = (cursor.unwrap_or(0) + 1).saturating_sub(fits).min(list.rows.len() - fits);
+    let frame = studio::hung_frame(pos2(left, top), w, fits);
+    let id_of = |k: usize| list.rows[k].pick.map(|pick| id.with("entry").with(pick));
+    let words = |ui: &Ui, k: usize, room: Rect, on: bool| entry(ui, room, &list.rows[k], on, tag_w, date_w, face);
+    if let Some(k) = studio::hung_list(ui, frame, start, fits, cursor, id_of, pal, words)
+        && let Some(pick) = list.rows[k].pick
+    {
+        acts.push(Act::ListPick(pick));
     }
 }
 
-/// One entry's words in `rect`, the selection's ink on the cursor's.
+/// One entry's words in `room`, the selection's ink on the cursor's.
 #[allow(clippy::too_many_arguments)]
-fn entry(ui: &Ui, rect: Rect, row: &ListRow, selected: bool, tag_w: f32, date_w: f32, face: &Face) {
+fn entry(ui: &Ui, room: Rect, row: &ListRow, selected: bool, tag_w: f32, date_w: f32, face: &Face) {
     let pal = face.pal;
     let ink = |own: Color32| if selected { pal.on_accent } else { own };
-    let mid = rect.center().y;
-    let mut x = rect.min.x + ENTRY_PAD;
-    let end = rect.max.x - ENTRY_PAD;
+    let mid = room.center().y;
+    let mut x = room.min.x;
+    let end = room.max.x;
     if row.said.in_column() {
         if row.picked {
             studio::led(ui, pos2(x + 3.0, studio::led_mid(ui, mid, &body(13.5), false)), ink(pal.accent));
@@ -1206,9 +1071,7 @@ fn entry(ui: &Ui, rect: Rect, row: &ListRow, selected: bool, tag_w: f32, date_w:
     let room = |x: f32| (end - x).max(1.0);
     match &row.said {
         Said::Asking(words) => {
-            let bar = studio::meter(ui, pos2(x, mid), 10, 0, vec2(5.0, 10.0), 2.0, pal.accent, pal);
-            let from = bar.max.x + 10.0;
-            studio::text(ui, pos2(from, mid), words, body(13.0), pal.accent, room(from), Align2::LEFT_CENTER);
+            studio::searching_at(ui, pos2(x, mid), words, room(x), pal);
         }
         Said::Failed(why) => {
             studio::cross(ui, pos2(x + 6.0, mid), pal.gold);
@@ -1265,6 +1128,13 @@ mod tests {
     const BOARD: Vec2 = vec2(1440.0, 824.0);
     /// The foot's one row: the kit's form button.
     const FORM_H: f32 = studio::FORM_BUTTON_H;
+    /// The kit's modal: its padding, its title's row and the room under
+    /// it; a choice's look past the column; the closed list's least width.
+    const MODAL_PAD: f32 = 24.0;
+    const TITLE_H: f32 = 20.0;
+    const MODAL_GAP: f32 = 20.0;
+    const REACH: f32 = studio::RADIO_REACH;
+    const CONTROL_LEAST: f32 = studio::SELECT_LEAST;
 
     /// A local build's folder, and a file that is not one, of the
     /// platform's own: the page shortens a path at its last separator.

@@ -17,53 +17,51 @@
 //! failure's log, the format's scan in the SD card row. [`Paint`] is the
 //! grammar, for a card's view too (card.rs).
 
-use egui::epaint::StrokeKind;
-use egui::{Align2, Color32, Id, Rect, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Align2, Color32, Id, Rect, Ui, UiBuilder, pos2, vec2};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use super::super::cells::{self, Row};
 use super::super::*;
 use super::{Drawn, Face, tone};
-use crate::gui::window::studio::{self, Lead, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
+use crate::gui::window::studio::{self, HEAD_H, Lead, Pal, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
 
 /// The cells' line, too wide to wrap in: the rows come a sentence each, and
-/// the value column wraps them by words in points.
-const WIDE: u16 = 4000;
+/// the value column wraps them by words in points. The measures from here
+/// on are a card's view's too (card.rs).
+pub(super) const WIDE: u16 = 4000;
 /// The label column: the boards' 140 points, less on a narrow card.
 const LABEL_W: f32 = 140.0;
-/// The head's row: the name's 16 points on 22.
-const HEAD_H: f32 = 22.0;
 /// A value's lines, their words' size and their row: a block's first line
 /// (a verdict) 14 on 20, a plain one (the figures under a meter) 13.5 on
 /// 20, an explanation's dim one 13 on 18; each 4 points under the last, 6
 /// under a meter.
-const FIRST: (f32, f32) = (14.0, 20.0);
-const PLAIN: (f32, f32) = (13.5, 20.0);
-const DIM: (f32, f32) = (13.0, 18.0);
-const LINE_GAP: f32 = 4.0;
-const METER_GAP: f32 = 6.0;
+pub(super) const FIRST: (f32, f32) = (14.0, 20.0);
+pub(super) const PLAIN: (f32, f32) = (13.5, 20.0);
+pub(super) const DIM: (f32, f32) = (13.0, 18.0);
+pub(super) const LINE_GAP: f32 = 4.0;
+pub(super) const METER_GAP: f32 = 6.0;
 /// A line led by the cells' scan (asking, reading, counting, formatting):
-/// the kit's searching shape on the row's 20 points, its words 13 and 10
-/// points after the segments, and after the share where there is one.
-const SCAN: (f32, f32) = (13.0, 20.0);
-const SCAN_GAP: f32 = 10.0;
+/// the kit's scan on the row's 20 points (`studio::scan_lead`), its words
+/// 13, 10 points after the segments, and after the share where there is
+/// one.
+pub(super) const SCAN: (f32, f32) = (13.0, 20.0);
 /// A meter's row, and its segments' height in it.
-const METER_ROW: f32 = 20.0;
-const METER_H: f32 = 10.0;
+pub(super) const METER_ROW: f32 = 20.0;
+pub(super) const METER_H: f32 = 10.0;
 /// A Details fact's row, a log line's, and the log's clock column (its
 /// `mm:ss` and two spaces in the monospace).
-const FACT_H: f32 = 20.0;
+pub(super) const FACT_H: f32 = 20.0;
 const LOG_ROW: f32 = 18.0;
 const CLOCK_W: f32 = 53.0;
 /// Text buttons in a row, the boards' 24 points apart, and a note after
 /// its button.
-const APART: f32 = 24.0;
+pub(super) const APART: f32 = 24.0;
 /// Words at a row's right come no nearer the words at its left than this,
 /// or are dropped whole.
-const CLEAR: f32 = 16.0;
+pub(super) const CLEAR: f32 = 16.0;
 /// The figures' one size in the card.
-const FIGURE: f32 = 12.5;
+pub(super) const FIGURE: f32 = 12.5;
 
 /// The card's grid in points: its content's left and width, and the label
 /// column's width.
@@ -81,16 +79,32 @@ impl Grid {
         Grid { x: room.min.x + face.space.pad_x, w, label_w: LABEL_W.min(w * 0.3) }
     }
 
-    fn value_x(&self) -> f32 {
+    pub(super) fn value_x(&self) -> f32 {
         self.x + self.label_w
     }
 
-    fn value_w(&self) -> f32 {
+    pub(super) fn value_w(&self) -> f32 {
         (self.w - self.label_w).max(1.0)
     }
 
-    fn right(&self) -> f32 {
+    pub(super) fn right(&self) -> f32 {
         self.x + self.w
+    }
+
+    /// A block's label in the label column on the line whose middle is
+    /// `mid`: the kit's small capitals, dim, cut 8 points short of the
+    /// values. A card's view labels its rows and its facts so too (card.rs).
+    pub(super) fn label(&self, ui: &Ui, label: &str, mid: f32, pal: &Pal) {
+        let room = (self.label_w - 8.0).max(1.0);
+        studio::small_caps(ui, pos2(self.x, mid), label, pal.dim, room, Align2::LEFT_CENTER);
+    }
+
+    /// The cells' █░ bar on a meter's row from `top`, as the kit's LED row
+    /// across the value column, lit for `permille` in `lit` as the cells
+    /// fill it.
+    pub(super) fn bar(&self, ui: &Ui, top: f32, permille: u32, lit: Color32, pal: &Pal) {
+        let track = Rect::from_min_size(pos2(self.value_x(), top + (METER_ROW - METER_H) / 2.0), vec2(self.value_w(), METER_H));
+        studio::led_fill(ui, track, permille, lit, pal.unlit);
     }
 }
 
@@ -106,9 +120,9 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, roo
     let grid = Grid::of(room, face);
     let card = clipped(ui, room, "mp3-board");
     let mut y = room.min.y + s.pad_y;
-    y = head(&card, face, grid, y, &cells::board_name(board), &cells::head_right(page, board));
+    y = studio::card_head(&card, pos2(grid.x, y), grid.w, &cells::board_name(board), &cells::head_right(page, board), face.pal);
     if let Some(words) = cells::identity(page, board) {
-        y = dim_line(&card, face, grid, y + LINE_GAP, &words);
+        y = studio::dim_line(&card, pos2(grid.x, y + LINE_GAP), grid.w, &words, face.ports, face.pal);
     }
     let actions = cells::actions_row(page, board);
     let actions_h = match &actions {
@@ -142,7 +156,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, roo
         paint.rows(page, board.port(), &cells::details_rows(page, board));
     }
     let bottom = (paint.y + s.pad_y).min(room.max.y);
-    hairline(&card, face, Rect::from_min_max(room.min, pos2(room.max.x, bottom)));
+    studio::hairline(&card, Rect::from_min_max(room.min, pos2(room.max.x, bottom)), face.pal);
     Drawn { acts, caret: None, rest }
 }
 
@@ -159,22 +173,22 @@ pub(super) fn empty(ui: &mut Ui, page: &mut Page, face: &Face, room: Rect) -> Dr
     let floor = if face.live { room.max.y - s.pad_y } else { f32::INFINITY };
     let mut y = room.min.y + s.pad_y;
     if let Some(e) = &page.list_failed {
-        let drawn = Para::new(&e.text(), strong(16.0), pal.gold).line(HEAD_H / 16.0).floor(floor).paint(&card, pos2(grid.x, y), grid.w);
+        let drawn = Para::new(&e.text(), strong(16.0), pal.gold).spaced(HEAD_H).floor(floor).paint(&card, pos2(grid.x, y), grid.w);
         y += drawn.height();
         if let Some(hint) = e.hint() {
-            let drawn = Para::new(&hint, body(DIM.0), pal.dim).line(DIM.1 / DIM.0).floor(floor).paint(&card, pos2(grid.x, y + LINE_GAP), grid.w);
+            let drawn = Para::new(&hint, body(DIM.0), pal.dim).spaced(DIM.1).floor(floor).paint(&card, pos2(grid.x, y + LINE_GAP), grid.w);
             y += LINE_GAP + drawn.height();
         }
     } else if !page.watched {
-        searching(&card, face, grid.x, y + studio::NOTE_H / 2.0, grid.w, &Phase::Scanning.text());
+        studio::searching_at(&card, pos2(grid.x, y + studio::NOTE_H / 2.0), &Phase::Scanning.text(), grid.w, pal);
         y += studio::NOTE_H;
     } else {
         studio::text(&card, pos2(grid.x, y + HEAD_H / 2.0), &t!("dev.none_title"), strong(16.0), pal.text, grid.w, Align2::LEFT_CENTER);
         y += HEAD_H + s.gap;
         let words = t!("dev.none_body");
-        let drawn = Para::new(&words, body(FIRST.0), pal.text).line(FIRST.1 / FIRST.0).floor(floor).paint(&card, pos2(grid.x, y), grid.w);
+        let drawn = Para::new(&words, body(FIRST.0), pal.text).spaced(FIRST.1).floor(floor).paint(&card, pos2(grid.x, y), grid.w);
         y += drawn.height() + METER_GAP;
-        searching(&card, face, grid.x, y + studio::NOTE_H / 2.0, grid.w, &t!("dev.none_watching"));
+        studio::searching_at(&card, pos2(grid.x, y + studio::NOTE_H / 2.0), &t!("dev.none_watching"), grid.w, pal);
         y += studio::NOTE_H;
     }
     y += s.gap;
@@ -204,7 +218,7 @@ pub(super) fn empty(ui: &mut Ui, page: &mut Page, face: &Face, room: Rect) -> Dr
             if k > 0 {
                 y += 6.0;
             }
-            let para = Para::new(hint, body(DIM.0), pal.dim).line(DIM.1 / DIM.0).lead(g.bullet).floor(floor);
+            let para = Para::new(hint, body(DIM.0), pal.dim).spaced(DIM.1).lead(g.bullet).floor(floor);
             y += para.paint(&card, pos2(grid.x, y), grid.w).height();
         }
         y += s.gap;
@@ -217,10 +231,10 @@ pub(super) fn empty(ui: &mut Ui, page: &mut Page, face: &Face, room: Rect) -> Dr
                 (format!(" {}", t!("dev.ports_not_bridge")), body(DIM.0), pal.dim),
             ]
         };
-        y += Para::runs(&seen).line(DIM.1 / DIM.0).floor(floor).paint(&card, pos2(grid.x, y), grid.w).height();
+        y += Para::runs(&seen).spaced(DIM.1).floor(floor).paint(&card, pos2(grid.x, y), grid.w).height();
     }
     let bottom = (y + s.pad_y).min(room.max.y);
-    hairline(&card, face, Rect::from_min_max(room.min, pos2(room.max.x, bottom)));
+    studio::hairline(&card, Rect::from_min_max(room.min, pos2(room.max.x, bottom)), face.pal);
     Drawn { acts, caret: None, rest }
 }
 
@@ -232,72 +246,21 @@ pub(super) fn clipped(ui: &mut Ui, room: Rect, salt: &str) -> Ui {
     child
 }
 
-/// A card's frame: a 1-point hairline in the edge colour round `rect`,
-/// never filled and never changing (the boards' card).
-pub(super) fn hairline(ui: &Ui, face: &Face, rect: Rect) {
-    ui.painter().rect_stroke(rect, studio::square(), Stroke::new(1.0, face.pal.edge), StrokeKind::Inside);
-}
-
-/// The head's row from `y`: `name` in the 16-point semibold at the left
-/// and, dim in the monospace at the right on the name's baseline, `right`
-/// (the port, or with several boards the serial), dropped whole where it
-/// would come within 16 points of the name. Returns where the next row
-/// starts.
-pub(super) fn head(ui: &Ui, face: &Face, grid: Grid, y: f32, name: &str, right: &str) -> f32 {
-    let pal = face.pal;
-    let mid = y + HEAD_H / 2.0;
-    let right_w = studio::width_of(ui, right, mono(FIGURE));
-    let name_w = studio::width_of(ui, name, strong(16.0));
-    let keep = !right.is_empty() && name_w + CLEAR + right_w <= grid.w;
-    let room = if keep { grid.w - right_w - CLEAR } else { grid.w };
-    studio::text(ui, pos2(grid.x, mid), name, strong(16.0), pal.text, room, Align2::LEFT_CENTER);
-    if keep {
-        // A line centred on a point stands on the UI face's baseline at its
-        // own size there, the smaller the higher: the figure is centred as
-        // far under the name's middle as stands it on the name's.
-        let under = |size: f32| {
-            let m = studio::metrics(ui, &body(size));
-            m.baseline - m.row / 2.0
-        };
-        let at = pos2(grid.right(), mid + under(16.0) - under(FIGURE));
-        studio::text(ui, at, right, mono(FIGURE), pal.dim, right_w + 1.0, Align2::RIGHT_CENTER);
-    }
-    y + HEAD_H
-}
-
-/// One dim line across the content from `y` (the identity line under the
-/// head), its figures in the monospace, cut with an ellipsis: it never
-/// wraps. Returns where the next row starts.
-pub(super) fn dim_line(ui: &Ui, face: &Face, grid: Grid, y: f32, words: &str) -> f32 {
-    let runs = studio::figured(words, face.ports, body(DIM.0), mono(FIGURE), face.pal.dim);
-    studio::runs(ui, pos2(grid.x, y + DIM.1 / 2.0), &runs, grid.w, Align2::LEFT_CENTER);
-    y + DIM.1
-}
-
-/// The cells' scan with no share, as the kit's searching shape on the line
-/// whose middle is `mid`: ten unlit segments and `words` in the accent 10
-/// points after them.
-fn searching(ui: &Ui, face: &Face, x: f32, mid: f32, w: f32, words: &str) {
-    let pal = face.pal;
-    let bar = studio::meter(ui, pos2(x, mid), 10, 0, vec2(5.0, 10.0), 2.0, pal.accent, pal);
-    let from = bar.max.x + 10.0;
-    studio::text(ui, pos2(from, mid), words, body(13.0), pal.accent, (x + w - from).max(1.0), Align2::LEFT_CENTER);
-}
-
 // ── The cells' rows in points ─────────────────────────────────────────────
 
-/// A cells' line as the canvas sets it: the glyph the cells lead it with
-/// (a verdict's ✓ ! ✗ ?) as the kit's LED in its colour, their scan widget
-/// at its head (its lit cells and the share after them) as the kit's
+/// A cells' line as the canvas sets it, the board card's and a card's view's
+/// alike (card.rs reads its rows through it): the glyph the cells lead it
+/// with (a verdict's ✓ ! ✗ ?) as the kit's LED in its colour, their scan
+/// widget at its head (its lit cells and the share after them) as the kit's
 /// meter, and the rest, each piece in its colour, the bold ones semibold.
-struct Lined {
-    lamp: Option<Color32>,
-    meter: Option<(usize, Option<String>)>,
-    spans: Vec<(String, Color32, bool)>,
+pub(super) struct Lined {
+    pub(super) lamp: Option<Color32>,
+    pub(super) meter: Option<(usize, Option<String>)>,
+    pub(super) spans: Vec<(String, Color32, bool)>,
 }
 
 impl Lined {
-    fn of(line: &Line, face: &Face) -> Lined {
+    pub(super) fn of(line: &Line, face: &Face) -> Lined {
         let g = glyphs();
         // The cells' spans with a run of spaces taking its neighbour's look,
         // so a sentence in one look is one piece.
@@ -318,7 +281,7 @@ impl Lined {
             let lit = cells.iter().filter(|c| mark(g.filled, **c)).count();
             drop_chars(&mut spans, 10);
             let head: String = spans.first().map(|(s, _)| s.trim_start().to_string()).unwrap_or_default();
-            let share = head.split_whitespace().next().filter(|w| w.ends_with('%') && w[..w.len() - 1].chars().all(|c| c.is_ascii_digit()));
+            let share = head.split_whitespace().next().filter(|w| w.len() > 1 && w.ends_with('%') && w[..w.len() - 1].chars().all(|c| c.is_ascii_digit()));
             let share = share.map(str::to_string);
             if let (Some(share), Some((first, _))) = (&share, spans.first_mut()) {
                 *first = first.trim_start()[share.len()..].to_string();
@@ -347,7 +310,7 @@ impl Lined {
     }
 
     /// Every word is dim: an explanation's line.
-    fn dim(&self, face: &Face) -> bool {
+    pub(super) fn dim(&self, face: &Face) -> bool {
         self.lamp.is_none() && self.meter.is_none() && self.spans.iter().all(|(_, c, _)| *c == face.pal.dim)
     }
 
@@ -376,35 +339,30 @@ fn drop_chars(spans: &mut Vec<(String, Style)>, mut n: usize) {
     }
 }
 
-/// Where a line centred on its middle stands that middle to share the
-/// baseline of a paragraph's first line drawn from `top` in the UI face at
-/// `size`: a paragraph stands its baseline its words' ascent under its top
-/// (`Para`), a centred line on the UI face's baseline at its middle
-/// (`studio::runs`), so the words at a row's right stand on its left's.
-fn on_baseline(ui: &Ui, top: f32, size: f32) -> f32 {
-    let m = studio::metrics(ui, &body(size));
-    top + m.ascent - m.baseline + m.row / 2.0
-}
-
-/// The leading that sets `runs` a line `line_h` points apart: the kit's
-/// prose takes its leading as a share of its first run's size, which is a
-/// figure's smaller one where a line starts with a figure (the card's
-/// "21.4 of 59.6 GB used"), so its lines would stand closer than its
-/// words'.
-fn leading(runs: &[Run], line_h: f32) -> f32 {
-    let first = runs.first().map_or(line_h, |(_, font, _)| font.size);
-    line_h / first.max(1.0)
-}
-
 /// The cells' door mark off a link's words, as the kit's lead: their ▸ a
 /// door shut, their ▾ a door open.
-fn lead_of(text: &str) -> (Option<Lead>, &str) {
+pub(super) fn lead_of(text: &str) -> (Option<Lead>, &str) {
     let g = glyphs();
     let after = |glyph: &str| text.strip_prefix(glyph).and_then(|r| r.strip_prefix(' '));
     match (after(g.forward), after(g.open)) {
         (Some(rest), _) => (Some(Lead::Shut), rest),
         (_, Some(rest)) => (Some(Lead::Open), rest),
         _ => (None, text),
+    }
+}
+
+/// The height a row after a log takes as [`Paint`] sets it, for the log
+/// to leave it, and what the cells count of it when a card's rows give way
+/// (card.rs).
+pub(super) fn fixed_h(row: &Row, face: &Face) -> f32 {
+    match row {
+        Row::Blank => face.space.gap,
+        Row::Link { .. } => TEXT_BUTTON_H,
+        Row::Fact { .. } => FACT_H,
+        Row::Actions { primary: Some(_), .. } => TALL_H,
+        Row::Rule => 2.0 * face.space.gap + 1.0,
+        Row::Log => 0.0,
+        _ => PLAIN.1,
     }
 }
 
@@ -474,21 +432,8 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             if self.cut {
                 return;
             }
-            let tail: f32 = rows[i + 1..].iter().map(|r| self.fixed(r)).sum();
+            let tail: f32 = rows[i + 1..].iter().map(|r| fixed_h(r, self.face)).sum();
             self.row(page, port, row, tail);
-        }
-    }
-
-    /// The height a row after the log takes, for the log to leave it.
-    fn fixed(&self, row: &Row) -> f32 {
-        match row {
-            Row::Blank => self.face.space.gap,
-            Row::Link { .. } => TEXT_BUTTON_H,
-            Row::Fact { .. } => FACT_H,
-            Row::Actions { primary: Some(_), .. } => TALL_H,
-            Row::Rule => 2.0 * self.face.space.gap + 1.0,
-            Row::Log => 0.0,
-            _ => PLAIN.1,
         }
     }
 
@@ -512,8 +457,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
     /// `mid`.
     fn label(&self, label: Option<&str>, mid: f32) {
         if let Some(label) = label {
-            let room = (self.grid.label_w - 8.0).max(1.0);
-            studio::small_caps(self.ui, pos2(self.grid.x, mid), label, self.face.pal.dim, room, Align2::LEFT_CENTER);
+            self.grid.label(self.ui, label, mid, self.face.pal);
         }
     }
 
@@ -549,27 +493,22 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             x += studio::STATE_INDENT;
         }
         if let Some((lit, share)) = &lined.meter {
-            let bar = studio::meter(self.ui, pos2(x, mid), 10, *lit, vec2(5.0, 10.0), 2.0, face.pal.ok, face.pal);
-            x = bar.max.x + SCAN_GAP;
-            if let Some(share) = share {
-                // On its words' baseline, as the cells' one line sets the
-                // two: the words are a paragraph from the row's top, so a
-                // share centred on the row's middle would stand under them.
-                let on = on_baseline(self.ui, top, size);
-                let drawn = studio::text(self.ui, pos2(x, on), share, mono(FIGURE), face.pal.dim, (end - x).max(1.0), Align2::LEFT_CENTER);
-                x = drawn.max.x + SCAN_GAP;
-            }
+            // Its share on its words' baseline, as the cells' one line sets
+            // the two: the words are a paragraph from the row's top, so a
+            // share centred on the row's middle would stand under them.
+            let on = studio::para_mid(self.ui, top, size);
+            x = studio::scan_lead(self.ui, pos2(x, mid), *lit, share.as_deref(), on, end, face.pal);
         }
         let runs = lined.runs(size, face);
         let height = if runs.is_empty() {
             line_h
         } else {
-            let para = Para::runs(&runs).line(leading(&runs, line_h)).floor(self.floor);
+            let para = Para::runs(&runs).spaced(line_h).floor(self.floor);
             para.paint(self.ui, pos2(x, top), (end - x).max(1.0)).height().max(line_h)
         };
         if let Some(right) = right {
             let left_w = x - from + studio::runs_width(self.ui, &runs);
-            let mid = on_baseline(self.ui, top, size);
+            let mid = studio::para_mid(self.ui, top, size);
             self.right_words(right, mid, from, end, left_w, height <= line_h + 0.5);
         }
         self.end(top + height);
@@ -611,8 +550,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         let first = self.last.is_none() || label.is_some();
         let Some(top) = self.room(if first { 0.0 } else { LINE_GAP }, METER_ROW) else { return };
         self.label(label, top + METER_ROW / 2.0);
-        let track = Rect::from_min_size(pos2(self.grid.value_x(), top + (METER_ROW - METER_H) / 2.0), vec2(self.grid.value_w(), METER_H));
-        studio::led_fill(self.ui, track, permille, lit, self.face.pal.unlit);
+        self.grid.bar(self.ui, top, permille, lit, self.face.pal);
         self.y = top + METER_ROW;
         self.last = Some(Kind::Meter);
     }
@@ -664,7 +602,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             line_h
         } else {
             let room = if reset { end - x - reset_w - CLEAR } else { end - x };
-            let para = Para::runs(&runs).line(leading(&runs, line_h)).floor(self.floor);
+            let para = Para::runs(&runs).spaced(line_h).floor(self.floor);
             para.paint(self.ui, pos2(x, top), room.max(1.0)).height().max(line_h)
         };
         let beside = runs.is_empty() || x + studio::runs_width(self.ui, &runs) + CLEAR + reset_w <= end;
@@ -674,7 +612,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             return;
         }
         let mid = if beside {
-            on_baseline(self.ui, top, size)
+            studio::para_mid(self.ui, top, size)
         } else {
             let Some(under) = self.room(0.0, TEXT_BUTTON_H) else { return };
             self.y = under + TEXT_BUTTON_H;
@@ -741,8 +679,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
     fn rule(&mut self) {
         let gap = self.face.space.gap;
         let Some(top) = self.room(gap, 1.0) else { return };
-        let (from, to) = (pos2(self.grid.x, top + 0.5), pos2(self.grid.right(), top + 0.5));
-        self.ui.painter().line_segment([from, to], Stroke::new(1.0, self.face.pal.edge));
+        studio::rule(self.ui, self.grid.x, self.grid.right(), top, self.face.pal);
         self.y = top + 1.0 + gap;
         self.last = None;
     }
@@ -802,7 +739,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             studio::text(self.ui, pos2(pane.min.x + CLOCK_W, mid), &entry.text, mono(FIGURE), ink, words_w, Align2::LEFT_CENTER);
         }
         if overflows {
-            thumb(self.ui, face, pane, rows, lines.len(), end - rows);
+            studio::list_thumb(self.ui, pane, rows, lines.len(), end - rows, face.pal);
         }
         self.y = pane.max.y;
         self.last = Some(Kind::Other);
@@ -845,18 +782,6 @@ fn wheel(ui: &Ui, page: &mut Page, rows: usize) {
         }
     }
     ui.ctx().data_mut(|d| d.insert_temp(key, left));
-}
-
-/// The log's thumb at the pane's right: as long as the share shown, where
-/// the view stands (`first` of `len` lines at its top), the kit's thumb at
-/// rest; the wheel moves the view, so it takes nothing itself.
-fn thumb(ui: &Ui, face: &Face, pane: Rect, rows: usize, len: usize, first: usize) {
-    let h = (pane.height() * rows as f32 / len as f32).max(studio::THUMB_MIN).min(pane.height());
-    let travel = pane.height() - h;
-    let top = pane.min.y + travel * first as f32 / (len - rows).max(1) as f32;
-    let rect = Rect::from_min_size(pos2(pane.max.x - studio::THUMB_W, top), vec2(studio::THUMB_W, h));
-    let rest = face.pal.dim.gamma_multiply(studio::THUMB_REST);
-    ui.painter().rect_filled(rect, egui::CornerRadius::same((studio::THUMB_W / 2.0) as u8), rest);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

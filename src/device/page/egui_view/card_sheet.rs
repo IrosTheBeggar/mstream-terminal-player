@@ -27,22 +27,19 @@
 //! brought in again when its field or its list opens. A list hangs only
 //! from a box in that view.
 
-use egui::{
-    Align2, Color32, CornerRadius, FontId, Id, LayerId, Order, Pos2, Rect, Sense, Shadow, Stroke, StrokeKind, Ui, UiBuilder,
-    Vec2, pos2, vec2,
-};
+use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use super::super::card::{CardSheet, SRow, SheetTab, card_name, codec_words, list_entries, server_name};
 use super::super::cells::card::row_help;
 use super::super::*;
-use super::{Drawn, Face};
+use super::{Drawn, Face, close_tip};
 use crate::device::board::gb;
 use crate::device::card::budget::DEFAULT_MB;
 use crate::device::card::engine::Removal;
 use crate::device::card::plan::{Fit, TRACK_CAP};
 use crate::device::card::state::Convert;
 use crate::device::card::worker::{CardView, Next, ServerLink};
-use crate::gui::window::studio::{self, BOX, Dialog, FIELD_H, Pal, Para, Run, SEG_H, Seg, TICK_H, body, mono, strong};
+use crate::gui::window::studio::{self, BOX, Dialog, FIELD_H, Pal, Para, SEG_H, Seg, TICK_H, body, mono, strong};
 
 /// The sheet's window: the canvas's forms'.
 const SHEET_W: f32 = 640.0;
@@ -66,14 +63,12 @@ const LABEL_W: f32 = 140.0;
 const LABEL_CLEAR: f32 = 12.0;
 /// A row's value, the board's 14 points.
 const VALUE: f32 = 14.0;
-/// A closed list's box (From, Into): 30 points tall, 2 clear of the row's
-/// ring, 120 wide at least, its words and its chevron 10 in.
+/// A closed list's box (From, Into), the kit's: 30 points tall, 2 clear of
+/// the row's ring.
 const BOX_H: f32 = 30.0;
-const BOX_LEAST: f32 = 120.0;
-const BOX_PAD: f32 = 10.0;
-const CHEVRON_W: f32 = 12.0;
-/// A choice of a pair: its words 24 in (the kit's radio's) and 24 apart.
-const RADIO_IN: f32 = 24.0;
+/// A choice of a pair: its words where the kit's choice's stand, and 24
+/// apart.
+const RADIO_IN: f32 = studio::RADIO_IN;
 const RADIO_APART: f32 = 24.0;
 /// A tick's words after its box.
 const TICK_IN: f32 = BOX + 10.0;
@@ -87,9 +82,6 @@ const FIT_LINE: f32 = 20.0;
 const HELP_LINE: f32 = 18.0;
 const UNDER_RULE: f32 = 10.0;
 const MORE_GAP: f32 = 4.0;
-/// An entry of the list that hangs, and its words' room at either side.
-const ENTRY_H: f32 = 28.0;
-const ENTRY_PAD: f32 = 10.0;
 /// The reveal's numbers for the Writing tab's rows, apart from Music's, so
 /// a tab switched to brings its first row in as a move would; and for a
 /// row with its field or its list open, apart from the row, so the one
@@ -139,13 +131,9 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
     {
         drawn.acts.push(Act::CardSheetPick(i));
     }
-    if let Some(close) = ctx.read_response(id.with("close")) {
-        // The cells' tooltip on their [X], its key named as their surface
-        // names keys.
-        let tip = t!("path_modal.tip_close").to_string();
-        let tip = if face.key_hints { tip } else { tip.rsplit_once(" — ").map_or(tip.clone(), |(words, _)| words.to_string()) };
-        let _ = close.on_hover_text(tip);
-    }
+    // The cells' tooltip on their [X], its key named as their surface
+    // names keys.
+    close_tip(ui, id, face);
     if shown.closed {
         drawn.acts.push(Act::CardSheetClose);
     }
@@ -341,23 +329,16 @@ fn size_words(bytes: u64) -> String {
     t!("dev.card_size", size = gb(bytes)).to_string()
 }
 
-/// `parts` as prose lines `line` points apart, whatever the face of their
-/// first run.
-fn para(parts: &[Run], line: f32) -> Para {
-    let first = parts.first().map_or(VALUE, |(_, font, _)| font.size);
-    Para::runs(parts).line(line / first)
-}
-
 /// The fit's words: 13.5 points in `tone` on 20-point lines, their
 /// figures in the monospace.
 fn fit_para(words: &str, tone: Color32) -> Para {
-    para(&studio::figured(words, &[], body(13.5), mono(12.5), tone), FIT_LINE)
+    Para::runs(&studio::figured(words, &[], body(13.5), mono(12.5), tone)).spaced(FIT_LINE)
 }
 
 /// The help's words: two dim 13-point lines at most, on 18, an ellipsis
 /// past them, their figures in the monospace.
 fn help_para(words: &str, pal: &Pal) -> Para {
-    para(&studio::figured(words, &[], body(13.0), mono(12.5), pal.dim), HELP_LINE).rows(2)
+    Para::runs(&studio::figured(words, &[], body(13.0), mono(12.5), pal.dim)).spaced(HELP_LINE).rows(2)
 }
 
 /// The sheet's body, laid out top-down in `ui`, the Dialog's: the tab row
@@ -422,7 +403,7 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id) -> Body {
     if let Some((help, h)) = &plan.help {
         ui.add_space(plan.gap);
         let (rect, _) = ui.allocate_exact_size(vec2(w, *h), Sense::hover());
-        ui.painter().hline(rect.x_range(), rect.min.y + 0.5, Stroke::new(1.0, pal.edge));
+        studio::rule(ui, rect.min.x, rect.max.x, rect.min.y, pal);
         help_para(help, pal).paint(ui, pos2(rect.min.x, rect.min.y + 1.0 + UNDER_RULE), w);
     }
     ui.add_space(plan.gap);
@@ -483,8 +464,7 @@ fn row_at(ui: &Ui, v: &View, face: &Face, id: Id, slot: Rect, row: &SRow, lit: b
     let response = face.takes().then(|| studio::hand(ui.interact(look, id, Sense::CLICK)));
     let hovered = response.as_ref().is_some_and(|r| r.hovered());
     if lit {
-        ui.painter().rect_filled(look, studio::square(), pal.raised);
-        studio::ring(ui, look, pal);
+        studio::cursor_look(ui, look, pal);
     } else if hovered {
         ui.painter().rect_filled(look, studio::square(), pal.raised);
     }
@@ -613,26 +593,22 @@ fn tick_line(ui: &Ui, slot: Rect, on: bool, hovered: bool, name: &str, right: Op
 }
 
 /// A closed list's box from `x` on the row's middle `mid` (From's server,
-/// Into's codec): 30 points tall on the ground's fill in a strong-edged
-/// hairline, `words` 10 in and the kit's chevron dim at its end, as wide as
-/// they are in the semibold the keyboard's row wears and 120 at least, no
-/// further than `end`. Returns where.
+/// Into's codec): the kit's (`studio::select_box`), [`BOX_H`] tall, its
+/// words in the row's 14 points, in the accent's semibold while the row is
+/// `lit`, as wide as they are in that semibold and the kit's least at
+/// least, no further than `end`. The row takes the click and the pointer.
+/// Returns where.
 fn closed_box(ui: &Ui, x: f32, mid: f32, end: f32, words: &str, lit: bool, pal: &Pal) -> Rect {
-    let (font, ink) = if lit { (strong(VALUE), pal.accent) } else { (body(VALUE), pal.text) };
-    let want = 3.0 * BOX_PAD + studio::width_of(ui, words, strong(VALUE)) + CHEVRON_W;
-    let w = want.max(BOX_LEAST).min(end - x).max(1.0);
+    let w = studio::select_box_width(ui, words, &[], VALUE).min(end - x).max(1.0);
     let rect = Rect::from_min_size(pos2(x, mid - BOX_H / 2.0), vec2(w, BOX_H));
-    ui.painter().rect_filled(rect, studio::square(), pal.ground);
-    ui.painter().rect_stroke(rect, studio::square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
-    let room = (w - 3.0 * BOX_PAD - CHEVRON_W).max(1.0);
-    studio::text(ui, pos2(rect.min.x + BOX_PAD, mid), words, font, ink, room, Align2::LEFT_CENTER);
-    studio::chevron(ui, pos2(rect.max.x - BOX_PAD - CHEVRON_W / 2.0, mid), pal.dim, false);
+    studio::select_box(ui, rect, words, &[], VALUE, lit, false, pal);
     rect
 }
 
-/// A pair of choices on one line from `x` (Convert, Removals, For), each a
-/// round mark — the accent's ring and dot for the one chosen, the strong
-/// edge's ring for the other — and its words in the row's face and ink,
+/// A pair of choices on one line from `x` (Convert, Removals, For), each
+/// the kit's round mark — its chosen one in the row's ink, the accent on
+/// the keyboard's row and the text colour on any other, as the cells set
+/// the whole row in its style — and its words in the row's face and ink,
 /// the second 24 points after the first, cut at `end`. The row takes the
 /// click, as the cells' does: either choice turns it to the other.
 fn radios(ui: &Ui, x: f32, mid: f32, end: f32, choices: &[(String, bool)], (font, ink): (&FontId, Color32), pal: &Pal) {
@@ -641,19 +617,9 @@ fn radios(ui: &Ui, x: f32, mid: f32, end: f32, choices: &[(String, bool)], (font
         if x + RADIO_IN >= end {
             break;
         }
-        radio_mark(ui, pos2(x + 7.0, mid), *on, pal);
+        studio::radio_mark(ui, pos2(x + 7.0, mid), *on, ink, pal);
         let drawn = studio::text(ui, pos2(x + RADIO_IN, mid), words, font.clone(), ink, end - x - RADIO_IN, Align2::LEFT_CENTER);
         x = drawn.max.x + RADIO_APART;
-    }
-}
-
-/// The kit's radio's round mark alone, centred on `at` (a kit candidate:
-/// `studio::radio` draws it only as a whole row of the layout).
-fn radio_mark(ui: &Ui, at: Pos2, on: bool, pal: &Pal) {
-    ui.painter().circle_filled(at, 7.0, pal.ground);
-    ui.painter().circle_stroke(at, 6.5, Stroke::new(1.0, if on { pal.accent } else { pal.edge_strong }));
-    if on {
-        ui.painter().circle_filled(at, 3.0, pal.accent);
     }
 }
 
@@ -690,10 +656,7 @@ fn fit_block(ui: &mut Ui, fit: &Fitted, h: f32, pal: &Pal) {
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     match fit {
         Fitted::Asking(words) => {
-            let mid = rect.min.y + FIT_LINE / 2.0;
-            let bar = studio::meter(ui, pos2(rect.min.x, mid), 10, 0, vec2(5.0, 10.0), 2.0, pal.accent, pal);
-            let x = bar.max.x + 10.0;
-            studio::text(ui, pos2(x, mid), words, body(13.0), pal.accent, (rect.max.x - x).max(1.0), Align2::LEFT_CENTER);
+            studio::searching_at(ui, pos2(rect.min.x, rect.min.y + FIT_LINE / 2.0), words, w, pal);
         }
         Fitted::Said { lamp, tone, words, more } => {
             let at = pos2(rect.min.x + studio::STATE_INDENT, rect.min.y);
@@ -724,7 +687,7 @@ fn foot(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan, on_buttons: boo
     if on_buttons {
         let (rects, h) = studio::foot_rects(ui, &[], &end, w);
         if let Some(rect) = rects.get(usize::from(v.sheet.on_apply)) {
-            studio::ring(ui, rect.translate(top.to_vec2()).expand(3.0), pal);
+            studio::button_ring(ui, rect.translate(top.to_vec2()), pal);
         }
         studio::reveal(ui, id, at, Rect::from_min_size(top, vec2(w, h)));
     }
@@ -733,68 +696,38 @@ fn foot(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan, on_buttons: boo
 }
 
 /// The list that hangs from a closed list's box (From's servers, Into's
-/// codecs), over the sheet's lower rows and above the Dialog: from
-/// `anchor`'s left at its foot (the row's), as wide as its widest entry and
-/// the box at least, a 28-point entry each in the accent's hairline on the
-/// panel's fill, the keyboard's `cursor` lit in the accent with its words
-/// on it, another raised under the pointer; whole entries only down to the
-/// page's area's foot, where the cells cut it, and none at all, frame and
-/// all, with nothing to list. The entry a click landed on: the cells'
-/// `CardSheetPick`.
-///
-/// A kit candidate: the kit has no list that hangs inside a modal (egui's
-/// own closes on a click outside it and takes keys of its own; this one is
-/// the page's keys' and lets a click on a row beneath it be the row's, as
-/// the cells' does).
+/// codecs): the kit's list that hangs, on a layer of its own over the
+/// Dialog's (`studio::hung_over`), so it hangs over the sheet's lower rows
+/// past the Dialog's body: from `anchor`'s left at its foot (the row's), as
+/// wide as its widest entry and the box at least, the keyboard's `cursor`
+/// lit in the accent with its words on it, another raised under the
+/// pointer, each entry's words in the row's 14 points with their figures in
+/// the monospace; whole entries only down to the page's area's foot, where
+/// the cells cut it, and none at all, frame and all, with nothing to list.
+/// A click on a row beneath it is the row's, as the cells' is. The entry a
+/// click landed on: the cells' `CardSheetPick`.
 fn hang(ui: &Ui, v: &View, face: &Face, parent: Id, anchor: Rect, cursor: usize) -> Option<usize> {
     let entries = list_entries(v.sheet, v.servers);
     let pal = face.pal;
     let over = face.full;
     let top = anchor.max.y;
-    let fit = (((over.max.y - top - 4.0) / ENTRY_H).floor().max(0.0)) as usize;
-    let n = entries.len().min(fit);
+    let n = entries.len().min(studio::hung_fits(top, over.max.y));
     if n == 0 {
         return None;
     }
-    let widest = entries.iter().map(|e| studio::width_of(ui, e, body(VALUE))).fold(0.0, f32::max);
-    let w = (widest + 2.0 * ENTRY_PAD + 4.0).max(anchor.width()).min(over.max.x - anchor.min.x).max(1.0);
-    let rect = Rect::from_min_size(pos2(anchor.min.x, top), vec2(w, n as f32 * ENTRY_H + 4.0));
-    let list_id = parent.with("list");
+    let runs = |entry: &str, ink: Color32| studio::figured(entry, &[], body(VALUE), mono(12.5), ink);
+    let widest = entries.iter().map(|e| studio::runs_width(ui, &runs(e, pal.text))).fold(0.0, f32::max);
+    let w = studio::hung_width(widest).max(anchor.width()).min(over.max.x - anchor.min.x).max(1.0);
+    let frame = studio::hung_frame(pos2(anchor.min.x, top), w, n);
     // Its entries' ids are their list's (From's on Music, Into's on
     // Writing) and their numbers, as the rows' are their tab's.
     let entry_id = parent.with("entry").with(v.sheet.tab == SheetTab::Writing);
-    let ctx = ui.ctx().clone();
-    let shown = egui::Area::new(list_id).order(Order::Foreground).fixed_pos(rect.min).constrain(false).fade_in(false).show(&ctx, |ui| {
-        let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
-        ui.painter().add(shadow.as_shape(rect, studio::square()));
-        ui.painter().rect_filled(rect, studio::square(), pal.panel);
-        ui.painter().rect_stroke(rect, studio::square(), Stroke::new(1.0, pal.accent), StrokeKind::Inside);
-        let mut picked = None;
-        for (i, entry) in entries.iter().take(n).enumerate() {
-            let row = Rect::from_min_size(rect.min + vec2(2.0, 2.0 + i as f32 * ENTRY_H), vec2(w - 4.0, ENTRY_H));
-            let response = face.takes().then(|| studio::hand(ui.interact(row, entry_id.with(i), Sense::CLICK)));
-            let on = i == cursor;
-            let ink = if on {
-                ui.painter().rect_filled(row, CornerRadius::same(2), pal.accent);
-                pal.on_accent
-            } else {
-                if response.as_ref().is_some_and(|r| r.hovered()) {
-                    ui.painter().rect_filled(row, CornerRadius::same(2), pal.raised);
-                }
-                pal.text
-            };
-            let room = (row.width() - 2.0 * ENTRY_PAD).max(1.0);
-            studio::text(ui, pos2(row.min.x + ENTRY_PAD, row.center().y), entry, body(VALUE), ink, room, Align2::LEFT_CENTER);
-            if response.is_some_and(|r| r.clicked()) {
-                picked = Some(i);
-            }
-        }
-        picked
-    });
-    // Over the sheet's window whatever was pressed last: egui moves an area
-    // pressed on to the top of its order, the Dialog's among them.
-    ctx.set_sublayer(LayerId::new(Order::Foreground, parent), LayerId::new(Order::Foreground, list_id));
-    shown.inner
+    let id_of = |i: usize| face.takes().then(|| entry_id.with(i));
+    let words = |ui: &Ui, i: usize, room: Rect, on: bool| {
+        let ink = if on { pal.on_accent } else { pal.text };
+        studio::runs(ui, room.left_center(), &runs(&entries[i], ink), room.width(), Align2::LEFT_CENTER);
+    };
+    studio::hung_over(ui, parent.with("list"), parent, frame, Some(cursor), n, id_of, pal, words)
 }
 
 /// The sheet's egui face run headless, as the window's panel runs it: the

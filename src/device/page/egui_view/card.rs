@@ -21,85 +21,41 @@
 //! its serial first and then its clusters, and its Removes fact cuts its
 //! path before its count, never the count.
 //!
-//! A card's gates are the kit's gold gate, over the page's area: its title
-//! and its sentences in the cells' words and groups (`gate_body`'s), the
-//! keep lit with the cells' back arrow as its lead and the go as the
-//! hairline. The stronger gate (RemoveGate.dc.html) has its box in its
-//! body, the kit's check line, and its go only once the box is ticked, as
-//! the model holds it; a gate opened by another's answer swallows what
-//! comes within its guard (`CHAIN_GUARD`) in the model, which every click
-//! here goes through.
+//! A card's gates are the kit's gate whose body is the page's own
+//! (`studio::gate_with`), over the page's area: its title and its
+//! sentences in the cells' words and groups (`gate_body`'s), the keep lit
+//! with the cells' back arrow as its lead and the go as the hairline, as
+//! the board's gate answers. The stronger gate (RemoveGate.dc.html) has its
+//! box in its body, the kit's check line, and its go only once the box is
+//! ticked, as the model holds it; a gate opened by another's answer opens
+//! at its body's top, and swallows what comes within its guard
+//! (`CHAIN_GUARD`) in the model, which every click here goes through.
 
-use egui::epaint::{Shadow, Shape, StrokeKind};
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align, Align2, Color32, FontId, Id, Layout, Pos2, Rect, Response, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
-use ratatui::style::{Modifier, Style};
+use egui::{Align2, Color32, FontId, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use ratatui::style::Style;
 use ratatui::text::Line;
 
 use super::super::card::{CardGate, GateKind, plan_of, span};
 use super::super::cells::{self, Row};
 use super::super::*;
-use super::board::{Grid, Paint, clipped, hairline, head};
-use super::{Drawn, Face, tone};
+use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, PLAIN, Paint, SCAN, WIDE, clipped, fixed_h, lead_of};
+use super::{Drawn, Face, tone, unled};
 use crate::device::card::worker::CardView;
-use crate::gui::window::studio::{self, Lead, Pal, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
+use crate::gui::window::studio::{self, HEAD_H, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
 
-/// The cells' line, too wide to wrap in: the rows come a sentence each, and
-/// the value column wraps them by words in points.
-const WIDE: u16 = 4000;
-/// The head's row: the name's 16 points on 22.
-const HEAD_H: f32 = 22.0;
-/// A value's lines, their words' size and their row: a plain value 13.5 on
-/// 20, a verdict behind its LED 14 on 20, an explanation's dim line 13 on
-/// 18 (on 20 where it is a row's first), a scan's words 13 on 20, the file
-/// in flight in the monospace 12.5 on 20; each 4 points under the last, 6
-/// under a meter.
-const PLAIN: (f32, f32) = (13.5, 20.0);
-const VERDICT: (f32, f32) = (14.0, 20.0);
-const DIM: (f32, f32) = (13.0, 18.0);
-const SCAN: (f32, f32) = (13.0, 20.0);
+/// A value's lines are the board card's (board.rs's measures: a plain
+/// value 13.5 on 20, a verdict behind its LED 14 on 20, an explanation's
+/// dim line 13 on 18 — on 20 where it is a row's first — a scan's words 13
+/// on 20; each 4 points under the last, 6 under a meter), and the file in
+/// flight's in the monospace, 12.5 on 20.
 const NOW: (f32, f32) = (12.5, 20.0);
-const LINE_GAP: f32 = 4.0;
-const METER_GAP: f32 = 6.0;
-/// A scan's words and its share stand 10 points after what comes before.
-const SCAN_GAP: f32 = 10.0;
-/// A meter's row, and its segments' height in it.
-const METER_ROW: f32 = 20.0;
-const METER_H: f32 = 10.0;
-/// A Details fact's row.
-const FACT_H: f32 = 20.0;
-/// Text buttons in a row, the boards' 24 points apart.
-const APART: f32 = 24.0;
-/// Words at a row's right come no nearer the words at its left than this,
-/// or are dropped whole.
-const CLEAR: f32 = 16.0;
-/// The figures' one size in the card.
-const FIGURE: f32 = 12.5;
 
-/// The gates' window, its padding, the room under its title, and the title
-/// row: the kit's gate's.
-const GATE_W: f32 = 600.0;
-const MODAL_PAD: f32 = 24.0;
-const MODAL_GAP: f32 = 20.0;
-const TITLE_H: f32 = 20.0;
-/// How far the gate's scrolled body reaches into the window's right padding
-/// for its thumb, as the kit's modal's does.
-const BODY_BAR: f32 = MODAL_PAD - 8.0;
-/// The kit's scrim over the page's area: the canvas's rgba(9, 10, 15, .62).
-const SCRIM: Color32 = Color32::from_rgba_premultiplied(6, 6, 9, 158);
-/// A gate's sentences: 14 points at the kit's 1.3 leading, a group 6 points
-/// under the last, the foot 20 under them; a figure in them the monospace
-/// at 13, as the boards set a library's count.
+/// A gate's sentences: 14 points at the kit's 1.3 leading, a group the
+/// kit's gate's 6 points under the last; a figure in them the monospace at
+/// 13, as the boards set a library's count.
 const SAY: f32 = 14.0;
 const SAY_LINE: f32 = SAY * 1.3;
 const SAY_FIGURE: f32 = 13.0;
-const GROUP_GAP: f32 = 6.0;
-const FOOT_ABOVE: f32 = 20.0;
-/// A gate's foot: the form buttons' capitals, 10 points apart, and the back
-/// arrow that leads the keep, its 6 points and the 8 after it.
-const FORM_SIZE: f32 = 11.5;
-const FOOT_GAP: f32 = 10.0;
-const BACK_LEAD: f32 = 14.0;
 /// A library's name and its count, the cells' two spaces apart.
 const LIB_APART: f32 = 8.0;
 
@@ -134,7 +90,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
         while fixed + measure.paint(0.0, &values) > room.height() + 0.5 && give_way(&mut values) {}
     }
     let card = clipped(ui, room, "mp3-card");
-    let y = head(&card, face, grid, room.min.y + s.pad_y, &laid.name, &laid.right);
+    let y = studio::card_head(&card, pos2(grid.x, room.min.y + s.pad_y), grid.w, &laid.name, &laid.right, face.pal);
     // The measuring run sees the card whole; the drawing cuts the values
     // short of the bottom row's place at the room's foot.
     let foot = if face.live { room.max.y - s.pad_y } else { f32::INFINITY };
@@ -148,7 +104,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
         details(&mut paint, page, &card, face, grid, view, &laid.details);
     }
     let bottom = (paint.y + s.pad_y).min(room.max.y);
-    hairline(&card, face, Rect::from_min_max(room.min, pos2(room.max.x, bottom)));
+    studio::hairline(&card, Rect::from_min_max(room.min, pos2(room.max.x, bottom)), face.pal);
     Drawn { acts, caret: None, rest }
 }
 
@@ -213,18 +169,6 @@ fn give_way(rows: &mut Vec<Row>) -> bool {
     true
 }
 
-/// The cells' door mark off a link's words, as the kit's lead: their ▸ a
-/// door shut, their ▾ a door open.
-fn lead_of(text: &str) -> (Option<Lead>, &str) {
-    let g = glyphs();
-    let after = |glyph: &str| text.strip_prefix(glyph).and_then(|r| r.strip_prefix(' '));
-    match (after(g.forward), after(g.open)) {
-        (Some(rest), _) => (Some(Lead::Shut), rest),
-        (_, Some(rest)) => (Some(Lead::Open), rest),
-        _ => (None, text),
-    }
-}
-
 /// The bottom row's links given way in points as the cells give them way
 /// in cells (cells/card.rs's `give_way`): where they would run past the
 /// room the primary leaves them, Send the plays goes first. `Paint` then
@@ -248,20 +192,6 @@ fn links_give_way(ui: &Ui, face: &Face, grid: Grid, row: Row) -> Row {
     Row::Actions { links, primary, covered }
 }
 
-/// The height a Details row takes, as `Paint` sets it: what the cells count
-/// of it when the rows give way, and what the rows after the log leave it.
-fn fixed_h(row: &Row, face: &Face) -> f32 {
-    match row {
-        Row::Blank => face.space.gap,
-        Row::Link { .. } => TEXT_BUTTON_H,
-        Row::Fact { .. } => FACT_H,
-        Row::Rule => 2.0 * face.space.gap + 1.0,
-        Row::Log => 0.0,
-        Row::Actions { primary: Some(_), .. } => TALL_H,
-        _ => PLAIN.1,
-    }
-}
-
 // ── The value rows ────────────────────────────────────────────────────────
 
 /// What a value row's line is, read off the cells' spans.
@@ -278,63 +208,29 @@ enum Kind {
     Scan(usize),
 }
 
-/// A cells' line read for the canvas: its kind, the scan's share, and its
-/// words, each piece in its colour, the bold ones semibold.
+/// A cells' line read for the canvas (board.rs's [`Lined`], the board
+/// card's reader): its kind, and its words, each piece in its colour, the
+/// bold ones semibold.
 struct Read {
     kind: Kind,
-    share: Option<String>,
-    spans: Vec<(String, Color32, bool)>,
+    lined: Lined,
 }
 
 impl Read {
     fn of(line: &Line, face: &Face) -> Read {
-        let g = glyphs();
-        // The cells' spans with a run of spaces taking its neighbour's look
-        // (their wrap sets the spaces between words plain), so a sentence
-        // in one look is one piece.
-        let mut spans: Vec<(String, Style)> = Vec::new();
-        for span in &line.spans {
-            let words = span.content.to_string();
-            match spans.last_mut() {
-                Some((last, style)) if *style == span.style || words.trim().is_empty() => last.push_str(&words),
-                _ => spans.push((words, span.style)),
-            }
-        }
-        let mut kind = Kind::Plain;
-        let mut share = None;
-        // The scan widget: ten cells, filled to the share.
-        let text: String = spans.iter().map(|(s, _)| s.as_str()).collect();
-        let cells: Vec<char> = text.chars().take(10).collect();
-        let mark = |glyph: &str, c: char| glyph.chars().count() == 1 && glyph.starts_with(c);
-        if cells.len() == 10 && cells.iter().all(|c| mark(g.filled, *c) || mark(g.empty, *c)) {
-            let lit = cells.iter().filter(|c| mark(g.filled, **c)).count();
-            drop_chars(&mut spans, 10);
-            let first = spans.first().map(|(s, _)| s.trim_start().to_string()).unwrap_or_default();
-            let word = first.split_whitespace().next().filter(|w| w.len() > 1 && w.ends_with('%') && w[..w.len() - 1].bytes().all(|b| b.is_ascii_digit()));
-            if let (Some(word), Some((head, _))) = (word, spans.first_mut()) {
-                *head = head.trim_start()[word.len()..].to_string();
-                share = Some(word.to_string());
-            }
-            kind = Kind::Scan(lit);
-        } else if let Some((first, style)) = spans.first_mut() {
-            // A verdict's glyph and the space after it.
-            for glyph in [g.ok, g.warn, g.no, g.unknown] {
-                if let Some(rest) = first.strip_prefix(glyph).and_then(|r| r.strip_prefix(' ')) {
-                    kind = Kind::Verdict(tone(*style, face.pal));
-                    *first = rest.to_string();
-                    break;
-                }
-            }
-        }
-        let spans: Vec<(String, Color32, bool)> = spans
-            .into_iter()
-            .filter(|(s, _)| !s.trim().is_empty())
-            .map(|(s, style)| (s, tone(style, face.pal), style.add_modifier.contains(Modifier::BOLD)))
-            .collect();
-        if kind == Kind::Plain && !spans.is_empty() && spans.iter().all(|(_, c, _)| *c == face.pal.dim) {
-            kind = Kind::Dim;
-        }
-        Read { kind, share, spans }
+        let lined = Lined::of(line, face);
+        let kind = match (&lined.meter, lined.lamp) {
+            (Some((lit, _)), _) => Kind::Scan(*lit),
+            (None, Some(lamp)) => Kind::Verdict(lamp),
+            (None, None) if !lined.spans.is_empty() && lined.dim(face) => Kind::Dim,
+            (None, None) => Kind::Plain,
+        };
+        Read { kind, lined }
+    }
+
+    /// The scan's share, where there is one.
+    fn share(&self) -> Option<&str> {
+        self.lined.meter.as_ref().and_then(|(_, share)| share.as_deref())
     }
 
     /// The words as runs at `size`, the bold ones semibold and, `figures`
@@ -342,7 +238,7 @@ impl Read {
     fn runs(&self, size: f32, figures: bool, face: &Face, drive: &str) -> Vec<Run> {
         let font = |bold: bool| if bold { strong(size) } else { body(size) };
         let mut runs = Vec::new();
-        for (k, (s, color, bold)) in self.spans.iter().enumerate() {
+        for (k, (s, color, bold)) in self.lined.spans.iter().enumerate() {
             let words = if k == 0 { s.trim_start() } else { s.as_str() };
             if figures {
                 runs.extend(figured(words, face.ports, drive, font(*bold), mono(FIGURE), *color));
@@ -352,29 +248,6 @@ impl Read {
         }
         runs
     }
-}
-
-/// `spans` less their first `n` characters.
-fn drop_chars(spans: &mut Vec<(String, Style)>, mut n: usize) {
-    while n > 0 && !spans.is_empty() {
-        let len = spans[0].0.chars().count();
-        if len <= n {
-            spans.remove(0);
-            n -= len;
-        } else {
-            let at = spans[0].0.char_indices().nth(n).map_or(spans[0].0.len(), |(i, _)| i);
-            spans[0].0 = spans[0].0[at..].to_string();
-            n = 0;
-        }
-    }
-}
-
-/// What `Para` takes to set `runs`' lines `line_h` apart: it reckons its
-/// leading from its first run's size, and words that open on a figure (12
-/// new, 41.2 of 63.8 GB, 37 plays not yet sent) open in the monospace's
-/// smaller one, which would draw their wrapped lines closer.
-fn leading(runs: &[Run], line_h: f32) -> f32 {
-    line_h / runs.first().map_or(line_h, |(_, font, _)| font.size)
 }
 
 /// Whether `drive` is a drive letter (`E:`): a figure, which the boards set
@@ -410,14 +283,6 @@ fn word_at(s: &str, word: &str) -> Option<usize> {
         let after = s[at + word.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
         before && after
     })
-}
-
-/// Where a line centred on its middle stands that middle to share the
-/// baseline of a paragraph's first line drawn from `top` in the UI face at
-/// `size`, so the words at a row's right stand on its left's.
-fn on_baseline(ui: &Ui, top: f32, size: f32) -> f32 {
-    let m = studio::metrics(ui, &body(size));
-    top + m.ascent - m.baseline + m.row / 2.0
 }
 
 /// The Card view's value rows set in points on a card's [`Grid`], none
@@ -471,19 +336,18 @@ impl Values<'_, '_> {
     }
 
     fn value_x(&self) -> f32 {
-        self.grid.x + self.grid.label_w
+        self.grid.value_x()
     }
 
     fn right(&self) -> f32 {
-        self.grid.x + self.grid.w
+        self.grid.right()
     }
 
     /// A block's label in the label column, on the line whose middle is
-    /// `mid`.
+    /// `mid`: the board card's.
     fn label(&self, label: Option<&str>, mid: f32) {
         if let Some(label) = label {
-            let room = (self.grid.label_w - 8.0).max(1.0);
-            studio::small_caps(self.ui, pos2(self.grid.x, mid), label, self.face.pal.dim, room, Align2::LEFT_CENTER);
+            self.grid.label(self.ui, label, mid, self.face.pal);
         }
     }
 
@@ -495,9 +359,7 @@ impl Values<'_, '_> {
             return None;
         }
         self.label(label, top + METER_ROW / 2.0);
-        let w = (self.right() - self.value_x()).max(1.0);
-        let track = Rect::from_min_size(pos2(self.value_x(), top + (METER_ROW - METER_H) / 2.0), vec2(w, METER_H));
-        studio::led_fill(self.ui, track, permille, lit, self.face.pal.unlit);
+        self.grid.bar(self.ui, top, permille, lit, self.face.pal);
         Some((top + METER_ROW, Was::Meter, true))
     }
 
@@ -516,7 +378,7 @@ impl Values<'_, '_> {
             }
             self.label(label, top + NOW.1 / 2.0);
             let path = left.to_string();
-            let para = Para::new(&path, mono(NOW.0), face.pal.text).line(NOW.1 / NOW.0).anywhere().floor(self.floor);
+            let para = Para::new(&path, mono(NOW.0), face.pal.text).spaced(NOW.1).anywhere().floor(self.floor);
             let h = para.paint(self.ui, pos2(x, top), (end - x).max(1.0)).height().max(NOW.1);
             return Some(self.ended(top + h));
         }
@@ -541,12 +403,10 @@ impl Values<'_, '_> {
                 from += studio::STATE_INDENT;
             }
             Kind::Scan(lit) => {
-                let bar = studio::meter(self.ui, pos2(from, mid), 10, lit, vec2(5.0, 10.0), 2.0, face.pal.ok, face.pal);
-                from = bar.max.x + SCAN_GAP;
-                if let Some(share) = &read.share {
-                    let drawn = studio::text(self.ui, pos2(from, mid), share, mono(FIGURE), face.pal.dim, (end - from).max(1.0), Align2::LEFT_CENTER);
-                    from = drawn.max.x + SCAN_GAP;
-                }
+                // Its share on its words' baseline, as the board card sets
+                // a scan's.
+                let on = studio::para_mid(self.ui, top, size);
+                from = studio::scan_lead(self.ui, pos2(from, mid), lit, read.share(), on, end, face.pal);
             }
             Kind::Plain | Kind::Dim => {}
         }
@@ -555,14 +415,14 @@ impl Values<'_, '_> {
         let height = if runs.is_empty() {
             line_h
         } else {
-            let para = Para::runs(&runs).line(leading(&runs, line_h)).floor(self.floor);
+            let para = Para::runs(&runs).spaced(line_h).floor(self.floor);
             para.paint(self.ui, pos2(from, top), (end - from).max(1.0)).height().max(line_h)
         };
         if let Some(right) = right
             && height <= line_h + 0.5
         {
             let left_w = from - x + studio::runs_width(self.ui, &runs);
-            self.right_words(right, on_baseline(self.ui, top, size), x + left_w, end);
+            self.right_words(right, studio::para_mid(self.ui, top, size), x + left_w, end);
         }
         let (bottom, _, whole) = self.ended(top + height);
         Some((bottom, Was::Line, whole))
@@ -629,9 +489,8 @@ fn fact_row(paint: &mut Paint, ui: &Ui, face: &Face, grid: Grid, label: &str, va
         return;
     }
     let mid = paint.y + FACT_H / 2.0;
-    let room = (grid.label_w - 8.0).max(1.0);
-    studio::small_caps(ui, pos2(grid.x, mid), label, face.pal.dim, room, Align2::LEFT_CENTER);
-    value(mid, grid.x + grid.label_w, (grid.w - grid.label_w).max(1.0));
+    grid.label(ui, label, mid, face.pal);
+    value(mid, grid.value_x(), grid.value_w());
     paint.y += FACT_H;
 }
 
@@ -789,19 +648,21 @@ pub(super) fn gate(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
         _ => String::new(),
     };
     let (pal, id) = (face.pal, Id::new("mp3-card-gate"));
-    let (answer, ticked) = gold_gate(ui, id, face.full, &title, pal, |ui| {
+    let (words, lead) = unled(&keep);
+    let answers = studio::Answers { keep: words, lead, go: go.as_deref(), also: face.ports };
+    let shown = studio::gate_with(ui, id, face.full, &title, &answers, pal, |ui| {
         let mut ticked = false;
         for (k, group) in groups.iter().enumerate() {
             if k > 0 {
-                ui.add_space(GROUP_GAP);
+                ui.add_space(studio::GATE_APART);
             }
             for line in group {
                 ticked |= said_line(ui, id, line, face, &drive);
             }
         }
-        ui.add_space(FOOT_ABOVE);
-        (gate_foot(ui, id.with("foot"), &keep, go.as_deref(), pal), ticked)
+        ticked
     });
+    let (answer, ticked) = shown.inner;
     if ticked {
         drawn.acts.push(Act::CardBox);
     }
@@ -830,7 +691,7 @@ fn said_line(ui: &mut Ui, id: Id, line: &Said, face: &Face, drive: &str) -> bool
             // The kit's 1.3 leading of the words' 14 points, a sentence
             // that opens on a figure too.
             let runs = runs_of(words, if *green { pal.ok } else { pal.text });
-            Para::runs(&runs).line(leading(&runs, SAY_LINE)).show(ui);
+            Para::runs(&runs).spaced(SAY_LINE).show(ui);
         }
         Said::Path(path) => {
             cut_row(ui, &[(path.clone(), mono(SAY_FIGURE), pal.text)]);
@@ -857,149 +718,6 @@ fn said_line(ui: &mut Ui, id: Id, line: &Said, face: &Face, drive: &str) -> bool
     false
 }
 
-/// The kit's gold gate over `over` (the kit's `Dialog` as its `gate` wears
-/// it: the scrim swallowing every press outside the window, the window
-/// [`GATE_W`] wide centred in `over` on the panel's fill in the gold's
-/// hairline with the canvas's shadow, 24 points in, `title` in the 16-point
-/// gold semibold wrapped where it runs long, no close — a gate is answered,
-/// never dismissed), with `body` laid out top-down under the title and
-/// scrolled where it is taller than `over` allows. The window takes the
-/// height its body asked for on the last pass, and egui runs the pass again
-/// when that changed. Drawn here rather than by the kit's gate, whose body
-/// is sentences alone and whose foot sets its answers bare: the stronger
-/// gate's body holds its box, and the keep wears the cells' back arrow.
-fn gold_gate<R>(ui: &Ui, id: Id, over: Rect, title: &str, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> R {
-    let ctx = ui.ctx().clone();
-    let width = GATE_W.min(over.width() - 32.0).max(over.width().min(160.0));
-    let inner_w = (width - 2.0 * MODAL_PAD).max(1.0);
-    let format = TextFormat { font_id: strong(16.0), color: pal.gold, ..Default::default() };
-    let mut job = LayoutJob::single_section(title.to_string(), format);
-    job.wrap = TextWrapping { max_width: inner_w, max_rows: 3, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let lines = galley.rows.len().max(1);
-    let line_h = galley.size().y / lines as f32;
-    let title_h = TITLE_H + (lines - 1) as f32 * line_h;
-    let fixed = 2.0 * MODAL_PAD + title_h + MODAL_GAP;
-    let max_h = (over.height() - 32.0).max(fixed);
-    let size_key = id.with("height");
-    let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
-    let window = Rect::from_center_size(over.center(), vec2(width, known.unwrap_or(max_h).min(max_h)));
-    // Up on this pass when it was not drawn on the last, or another gate
-    // took its place there (a chained gate, which the last one's go opened
-    // where its foot had been scrolled to): its body at its top, as the
-    // cells draw a gate afresh.
-    let now = ctx.cumulative_pass_nr();
-    let (drawn_key, title_key) = (id.with("drawn"), id.with("title"));
-    let other = ctx.data(|d| d.get_temp::<String>(title_key)).is_none_or(|was| was != title);
-    let opened = other || ctx.data(|d| d.get_temp::<u64>(drawn_key)).is_none_or(|last| last + 1 != now);
-    ctx.data_mut(|d| {
-        d.insert_temp(drawn_key, now);
-        d.insert_temp(title_key, title.to_string());
-    });
-    let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false);
-    let shown = area.show(&ctx, |ui| {
-        let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
-        ui.painter().rect_filled(over, 0.0, SCRIM);
-        let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
-        ui.painter().add(shadow.as_shape(window, studio::square()));
-        ui.painter().rect_filled(window, studio::square(), pal.panel);
-        ui.painter().rect_stroke(window, studio::square(), Stroke::new(1.0, pal.gold), StrokeKind::Inside);
-        let inner = window.shrink(MODAL_PAD);
-        ui.painter().galley(pos2(inner.min.x, inner.min.y + TITLE_H / 2.0 - line_h / 2.0), galley, pal.gold);
-        let budget = (max_h - fixed).max(0.0);
-        let top = inner.min.y + title_h + MODAL_GAP;
-        let body_rect = Rect::from_min_size(pos2(inner.min.x, top), vec2(inner.width() + BODY_BAR, budget));
-        let mut child = ui.new_child(UiBuilder::new().id_salt(id.with("body")).max_rect(body_rect).layout(Layout::top_down(Align::Min)));
-        let mut scroll = ScrollArea::vertical().id_salt(id.with("scroll")).max_height(budget).auto_shrink([false, true]);
-        if opened {
-            scroll = scroll.vertical_scroll_offset(0.0);
-        }
-        let out = scroll.show(&mut child, |ui| {
-            ui.set_max_width(inner.width());
-            body(ui)
-        });
-        (out.inner, (fixed + out.content_size.y.min(budget)).min(max_h))
-    });
-    let (inner, wanted) = shown.inner;
-    if known.is_none_or(|h| (h - wanted).abs() > 0.5) {
-        ctx.data_mut(|d| d.insert_temp(size_key, wanted));
-        ctx.request_discard("a card's gate took its body's height");
-    }
-    inner
-}
-
-/// A gate's foot, a row of the layout the body wide: `keep` lit, led by the
-/// cells' back arrow, and `go` (where the gate has one now) after it as the
-/// hairline, ending at the right, 10 points apart; where the two will not
-/// fit one row, the go keeps the first and the keep comes under it, as the
-/// kit's foot lays a gate's. Button `k` is `id.with(k)`, the keep first.
-/// How a click answered: `Some(true)` goes through, `Some(false)` keeps.
-fn gate_foot(ui: &mut Ui, id: Id, keep: &str, go: Option<&str>, pal: &Pal) -> Option<bool> {
-    let w = ui.available_width();
-    let keep_w = back_button_width(ui, keep).min(w);
-    let go_w = go.map(|go| studio::form_button_width(ui, go).min(w));
-    let two_rows = go_w.is_some_and(|go_w| keep_w + FOOT_GAP + go_w > w);
-    let h = if two_rows { 2.0 * studio::FORM_BUTTON_H + FOOT_GAP } else { studio::FORM_BUTTON_H };
-    let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-    let row = |k: usize, right: f32, bw: f32| {
-        let top = area.min.y + k as f32 * (studio::FORM_BUTTON_H + FOOT_GAP);
-        Rect::from_min_size(pos2(right - bw, top), vec2(bw, studio::FORM_BUTTON_H))
-    };
-    let mut answer = None;
-    let mut keep_right = area.max.x;
-    if let (Some(go), Some(go_w)) = (go, go_w) {
-        let rect = row(0, area.max.x, go_w);
-        if studio::form_button(ui, id.with(1usize), rect, go, false, pal).clicked() {
-            answer = Some(true);
-        }
-        if !two_rows {
-            keep_right = rect.min.x - FOOT_GAP;
-        }
-    }
-    let rect = row(usize::from(two_rows), keep_right, keep_w);
-    if back_button(ui, id.with(0usize), rect, keep, pal).clicked() {
-        answer = Some(false);
-    }
-    answer
-}
-
-/// The words of a keep, bare of the cells' back arrow and the marks the
-/// kit's buttons drop.
-fn keep_words(label: &str) -> &str {
-    let label = label.trim_start();
-    studio::bare(label.strip_prefix(glyphs().back).unwrap_or(label))
-}
-
-/// How wide [`back_button`] wants to be for `label`.
-fn back_button_width(ui: &Ui, label: &str) -> f32 {
-    studio::caps_width(ui, keep_words(label), FORM_SIZE) + 36.0 + BACK_LEAD
-}
-
-/// A gate's keep at `rect`, the canvas's: the kit's lit form button (the
-/// accent fill, the hot accent under the pointer, on-accent capitals, the
-/// hand) with the cells' back arrow as the kit's pointer turned left, 8
-/// points before its words.
-fn back_button(ui: &Ui, id: Id, rect: Rect, label: &str, pal: &Pal) -> Response {
-    let words = keep_words(label);
-    let response = studio::hand(ui.interact(rect, id, Sense::click()));
-    let fill = if response.hovered() { pal.accent_hot } else { pal.accent };
-    ui.painter().rect_filled(rect, studio::square(), fill);
-    let words_w = studio::caps_width(ui, words, FORM_SIZE);
-    let left = (rect.center().x - (BACK_LEAD + words_w) / 2.0).max(rect.min.x + 1.0);
-    let mid = studio::led_mid(ui, rect.center().y, &strong(FORM_SIZE), true);
-    back_pointer(ui, pos2(left + 2.5, mid), pal.on_accent);
-    let room = (rect.max.x - left - BACK_LEAD).max(1.0);
-    studio::caps(ui, pos2(left + BACK_LEAD, rect.center().y), words, FORM_SIZE, pal.on_accent, room, Align2::LEFT_CENTER);
-    response
-}
-
-/// The kit's pointer turned left, centred on `at`: the cells' ◂ before a
-/// keep.
-fn back_pointer(ui: &Ui, at: Pos2, color: Color32) {
-    let points = vec![at + vec2(3.5, -4.0), at + vec2(-2.5, 0.0), at + vec2(3.5, 4.0)];
-    ui.painter().add(Shape::convex_polygon(points, color, Stroke::NONE));
-}
-
 /// The card's egui face run headless, as the window's panel runs it, on
 /// the page's own fixtures: cards as the transfer worker tells them
 /// (worker::fixtures) on a link whose inbox the test reads, boards on
@@ -1011,7 +729,7 @@ mod tests {
     use std::sync::mpsc::Receiver;
 
     use egui::epaint::Shape;
-    use egui::{Event, FontId, FullOutput, MouseWheelUnit, PointerButton, Vec2};
+    use egui::{Event, FontId, FullOutput, MouseWheelUnit, PointerButton, Pos2, Vec2};
 
     use super::super::super::card::{Opened, Transfer};
     use super::super::show as page_show;
@@ -1020,6 +738,7 @@ mod tests {
     use crate::device::card::engine::Guard;
     use crate::device::card::volume::{Fs, Table};
     use crate::device::card::worker::{self, Allow, Ended, Fold, In, Link, Next, Pause, Phase as Step, fixtures as cards};
+    use crate::gui::window::studio::Pal;
 
     fn english() -> std::sync::RwLockReadGuard<'static, ()> {
         let guard = crate::setup::tests::LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
@@ -1035,6 +754,18 @@ mod tests {
     const FLOOR: Vec2 = vec2(800.0, 352.0);
     const NARROW: Vec2 = vec2(576.0, 448.0);
     const BOARD: Vec2 = vec2(1440.0, 824.0);
+
+    /// The kit's modal: its padding, the room under its title, and the
+    /// title's row.
+    const MODAL_PAD: f32 = 24.0;
+    const MODAL_GAP: f32 = 20.0;
+    const TITLE_H: f32 = 20.0;
+
+    /// A keep's words as its button takes them: bare of the cells' back
+    /// arrow.
+    fn keep_words(label: &str) -> &str {
+        unled(label).0
+    }
 
     /// A context styled as the host's, its passes run over a page's area.
     struct Probe {
