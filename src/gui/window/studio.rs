@@ -789,6 +789,13 @@ pub(crate) fn check(ui: &Ui, at: Pos2, color: Color32) {
     ui.painter().add(Shape::line(points, Stroke::new(1.7, color)));
 }
 
+/// The canvas's cross in its 12-point box, centred on `at`: the cells' "✗"
+/// as a mark beside words (a failed write's tab), which the panel's faces
+/// have no glyph for.
+pub(crate) fn cross(ui: &Ui, at: Pos2, color: Color32) {
+    draw_icon(ui, at, Icon::Close, color);
+}
+
 /// A small solid triangle pointing right, centred on `at`: the cells' "▸"
 /// before a folder in a list, and before the keyboard's pick.
 pub(crate) fn pointer(ui: &Ui, at: Pos2, color: Color32) {
@@ -2999,9 +3006,10 @@ pub(crate) fn halved(image: &egui::ColorImage) -> egui::ColorImage {
 /// or digit (or a `/`), the letters and digits and the marks that join a
 /// figure's parts (`.,:-+_/`), less the marks it ends on (a sentence's
 /// full stop) — when that run starts with a digit (`21.4`, `1,284`,
-/// `14:03`, a serial), is a version (`v0.14.0`, `v0.14.0-5-g4e94418`), is
-/// a hex string of six or more with a digit in it (an ELF), or is one of
-/// `also` (a port's name, which no rule can tell from a word).
+/// `14:03`, a serial, and a percentage with its sign, `62%`), is a version
+/// (`v0.14.0`, `v0.14.0-5-g4e94418`), is a hex string of six or more with
+/// a digit in it (an ELF), or is one of `also` (a port's name, which no
+/// rule can tell from a word).
 fn figure_span(word: &str, also: &[&str]) -> Option<Range<usize>> {
     let start = word.find(|c: char| c.is_ascii_alphanumeric() || c == '/')?;
     let joins = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | ',' | ':' | '-' | '+' | '_' | '/');
@@ -3012,7 +3020,9 @@ fn figure_span(word: &str, also: &[&str]) -> Option<Range<usize>> {
     let digit = first.is_ascii_digit();
     let version = first == 'v' && chars.next().is_some_and(|c| c.is_ascii_digit());
     let hex = core.len() >= 6 && core.chars().all(|c| c.is_ascii_hexdigit()) && core.chars().any(|c| c.is_ascii_digit());
-    (digit || version || hex || also.contains(&core)).then(|| start..start + core.len())
+    let end = start + core.len();
+    let end = if digit && word[end..].starts_with('%') { end + 1 } else { end };
+    (digit || version || hex || also.contains(&core)).then(|| start..end)
 }
 
 /// `s` as runs in `font` and `color`, each figure in it ([`figure_span`]:
@@ -3067,8 +3077,13 @@ const LEAD_W: f32 = 16.0;
 /// How wide [`text_button`] draws `words` led by `lead`, in the semibold it
 /// wears under the pointer, the widest it gets.
 pub(crate) fn text_button_width(ui: &Ui, words: &str, lead: Option<Lead>, also: &[&str]) -> f32 {
+    text_button_width_sized(ui, words, lead, also, TEXT_BUTTON_SIZE)
+}
+
+/// How wide [`text_button_sized`] draws `words` at `size`.
+pub(crate) fn text_button_width_sized(ui: &Ui, words: &str, lead: Option<Lead>, also: &[&str], size: f32) -> f32 {
     let lead_w = if lead.is_some() { LEAD_W } else { 0.0 };
-    lead_w + runs_width(ui, &figured(words, also, strong(TEXT_BUTTON_SIZE), mono(12.5), Color32::WHITE))
+    lead_w + runs_width(ui, &figured(words, also, strong(size), mono(12.5), Color32::WHITE))
 }
 
 /// A button that is only its words, the canvas's TEXT BUTTON (a door, a
@@ -3092,12 +3107,32 @@ pub(crate) fn text_button(
     live: bool,
     pal: &Pal,
 ) -> Response {
-    let w = text_button_width(ui, words, lead, also).min(max_w).max(8.0);
+    text_button_sized(ui, id, at, words, lead, also, max_w, live, pal, TEXT_BUTTON_SIZE)
+}
+
+/// A [`text_button`] whose words are `size` points rather than the card's
+/// 13.5 (its figures stay the card's 12.5): one that shares a slot with
+/// plain words of that size, as Update all shares the MP3 tab's row's right
+/// edge with its counts at 13.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_button_sized(
+    ui: &Ui,
+    id: Id,
+    at: Pos2,
+    words: &str,
+    lead: Option<Lead>,
+    also: &[&str],
+    max_w: f32,
+    live: bool,
+    pal: &Pal,
+    size: f32,
+) -> Response {
+    let w = text_button_width_sized(ui, words, lead, also, size).min(max_w).max(8.0);
     let rect = Rect::from_min_size(pos2(at.x, at.y - TEXT_BUTTON_H / 2.0), vec2(w, TEXT_BUTTON_H));
     let response = if live { hand(ui.interact(rect, id, Sense::click())) } else { ui.interact(rect, id, Sense::hover()) };
     let hot = live && response.hovered();
     let ink = if hot { pal.text } else { pal.dim };
-    let font = if hot { strong(TEXT_BUTTON_SIZE) } else { body(TEXT_BUTTON_SIZE) };
+    let font = if hot { strong(size) } else { body(size) };
     let mut x = at.x;
     match lead {
         // The pointer's 6 points and the arrow's 8 each stand at the lead's
@@ -4720,6 +4755,7 @@ mod tests {
         assert_eq!(figures_in("mstream-mp3-player v0.14.0 · QIO · ELF fa4e0000.", &[]), ["v0.14.0", "fa4e0000"], "the full stop left out");
         assert!(figures_in("M5Stack Core2 · FAT32 · a decade", &[]).is_empty(), "names and words with a digit in them stay words");
         assert_eq!(figures_in("64 % battery · set at 14:03 (it was 3.2 s off)", &[]), ["64", "14:03", "3.2"]);
+        assert_eq!(figures_in("writing v0.14.0… 62% · about 15 s left", &[]), ["v0.14.0", "62%", "15"], "a percentage with its sign");
         assert_eq!(figures_in("v0.8.0に更新しました", &[]), ["v0.8.0"], "a figure ends where its script does");
     }
 

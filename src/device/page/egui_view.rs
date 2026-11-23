@@ -35,7 +35,7 @@ mod card_sheet;
 mod gate;
 mod sheet;
 
-use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use ratatui::style::Style;
 
 use super::*;
@@ -60,6 +60,9 @@ const RIGHT_CLEAR: f32 = 22.0;
 /// The least a card's name shrinks to on its tab before the right edge's
 /// words give way.
 const NAME_LEAST: f32 = 48.0;
+/// The right edge's words, plain or Update all's text button: the boards'
+/// 13 points, a half under the card's text buttons.
+const RIGHT_SIZE: f32 = 13.0;
 
 /// The frame's measures, and the cards': the boards' where the page has
 /// the room for the card in view at rest, a tighter set where it has not
@@ -191,13 +194,14 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, composition: &str, key_hints: b
 /// What the tab draws while the page it was left with lets its ports go
 /// and the next waits to be built (contract clause 5; the cells'
 /// `draw_waiting`): `words`, dim, on the page's first line under its blank
-/// first row, at the subjects column's left.
+/// first row, at the subjects column's left, in the 13 points the same
+/// words take on the busy line while the page lets go.
 pub(crate) fn waiting(ui: &mut Ui, words: &str) {
     let pal = studio::begin(ui);
     let full = ui.max_rect();
     let w = COLUMN_W.min(full.width() - 2.0 * SIDE).max(1.0);
     let at = pos2(full.center().x - w / 2.0, full.min.y + ROOMY.top + studio::NOTE_H / 2.0);
-    studio::text(ui, at, words, body(13.5), pal.dim, w, Align2::LEFT_CENTER);
+    studio::text(ui, at, words, body(13.0), pal.dim, w, Align2::LEFT_CENTER);
 }
 
 /// The measures for this pass: the boards' where the card in view at rest
@@ -304,11 +308,22 @@ struct Tab {
     act: Act,
 }
 
+/// How a tab's mark is drawn, as the boards draw each: the cells' ✓ as the
+/// kit's check and their ✗ as its cross (the panel's faces hold neither
+/// glyph), a write's or a sync's percentage as a figure in the monospace at
+/// its one weight, any other mark (! ? … in use) its words in the semibold.
+enum Look {
+    Check,
+    Cross,
+    Words(FontId),
+}
+
 impl Tab {
-    /// The tab's name as runs in `ink`, the semibold under the pointer for
-    /// a card's words (a port stays regular: the monospace has no bold).
-    fn runs(&self, ink: Color32, hot: bool) -> Vec<Run> {
-        let font = if hot { strong(13.5) } else { body(13.5) };
+    /// The tab's name as runs in `ink`, a card's words in the semibold
+    /// under the pointer and on the slab (`bold`: the cells' bold), a port
+    /// or a drive regular (the monospace has no bold).
+    fn runs(&self, ink: Color32, bold: bool) -> Vec<Run> {
+        let font = if bold { strong(13.5) } else { body(13.5) };
         match self.figure.as_deref() {
             Some(figure) if figure == self.name => vec![(self.name.clone(), mono(13.0), ink)],
             Some(figure) if self.name.starts_with(figure) => {
@@ -318,9 +333,26 @@ impl Tab {
         }
     }
 
-    /// The mark's width: the kit's check for the cells' ✓, else its words.
+    /// How its mark is drawn.
+    fn look(&self) -> Look {
+        let g = glyphs();
+        if self.mark == g.ok {
+            return Look::Check;
+        }
+        if self.mark == g.no {
+            return Look::Cross;
+        }
+        let figure = self.mark.strip_suffix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        Look::Words(if figure { mono(13.0) } else { strong(14.0) })
+    }
+
+    /// The mark's width: the check's or the cross's 10 points, else its
+    /// words'.
     fn mark_w(&self, ui: &Ui) -> f32 {
-        if self.mark == glyphs().ok { 10.0 } else { studio::width_of(ui, &self.mark, strong(14.0)) }
+        match self.look() {
+            Look::Check | Look::Cross => 10.0,
+            Look::Words(font) => studio::width_of(ui, &self.mark, font),
+        }
     }
 }
 
@@ -362,8 +394,8 @@ fn subjects(ui: &Ui, page: &Page, face: &Face, row: Rect, acts: &mut Vec<Act>) {
     let (words, style, act) = cells::tabs_right(page);
     let right_tone = tone(style, pal);
     let right_w = match &act {
-        Some(_) => studio::text_button_width(ui, &words, None, face.ports),
-        None => studio::runs_width(ui, &studio::figured(&words, face.ports, body(13.0), mono(12.5), right_tone)),
+        Some(_) => studio::text_button_width_sized(ui, &words, None, face.ports, RIGHT_SIZE),
+        None => studio::runs_width(ui, &studio::figured(&words, face.ports, body(RIGHT_SIZE), mono(12.5), right_tone)),
     };
     // Each tab's frame (its padding, its gap and its mark) and its name's
     // natural width.
@@ -405,17 +437,25 @@ fn subjects(ui: &Ui, page: &Page, face: &Face, row: Rect, acts: &mut Vec<Act>) {
     if !keep_right || x - TABS_APART + RIGHT_CLEAR > row.max.x - right_w {
         return;
     }
-    let at = pos2(row.max.x - right_w, row.center().y);
     match act {
         Some(act) => {
+            // Flush with the column's end at rest and in the semibold under
+            // the pointer alike, as the boards set it: its slot is the
+            // semibold's, its words as wide as they are drawn now.
+            let slot = Rect::from_min_max(pos2(row.max.x - right_w, row.min.y), row.max);
+            let hot = face.takes() && ui.rect_contains_pointer(slot);
+            let rest = studio::runs_width(ui, &studio::figured(&words, face.ports, body(RIGHT_SIZE), mono(12.5), pal.dim));
+            let w = if hot { right_w } else { rest.min(right_w) };
+            let at = pos2(row.max.x - w, row.center().y);
             let id = Id::new("mp3-tabs-right");
-            if studio::text_button(ui, id, at, &words, None, face.ports, right_w, face.takes(), pal).clicked() {
+            // A point over, so the words' own width never reads as a cut.
+            if studio::text_button_sized(ui, id, at, &words, None, face.ports, w + 1.0, face.takes(), pal, RIGHT_SIZE).clicked() {
                 acts.push(act);
             }
         }
         None => {
-            let runs = studio::figured(&words, face.ports, body(13.0), mono(12.5), right_tone);
-            studio::runs(ui, at, &runs, right_w + 1.0, Align2::LEFT_CENTER);
+            let runs = studio::figured(&words, face.ports, body(RIGHT_SIZE), mono(12.5), right_tone);
+            studio::runs(ui, pos2(row.max.x - right_w, row.center().y), &runs, right_w + 1.0, Align2::LEFT_CENTER);
         }
     }
 }
@@ -436,13 +476,16 @@ fn draw_tab(ui: &Ui, face: &Face, tab: &Tab, rect: Rect, name_w: f32, id: Id) ->
         (pal.dim, tab.tone)
     };
     let mid = rect.center().y;
-    let name = studio::runs(ui, pos2(rect.min.x + TAB_PAD, mid), &tab.runs(ink, hot), name_w + 1.0, Align2::LEFT_CENTER);
+    let runs = tab.runs(ink, hot || tab.open);
+    let name = studio::runs(ui, pos2(rect.min.x + TAB_PAD, mid), &runs, name_w + 1.0, Align2::LEFT_CENTER);
     let x = name.max.x.max(rect.min.x + TAB_PAD) + TAB_GAP;
-    if tab.mark == glyphs().ok {
-        let y = studio::led_mid(ui, mid, &body(13.5), false);
-        studio::check(ui, pos2(x + 5.0, y), mark);
-    } else {
-        studio::text(ui, pos2(x, mid), &tab.mark, strong(14.0), mark, rect.max.x - x, Align2::LEFT_CENTER);
+    let y = studio::led_mid(ui, mid, &body(13.5), false);
+    match tab.look() {
+        Look::Check => studio::check(ui, pos2(x + 5.0, y), mark),
+        Look::Cross => studio::cross(ui, pos2(x + 5.0, y), mark),
+        Look::Words(font) => {
+            studio::text(ui, pos2(x, mid), &tab.mark, font, mark, rect.max.x - x, Align2::LEFT_CENTER);
+        }
     }
     response.is_some_and(|r| r.clicked())
 }

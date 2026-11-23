@@ -43,6 +43,11 @@ const PLAIN: (f32, f32) = (13.5, 20.0);
 const DIM: (f32, f32) = (13.0, 18.0);
 const LINE_GAP: f32 = 4.0;
 const METER_GAP: f32 = 6.0;
+/// A line led by the cells' scan (asking, reading, counting, formatting):
+/// the kit's searching shape on the row's 20 points, its words 13 and 10
+/// points after the segments, and after the share where there is one.
+const SCAN: (f32, f32) = (13.0, 20.0);
+const SCAN_GAP: f32 = 10.0;
 /// A meter's row, and its segments' height in it.
 const METER_ROW: f32 = 20.0;
 const METER_H: f32 = 10.0;
@@ -225,9 +230,10 @@ pub(super) fn hairline(ui: &Ui, face: &Face, rect: Rect) {
 }
 
 /// The head's row from `y`: `name` in the 16-point semibold at the left
-/// and, dim in the monospace at the right, `right` (the port, or with
-/// several boards the serial), dropped whole where it would come within 16
-/// points of the name. Returns where the next row starts.
+/// and, dim in the monospace at the right on the name's baseline, `right`
+/// (the port, or with several boards the serial), dropped whole where it
+/// would come within 16 points of the name. Returns where the next row
+/// starts.
 pub(super) fn head(ui: &Ui, face: &Face, grid: Grid, y: f32, name: &str, right: &str) -> f32 {
     let pal = face.pal;
     let mid = y + HEAD_H / 2.0;
@@ -237,7 +243,15 @@ pub(super) fn head(ui: &Ui, face: &Face, grid: Grid, y: f32, name: &str, right: 
     let room = if keep { grid.w - right_w - CLEAR } else { grid.w };
     studio::text(ui, pos2(grid.x, mid), name, strong(16.0), pal.text, room, Align2::LEFT_CENTER);
     if keep {
-        studio::text(ui, pos2(grid.right(), mid), right, mono(FIGURE), pal.dim, right_w + 1.0, Align2::RIGHT_CENTER);
+        // A line centred on a point stands on the UI face's baseline at its
+        // own size there, the smaller the higher: the figure is centred as
+        // far under the name's middle as stands it on the name's.
+        let under = |size: f32| {
+            let m = studio::metrics(ui, &body(size));
+            m.baseline - m.row / 2.0
+        };
+        let at = pos2(grid.right(), mid + under(16.0) - under(FIGURE));
+        studio::text(ui, at, right, mono(FIGURE), pal.dim, right_w + 1.0, Align2::RIGHT_CENTER);
     }
     y + HEAD_H
 }
@@ -491,7 +505,9 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         let face = self.face;
         let lined = Lined::of(left, face);
         let first = self.last.is_none() || label.is_some();
-        let (size, line_h) = if first || lined.lamp.is_some() || lined.meter.is_some() {
+        let (size, line_h) = if lined.meter.is_some() {
+            SCAN
+        } else if first || lined.lamp.is_some() {
             FIRST
         } else if lined.dim(face) {
             DIM
@@ -515,10 +531,10 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         }
         if let Some((lit, share)) = &lined.meter {
             let bar = studio::meter(self.ui, pos2(x, mid), 10, *lit, vec2(5.0, 10.0), 2.0, face.pal.ok, face.pal);
-            x = bar.max.x + 8.0;
+            x = bar.max.x + SCAN_GAP;
             if let Some(share) = share {
-                let drawn = studio::text(self.ui, pos2(x, mid), share, mono(12.0), face.pal.dim, (end - x).max(1.0), Align2::LEFT_CENTER);
-                x = drawn.max.x + 8.0;
+                let drawn = studio::text(self.ui, pos2(x, mid), share, mono(FIGURE), face.pal.dim, (end - x).max(1.0), Align2::LEFT_CENTER);
+                x = drawn.max.x + SCAN_GAP;
             }
         }
         let runs = lined.runs(size, face);
@@ -612,7 +628,9 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
     fn next(&mut self, line: &Line, reset: bool) {
         let face = self.face;
         let lined = Lined::of(line, face);
-        let (size, line_h) = PLAIN;
+        // The choice's line plain; under it, the image coming and the flags
+        // that set it are explanations, dim, as every such line.
+        let (size, line_h) = if !lined.spans.is_empty() && lined.dim(face) { DIM } else { PLAIN };
         let gap = if self.last.is_none() { 0.0 } else { LINE_GAP };
         let Some(top) = self.room(gap, line_h) else { return };
         let (x, end) = (self.grid.value_x(), self.grid.right());

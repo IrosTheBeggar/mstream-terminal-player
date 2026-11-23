@@ -128,9 +128,11 @@ fn a_board_a_release_behind_draws_its_head_its_chip_its_card_row_and_its_primary
     assert_drew(&out, &["Update available · v0.7.0 → v0.8.0", "v0.7.0 can't report the card."]);
     assert!(!drew(&out, "? v0.7.0 can't report the card."), "the cells' glyph is the kit's LED, not a word");
     assert!(!texts(&out).iter().any(|(t, _)| t.contains("COM5")), "one board: no subjects row");
-    // The head's port at the card's right, the primary at the content's.
+    // The head's port at the card's right on the name's baseline, the
+    // primary at the content's.
     let (name, port, primary) = (find(&out, "M5Stack Core2"), find(&out, "COM3"), find(&out, "UPDATE"));
-    assert!((name.center().y - port.center().y).abs() < 2.0 && port.min.x > name.max.x + 100.0, "{name:?} {port:?}");
+    let level = (baseline(&out, "M5Stack Core2") - baseline(&out, "COM3")).abs() < 0.5;
+    assert!(level && port.min.x > name.max.x + 100.0, "{name:?} {port:?}");
     assert!(primary.min.y > find(&out, "v0.7.0 can't report the card.").max.y, "the bottom row under the rows");
     assert!(ends.sent().is_empty(), "drawing asks the worker nothing");
 }
@@ -377,4 +379,121 @@ fn a_card_shares_the_subjects_row_and_its_tab_opens_its_view() {
     assert!(page.card_open.is_some(), "the cells' Card(0)");
     let out = probe.settle(&mut page);
     assert_drew(&out, &["Car music"]);
+}
+
+// ── The boards' type for the cells' marks and figures ───────────────────
+
+/// The galley a pass drew with the text `words`, within `rows` of the
+/// area's height, and where.
+fn galley_in(out: &FullOutput, words: &str, rows: std::ops::Range<f32>) -> (Pos2, std::sync::Arc<egui::Galley>) {
+    out.shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            Shape::Text(t) if t.galley.text() == words && rows.contains(&t.pos.y) => Some((t.pos, t.galley.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{words:?} drawn: {:?}", texts(out)))
+}
+
+/// The faces `words` was set in, run by run.
+fn fonts_of(out: &FullOutput, words: &str) -> Vec<FontId> {
+    galley_in(out, words, f32::MIN..f32::MAX).1.job.sections.iter().map(|s| s.format.font_id.clone()).collect()
+}
+
+/// Where `words`' first letter stands on its baseline.
+fn baseline(out: &FullOutput, words: &str) -> f32 {
+    let (pos, galley) = galley_in(out, words, f32::MIN..f32::MAX);
+    let row = &galley.rows[0];
+    pos.y + row.pos.y + row.row.glyphs[0].pos.y
+}
+
+#[test]
+fn a_failed_boards_tab_wears_the_kits_cross_and_a_writes_tab_its_percent_in_the_monospace() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::old("COM3", "v0.7.0"), fixtures::old("COM5", "v0.7.0")]));
+    ends.failed();
+    page.pump();
+    page.act(Act::Board(1));
+    let out = probe.settle(&mut page);
+    let no = glyphs().no;
+    assert!(!texts(&out).iter().any(|(t, _)| t.contains(no)), "no ✗ set as words: the panel's faces have no such glyph");
+    let gold = Pal::now().gold;
+    let cross = out.shapes.iter().filter(|c| matches!(&c.shape, Shape::LineSegment { stroke, .. } if stroke.color == gold && stroke.width == 1.6));
+    assert_eq!(cross.count(), 2, "COM3's mark, the kit's cross in the gold");
+    // A write's percentage is a figure.
+    let (mut page, ends) = page_with(Ends::two);
+    page.act(Act::Board(1));
+    page.act(Act::Primary);
+    page.act(Act::Write);
+    let mut board = fixtures::old("COM5", "v0.7.0");
+    board.work = Work::Writing { phase: Phase::Writing, pct: Some(62) };
+    ends.tell([crate::device::desk::Event::Board(board)]);
+    page.pump();
+    let out = probe.settle(&mut page);
+    assert_eq!(fonts_of(&out, "62%"), [mono(13.0)], "the monospace at its one weight, never bold");
+}
+
+#[test]
+fn the_slab_sets_a_cards_name_in_the_semibold_as_the_cells_bold_it() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let (mut page, _ends) = with_card(Ends::update_available);
+    let tab = if cfg!(windows) { "E: Car music" } else { "Car music" };
+    let row = 0.0..ROOMY.top + ROW_H;
+    let name_font = |out: &FullOutput| galley_in(out, tab, row.clone()).1.job.sections.last().map(|s| s.format.font_id.clone());
+    let out = probe.settle(&mut page);
+    assert_eq!(name_font(&out), Some(body(13.5)), "a closed tab's name at rest");
+    page.act(Act::Card(0));
+    let out = probe.settle(&mut page);
+    assert_eq!(name_font(&out), Some(strong(13.5)), "on the slab, the semibold");
+    if cfg!(windows) {
+        assert_eq!(galley_in(&out, tab, row).1.job.sections[0].format.font_id, mono(13.0), "the drive stays regular");
+    }
+}
+
+#[test]
+fn update_all_at_the_rows_right_edge_is_set_at_the_slots_13_points_flush_with_the_column() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let boards = vec![fixtures::old("COM3", "v0.7.0"), fixtures::old("COM5", "v0.7.0"), fixtures::answering("COM9", "v0.8.0")];
+    let (mut page, _ends) = page_with(|e| e.boards(boards));
+    let words = "Update all (2)";
+    let end = WINDOW.x / 2.0 + COLUMN_W / 2.0;
+    let out = probe.settle(&mut page);
+    assert!((find(&out, words).max.x - end).abs() < 1.0, "flush at rest: {:?} to {end}", find(&out, words));
+    assert!(fonts_of(&out, words).contains(&body(13.0)), "{:?}", fonts_of(&out, words));
+    // Under the pointer, the semibold, still flush.
+    let _ = probe.pass(&mut page, vec![Event::PointerMoved(find(&out, words).center())]);
+    let out = probe.settle(&mut page);
+    assert!((find(&out, words).max.x - end).abs() < 1.0, "flush under the pointer: {:?}", find(&out, words));
+    assert!(fonts_of(&out, words).contains(&strong(13.0)), "{:?}", fonts_of(&out, words));
+}
+
+#[test]
+fn the_heads_right_stands_on_the_names_baseline() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let (mut page, _ends) = page_with(Ends::two);
+    let out = probe.settle(&mut page);
+    let serial = texts(&out).into_iter().find(|(t, _)| t.starts_with("serial ")).expect("the serial at the head's right").0;
+    let (name, right) = (baseline(&out, "M5Stack Core2"), baseline(&out, &serial));
+    assert!((name - right).abs() < 0.5, "the name on {name}, the serial on {right}");
+}
+
+#[test]
+fn a_scan_is_the_kits_searching_shape_its_words_at_13_points_10_after_the_segments() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let (mut page, _ends) = page_with(|e| e.boards(vec![fixtures::heard("COM3", Heard::Nothing)]));
+    let out = probe.settle(&mut page);
+    let words = t!("dev.fw_asking").to_string();
+    assert_eq!(fonts_of(&out, &words), [body(13.0)]);
+    let unlit = Pal::now().unlit;
+    let segments = out.shapes.iter().filter_map(|c| match &c.shape {
+        Shape::Rect(r) if r.fill == unlit && r.rect.width() == 5.0 => Some(r.rect.max.x),
+        _ => None,
+    });
+    let end = segments.fold(f32::MIN, f32::max);
+    assert!((find(&out, &words).min.x - (end + 10.0)).abs() < 0.5, "{:?} after {end}", find(&out, &words));
 }
