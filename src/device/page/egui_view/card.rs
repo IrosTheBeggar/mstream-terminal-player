@@ -75,7 +75,8 @@ const LIB_APART: f32 = 8.0;
 /// rows, given way as the cells give them way ([`turns`]) and then from the
 /// foot; its log takes the room left. Its rest is its height with every
 /// row it has, and through Details while it is open, its log at board.rs's
-/// `LOG_REST` lines, as the frame measures it; the measuring run
+/// `LOG_REST` lines (fewer where it has fewer, unless its sync or a job of
+/// its is under way), as the frame measures it; the measuring run
 /// (`face.live` false) draws no control.
 pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, room: Rect) -> Drawn {
     let s = face.space;
@@ -92,7 +93,10 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
     let values = &laid.values;
     let said = saying(values, face);
     let says_rows: Vec<usize> = (0..values.len()).filter(|&i| said[i]).collect();
-    let want = Want::of(page, &view.key, face, room, y - room.min.y + s.gap + actions_h + s.pad_y, values.len(), turns(values, &said), says_rows, &laid.details);
+    // Its work under way: a sync, or a job of its own (set-up, settings,
+    // the plays, the eject); each tells its log a line a step.
+    let under_way = view.run.is_some() || view.busy.is_some();
+    let want = Want::of(page, &view.key, face, room, y - room.min.y + s.gap + actions_h + s.pad_y, values.len(), turns(values, &said), says_rows, &laid.details, under_way);
     let kept_rows = |mask: &[bool]| values.iter().zip(mask).filter(|(_, k)| **k).map(|(r, _)| r).collect::<Vec<&Row>>();
     let mut probe = card.new_child(UiBuilder::new().id_salt("mp3-card-measure").max_rect(room));
     probe.set_invisible();

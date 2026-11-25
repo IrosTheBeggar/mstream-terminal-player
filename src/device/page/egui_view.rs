@@ -164,8 +164,9 @@ pub(super) struct Drawn {
     /// How tall its card stands at rest, from its top through its bottom
     /// row and its foot's padding — and, while Details is open, through
     /// Details too, its log at its newest lines up to board.rs's
-    /// `LOG_REST`: what the frame measures to choose its [`Space`]. Nothing
-    /// for a modal.
+    /// `LOG_REST`, and at `LOG_REST` whatever it has while its work is under
+    /// way: what the frame measures to choose its [`Space`]. Nothing for a
+    /// modal.
     pub(super) rest: f32,
 }
 

@@ -706,6 +706,59 @@ fn the_frame_closes_up_once_for_a_window_size_and_holds_there_till_the_window_ch
     assert_eq!(again, at_rest, "a window that changed opens the frame up again");
 }
 
+/// The page's areas in points from the GUI's default window to where the
+/// frame no longer closes up for a write's log: 28 to 36 rows.
+fn default_sizes() -> impl Iterator<Item = Vec2> {
+    (28..=36).map(|rows| vec2(800.0, rows as f32 * 16.0))
+}
+
+#[test]
+fn a_write_under_way_with_details_open_moves_nothing_of_the_page_as_its_log_grows() {
+    let _en = english();
+    for size in default_sizes() {
+        let probe = Probe::new(size);
+        let (mut page, ends) = with_card(Ends::update_available);
+        page.act(Act::Primary);
+        page.act(Act::Write);
+        ends.writing(5);
+        page.pump();
+        page.act(Act::Details);
+        let head = |out: &FullOutput| find(out, "M5Stack Core2");
+        let open = head(&probe.settle(&mut page));
+        // A line at a time, as the write tells them: the frame closed up
+        // for its log when Details opened, and holds there.
+        for i in 0..10 {
+            ends.tell([log_line(&format!("wrote chunk {i:02}"))]);
+            page.pump();
+            let out = probe.settle(&mut page);
+            assert_eq!(head(&out), open, "the head held after line {i} at {size:?}");
+            assert!(drew(&out, &format!("wrote chunk {i:02}")), "the newest line drawn at {size:?}");
+        }
+    }
+}
+
+#[test]
+fn a_sync_under_way_with_details_open_moves_nothing_of_the_page_as_its_log_grows() {
+    let _en = english();
+    for size in default_sizes() {
+        let probe = Probe::new(size);
+        let (mut page, ends) = with_card(Ends::up_to_date);
+        page.act(Act::Card(0));
+        let key = page.cards()[0].key.clone();
+        page.transfer.as_ref().expect("the cards' worker").fold.borrow_mut().apply(worker::Event::Card(Box::new(cards::syncing("E:", now()))));
+        page.act(Act::Details);
+        let head = |out: &FullOutput| find(out, "Car music");
+        let open = head(&probe.settle(&mut page));
+        for i in 0..10 {
+            ends.tell([crate::device::desk::Event::Log { port: Some(key.clone()), text: format!("copied track {i:02}"), kind: LogKind::Fact }]);
+            page.pump();
+            let out = probe.settle(&mut page);
+            assert_eq!(head(&out), open, "the head held after line {i} at {size:?}");
+            assert!(drew(&out, &format!("copied track {i:02}")), "the newest line drawn at {size:?}");
+        }
+    }
+}
+
 #[test]
 fn the_waiting_line_says_its_words_under_the_blank_first_row() {
     let _en = english();

@@ -149,7 +149,10 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, roo
     // The other rows go a line at a time from the foot: the board has no
     // give-way of its own (contract clauses 4 and 20a).
     let give_way: Vec<Vec<usize>> = (0..flat.len()).rev().filter(|&i| !said[flat[i].0]).map(|i| vec![i]).collect();
-    let want = Want::of(page, port, face, room, y - room.min.y + s.gap + actions_h + s.pad_y, flat.len(), give_way, says_rows, &details);
+    // Its work under way: a write (from the gate's yes), a format, a count,
+    // a listen; each tells its log a line a step.
+    let under_way = board.work != Work::Idle || page.written_now(board);
+    let want = Want::of(page, port, face, room, y - room.min.y + s.gap + actions_h + s.pad_y, flat.len(), give_way, says_rows, &details, under_way);
     let salt = Id::new("mp3-board").with(port);
     // The value rows `keep` asks after, measured as they are drawn: blocks
     // a block's gap apart, under the head.
@@ -434,9 +437,14 @@ pub(super) struct Want {
 impl Want {
     /// What a card in `room` asks with Details' `details` rows (the cells'
     /// own, none while it is shut) and `port`'s log: in the live run the log
-    /// counts every line it has, in the measuring run [`LOG_REST`] at most.
+    /// counts every line it has, in the measuring run [`LOG_REST`] at most —
+    /// and [`LOG_REST`] whatever it has while the subject's work is
+    /// `under_way` (a write, a format, a sync), whose log grows a line a
+    /// step: the frame closes up once for it, when Details opens on it or it
+    /// starts with Details open, rather than a few points a line through
+    /// its first lines.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn of(page: &Page, port: &str, face: &Face, room: Rect, fixed: f32, values: usize, give_way: Vec<Vec<usize>>, says: Vec<usize>, details: &[Row]) -> Want {
+    pub(super) fn of(page: &Page, port: &str, face: &Face, room: Rect, fixed: f32, values: usize, give_way: Vec<Vec<usize>>, says: Vec<usize>, details: &[Row], under_way: bool) -> Want {
         let at = details.iter().position(|r| matches!(r, Row::Log));
         let lines = at.map_or(0, |_| page.log_for(port).len());
         let links = at.map_or(0.0, |at| details[at + 1..].iter().map(|r| fixed_h(r, face)).sum());
@@ -448,7 +456,7 @@ impl Want {
             says,
             open: !details.is_empty(),
             facts: details.iter().filter(|r| matches!(r, Row::Fact { .. })).count(),
-            log: if face.live { lines } else { lines.min(LOG_REST) },
+            log: if face.live { lines } else if under_way && at.is_some() { LOG_REST } else { lines.min(LOG_REST) },
             links,
         }
     }
