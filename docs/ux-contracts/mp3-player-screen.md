@@ -1734,12 +1734,15 @@ comes from the cache, or a download, beside them.
     the card in view stands whole under them at rest: its rows through its
     bottom row and, while Details is open, Details too, its log at its
     newest seven lines where it has them — a write's last rung, from its 0%
-    to its failure's hint (the empty card's hints count so while they are
-    open). Where it does not, the frame closes up toward a tighter set (16
-    points under the top bar, blocks 10 apart, the card 16 in at its sides
-    and 12 at its top and foot) just as far as the card needs, each measure
-    a whole number of points, and holds there while the window keeps its
-    size: a sync that starts or ends, Details closed or another subject
+    to its failure's hint — and at seven whatever it has while its work is
+    under way (a write, a format, a sync), whose log grows a line a step,
+    so the frame closes up once for it rather than a few points a line (the
+    empty card's hints count at rest while they are open). Where it does
+    not, the frame closes up toward a tighter set (16 points under the top
+    bar, blocks 10 apart, the card 16 in at its sides and 12 at its top and
+    foot) just as far as the card needs, each measure a whole number of
+    points, and holds there while the window keeps its size: a sync that
+    starts or ends, a log that grows, Details closed or another subject
     chosen moves nothing of the page, which opens up again only with the
     window. So after a failure in the GUI's default window the frame closes
     up and the log takes the room under the card down to the busy line, as
@@ -1783,8 +1786,10 @@ comes from the cache, or a download, beside them.
     stay the model's, on a thread of their own (clause 36). The worker's
     reports drive the frame as they do the cells'; egui asks for a pass of
     its own only when a click changed the page (the next pass shows it),
-    when a tooltip ripens, and when a modal settles its height or brings
-    the keyboard's control into view.
+    when a tooltip ripens, and when a modal settles its height, brings the
+    keyboard's control into view, or ends its body's view between the rows
+    it laid out (a sheet opened, its tab turned: rows other than the last
+    pass's).
 70. **The board card and a card's view are the cells' rows in points**,
     made by the same functions (cells.rs's and cells/card.rs's rows, with a
     value column too wide to wrap in), so the two faces say the same words
@@ -1805,22 +1810,24 @@ comes from the cache, or a download, beside them.
     whose links drop from the end (a card's Send the plays first); the
     value rows that say what the primary will do — the block a board's
     primary acts on (Firmware, or the SD card for Format), Next sync and
-    Next write, a failure's or a warning's words behind a gold LED — and
-    work under way (a write, a format, a sync); while Details is open, its
-    rule and its links (Write again, Format as FAT32…, Sync again), so its
-    door never stands open over nothing and no control of its goes at the
-    default window; then its log's newest two lines; then its facts, cut
-    from the foot; then the other value rows, given way as the cells give
-    theirs (a card's dim lines first, then Converts) and then whole lines
-    from the foot. What room is left the log takes, its newest lines, as
-    many as fit and it has. Only where the bottom row and the rows that say
-    what it will do leave no room for even Details' rule and links does
-    Details go whole, its door open over nothing, and its links' keys, where
-    they have them, still reach them as the footer says (w writes again, f
-    formats), as the cells' keys reach a link they cut. Details' facts are a
-    line each, never wrapped (a card's Drive gives way a piece at a time and
-    its Removes cuts its path, never its count), its log a line a notch
-    under the wheel, a thumb while it overflows.
+    Next write, a failure's or a warning's words behind a gold LED, and a
+    block that holds a control (the SD card's Count free space or Format
+    link, Next write's Reset), so no control goes while the room holds it
+    — and work under way (a write, a format, a sync); while Details is
+    open, its rule and its links (Write again, Format as FAT32…, Sync
+    again), so its door never stands open over nothing and no control of
+    its goes at the default window; then its log's newest two lines; then
+    its facts, cut from the foot; then the other value rows, given way as
+    the cells give theirs (a card's dim lines first, then Converts) and
+    then whole lines from the foot. What room is left the log takes, its
+    newest lines, as many as fit and it has. Only where the bottom row and
+    the rows that say what it will do leave no room for even Details' rule
+    and links does Details go whole, its door open over nothing, and its
+    links' keys, where they have them, still reach them as the footer says
+    (w writes again, f formats), as the cells' keys reach a link they cut.
+    Details' facts are a line each, never wrapped (a card's Drive gives way
+    a piece at a time and its Removes cuts its path, never its count), its
+    log a line a notch under the wheel, a thumb while it overflows.
 
     The subjects row is runs per tab, not the kit's segmented control: a
     name in its own case (a port whole in the monospace, a card's drive
@@ -1872,11 +1879,14 @@ comes from the cache, or a download, beside them.
     entry raised under the pointer, its figures in the monospace, and,
     holding fewer entries than it has, the kit's thumb in a gutter of its
     own its entries stop short of — the release list inside the sheet's
-    body, its words under its control's, From's and Into's on a layer of
-    their own over the sheet's lower rows, inside its frame and over its
-    pinned foot, never lower, and only from a box in the body's view. The
-    keyboard's button in a foot wears the accent's ring 3 points out of it;
-    an Apply with no whole image is drawn dim and takes nothing.
+    body, its words under its control's, a press off its entries closing
+    it; From's and Into's on a layer of their own over the sheet's lower
+    rows, inside its frame and over its pinned foot, never lower, and only
+    from a box in the body's view, a press on their frame off their entries
+    (the thumb, its gutter, the frame's edge) taking nothing and never the
+    row they hide. The keyboard's button in a foot wears the accent's ring
+    3 points out of it; an Apply with no whole image is drawn dim and takes
+    nothing.
 
 ## Wording
 
@@ -3485,7 +3495,10 @@ setting no locale, prints in English.
     GUI's default window and its floor the two say different words in the
     same state; and the egui frame closes up toward its tighter set and
     holds there for the window's size (clause 68), where the cells have no
-    measures to close.
+    measures to close; and a press on From's or Into's list's frame off its
+    entries (its thumb, the thumb's gutter, the frame's edge) takes nothing
+    in egui, where a press on the cells' border is the Settings row's it
+    lies over (2026-11-25: egui's turned that row's setting unseen).
   - **Looks left as they are**: at the GUI's floor the removals gate's
     foot stands half under its body's view until the body is scrolled, as
     the kit's gate does (a foot's buttons say no row of the body's, so the
