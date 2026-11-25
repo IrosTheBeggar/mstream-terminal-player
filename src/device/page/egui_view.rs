@@ -20,7 +20,10 @@
 //! view registers for the same control and only while it registers it — a
 //! card's rows are the cells' own (cells.rs's `Row`s, made by the same
 //! functions), only set in points — applied through [`Page::act`] at the
-//! pass's end, once a click however many runs egui makes of a pass. Keys
+//! pass's end, once a click however many runs egui makes of a pass. A
+//! control's id says what it is and whose, never where it falls, so a press
+//! whose control went or changed before its release is dropped rather than
+//! given to the control that took its place. Keys
 //! never reach egui: the page's keymap still moves the view, opens Details,
 //! answers the gates and edits the sheet's field, and egui draws what the
 //! page holds. The view keeps nothing of its own between passes but what
@@ -395,7 +398,7 @@ pub(super) fn tone(style: Style, pal: &Pal) -> Color32 {
 /// One tab of the subjects row, as the cells make it (cells.rs's
 /// `tab_row`): its name and the part of it the monospace sets (a port
 /// whole, a card's drive), its mark and the mark's colour, whether its
-/// subject is in view, and its act.
+/// subject is in view, its act, and its id ([`tab_id`]).
 struct Tab {
     name: String,
     figure: Option<String>,
@@ -403,6 +406,17 @@ struct Tab {
     tone: Color32,
     open: bool,
     act: Act,
+    id: Id,
+}
+
+/// A tab's id: its subject's, a board's port or a card's key, never its
+/// place on the row. egui gives a release to the id that was under its
+/// press, so a press on a tab whose subject moved along the row before its
+/// release (another plugged in before it, one before it gone) opens that
+/// subject still, and one whose subject went opens nothing, never the
+/// subject that took its place.
+fn tab_id(subject: &str) -> Id {
+    Id::new("mp3-tab").with(subject)
 }
 
 /// How a tab's mark is drawn, as the boards draw each: the cells' ✓ as the
@@ -462,7 +476,7 @@ fn tabs(page: &Page, pal: &Pal) -> Vec<Tab> {
         let name = short(board.port());
         let open = page.card_open.is_none() && page.open.as_deref() == Some(board.port());
         let tone = tone(Style::default().fg(color), pal);
-        tabs.push(Tab { figure: Some(name.clone()), name, mark, tone, open, act: Act::Board(i) });
+        tabs.push(Tab { figure: Some(name.clone()), name, mark, tone, open, act: Act::Board(i), id: tab_id(board.port()) });
     }
     for (i, card) in page.cards().iter().enumerate() {
         let (mark, color) = cells::card::mark(card);
@@ -471,7 +485,7 @@ fn tabs(page: &Page, pal: &Pal) -> Vec<Tab> {
         let figure = name.starts_with(&format!("{drive} ")).then_some(drive);
         let open = page.card_open.as_deref() == Some(card.key.as_str());
         let tone = tone(Style::default().fg(color), pal);
-        tabs.push(Tab { name, figure, mark, tone, open, act: Act::Card(i) });
+        tabs.push(Tab { name, figure, mark, tone, open, act: Act::Card(i), id: tab_id(&card.key) });
     }
     tabs
 }
@@ -526,7 +540,7 @@ fn subjects(ui: &Ui, page: &Page, face: &Face, row: Rect, acts: &mut Vec<Act>) {
             break;
         }
         let rect = Rect::from_min_size(pos2(x, row.min.y), vec2(w, ROW_H));
-        if draw_tab(ui, face, tab, rect, rooms[i], Id::new("mp3-tab").with(i)) {
+        if draw_tab(ui, face, tab, rect, rooms[i]) {
             acts.push(tab.act.clone());
         }
         x = rect.max.x + TABS_APART;
@@ -559,9 +573,9 @@ fn subjects(ui: &Ui, page: &Page, face: &Face, row: Rect, acts: &mut Vec<Act>) {
 
 /// A tab in `rect`, its name cut to `name_w`: the slab while its subject is
 /// in view, else bare, raised under the pointer. Whether a click landed.
-fn draw_tab(ui: &Ui, face: &Face, tab: &Tab, rect: Rect, name_w: f32, id: Id) -> bool {
+fn draw_tab(ui: &Ui, face: &Face, tab: &Tab, rect: Rect, name_w: f32) -> bool {
     let pal = face.pal;
-    let response = face.takes().then(|| studio::hand(ui.interact(rect, id, Sense::click())));
+    let response = face.takes().then(|| studio::hand(ui.interact(rect, tab.id, Sense::click())));
     let hot = !tab.open && response.as_ref().is_some_and(|r| r.hovered());
     let (ink, mark) = if tab.open {
         ui.painter().rect_filled(rect, studio::square(), pal.accent);

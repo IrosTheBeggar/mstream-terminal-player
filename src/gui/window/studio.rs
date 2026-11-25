@@ -5532,6 +5532,8 @@ mod tests {
         let mut run = |ui: &mut Ui| {
             let pal = Pal::now();
             let response = tall_button(ui, Id::new("probe-tall"), rect, "Update ▸", enabled.get(), true, &pal);
+            // The caller's why, while it waits.
+            let response = if enabled.get() { response } else { response.on_hover_text("one board at a time") };
             if response.clicked() {
                 clicked.set(clicked.get() + 1);
             }
@@ -5550,6 +5552,15 @@ mod tests {
         assert_eq!(clicked.get(), 1, "disabled: no click");
         let out = pass(&ctx, size, vec![egui::Event::PointerMoved(rect.center())], &mut run);
         assert_ne!(out.platform_output.cursor_icon, CursorIcon::PointingHand, "and no hand");
+        // But it still senses the pointer, so the caller's tooltip says why
+        // (in a context of its own: egui shows none where the pointer
+        // rests after a click).
+        let ctx = context();
+        let _ = pass(&ctx, size, vec![egui::Event::PointerMoved(rect.center())], &mut run);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(ctx.read_response(Id::new("probe-tall")).is_some_and(|r| r.hovered()), "the waiting primary under the pointer");
+        assert!(texts(&out).iter().any(|(t, _)| t == "one board at a time"), "its why in the tooltip: {:?}", texts(&out));
     }
 
     fn tall_button_width_probe(ctx: &egui::Context, label: &str, enabled: bool) -> f32 {

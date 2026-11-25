@@ -11,6 +11,7 @@ use egui::epaint::Shape;
 use egui::{Event, FullOutput, MouseWheelUnit, PointerButton, Vec2};
 
 use super::super::fixtures;
+use super::board::tests::card_room_of;
 use super::*;
 use crate::device::card::worker::{self, Fold, Link, fixtures as cards};
 
@@ -96,6 +97,18 @@ impl Probe {
     fn click_id(&self, page: &mut Page, id: Id) {
         let at = self.ctx.read_response(id).unwrap_or_else(|| panic!("{id:?} was drawn")).rect.center();
         self.click(page, at);
+    }
+
+    /// A press at `at`; `meanwhile` done to the page while the button is
+    /// held, and a pass that draws it, as the window draws the worker's
+    /// news; then the release where the press was.
+    fn press_held_through(&self, page: &mut Page, at: Pos2, meanwhile: impl FnOnce(&mut Page)) {
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let _ = self.pass(page, vec![Event::PointerMoved(at)]);
+        let _ = self.pass(page, vec![button(true)]);
+        meanwhile(page);
+        let _ = self.pass(page, Vec::new());
+        let _ = self.pass(page, vec![button(false)]);
     }
 }
 
@@ -184,7 +197,7 @@ fn several_boards_draw_the_subjects_row_its_marks_its_right_edge_and_a_tab_click
     let slab = out.shapes.iter().any(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == pal.accent && r.rect.height() == ROW_H));
     assert!(slab, "the tab in view on the accent's slab");
     assert_eq!(page.open.as_deref(), Some("COM3"));
-    probe.click_id(&mut page, Id::new("mp3-tab").with(1usize));
+    probe.click_id(&mut page, tab_id("COM5"));
     assert_eq!(page.open.as_deref(), Some("COM5"), "the tab's act, the cells' Board(1)");
     let out = probe.settle(&mut page);
     assert_drew(&out, &["Update available · v0.7.0 → v0.8.0"]);
@@ -311,11 +324,67 @@ fn under_the_write_the_tabs_still_switch_as_the_cells_let_them_and_nothing_else_
     assert!(!drew(&out, "Advanced…"), "nothing that writes or chooses under the lock");
     // COM3's tab: the cells register it under the lock, and the view moves
     // to the board not being written, which offers nothing either.
-    probe.click_id(&mut page, Id::new("mp3-tab").with(0usize));
+    probe.click_id(&mut page, tab_id("COM3"));
     assert_eq!(page.open.as_deref(), Some("COM3"));
     let out = probe.settle(&mut page);
     assert!(!drew(&out, "Show on the player") && !drew(&out, "Advanced…"), "{:?}", texts(&out));
     assert!(ends.sent().is_empty(), "and the lock sends nothing");
+}
+
+#[test]
+fn a_press_on_details_held_while_the_primary_comes_in_opens_details_never_the_gate() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    // COM3 listing its library, its bottom row the door alone; it answers
+    // on v0.7.0 while the button is held on Details, and UPDATE comes in at
+    // the row's end: the release opens Details, never the update's gate.
+    let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::starting("COM3", Some("v0.7.0"))]));
+    let out = probe.settle(&mut page);
+    assert!(!drew(&out, "UPDATE"), "no primary while it lists its library");
+    probe.press_held_through(&mut page, find(&out, "Details").center(), |page| {
+        ends.tell([crate::device::desk::Event::Board(fixtures::old("COM3", "v0.7.0"))]);
+        page.pump();
+    });
+    assert!(page.details && page.gate.is_none(), "the press on Details opened Details, not the gate");
+    assert!(drew(&probe.settle(&mut page), "UPDATE"), "the primary came in under the held button");
+}
+
+#[test]
+fn a_press_on_a_tab_held_while_a_board_is_plugged_in_before_it_opens_its_own_board() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    // Two boards, the press on COM5's tab, and COM4 plugged in before it
+    // while the button is held: the release opens COM5, never COM4.
+    let (mut page, ends) = page_with(Ends::two);
+    let out = probe.settle(&mut page);
+    let tab = find(&out, "COM5");
+    assert!(tab.max.y < ROOMY.top + ROW_H, "COM5's tab on the subjects row: {tab:?}");
+    probe.press_held_through(&mut page, tab.center(), |page| {
+        let ports = ["COM3", "COM4", "COM5"].map(String::from).to_vec();
+        let plugged = fixtures::answering("COM4", "v0.8.0");
+        ends.tell([crate::device::desk::Event::Board(plugged), crate::device::desk::Event::Watch { ports, others: Vec::new() }]);
+        page.pump();
+    });
+    assert_eq!(page.boards.iter().map(|b| b.port()).collect::<Vec<_>>(), ["COM3", "COM4", "COM5"], "COM4 came in before COM5");
+    assert_eq!(page.open.as_deref(), Some("COM5"), "the press on COM5's tab opened COM5");
+}
+
+#[test]
+fn a_press_on_a_primary_held_while_its_board_is_unplugged_asks_nothing_of_the_next() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    // Two boards a release behind, the press on COM3's UPDATE, and COM3
+    // unplugged while the button is held, the view going to COM5: the
+    // release asks nothing of COM5.
+    let (mut page, ends) = page_with(|e| e.boards(vec![fixtures::old("COM3", "v0.7.0"), fixtures::old("COM5", "v0.7.0")]));
+    let out = probe.settle(&mut page);
+    probe.press_held_through(&mut page, find(&out, "UPDATE").center(), |page| {
+        ends.tell([crate::device::desk::Event::Gone { port: "COM3".into() }]);
+        page.pump();
+    });
+    assert_eq!(page.open.as_deref(), Some("COM5"), "the view went to the board left");
+    assert!(page.gate.is_none(), "a press on a board gone opens no gate on another");
+    assert!(ends.sent().is_empty());
 }
 
 /// A log line about COM3, as the worker tells one.
@@ -406,9 +475,15 @@ fn at_the_guis_floor_the_card_tightens_and_keeps_its_bottom_row_whole() {
     let out = probe.settle(&mut page);
     let row = find(&out, "COM3").center().y;
     assert!(row < ROOMY.top + ROW_H / 2.0 - 0.5 && row > TIGHT.top + ROW_H / 2.0 - 0.5, "closed up: the row nearer the top, never nearer than the tighter set's: {row}");
+    // The primary whole in the card's room, as its clip says, over the
+    // foot's padding (the tighter set's at the least); the room over the
+    // busy line.
     let primary = find(&out, "WRITE");
+    let room = card_room_of(&out, "WRITE");
+    let bottom = primary.center().y + studio::TALL_H / 2.0;
+    assert!(bottom <= room.max.y - TIGHT.pad_y + 0.5, "the primary whole on the card: {primary:?}, {bottom} in {room:?}");
     let busy_top = FLOOR.y - TIGHT.under_busy - studio::NOTE_H;
-    assert!(primary.center().y + studio::TALL_H / 2.0 <= busy_top + 0.5, "the primary whole over the busy line: {primary:?}");
+    assert!(room.max.y <= busy_top - TIGHT.over_busy + 0.5, "the card's room over the busy line: {room:?}");
     assert_drew(&out, &["COM3", "COM5"]);
 }
 
@@ -603,8 +678,9 @@ fn a_card_shares_the_subjects_row_and_its_tab_opens_its_view() {
     let out = probe.settle(&mut page);
     let tab = if cfg!(windows) { "E: Car music" } else { "Car music" };
     assert_drew(&out, &["COM3", tab]);
-    probe.click_id(&mut page, Id::new("mp3-tab").with(1usize));
-    assert!(page.card_open.is_some(), "the cells' Card(0)");
+    let key = page.cards()[0].key.clone();
+    probe.click_id(&mut page, tab_id(&key));
+    assert_eq!(page.card_open, Some(key), "the cells' Card(0)");
     let out = probe.settle(&mut page);
     assert_drew(&out, &["Car music"]);
 }
@@ -612,6 +688,12 @@ fn a_card_shares_the_subjects_row_and_its_tab_opens_its_view() {
 /// A page with no board and `card` in a reader, the transfer worker's
 /// inbox kept to read what the page asks of it.
 fn with_one_card(card: worker::CardView) -> (Page, std::sync::mpsc::Receiver<worker::In>) {
+    let (page, inbox, _fold) = with_one_card_told(card);
+    (page, inbox)
+}
+
+/// The same, with the fold the worker tells the page's cards through.
+fn with_one_card_told(card: worker::CardView) -> (Page, std::sync::mpsc::Receiver<worker::In>, Rc<RefCell<Fold>>) {
     let (mut page, _ends) = Page::quiet();
     let (link, inbox) = Link::pair();
     let fold = Rc::new(RefCell::new(Fold::default()));
@@ -621,9 +703,28 @@ fn with_one_card(card: worker::CardView) -> (Page, std::sync::mpsc::Receiver<wor
         f.servers = vec![cards::home()];
         f.apply(worker::Event::Card(Box::new(card)));
     }
-    page.attach(Transfer { link, fold });
+    page.attach(Transfer { link, fold: fold.clone() });
     page.pump();
-    (page, inbox)
+    (page, inbox, fold)
+}
+
+#[test]
+fn a_press_on_a_cards_link_that_goes_before_its_release_does_nothing_of_another() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    // A card syncing, the press on its stop, and the sync ending while the
+    // button is held: the stop is gone, and the release asks for nothing —
+    // not the Settings sheet, Details or the sync's gate in its place.
+    let (mut page, inbox, fold) = with_one_card_told(cards::syncing("E:", now()));
+    let out = probe.settle(&mut page);
+    let stop = t!("dev.card.link_stop").to_string();
+    probe.press_held_through(&mut page, find(&out, &stop).center(), |_| {
+        fold.borrow_mut().apply(worker::Event::Card(Box::new(cards::ready("E:", now()))));
+    });
+    let out = probe.settle(&mut page);
+    assert!(!drew(&out, &stop) && drew(&out, "Settings…"), "the sync ended under the held button: {:?}", texts(&out));
+    assert!(page.card.sheet.is_none() && page.card.gate.is_none() && !page.details, "the press on the stop did nothing of another control's");
+    assert!(worker::sent(&inbox).is_empty(), "nothing asked of the card");
 }
 
 #[test]
@@ -637,12 +738,33 @@ fn a_cards_gate_draws_over_the_inert_page_and_its_safe_answer_is_the_cells_keep(
         }
     });
     let (mut page, inbox) = with_one_card(card.clone());
+    // The Details door's lead, at the card's content's left: the gate's
+    // window, the column's middle, stands clear of it.
+    let door = find(&probe.settle(&mut page), "Details");
+    let beneath = pos2(door.min.x - 8.0, door.center().y);
     page.act(Act::Primary);
     assert!(page.card.gate.is_some() && worker::sent(&inbox).is_empty(), "the gate first");
     let _ = probe.settle(&mut page);
     let (out, shown) = probe.pass(&mut page, Vec::new());
-    assert_drew(&out, &["Remove 214 tracks from Car music?"]);
+    let title = "Remove 214 tracks from Car music?";
+    assert_drew(&out, &[title]);
     assert!(shown.caret.is_none(), "a gate has no field");
+    // The card beneath is inert: a click on its Details door, off the
+    // gate's window, is the scrim's.
+    let pal = Pal::now();
+    let window = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            Shape::Rect(r) if r.fill == pal.panel && r.rect.contains_rect(find(&out, title)) => Some(r.rect),
+            _ => None,
+        })
+        .min_by(|a, b| a.area().total_cmp(&b.area()))
+        .expect("the gate's window");
+    assert!(!window.contains(beneath), "the door off the gate's window: {beneath:?} and {window:?}");
+    probe.click(&mut page, beneath);
+    assert!(page.card.gate.is_some() && !page.details, "the card's Details door takes no click under its gate");
+    assert!(worker::sent(&inbox).is_empty(), "and nothing is asked of the card");
     probe.click_id(&mut page, Id::new("mp3-card-gate").with("foot").with(0usize));
     assert!(page.card.gate.is_none(), "the cells' CardKeep");
     assert_eq!(worker::sent(&inbox), [worker::Cmd::Dismiss { key: card.key.clone() }]);

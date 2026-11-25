@@ -99,7 +99,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
     let head = if laid.details.is_empty() { 0.0 } else { details_head(face) };
     let y = Values { ui: &card, face, grid, floor: foot - actions_h - s.gap - head, drive: &drive }.paint(y, &values);
     let mut acts = Vec::new();
-    let mut paint = Paint::new(&card, face, grid, y, foot, Id::new("mp3-card"), &mut acts);
+    let mut paint = Paint::new(&card, face, grid, y, foot, Id::new("mp3-card").with(&view.key), &mut acts);
     paint.blank();
     paint.row(page, &view.key, &actions, 0.0);
     let rest = paint.y + s.pad_y - room.min.y + details_h(page, &view.key, &laid.details, face);
@@ -1323,7 +1323,10 @@ mod tests {
         let probe = Probe::new(BOARD);
         let (mut page, inbox) = alone(planned(|p| p.removals = paths(214)));
         let before = probe.settle(&mut page);
-        let settings = find(&before, "Settings…").center();
+        // The Details door's lead, at the card's content's left: the gate's
+        // window, the column's middle, stands clear of it.
+        let door = find(&before, "Details");
+        let beneath = pos2(door.min.x - 8.0, door.center().y);
         page.act(Act::Primary);
         let (_, shown) = probe.pass(&mut page, Vec::new());
         let out = probe.settle(&mut page);
@@ -1338,10 +1341,22 @@ mod tests {
         let on_accent = Pal::now().on_accent;
         let arrow = out.shapes.iter().any(|c| matches!(&c.shape, Shape::Path(p) if p.fill == on_accent && p.points.len() == 3));
         assert!(arrow, "the keep's lead");
-        // The card beneath is inert: a click where Settings… stands is the
-        // scrim's.
-        probe.click(&mut page, settings);
-        assert!(page.card.sheet.is_none() && page.card.gate.is_some() && worker::sent(&inbox).is_empty());
+        // The card beneath is inert: a click on its Details door, off the
+        // gate's window, is the scrim's.
+        let pal = Pal::now();
+        let title = find(&out, "Remove 214 tracks from Car music?");
+        let window = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::Rect(r) if r.fill == pal.panel && r.rect.contains_rect(title) => Some(r.rect),
+                _ => None,
+            })
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .expect("the gate's window");
+        assert!(!window.contains(beneath), "the door off the gate's window: {beneath:?} and {window:?}");
+        probe.click(&mut page, beneath);
+        assert!(!page.details && page.card.gate.is_some() && worker::sent(&inbox).is_empty());
         probe.click_on(&mut page, "REMOVE 214 AND SYNC");
         let sent = worker::sent(&inbox);
         let [worker::Cmd::Sync { allow, .. }] = sent.as_slice() else { panic!("{sent:?}") };

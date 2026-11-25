@@ -137,7 +137,8 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, roo
     // short of the bottom row's place at the room's foot.
     let foot = if face.live { room.max.y - s.pad_y } else { f32::INFINITY };
     let mut acts = Vec::new();
-    let mut paint = Paint::new(&card, face, grid, y, foot - actions_h - s.gap - head, Id::new("mp3-board"), &mut acts);
+    let salt = Id::new("mp3-board").with(board.port());
+    let mut paint = Paint::new(&card, face, grid, y, foot - actions_h - s.gap - head, salt, &mut acts);
     for block in cells::value_blocks(page, board, WIDE) {
         paint.blank();
         paint.rows(page, board.port(), &block);
@@ -409,20 +410,33 @@ pub(super) struct Paint<'u, 'f, 'a> {
     /// A row did not fit: the rows after it are not drawn.
     pub(super) cut: bool,
     last: Option<Kind>,
+    /// The card's own: its kind and its subject, a board's port or a
+    /// card's key.
     salt: Id,
-    controls: usize,
+    /// The controls' ids drawn so far.
+    ids: Vec<Id>,
     acts: &'a mut Vec<Act>,
 }
 
 impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
     pub(super) fn new(ui: &'u Ui, face: &'f Face<'f>, grid: Grid, y: f32, floor: f32, salt: Id, acts: &'a mut Vec<Act>) -> Self {
-        Paint { ui, face, grid, y, floor, cut: false, last: None, salt, controls: 0, acts }
+        Paint { ui, face, grid, y, floor, cut: false, last: None, salt, ids: Vec::new(), acts }
     }
 
-    /// The next control's id: its place among the card's controls.
-    fn id(&mut self) -> Id {
-        self.controls += 1;
-        self.salt.with(self.controls)
+    /// The id of the control whose words are `words` and whose act is
+    /// `act`: what it is and whose, never where it falls among the card's
+    /// controls. egui gives a release to the id that was under its press; a
+    /// press whose control went, changed its words or its act, or belongs to
+    /// another subject by its release is so dropped, as egui drops a click
+    /// whose control is no longer drawn, and never given to the control that
+    /// took its place in the row (the cells act on the press itself, on what
+    /// they drew under it). The same words and act twice on one card are
+    /// told apart by their turn.
+    fn id(&mut self, words: &str, act: &Act) -> Id {
+        let id = self.salt.with(words).with(format!("{act:?}"));
+        let turn = self.ids.iter().filter(|seen| **seen == id).count();
+        self.ids.push(id);
+        if turn == 0 { id } else { id.with(turn) }
     }
 
     /// A block's gap: the cells' blank row.
@@ -584,7 +598,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         let (lead, words) = lead_of(text);
         let w = studio::text_button_width(self.ui, words, lead, face.ports).min(room);
         if face.live {
-            let id = self.id();
+            let id = self.id(words, act);
             if studio::text_button(self.ui, id, pos2(x, mid), words, lead, face.ports, room, face.takes(), face.pal).clicked() {
                 self.acts.push(act.clone());
             }
@@ -636,7 +650,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             under + TEXT_BUTTON_H / 2.0
         };
         if face.live {
-            let id = self.id();
+            let id = self.id(&words, &Act::Reset);
             let at = pos2(end - reset_w, mid);
             if studio::text_button(self.ui, id, at, &words, None, face.ports, reset_w, face.takes(), face.pal).clicked() {
                 self.acts.push(Act::Reset);
@@ -659,7 +673,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             let w = studio::tall_button_width(self.ui, label, *enabled).min(self.grid.w);
             links_end -= w + APART;
             if face.live && !covered {
-                let id = self.id();
+                let id = self.id(label, &Act::Primary);
                 let rect = Rect::from_min_size(pos2(self.grid.right() - w, top), vec2(w, h));
                 let response = studio::tall_button(self.ui, id, rect, label, *enabled, face.takes(), face.pal);
                 let response = match why.as_deref().filter(|_| face.takes()) {
@@ -679,7 +693,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
                 break;
             }
             if face.live {
-                let id = self.id();
+                let id = self.id(words, act);
                 let room = (links_end - x).max(1.0);
                 if studio::text_button(self.ui, id, pos2(x, mid), words, lead, face.ports, room, face.takes(), face.pal).clicked() {
                     self.acts.push(act.clone());
@@ -924,6 +938,16 @@ pub(super) mod tests {
         all.iter().find(|(t, _)| t == words).map(|(_, r)| *r).unwrap_or_else(|| panic!("{words:?} drawn: {:?}", all.iter().map(|(t, _)| t).collect::<Vec<_>>()))
     }
 
+    /// The room of the card `words` stand in: what clipped them, less the
+    /// point the card's clip stands outside its room (`clipped`).
+    pub(in super::super) fn card_room_of(out: &FullOutput, words: &str) -> Rect {
+        let clip = out.shapes.iter().find_map(|c| match &c.shape {
+            Shape::Text(t) if t.galley.text() == words => Some(c.clip_rect),
+            _ => None,
+        });
+        clip.unwrap_or_else(|| panic!("{words:?} drawn")).shrink(1.0)
+    }
+
     pub(in super::super) fn assert_drew(out: &FullOutput, words: &[&str]) {
         for w in words {
             assert!(drew(out, w), "{w:?} drawn: {:?}", texts(out).into_iter().map(|(t, _)| t).collect::<Vec<_>>());
@@ -1079,7 +1103,7 @@ pub(super) mod tests {
         // The footer's warning is the cells' hint, never cut.
         assert!(Screen::hint(&page).starts_with(&t!("dev.hint_working_port", port = "COM3").to_string()), "{}", Screen::hint(&page));
         // The tab of the board being written still takes the view back.
-        probe.click_id(&mut page, Id::new("mp3-tab").with(0usize));
+        probe.click_id(&mut page, super::super::tab_id("COM3"));
         assert_eq!(page.open.as_deref(), Some("COM3"));
         let out = probe.settle(&mut page);
         assert_drew(&out, &["writing v0.8.0… 62%"]);
@@ -1193,11 +1217,12 @@ pub(super) mod tests {
         ends.failed();
         page.pump();
         let out = probe.settle(&mut page);
-        // The tighter measures, so the log has rows: its newest line whole
-        // over the busy line, the primary whole too.
-        let busy_top = FLOOR.y - super::super::TIGHT.under_busy - studio::NOTE_H;
+        // The frame closed up, so the log has rows: its newest line whole
+        // in the card's room, over the foot's padding (the tighter set's at
+        // the least), the primary whole too.
         let line = find(&out, fail);
-        assert!(line.max.y <= busy_top, "the failure on the card: {line:?} over {busy_top}");
+        let room = card_room_of(&out, fail);
+        assert!(line.max.y <= room.max.y - super::super::TIGHT.pad_y + 0.5, "the failure whole on the card: {line:?} in {room:?}");
         assert!(drew(&out, "wrote chunk 39"), "and the line before it");
         let primary = find(&out, "TRY AGAIN");
         assert!(primary.max.y < line.min.y, "under Try again");
@@ -1228,9 +1253,8 @@ pub(super) mod tests {
             let probe = Headless::new(vec2(FLOOR.x, h));
             let out = probe.settle(&mut page);
             assert_drew(&out, &["Details", "PORT", "M5Stack Core2"]);
-            let port = find(&out, "PORT");
-            let busy_top = h - super::super::TIGHT.under_busy - studio::NOTE_H;
-            assert!(port.max.y <= busy_top, "{h}: the port's fact on the card: {port:?}");
+            let (port, room) = (find(&out, "PORT"), card_room_of(&out, "PORT"));
+            assert!(port.max.y <= room.max.y - super::super::TIGHT.pad_y + 0.5, "{h}: the port's fact whole on the card: {port:?} in {room:?}");
             page.act(Act::Details);
             let shut = probe.settle(&mut page);
             page.act(Act::Details);

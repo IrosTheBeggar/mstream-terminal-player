@@ -1731,9 +1731,17 @@ comes from the cache, or a download, beside them.
     is the boards' 760 points at most, centred, narrowing with the window.
     The measures are the boards' (20 points under the top bar, blocks 18
     apart, the card 24 in at its sides and 20 at its top and foot) wherever
-    the card in view stands whole under them at rest, Details aside, and a
-    tighter set where it does not, so at the GUI's floor the card keeps its
-    bottom row and the page never scrolls (clause 4). While a visit waits
+    the card in view stands whole under them at rest: its rows through its
+    bottom row and, while Details is open, Details too, its log at its
+    newest two lines (the empty card's hints count so while they are open).
+    Where it does not, the frame closes up toward a tighter set (16 points
+    under the top bar, blocks 10 apart, the card 16 in at its sides and 12
+    at its top and foot) just as far as the card needs, each measure a
+    whole number of points, and holds there while the window keeps its
+    size: a sync that starts or ends, Details closed or another subject
+    chosen moves nothing of the page, which opens up again only with the
+    window. So at the GUI's floor the card keeps its bottom row and the
+    page never scrolls (clause 4). While a visit waits
     for the last page to let its ports go, the region holds that one dim
     line where the page's first line stands (clause 5).
 
@@ -1752,7 +1760,13 @@ comes from the cache, or a download, beside them.
     entries, any other click closing it. Each goes through the page's own
     act path once a click, however many runs egui makes of a pass, the
     chained gates' guard and the lock with it; an end it brings ends the
-    page as the cells' click would. The wheel over the log moves the
+    page as the cells' click would. egui takes a click on its release,
+    where the cells act on the press, and gives it to the control that was
+    under the press by what that control is and whose it is, never by its
+    place: a press whose control went, changed its words or its act, or
+    whose subject left the view before the release asks for nothing, and a
+    press on a tab whose subject moved along the row opens that subject
+    still. The wheel over the log moves the
     page's own count, a line a notch (clause 14). The pointer's hover and
     the hand are egui's; tooltips are the cells' words — a waiting
     primary's why, a cut path whole, a sheet's close with its key only
@@ -1762,8 +1776,10 @@ comes from the cache, or a download, beside them.
     keys alone, its caret's foot handed up to the GUI's surface for the
     candidates, and none while no field has the keys. The native dialogs
     stay the model's, on a thread of their own (clause 36). The worker's
-    reports drive the frame as they do the cells'; egui asks for a pass
-    only when a tooltip ripens or a modal settles its height.
+    reports drive the frame as they do the cells'; egui asks for a pass of
+    its own only when a click changed the page (the next pass shows it),
+    when a tooltip ripens, and when a modal settles its height or brings
+    the keyboard's control into view.
 70. **The board card and a card's view are the cells' rows in points**,
     made by the same functions (cells.rs's and cells/card.rs's rows, with a
     value column too wide to wrap in), so the two faces say the same words
@@ -1782,10 +1798,13 @@ comes from the cache, or a download, beside them.
     value rows give way as the cells give theirs (a card's dim lines first,
     then Converts), then whole lines from the foot; never the bottom row,
     whose links drop from the end, a card's Send the plays first. Details
-    takes what is left under it: its facts a line each, never wrapped (a
-    card's Drive gives way a piece at a time and its Removes cuts its path,
-    never its count), its log the newest lines that fit, a line a notch
-    under the wheel, a thumb while it overflows.
+    takes what is left under it, and while it is open the value rows give
+    way above the bottom row to its rule and its first fact (a board's
+    port, a card's drive), so its door never stands open over nothing; its
+    facts are a line each, never wrapped (a card's Drive gives way a piece
+    at a time and its Removes cuts its path, never its count), its log the
+    newest lines that fit, a line a notch under the wheel, a thumb while it
+    overflows.
 
     The subjects row is runs per tab, not the kit's segmented control: a
     name in its own case (a port whole in the monospace, a card's drive
@@ -3412,7 +3431,20 @@ setting no locale, prints in English.
   - **Fixed on the way**: the frame took the boards' measures for a card
     up to half a point too tall for them, and the card's last value line
     was left out under its floor; it takes them only within the
-    hundredth's grace the card's floor allows a row now.
+    hundredth's grace the card's floor allows a row now. Every control on
+    a card and every tab was known by its place among the others, so a
+    release could run the act of whatever control had taken the pressed
+    one's place meanwhile (Details' press opening the update's gate when
+    UPDATE came in at the row's end, a tab's press opening the board
+    plugged in before it); each is known by what it is and whose now
+    (clause 69).
+  - **Where the two faces part**: while Details is open on a card short
+    of room, egui's value rows give way above the bottom row to Details'
+    rule and first fact, where the cells keep the value rows and cut
+    Details from the foot, so at the GUI's floor the two say different
+    words in the same state (clause 70); and the egui frame closes up
+    toward its tighter set and holds there for the window's size (clause
+    68), where the cells have no measures to close.
   - **Looks left as they are**: at the GUI's floor the removals gate's
     foot stands half under its body's view until the body is scrolled, as
     the kit's gate does; the Advanced sheet's erase line takes the click on
