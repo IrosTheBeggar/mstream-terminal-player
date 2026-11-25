@@ -194,7 +194,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, composition: &str, key_hints: b
     let part = subject(ui, page, &face, at.card);
     drawn.acts.extend(part.acts);
     drawn.caret = part.caret;
-    busy_line(ui, at.busy, page, &pal);
+    busy_line(ui, at.busy, page, &face);
     if modal {
         drawn = modal_part(ui, page, &face);
     }
@@ -344,11 +344,13 @@ fn modal_part(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
 
 /// The busy line across `rect` (the cells' hosted foot): what the page is
 /// busy with in the accent, else its note — gold where the page says so,
-/// dim otherwise — cut with an ellipsis; nothing for nothing, the row kept.
-fn busy_line(ui: &Ui, rect: Rect, page: &Page, pal: &Pal) {
+/// dim otherwise — cut with an ellipsis, its figures and the boards' ports
+/// in the monospace (the Done board's version); nothing for nothing, the
+/// row kept.
+fn busy_line(ui: &Ui, rect: Rect, page: &Page, face: &Face) {
     let busy = page.busy();
     let note = page.note.as_ref().map(|n| (n.text.clone(), n.gold));
-    studio::note_line(ui, rect, busy.as_deref(), note.as_ref(), pal);
+    studio::note_line_naming(ui, rect, busy.as_deref(), note.as_ref(), face.ports, face.pal);
 }
 
 /// A keep's words bare of the cells' ◂ before them (cells.rs's
@@ -574,10 +576,11 @@ fn draw_tab(ui: &Ui, face: &Face, tab: &Tab, rect: Rect, name_w: f32, id: Id) ->
     let runs = tab.runs(ink, hot || tab.open);
     let name = studio::runs(ui, pos2(rect.min.x + TAB_PAD, mid), &runs, name_w + 1.0, Align2::LEFT_CENTER);
     let x = name.max.x.max(rect.min.x + TAB_PAD) + TAB_GAP;
-    let y = studio::led_mid(ui, mid, &body(13.5), false);
+    // The check's and the cross's boxes centred on the row, as the boards
+    // centre them: their foot is no letter's to stand on a baseline.
     match tab.look() {
-        Look::Check => studio::check(ui, pos2(x + 5.0, y), mark),
-        Look::Cross => studio::cross(ui, pos2(x + 5.0, y), mark),
+        Look::Check => studio::check(ui, pos2(x + 5.0, mid), mark),
+        Look::Cross => studio::cross(ui, pos2(x + 5.0, mid), mark),
         Look::Words(font) => {
             studio::text(ui, pos2(x, mid), &tab.mark, font, mark, rect.max.x - x, Align2::LEFT_CENTER);
         }

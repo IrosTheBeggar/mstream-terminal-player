@@ -380,9 +380,14 @@ impl Values<'_, '_> {
                 return None;
             }
             self.label(label, top + NOW.1 / 2.0);
-            let path = left.to_string();
-            let para = Para::new(&path, mono(NOW.0), face.pal.text).spaced(NOW.1).anywhere().floor(self.floor);
-            let h = para.paint(self.ui, pos2(x, top), (end - x).max(1.0)).height().max(NOW.1);
+            // On the baseline of the plain values' words, as its label and
+            // every other row stand: a paragraph stands its first line its
+            // face's ascent under its top, and the monospace's is the
+            // lesser, so the path is set that much lower.
+            let ascent = |font: FontId| studio::metrics(self.ui, &font).ascent;
+            let drop = (ascent(body(PLAIN.0)) - ascent(mono(NOW.0))).max(0.0);
+            let para = Para::new(&left.to_string(), mono(NOW.0), face.pal.text).spaced(NOW.1).anywhere().floor(self.floor);
+            let h = drop + para.paint(self.ui, pos2(x, top + drop), (end - x).max(1.0)).height().max(NOW.1 - drop);
             return Some(self.ended(top + h));
         }
         let read = Read::of(left, face);
@@ -1099,6 +1104,32 @@ mod tests {
         let drive = find(&out, "DRIVE");
         assert!(drive.max.y + 12.0 <= FLOOR.y - studio::NOTE_H, "the drive's fact on the card: {drive:?}");
         assert_drew(&out, &["Car music", "HOLDS", "SPACE"]);
+    }
+
+    #[test]
+    fn the_file_in_flight_stands_on_its_labels_baseline_as_every_value_does() {
+        let _en = english();
+        let probe = Probe::new(BOARD);
+        let (mut page, _ends, _inbox, _fold) = with_cards(Ends::up_to_date, vec![cards::syncing("E:", now())]);
+        page.act(Act::Card(0));
+        let out = probe.settle(&mut page);
+        let baseline = |words: &str| {
+            let (pos, g) = out
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    Shape::Text(t) if t.galley.text() == words => Some((t.pos, t.galley.clone())),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{words:?} drawn"));
+            let row = &g.rows[0];
+            pos.y + row.pos.y + row.row.glyphs[0].pos.y
+        };
+        // The path stands to its label as a plain value stands to its own,
+        // within a point of it.
+        let now = baseline("Orla Finch/Paper Boats/03 - Fold.flac") - baseline("NOW");
+        let holds = baseline("Rock, Jazz from Home") - baseline("HOLDS");
+        assert!((now - holds).abs() < 0.25 && now.abs() < 1.25, "the path {now} under its label, a plain value {holds} under its own");
     }
 
     #[test]

@@ -264,14 +264,20 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
 /// box's 16 points and the 10 after it.
 const ERASE_HANG: f32 = studio::BOX + 10.0;
 
+/// The names on the player's card the format's sentences say, which the
+/// Format board sets in the monospace with the figures: what no rule can
+/// tell from a word.
+const CARD_NAMES: [&str; 2] = ["/music", "device.txt"];
+
 /// A sentence of the body as the kit's prose: the boards' 14 points in its
-/// tone at the kit's leading, its figures (a version, a size, a port) in
-/// the monospace a point under them, wrapped by words — or, a `line`, one
-/// line cut with an ellipsis. A sentence that starts with a figure (Update
-/// all's port) keeps the words' leading.
+/// tone at the kit's leading, its figures (a version, a size, a port, a
+/// name on the card) in the monospace a point under them, wrapped by words
+/// — or, a `line`, one line cut with an ellipsis. A sentence that starts
+/// with a figure (Update all's port) keeps the words' leading.
 fn words_para(piece: &Piece, face: &Face) -> Para {
     let Piece::Words { text, tone, line } = piece else { return Para::new("", body(WORDS), face.pal.text) };
-    let runs = studio::figured(text, face.ports, body(WORDS), mono(FIGURES), *tone);
+    let also: Vec<&str> = face.ports.iter().copied().chain(CARD_NAMES).collect();
+    let runs = studio::figured(text, &also, body(WORDS), mono(FIGURES), *tone);
     let para = Para::runs(&runs).spaced(LINE);
     if *line { para.rows(1) } else { para }
 }
@@ -581,6 +587,19 @@ mod tests {
         let lost = t!("dev.card.gate_fmt_lost", what = t!("dev.card.gate_fmt_one", fs = "exFAT")).to_string();
         assert_eq!(color_of(&out, &lost), pal.gold);
         assert_drew(&out, &["Format the card in COM3 as FAT32?"]);
+        // The names on the card in the monospace, as the Format board sets
+        // them with the figures.
+        let runs_of = |words: &str| -> Vec<(String, egui::FontId)> {
+            let g = galleys(&out).into_iter().find(|(_, g)| g.text() == words).unwrap_or_else(|| panic!("{words:?} drawn")).1;
+            g.job.sections.iter().map(|s| (g.job.text[s.byte_range.start.0..s.byte_range.end.0].to_string(), s.format.font_id.clone())).collect()
+        };
+        for (key, name) in [("dev.card.gate_fmt_txt", "device.txt")] {
+            let runs = runs_of(&t!(key));
+            assert!(runs.iter().any(|(t, f)| t == name && *f == mono(FIGURES)), "{name} in the monospace: {runs:?}");
+        }
+        let body_words = texts(&out).into_iter().map(|(t, _)| t).find(|t| t.contains("/music")).expect("the format's first sentence");
+        let runs = runs_of(&body_words);
+        assert!(runs.iter().any(|(t, f)| t == "/music" && *f == mono(FIGURES)), "/music in the monospace: {runs:?}");
         // Update all: a line a board, the left-out board dim; and with more
         // boards than six lines, "and N more".
         let left_out = with_next(fixtures::old("COM9", "v0.6.0"), Image::release("v0.7.0", Mode::Qio), false);

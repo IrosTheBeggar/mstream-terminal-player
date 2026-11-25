@@ -452,6 +452,50 @@ fn head_mid(space: Space) -> f32 {
 }
 
 #[test]
+fn the_busy_line_sets_its_figures_and_the_boards_ports_in_the_monospace() {
+    let _en = english();
+    let probe = Probe::new(BOARD);
+    let (mut page, _ends) = page_with(Ends::up_to_date);
+    let words = "Updated from v0.7.0 just now. COM3 answered.";
+    page.say(words, false, None);
+    let out = probe.settle(&mut page);
+    let galley = out
+        .shapes
+        .iter()
+        .find_map(|c| match &c.shape {
+            Shape::Text(t) if t.galley.text() == words => Some(t.galley.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{words:?} drawn: {:?}", texts(&out)));
+    let runs: Vec<(String, egui::FontId)> = galley.job.sections.iter().map(|s| (galley.job.text[s.byte_range.start.0..s.byte_range.end.0].to_string(), s.format.font_id.clone())).collect();
+    let mono_runs: Vec<&str> = runs.iter().filter(|(_, f)| *f == studio::mono(12.0)).map(|(t, _)| t.as_str()).collect();
+    assert_eq!(mono_runs, ["v0.7.0", "COM3"], "the version and the port in the monospace a point under the words: {runs:?}");
+    assert!(runs.iter().all(|(_, f)| *f == studio::mono(12.0) || *f == body(13.0)), "the rest the words' 13 points: {runs:?}");
+}
+
+#[test]
+fn a_tabs_check_stands_centred_on_the_subjects_row_as_the_boards_centre_its_box() {
+    let _en = english();
+    let probe = Probe::new(BOARD);
+    let (mut page, _ends) = page_with(Ends::two);
+    let out = probe.settle(&mut page);
+    // The kit's check: a three-point stroke 1.7 wide, its ink spanning its
+    // 10-point box's middle.
+    let checks: Vec<Rect> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            Shape::Path(p) if p.points.len() == 3 && (p.stroke.width - 1.7).abs() < 0.01 => Some(Rect::from_points(&p.points)),
+            _ => None,
+        })
+        .filter(|r| r.max.y < ROOMY.top + ROW_H)
+        .collect();
+    assert_eq!(checks.len(), 1, "COM3's check on its slab: {checks:?}");
+    let mid = ROOMY.top + ROW_H / 2.0;
+    assert!((checks[0].center().y - mid).abs() < 0.5, "centred on the row's middle {mid}: {:?}", checks[0]);
+}
+
+#[test]
 fn the_measures_close_up_in_whole_points_from_the_boards_to_the_tighter_set() {
     assert_eq!(Space::at(0.0), ROOMY);
     assert_eq!(Space::at(1.0), TIGHT);
