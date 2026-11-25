@@ -114,7 +114,9 @@ impl Grid {
 /// frame from the foot; the bottom row is never cut — the value rows give
 /// way above it, whole lines at a time — so its primary stands at every
 /// size the page is drawn at. Details takes what is left under it, its log
-/// the rows its other rows leave.
+/// the rows its other rows leave; while it is open the value rows give way
+/// to its head too ([`details_head`]), so its door never stands open over
+/// nothing.
 pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, room: Rect) -> Drawn {
     let s = face.space;
     let grid = Grid::of(room, face);
@@ -129,11 +131,13 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, roo
         Row::Actions { primary: Some(_), .. } => TALL_H,
         _ => TEXT_BUTTON_H,
     };
+    let details = if page.details { cells::details_rows(page, board) } else { Vec::new() };
+    let head = if details.is_empty() { 0.0 } else { details_head(face) };
     // The measuring run sees the card whole; the drawing cuts the values
     // short of the bottom row's place at the room's foot.
     let foot = if face.live { room.max.y - s.pad_y } else { f32::INFINITY };
     let mut acts = Vec::new();
-    let mut paint = Paint::new(&card, face, grid, y, foot - actions_h - s.gap, Id::new("mp3-board"), &mut acts);
+    let mut paint = Paint::new(&card, face, grid, y, foot - actions_h - s.gap - head, Id::new("mp3-board"), &mut acts);
     for block in cells::value_blocks(page, board, WIDE) {
         paint.blank();
         paint.rows(page, board.port(), &block);
@@ -142,18 +146,12 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, roo
     paint.cut = false;
     paint.blank();
     paint.row(page, board.port(), &actions, 0.0);
-    let mut rest = paint.y + s.pad_y - room.min.y;
-    // A failed write opens Details by itself on the log's newest lines
-    // (the Failed board; the cells keep three of them at the GUI's floor):
-    // there Details counts at rest — its rule, the port, which is all its
-    // facts after a failure, and two lines of the log — so the frame takes
-    // the tighter measures rather than leave the failure under the card's
-    // foot.
-    if page.details && matches!(board.written, Some(Written::Failed { .. })) {
-        rest += 2.0 * s.gap + 1.0 + FACT_H + s.gap + 2.0 * LOG_ROW;
-    }
-    if page.details && face.live {
-        paint.rows(page, board.port(), &cells::details_rows(page, board));
+    // Details counts at rest while it is open — a failed write opens it by
+    // itself on the log's newest lines (the Failed board) — so the frame
+    // closes up to show it rather than leave it under the card's foot.
+    let rest = paint.y + s.pad_y - room.min.y + details_h(page, board.port(), &details, face);
+    if face.live {
+        paint.rows(page, board.port(), &details);
     }
     let bottom = (paint.y + s.pad_y).min(room.max.y);
     studio::hairline(&card, Rect::from_min_max(room.min, pos2(room.max.x, bottom)), face.pal);
@@ -203,8 +201,9 @@ pub(super) fn empty(ui: &mut Ui, page: &mut Page, face: &Face, room: Rect) -> Dr
         }
     }
     y += TEXT_BUTTON_H;
-    let rest = y + s.pad_y - room.min.y;
-    if page.details && face.live {
+    // The hints count at rest while they are open, as Details does on a
+    // board's card: the measuring run sets them too.
+    if page.details {
         y += s.gap;
         let mut hints = vec![t!("dev.no_device_cable").to_string()];
         hints.push(format!("{}\n{}", t!("dev.no_device_driver"), t!("dev.no_device_driver_2")));
@@ -233,6 +232,7 @@ pub(super) fn empty(ui: &mut Ui, page: &mut Page, face: &Face, room: Rect) -> Dr
         };
         y += Para::runs(&seen).spaced(DIM.1).floor(floor).paint(&card, pos2(grid.x, y), grid.w).height();
     }
+    let rest = y + s.pad_y - room.min.y;
     let bottom = (y + s.pad_y).min(room.max.y);
     studio::hairline(&card, Rect::from_min_max(room.min, pos2(room.max.x, bottom)), face.pal);
     Drawn { acts, caret: None, rest }
@@ -349,6 +349,23 @@ pub(super) fn lead_of(text: &str) -> (Option<Lead>, &str) {
         (_, Some(rest)) => (Some(Lead::Open), rest),
         _ => (None, text),
     }
+}
+
+/// What Details' `rows` (the cells' own, none while it is shut) add to a
+/// card's rest: each row as [`Paint`] sets it, and its log's newest two
+/// lines under their gap where `port`'s log has them (the cells keep three
+/// at the GUI's floor). What the frame closes up for while Details is open.
+pub(super) fn details_h(page: &Page, port: &str, rows: &[Row], face: &Face) -> f32 {
+    let fixed: f32 = rows.iter().map(|r| fixed_h(r, face)).sum();
+    let lines = page.log_for(port).len().min(2);
+    let log = rows.iter().any(|r| matches!(r, Row::Log)) && lines > 0;
+    fixed + if log { face.space.gap + lines as f32 * LOG_ROW } else { 0.0 }
+}
+
+/// The least of Details the value rows above it give way to while it is
+/// open: its rule and its first fact (a board's port, a card's drive).
+pub(super) fn details_head(face: &Face) -> f32 {
+    2.0 * face.space.gap + 1.0 + FACT_H
 }
 
 /// The height a row after a log takes as [`Paint`] sets it, for the log
@@ -1188,6 +1205,38 @@ pub(super) mod tests {
         page.act(Act::Details);
         let out = probe.settle(&mut page);
         assert!(!drew(&out, fail) && drew(&out, "TRY AGAIN"));
+    }
+
+    #[test]
+    fn at_the_guis_floor_details_opens_on_its_port_at_least_the_values_giving_way_to_it() {
+        let _en = english();
+        // Two boards and the one in view just written: the subjects row
+        // and the Done card's lines leave Details no room of its own here.
+        let (mut page, ends) = locked(|e| e.boards(vec![fixtures::old("COM3", "v0.7.0"), fixtures::old("COM5", "v0.7.0")]));
+        ends.writing(62);
+        ends.tell([log("writing… 100%", LogKind::Phase), log("mstream-mp3-player v0.8.0", LogKind::Quiet)]);
+        ends.tell([Told::Board(written_answering())]);
+        page.pump();
+        page.act(Act::Details);
+        // At the floor and in shorter areas still, where the card at rest
+        // fills its room even closed up: its port's fact stands under the
+        // door, the value lines giving way from the foot up, never the
+        // head or the bottom row.
+        let lines = |out: &FullOutput| texts(out).into_iter().filter(|(_, r)| r.max.y < find(out, "Details").min.y).count();
+        let mut gave_way = false;
+        for h in [FLOOR.y, 320.0, 300.0, 280.0] {
+            let probe = Headless::new(vec2(FLOOR.x, h));
+            let out = probe.settle(&mut page);
+            assert_drew(&out, &["Details", "PORT", "M5Stack Core2"]);
+            let port = find(&out, "PORT");
+            let busy_top = h - super::super::TIGHT.under_busy - studio::NOTE_H;
+            assert!(port.max.y <= busy_top, "{h}: the port's fact on the card: {port:?}");
+            page.act(Act::Details);
+            let shut = probe.settle(&mut page);
+            page.act(Act::Details);
+            gave_way |= lines(&probe.settle(&mut page)) < lines(&shut);
+        }
+        assert!(gave_way, "somewhere a value line gave way to Details' head");
     }
 
     #[test]

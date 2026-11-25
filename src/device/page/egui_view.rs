@@ -35,7 +35,7 @@ mod card_sheet;
 mod gate;
 mod sheet;
 
-use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
 use ratatui::style::Style;
 
 use super::*;
@@ -65,9 +65,9 @@ const NAME_LEAST: f32 = 48.0;
 const RIGHT_SIZE: f32 = 13.0;
 
 /// The frame's measures, and the cards': the boards' where the page has
-/// the room for the card in view at rest, a tighter set where it has not
-/// (the GUI's floor), so a card keeps its bottom row and the page never
-/// scrolls.
+/// the room for the card in view at rest, closed up toward a tighter set
+/// just as far as it has not (down to the GUI's floor), so a card keeps
+/// its bottom row and the page never scrolls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Space {
     /// Over the subjects column: the page's blank first row.
@@ -88,8 +88,30 @@ pub(super) struct Space {
 /// 18 apart, the card 24 in at its sides and 20 at its top and foot, the
 /// busy line's row 14 over the footer).
 pub(super) const ROOMY: Space = Space { top: 20.0, gap: 18.0, pad_x: 24.0, pad_y: 20.0, over_busy: 18.0, under_busy: 14.0 };
-/// The measures where the boards' leave a card no room for its bottom row.
-pub(super) const TIGHT: Space = Space { top: 8.0, gap: 10.0, pad_x: 16.0, pad_y: 12.0, over_busy: 6.0, under_busy: 6.0 };
+/// The closest the frame comes, where the boards' leave a card no room for
+/// its bottom row. Its top is the kit's modal's margin (a Dialog stands 16
+/// points clear of the area's ends at its tallest), so a sheet held at its
+/// highest covers the subjects row whole rather than cut a sliver off it.
+pub(super) const TIGHT: Space = Space { top: 16.0, gap: 10.0, pad_x: 16.0, pad_y: 12.0, over_busy: 6.0, under_busy: 6.0 };
+
+impl Space {
+    /// `t` of the way from [`ROOMY`] to [`TIGHT`], each measure a whole
+    /// number of points (no hairline falls between pixels), never roomier
+    /// than the share asked for.
+    pub(super) fn at(t: f32) -> Space {
+        let t = t.clamp(0.0, 1.0);
+        let k = |a: f32, b: f32| (a + (b - a) * t).floor();
+        let (r, s) = (ROOMY, TIGHT);
+        Space {
+            top: k(r.top, s.top),
+            gap: k(r.gap, s.gap),
+            pad_x: k(r.pad_x, s.pad_x),
+            pad_y: k(r.pad_y, s.pad_y),
+            over_busy: k(r.over_busy, s.over_busy),
+            under_busy: k(r.under_busy, s.under_busy),
+        }
+    }
+}
 
 /// What the frame hands each part of the page beside the page itself.
 #[derive(Clone, Copy)]
@@ -137,8 +159,9 @@ pub(super) struct Drawn {
     /// The foot of the caret of its field with the keyboard, in points.
     pub(super) caret: Option<Pos2>,
     /// How tall its card stands at rest, from its top through its bottom
-    /// row and its foot's padding, Details aside: what the frame measures
-    /// to choose its [`Space`]. Nothing for a modal.
+    /// row and its foot's padding — and, while Details is open, through
+    /// Details too, its log at its newest two lines: what the frame
+    /// measures to choose its [`Space`]. Nothing for a modal.
     pub(super) rest: f32,
 }
 
@@ -204,21 +227,68 @@ pub(crate) fn waiting(ui: &mut Ui, words: &str) {
 }
 
 /// The measures for this pass: the boards' where the card in view at rest
-/// (Details aside) stands whole under them, else the tighter set. Found by
-/// an invisible run of the card's own drawing in a room with no floor, so
-/// the measuring and the drawing never disagree about its height; and held
-/// to the hundredth's grace the drawing's floor allows a row (board.rs's
-/// `Paint`), so a card a fraction of a point too tall for the boards'
-/// measures never takes them and loses its last value line under the
+/// (Details with it while open) stands whole under them, else closed up
+/// toward the tighter set just as far as it needs ([`Space::at`]), else the
+/// tighter set. Found by invisible runs of the card's own drawing in a room
+/// with no floor, so the measuring and the drawing never disagree about its
+/// height; each held to the hundredth's grace the drawing's floor allows a
+/// row (board.rs's `Paint`), so a card a fraction of a point too tall for
+/// its measures never takes them and loses its last value line under the
 /// floor.
+///
+/// Held for the area's size in egui's memory: while the window keeps its
+/// size the frame never opens up again, so a sync that starts or ends,
+/// Details closed or another subject chosen moves nothing of the page — it
+/// closes up once, as far as the tallest card it has shown at that size
+/// needed, and opens up again only with the window.
 fn measures(ui: &mut Ui, page: &mut Page, face: &Face) -> Space {
-    let at = parts(face.full, ROOMY, page);
+    let key = Id::new("mp3-space");
+    let size = face.full.size();
+    let held: Option<(Vec2, f32)> = ui.ctx().data(|d| d.get_temp(key));
+    let held = held.filter(|(was, _)| (*was - size).abs().max_elem() < 0.5).map_or(0.0, |(_, t)| t);
+    let fits = |over: f32| over <= 0.01;
+    let at_held = overrun(ui, page, face, held, 0);
+    let tight = if fits(at_held) { 0.0 } else { overrun(ui, page, face, 1.0, 1) };
+    let t = if fits(at_held) {
+        held
+    } else if !fits(tight) {
+        1.0
+    } else {
+        // The card's height and its room each move with the measures
+        // nearly in a line: the share that closes the gap, then halved
+        // toward the tighter end where a line's wrap or a point's rounding
+        // leaves it a hair short.
+        let guess = held + (1.0 - held) * at_held / (at_held - tight);
+        let (mut lo, mut hi) = (held, 1.0_f32);
+        let mut t = guess;
+        for k in 0..5 {
+            if fits(overrun(ui, page, face, t, 2 + k)) {
+                hi = t;
+                if k == 0 {
+                    break;
+                }
+            } else {
+                lo = t;
+            }
+            t = (lo + hi) / 2.0;
+        }
+        hi
+    };
+    ui.ctx().data_mut(|d| d.insert_temp(key, (size, t)));
+    Space::at(t)
+}
+
+/// How far the card in view at rest stands past the room the frame leaves
+/// it with the measures `t` of the way to the tighter set: an invisible
+/// run of its own drawing, salted `salt` among the pass's runs.
+fn overrun(ui: &mut Ui, page: &mut Page, face: &Face, t: f32, salt: usize) -> f32 {
+    let space = Space::at(t);
+    let at = parts(face.full, space, page);
     let room = Rect::from_min_size(at.card.min, vec2(at.card.width(), 100_000.0));
-    let mut probe = ui.new_child(UiBuilder::new().id_salt("mp3-probe").max_rect(room));
+    let mut probe = ui.new_child(UiBuilder::new().id_salt(("mp3-probe", salt)).max_rect(room));
     probe.set_invisible();
-    let probing = Face { space: ROOMY, live: false, ..*face };
-    let rest = subject(&mut probe, page, &probing, room).rest;
-    if rest <= at.card.height() + 0.01 { ROOMY } else { TIGHT }
+    let probing = Face { space, live: false, ..*face };
+    subject(&mut probe, page, &probing, room).rest - at.card.height()
 }
 
 /// Where the frame's parts stand: the subjects row (with two subjects or

@@ -404,7 +404,8 @@ fn at_the_guis_floor_the_card_tightens_and_keeps_its_bottom_row_whole() {
         e.boards(vec![chosen, fixtures::old("COM5", "v0.7.0")]);
     });
     let out = probe.settle(&mut page);
-    assert!(find(&out, "COM3").center().y < ROOMY.top + ROW_H / 2.0 - 4.0, "the tighter measures: the row nearer the top");
+    let row = find(&out, "COM3").center().y;
+    assert!(row < ROOMY.top + ROW_H / 2.0 - 0.5 && row > TIGHT.top + ROW_H / 2.0 - 0.5, "closed up: the row nearer the top, never nearer than the tighter set's: {row}");
     let primary = find(&out, "WRITE");
     let busy_top = FLOOR.y - TIGHT.under_busy - studio::NOTE_H;
     assert!(primary.center().y + studio::TALL_H / 2.0 <= busy_top + 0.5, "the primary whole over the busy line: {primary:?}");
@@ -432,17 +433,63 @@ fn a_card_a_fraction_of_a_point_too_tall_for_its_room_tightens_and_keeps_its_eve
     out.textures_delta.clear();
     // An area that leaves the card a few tenths of a point less than that:
     // the boards' measures would stand its last value line past the floor,
-    // so the frame takes the tighter set and every line stands.
+    // so the frame closes up and every line stands — a point or two, as
+    // far as the card needs, never the whole way to the tighter set.
     let short = Probe::new(vec2(BOARD.x, BOARD.y - room + rest - 0.3));
     let out = short.settle(&mut page);
     let drawn: Vec<String> = texts(&out).into_iter().map(|(t, _)| t).collect();
     let lost: Vec<&String> = whole.iter().filter(|t| !drawn.contains(t)).collect();
     assert!(lost.is_empty(), "every line of the card stands: {lost:?} left out");
-    assert!(find(&out, "M5Stack Core2").center().y < ROOMY.top + ROOMY_HEAD_MID - 4.0, "the tighter measures");
+    let head = find(&out, "M5Stack Core2").center().y;
+    assert!(head < ROOMY.top + head_mid(ROOMY) - 0.5, "closed up: {head}");
+    assert!(head > TIGHT.top + head_mid(TIGHT) + 4.0, "only as far as it needs: {head}");
 }
 
-/// Where the head's name stands its middle under the column's top.
-const ROOMY_HEAD_MID: f32 = studio::HEAD_H / 2.0 + ROOMY.pad_y;
+/// Where the head's name stands its middle under the column's top with
+/// `space`.
+fn head_mid(space: Space) -> f32 {
+    studio::HEAD_H / 2.0 + space.pad_y
+}
+
+#[test]
+fn the_measures_close_up_in_whole_points_from_the_boards_to_the_tighter_set() {
+    assert_eq!(Space::at(0.0), ROOMY);
+    assert_eq!(Space::at(1.0), TIGHT);
+    assert_eq!(Space::at(-1.0), ROOMY, "no roomier than the boards'");
+    assert_eq!(Space::at(2.0), TIGHT, "no tighter than the tighter set");
+    let half = Space::at(0.5);
+    for (k, v) in [half.top, half.gap, half.pad_x, half.pad_y, half.over_busy, half.under_busy].into_iter().enumerate() {
+        assert_eq!(v, v.floor(), "measure {k} a whole number of points: {half:?}");
+    }
+    assert_eq!(half.gap, 14.0, "half way: {half:?}");
+    assert!(TIGHT.top >= 16.0, "never over the kit's modal's margin: a sheet held at its highest covers the subjects row");
+}
+
+#[test]
+fn the_frame_closes_up_once_for_a_window_size_and_holds_there_till_the_window_changes() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let (mut page, ends) = page_with(Ends::up_to_date);
+    ends.tell((0..30).map(|i| log_line(&format!("line {i:02}"))));
+    page.pump();
+    let head = |out: &FullOutput| find(out, "M5Stack Core2");
+    let at_rest = head(&probe.settle(&mut page));
+    // Details open counts at rest: the frame closes up to show it.
+    page.act(Act::Details);
+    let out = probe.settle(&mut page);
+    let open = head(&out);
+    assert!(open.center().y < at_rest.center().y - 0.5, "Details open closes the frame up: {at_rest:?} then {open:?}");
+    assert_drew(&out, &["PORT", "line 29"]);
+    // Shut again, at the same size, nothing moves.
+    page.act(Act::Details);
+    let shut = head(&probe.settle(&mut page));
+    assert_eq!(shut, open, "the frame holds while the window keeps its size");
+    // Another size is measured afresh, and back again from the boards'.
+    let wide = Probe { ctx: probe.ctx.clone(), size: BOARD };
+    let _ = wide.settle(&mut page);
+    let again = head(&probe.settle(&mut page));
+    assert_eq!(again, at_rest, "a window that changed opens the frame up again");
+}
 
 #[test]
 fn the_waiting_line_says_its_words_under_the_blank_first_row() {

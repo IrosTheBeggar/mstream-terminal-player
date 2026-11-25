@@ -38,7 +38,7 @@ use ratatui::text::Line;
 use super::super::card::{CardGate, GateKind, plan_of, span};
 use super::super::cells::{self, Row};
 use super::super::*;
-use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, PLAIN, Paint, SCAN, WIDE, clipped, fixed_h, lead_of};
+use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, PLAIN, Paint, SCAN, WIDE, clipped, details_h, details_head, fixed_h, lead_of};
 use super::{Drawn, Face, tone, unled};
 use crate::device::card::worker::CardView;
 use crate::gui::window::studio::{self, HEAD_H, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
@@ -64,9 +64,11 @@ const LIB_APART: f32 = 8.0;
 /// The card `view` in the column's `room` (the cells' `card_view`): its
 /// head, its value rows, its bottom row, and Details while open, in a
 /// hairline frame as tall as its rows and no taller than the room. Its rest
-/// is its height through its bottom row with every row it has, Details
-/// aside, as the frame measures it; the measuring run (`face.live` false)
-/// draws no control and gives nothing way.
+/// is its height through its bottom row with every row it has, and through
+/// Details while it is open, as the frame measures it; the measuring run
+/// (`face.live` false) draws no control and gives nothing way. While
+/// Details is open the value rows give way to its head too (board.rs's
+/// `details_head`), so its door never stands open over nothing.
 pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, room: Rect) -> Drawn {
     let s = face.space;
     let grid = Grid::of(room, face);
@@ -94,12 +96,13 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
     // The measuring run sees the card whole; the drawing cuts the values
     // short of the bottom row's place at the room's foot.
     let foot = if face.live { room.max.y - s.pad_y } else { f32::INFINITY };
-    let y = Values { ui: &card, face, grid, floor: foot - actions_h - s.gap, drive: &drive }.paint(y, &values);
+    let head = if laid.details.is_empty() { 0.0 } else { details_head(face) };
+    let y = Values { ui: &card, face, grid, floor: foot - actions_h - s.gap - head, drive: &drive }.paint(y, &values);
     let mut acts = Vec::new();
     let mut paint = Paint::new(&card, face, grid, y, foot, Id::new("mp3-card"), &mut acts);
     paint.blank();
     paint.row(page, &view.key, &actions, 0.0);
-    let rest = paint.y + s.pad_y - room.min.y;
+    let rest = paint.y + s.pad_y - room.min.y + details_h(page, &view.key, &laid.details, face);
     if page.details && face.live {
         details(&mut paint, page, &card, face, grid, view, &laid.details);
     }
@@ -1079,6 +1082,23 @@ mod tests {
         assert_drew(&out, &["Car music", "HOLDS", "SPACE", "LAST SYNC", "Details", "SYNC"]);
         let primary = find(&out, "SYNC");
         assert!(primary.max.y + 12.0 < FLOOR.y - studio::NOTE_H, "the primary over the busy line: {primary:?}");
+    }
+
+    #[test]
+    fn at_the_guis_floor_details_opens_on_its_drive_at_least_under_a_synced_card_beside_a_board() {
+        let _en = english();
+        let done = cards::with(cards::ready("E:", now()), |c| {
+            c.ended = Some(Ended::Done { tracks: 4_822, took: 60, skipped: Vec::new(), plays: 37 });
+        });
+        let probe = Probe::new(FLOOR);
+        let (mut page, _ends, _inbox, _fold) = with_cards(Ends::up_to_date, vec![done]);
+        page.act(Act::Card(0));
+        page.act(Act::Details);
+        let out = probe.settle(&mut page);
+        assert_drew(&out, &["Details", "DRIVE", "SYNC"]);
+        let drive = find(&out, "DRIVE");
+        assert!(drive.max.y + 12.0 <= FLOOR.y - studio::NOTE_H, "the drive's fact on the card: {drive:?}");
+        assert_drew(&out, &["Car music", "HOLDS", "SPACE"]);
     }
 
     #[test]
