@@ -466,6 +466,7 @@ pub(crate) fn with_figures(s: &str, figures: &[&str], font: FontId, figure: Font
 pub(crate) fn line(ui: &mut Ui, h: f32, s: &str, font: FontId, color: Color32) -> Rect {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    body_row(ui, row.min.y, row.max.y);
     text(ui, row.left_center(), s, font, color, w, Align2::LEFT_CENTER)
 }
 
@@ -477,6 +478,7 @@ const LABEL_H: f32 = 14.0;
 pub(crate) fn label(ui: &mut Ui, s: &str, pal: &Pal) -> Rect {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, LABEL_H), Sense::hover());
+    body_row(ui, row.min.y, row.max.y);
     label_at(ui, row.left_center(), s, w, pal);
     row
 }
@@ -555,12 +557,16 @@ impl Para {
         Para { anywhere: true, ..self }
     }
 
-    /// A row of the layout the column wide, as tall as its lines. Returns
-    /// where they were drawn.
+    /// A row of the layout the column wide, as tall as its lines, each
+    /// line a row of a Dialog's body ([`body_row`]). Returns where they
+    /// were drawn.
     pub(crate) fn show(self, ui: &mut Ui) -> Rect {
         let w = ui.available_width();
         let at = ui.cursor().min;
-        let drawn = self.paint(ui, at, w);
+        let (drawn, lines) = self.paint_lines(ui, at, w);
+        for line in lines {
+            body_row(ui, line.min, line.max);
+        }
         let (rect, _) = ui.allocate_exact_size(vec2(w, drawn.height()), Sense::hover());
         rect
     }
@@ -569,7 +575,12 @@ impl Para {
     /// on one baseline ([`shared_baseline`]) — a figure in the monospace
     /// on its words' — the lead's too. Returns where.
     pub(crate) fn paint(self, ui: &Ui, at: Pos2, w: f32) -> Rect {
-        let Some((_, font, color)) = self.parts.first().cloned() else { return Rect::from_min_size(at, Vec2::ZERO) };
+        self.paint_lines(ui, at, w).0
+    }
+
+    /// [`Para::paint`], and where each of its lines stands, top to foot.
+    fn paint_lines(self, ui: &Ui, at: Pos2, w: f32) -> (Rect, Vec<Rangef>) {
+        let Some((_, font, color)) = self.parts.first().cloned() else { return (Rect::from_min_size(at, Vec2::ZERO), Vec::new()) };
         let line_h = font.size * self.line;
         let parts: Vec<&Run> = self.parts.iter().filter(|(s, ..)| !s.is_empty()).collect();
         let mut fonts: Vec<&FontId> = parts.iter().map(|(_, font, _)| font).collect();
@@ -599,6 +610,7 @@ impl Para {
         let galley = ui.painter().layout_job(job);
         let origin = at + vec2(indent, 0.0);
         let rect = Rect::from_min_size(at, vec2(w, galley.size().y));
+        let lines = galley.rows.iter().map(|row| Rangef::new(origin.y + row.rect().min.y, origin.y + row.rect().max.y)).collect();
         // The lines that end at or above the floor, whole.
         let fits = galley.rows.iter().map(|row| origin.y + row.rect().max.y).filter(|foot| *foot <= self.floor + 0.01).fold(origin.y, f32::max);
         if fits >= rect.max.y - 0.01 {
@@ -606,7 +618,7 @@ impl Para {
         } else if fits > origin.y {
             ui.painter().with_clip_rect(rect.with_max_y(fits).intersect(ui.clip_rect())).galley(origin, galley, color);
         }
-        rect
+        (rect, lines)
     }
 }
 
@@ -1243,6 +1255,10 @@ pub(crate) fn tick_grid(ui: &mut Ui, id: Id, items: &[(String, bool)], focus: Op
     let lines = items.len().div_ceil(n);
     let h = (lines as f32 * (tick_h + TICK_GAP) - TICK_GAP).max(0.0);
     let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    for line in 0..lines {
+        let top = area.min.y + line as f32 * (tick_h + TICK_GAP);
+        body_row(ui, top, top + tick_h);
+    }
     let mut ticks = Ticks { clicked: None, rects: Vec::new() };
     for (i, (label, on)) in items.iter().enumerate() {
         let (line, col) = (i / n, i % n);
@@ -1293,6 +1309,10 @@ pub(crate) fn tick_flow(ui: &mut Ui, id: Id, items: &[(String, bool)], focus: Op
     let lines = placed.last().map_or(0, |(line, ..)| line + 1);
     let h = (lines as f32 * (TICK_H + TICK_GAP) - TICK_GAP).max(0.0);
     let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    for line in 0..lines {
+        let top = area.min.y + line as f32 * (TICK_H + TICK_GAP);
+        body_row(ui, top, top + TICK_H);
+    }
     let mut ticks = Ticks { clicked: None, rects: Vec::new() };
     for (i, ((label, on), (line, x, tw))) in items.iter().zip(placed).enumerate() {
         let rect = Rect::from_min_size(pos2(area.min.x - 8.0 + x, area.min.y + line as f32 * (TICK_H + TICK_GAP)), vec2(tw, TICK_H));
@@ -1331,6 +1351,7 @@ fn flow(wants: &[f32], room: f32, gap: f32) -> Vec<(usize, f32, f32)> {
 pub(crate) fn list_row(ui: &mut Ui, id: Id, h: f32, on: bool, pal: &Pal) -> (Rect, Response) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    body_row(ui, rect.min.y, rect.max.y);
     let response = list_row_at(ui, id, rect, on, pal);
     (rect, response)
 }
@@ -1374,6 +1395,7 @@ pub(crate) fn checkbox(ui: &Ui, id: Id, at: Pos2, on: bool, pal: &Pal) -> Respon
 pub(crate) fn check_line(ui: &mut Ui, id: Id, on: bool, label: &str, detail: &str, focused: bool, pal: &Pal) -> Response {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, HIT), Sense::hover());
+    body_row(ui, row.min.y, row.max.y);
     check_line_at(ui, id, row, on, label, detail, focused, pal)
 }
 
@@ -1427,6 +1449,7 @@ pub(crate) fn radio_mark(ui: &Ui, at: Pos2, on: bool, lit: Color32, pal: &Pal) {
 pub(crate) fn radio(ui: &mut Ui, id: Id, on: bool, label: &str, detail: &str, pal: &Pal) -> Response {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
+    body_row(ui, row.min.y, row.max.y);
     // The canvas's row reaches 8 points past the column either side.
     let hit = row.expand2(vec2(RADIO_REACH, 0.0));
     let response = hand(ui.interact(hit, id, Sense::click()));
@@ -1780,6 +1803,7 @@ pub(crate) const FIELD_ROW_H: f32 = LABEL_H + 6.0 + FIELD_H;
 pub(crate) fn field(ui: &mut Ui, id: Id, label: &str, input: &Input, pal: &Pal) -> Typed {
     let w = ui.available_width();
     let (slot, _) = ui.allocate_exact_size(vec2(w, FIELD_ROW_H), Sense::hover());
+    body_row(ui, slot.min.y, slot.max.y);
     field_at(ui, id, slot, label, input, pal)
 }
 
@@ -1801,6 +1825,7 @@ pub(crate) fn field_beside(ui: &mut Ui, id: Id, label: &str, input: &Input, box_
     ui.add_space(6.0);
     let box_w = box_w.min(w);
     let (row, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
+    body_row(ui, row.min.y, row.max.y);
     let typed = field_box(ui, id, Rect::from_min_size(row.min, vec2(box_w, FIELD_H)), input, pal);
     if !note.is_empty() {
         let note_w = width_of(ui, note, body(13.0));
@@ -2539,13 +2564,87 @@ pub(crate) struct ModalShown<R> {
 }
 
 /// Where a modal's body stood on this pass, for [`reveal`]: the top of its
-/// content and its view, in the screen's points, and whether the modal
-/// came up on this pass.
+/// content and its view as it ends between rows, in the screen's points,
+/// how tall its whole view is, and whether the modal came up on this pass.
 #[derive(Clone, Copy)]
 struct BodyView {
     origin: f32,
     view: Rect,
+    full: f32,
     opened: bool,
+}
+
+/// The body a [`Dialog`] is laying out now, for [`body_row`]: the modal's
+/// id, the top of its body's content and its view's clip, in the screen's
+/// points.
+#[derive(Clone, Copy)]
+struct Laying {
+    id: Id,
+    origin: f32,
+    clip: Rect,
+}
+
+/// Where the body being laid out is kept while its closure runs.
+fn laying_key() -> Id {
+    Id::new("studio-dialog-laying")
+}
+
+/// A row of the body a [`Dialog`] is laying out, from `top` to `bottom` in
+/// the screen's points: a place the body's view never ends through at rest
+/// (the Dialog ends it over the row's top instead, between rows). The
+/// kit's own rows say so themselves (a field, a check line, a choice, a
+/// line, a label, a paragraph, a row of ticks or of a list); a body that
+/// sets its rows at places of its own says so for each. A row laid out
+/// anywhere else — outside a Dialog's body, or in a scrolled list of the
+/// body's own, whose view is its own — is let be.
+pub(crate) fn body_row(ui: &Ui, top: f32, bottom: f32) {
+    let ctx = ui.ctx();
+    let Some(laying) = ctx.data(|d| d.get_temp::<Laying>(laying_key())) else { return };
+    if ui.clip_rect() != laying.clip || bottom <= top {
+        return;
+    }
+    let row = Rangef::new(top - laying.origin, bottom - laying.origin);
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<Rangef>>(laying.id.with("rows-now")).push(row));
+}
+
+/// Where a view `h` tall scrolled `offset` down its content ends over the
+/// body's `rows` (each from its top to its bottom in the content's points):
+/// its own end, or where that falls inside a row the row's top, and so on
+/// up; its own end still where the rows would leave it nothing to show.
+fn row_end(rows: &[Rangef], offset: f32, h: f32) -> f32 {
+    let mut end = offset + h;
+    loop {
+        let cut = rows.iter().filter(|r| inside(r, end)).map(|r| r.min).fold(f32::INFINITY, f32::min);
+        if !cut.is_finite() {
+            break;
+        }
+        end = cut;
+    }
+    if end <= offset + 0.01 { offset + h } else { end }
+}
+
+/// Where a view scrolled `offset` down its content and ending at `end`
+/// starts over the body's `rows`: its own top, or where that falls inside a
+/// row the row's foot, and so on down — the body scrolled as far as it
+/// goes, its last row on the view's foot, can leave a row torn over its
+/// top; its own top still where the rows would leave it nothing to show.
+fn row_start(rows: &[Rangef], offset: f32, end: f32) -> f32 {
+    let mut start = offset;
+    loop {
+        let cut = rows.iter().filter(|r| inside(r, start)).map(|r| r.max).fold(f32::NEG_INFINITY, f32::max);
+        if !cut.is_finite() {
+            break;
+        }
+        start = cut;
+    }
+    if start >= end - 0.01 { offset } else { start }
+}
+
+/// Whether an edge at `y` cuts `row`: more than half a point inside it at
+/// either end, so the scrolled view's rounding to the pixel never reads as a
+/// cut.
+fn inside(row: &Rangef, y: f32) -> bool {
+    row.min + 0.5 < y && y < row.max - 0.5
 }
 
 /// A modal over `over` only — the room's area, never the window's — as the
@@ -2566,6 +2665,15 @@ struct BodyView {
 /// the scrim is inert. A modal comes up with its body at its top, as the
 /// cells draw a modal afresh each time, wherever it was scrolled to when it
 /// was last up.
+///
+/// A scrolled body's view ends between its rows ([`body_row`]), never
+/// through one: where its foot would cut a row, it ends over that row's
+/// top, the room under it left blank, and the row comes in whole as the
+/// body scrolls to it; where its top would (the body scrolled to its end),
+/// it starts under that row's foot. It stands so wherever it stands — at
+/// its top, where the keys or [`reveal`] took it, under the wheel — by the
+/// rows the last pass laid out, the pass run again where they moved, so
+/// the body never shows a row torn and the window never moves for it.
 pub(crate) struct Dialog<'a> {
     id: Id,
     over: Rect,
@@ -2575,6 +2683,7 @@ pub(crate) struct Dialog<'a> {
     close: bool,
     hold: Option<f32>,
     afresh: Option<&'a str>,
+    head: f32,
     foot: f32,
 }
 
@@ -2593,7 +2702,16 @@ struct Measured {
 
 impl<'a> Dialog<'a> {
     pub(crate) fn new(id: Id, over: Rect, width: f32, title: &'a str) -> Self {
-        Dialog { id, over, width, title, tone: None, close: true, hold: None, afresh: None, foot: 0.0 }
+        Dialog { id, over, width, title, tone: None, close: true, hold: None, afresh: None, head: 0.0, foot: 0.0 }
+    }
+
+    /// A head `h` points tall, the room under it with it, pinned under the
+    /// title over the body's view rather than scrolled with the body: a
+    /// sheet's tabs and what they say of it stand whole in view at every
+    /// size, so the open tab can always be read, and the body scrolls under
+    /// them where it runs long. [`Dialog::show_pinned`] draws it.
+    pub(crate) fn head(self, h: f32) -> Self {
+        Dialog { head: h.max(0.0), ..self }
     }
 
     /// A foot `h` points tall, the room over it with it, pinned under the
@@ -2650,14 +2768,16 @@ impl<'a> Dialog<'a> {
         // a few ten-thousandths of a point under it, and the floor would
         // take a whole 32nd from the body for that. A view up to a 1024th
         // taller than the room costs nothing: the window it asks for is
-        // held to `max_h`. A pinned foot's room is the body's no more.
-        let budget = ((max_h - fixed - self.foot).max(0.0) + 1.0 / 1024.0).floor_ui();
+        // held to `max_h`. A pinned head's and foot's room is the body's no
+        // more.
+        let budget = ((max_h - fixed - self.head - self.foot).max(0.0) + 1.0 / 1024.0).floor_ui();
         Measured { width, inner_w, title, fixed, max_h, budget }
     }
 
     /// The room the window gives its body over its room, known before it
     /// is drawn: the body's width, and its height to the 32nd of a point
-    /// (a pinned foot's room aside), as [`Dialog::show`] hands them to it —
+    /// (a pinned head's and foot's room aside), as [`Dialog::show`] hands
+    /// them to it —
     /// what a body that chooses its own measures for its room (the MP3
     /// tab's Advanced and Settings sheets) chooses them by.
     pub(crate) fn body_room(&self, ui: &Ui) -> Vec2 {
@@ -2673,9 +2793,23 @@ impl<'a> Dialog<'a> {
     /// out top-down in its room right under the body's view, the window
     /// wide, handed what the body returned to add to.
     pub(crate) fn show_footed<R>(self, ui: &Ui, pal: &Pal, body: impl FnOnce(&mut Ui) -> R, foot: impl FnOnce(&mut Ui, &mut R)) -> ModalShown<R> {
+        self.show_pinned(ui, pal, |_| {}, body, foot)
+    }
+
+    /// [`Dialog::show_footed`] with its pinned [`Dialog::head`] too: `head`
+    /// lays it out top-down in its room right under the title, the body's
+    /// width, and the body's view stands under it.
+    pub(crate) fn show_pinned<R>(
+        self,
+        ui: &Ui,
+        pal: &Pal,
+        head: impl FnOnce(&mut Ui),
+        body: impl FnOnce(&mut Ui) -> R,
+        foot: impl FnOnce(&mut Ui, &mut R),
+    ) -> ModalShown<R> {
         let title_color = self.tone.unwrap_or(pal.text);
         let Measured { width, title, fixed, max_h, budget, .. } = self.measure(ui, title_color);
-        let Dialog { id, over, tone, close, hold, afresh, foot: foot_h, .. } = self;
+        let Dialog { id, over, tone, close, hold, afresh, head: head_h, foot: foot_h, .. } = self;
         let ctx = ui.ctx().clone();
         let size_key = id.with("height");
         let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
@@ -2699,7 +2833,18 @@ impl<'a> Dialog<'a> {
             opened |= was.as_deref() != Some(key);
             ctx.data_mut(|d| d.insert_temp(key_at, key.to_string()));
         }
-        let reveal_to: Option<f32> = ctx.data_mut(|d| d.remove_temp(id.with("reveal-to")));
+        // The body's rows as the last pass laid them out, in its content's
+        // points, and a control the keys moved to, which comes in with the
+        // view's top on a row's.
+        let rows: Vec<Rangef> = ctx.data(|d| d.get_temp(id.with("rows"))).unwrap_or_default();
+        let reveal_to: Option<(f32, f32, bool)> = ctx.data_mut(|d| d.remove_temp(id.with("reveal-to")));
+        let reveal_to = reveal_to.map(|(top, bottom, down)| {
+            // The control's own rows whole: from the top of the row its top
+            // falls in to the foot of the row its foot does.
+            let top = rows.iter().filter(|r| inside(r, top)).map(|r| r.min).fold(top, f32::min);
+            let bottom = rows.iter().filter(|r| inside(r, bottom)).map(|r| r.max).fold(bottom, f32::max);
+            if down { row_top(&rows, bottom - budget, top) } else { top }
+        });
 
         // Up at once, as the canvas's and the cells' modals are: egui fades an
         // area in by default, over frames the panel would have to run for it.
@@ -2715,9 +2860,16 @@ impl<'a> Dialog<'a> {
             };
             let title_h = title.h;
             title.paint(ui, inner.min);
+            // The pinned head right under the title, the body's width.
+            let head_top = (inner.min.y + title_h + MODAL_GAP).round_to_pixels(ui.pixels_per_point()).round_ui();
+            if head_h > 0.0 {
+                let room = Rect::from_min_size(pos2(inner.min.x, head_top), vec2(inner.width(), head_h));
+                let mut child = ui.new_child(UiBuilder::new().id_salt(id.with("head")).max_rect(room).layout(Layout::top_down(Align::Min)));
+                head(&mut child);
+            }
             // The body's view starts where its content does, on the pixel
             // egui puts that on, and is `budget` tall on every pass.
-            let top = (inner.min.y + title_h + MODAL_GAP).round_to_pixels(ui.pixels_per_point()).round_ui();
+            let top = (head_top + head_h).round_to_pixels(ui.pixels_per_point()).round_ui();
             // The scrolled area reaches into the window's padding, where its
             // thumb stands 8 points in from the window's edge, clear of the
             // body, which keeps the inner width.
@@ -2728,38 +2880,87 @@ impl<'a> Dialog<'a> {
             if opened {
                 scroll = scroll.vertical_scroll_offset(0.0);
             } else if let Some(to) = reveal_to {
-                scroll = scroll.vertical_scroll_offset(to);
+                scroll = scroll.vertical_scroll_offset(to.max(0.0));
             }
             let out = scroll.show(&mut child, |ui| {
                 ui.set_max_width(inner.width());
-                let view = BodyView { origin: ui.max_rect().min.y, view: ui.clip_rect(), opened };
-                ui.ctx().data_mut(|d| d.insert_temp(id.with("view"), view));
+                // The view ends between the rows the last pass laid out,
+                // over the top of a row its foot would cut, and starts
+                // between them, under the foot of one its top would.
+                let origin = ui.max_rect().min.y;
+                let full = ui.clip_rect();
+                let offset = full.min.y - origin;
+                let end = row_end(&rows, offset, full.height());
+                let start = row_start(&rows, offset, end);
+                let view = Rect::from_min_max(pos2(full.min.x, (origin + start).max(full.min.y)), pos2(full.max.x, (origin + end).min(full.max.y)));
+                ui.set_clip_rect(view);
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(id.with("view"), BodyView { origin, view, full: full.height(), opened });
+                    d.insert_temp(laying_key(), Laying { id, origin, clip: view });
+                    d.remove_temp::<Vec<Rangef>>(id.with("rows-now"));
+                });
                 // The body laid out in a room exactly as tall as its view.
                 // egui rounds the scrolled rect it hands the body to pixels
                 // at its top and its bottom apart, so that rect's height
                 // moves by up to a pixel with where the window stands and
                 // how far the body is scrolled.
                 let room = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), budget));
-                ui.scope_builder(UiBuilder::new().max_rect(room), body).inner
+                let said = ui.scope_builder(UiBuilder::new().max_rect(room), body).inner;
+                ui.ctx().data_mut(|d| d.remove::<Laying>(laying_key()));
+                (said, offset, full.height(), (start, end))
             });
             // The pinned foot right under the body's view, the body's width.
             let shown_h = out.content_size.y.min(budget);
-            let mut said = out.inner;
+            let (mut said, offset, full_h, ends) = out.inner;
             if foot_h > 0.0 {
                 let room = Rect::from_min_size(pos2(inner.min.x, top + shown_h), vec2(inner.width(), foot_h));
                 let mut child = ui.new_child(UiBuilder::new().id_salt(id.with("pinned")).max_rect(room).layout(Layout::top_down(Align::Min)));
                 foot(&mut child, &mut said);
             }
-            let wanted = fixed + shown_h + foot_h;
-            (closed, said, wanted.min(max_h))
+            // How low a list that hangs over the body may reach: over a
+            // pinned foot, else inside the window's padding.
+            let floor = if foot_h > 0.0 { top + shown_h } else { inner.max.y };
+            ui.ctx().data_mut(|d| d.insert_temp(id.with("hang-floor"), floor));
+            let wanted = fixed + head_h + shown_h + foot_h;
+            (closed, said, wanted.min(max_h), (offset, full_h, ends))
         });
-        let (closed, inner, wanted) = shown.inner;
+        let (closed, inner, wanted, (offset, full_h, (start, end))) = shown.inner;
+        // The rows this pass laid out: where the view would start or end
+        // elsewhere over them than it did over the last pass's, the pass
+        // runs again.
+        let laid: Vec<Rangef> = ctx.data_mut(|d| d.remove_temp(id.with("rows-now"))).unwrap_or_default();
+        let laid_end = row_end(&laid, offset, full_h);
+        let moved = (laid_end - end).abs() > 0.01 || (row_start(&laid, offset, laid_end) - start).abs() > 0.01;
+        ctx.data_mut(|d| d.insert_temp(id.with("rows"), laid));
+        if moved {
+            ctx.request_discard("a modal's view ends between its body's rows");
+            if !ctx.will_discard() {
+                ctx.request_repaint();
+            }
+        }
         if known.is_none_or(|h| (h - wanted).abs() > 0.5) {
             ctx.data_mut(|d| d.insert_temp(size_key, wanted));
             ctx.request_discard("a modal took its body's height");
         }
         ModalShown { closed, inner, window }
     }
+}
+
+/// Where a body's view scrolled down to show a control from `top` to its
+/// foot starts, its view's top at least at `low` (where the control's foot
+/// meets the view's): the highest top of the body's `rows` from there that
+/// still shows the control whole — so no row is torn over it — else the
+/// control's own top.
+fn row_top(rows: &[Rangef], low: f32, top: f32) -> f32 {
+    rows.iter().map(|r| r.min).filter(|t| *t >= low - 0.01 && *t <= top + 0.01).fold(top, f32::min)
+}
+
+/// How low a list that hangs over the modal `modal`'s body may reach, as
+/// the modal stood when it was last shown (this pass, for a list drawn
+/// after it): over its pinned foot, else inside its window's padding
+/// ([`hung_over`] holds its list to it). None before it was ever shown.
+pub(crate) fn hung_floor(ui: &Ui, modal: Id) -> Option<f32> {
+    ui.ctx().data(|d| d.get_temp(modal.with("hang-floor")))
 }
 
 /// How wide a [`Dialog`] wants to be to hold a body `body_w` points wide
@@ -2807,11 +3008,13 @@ pub(crate) fn gate(ui: &Ui, id: Id, over: Rect, title: &str, sentences: Vec<Para
 /// cursor) or the modal came up or changed height — never after, so the
 /// wheel keeps the body where it puts it. The move lands within the frame:
 /// the pass runs again with the body where it goes, or where egui runs no
-/// more passes this frame, the next frame is asked for.
+/// more passes this frame, the next frame is asked for. A control under
+/// the view comes in with the view's top on a row's top, its foot ending
+/// between rows ([`Dialog`]), so the move tears no row at either end.
 pub(crate) fn reveal(ui: &Ui, modal: Id, at: usize, rect: Rect) {
     let ctx = ui.ctx();
     let Some(body) = ctx.data(|d| d.get_temp::<BodyView>(modal.with("view"))) else { return };
-    let h = body.view.height();
+    let h = body.full;
     let key = modal.with("revealed");
     let last: Option<(usize, f32)> = ctx.data(|d| d.get_temp(key));
     ctx.data_mut(|d| d.insert_temp(key, (at, h)));
@@ -2819,15 +3022,17 @@ pub(crate) fn reveal(ui: &Ui, modal: Id, at: usize, rect: Rect) {
         return;
     }
     let offset = body.view.min.y - body.origin;
+    // In view is over where the view ends between rows, not its full foot.
+    let end = body.view.max.y - body.origin;
     let (top, bottom) = (rect.min.y - body.origin, rect.max.y - body.origin);
-    let to = if top < offset {
-        top
-    } else if bottom > offset + h {
-        (bottom - h).min(top)
+    let down = if top < offset {
+        false
+    } else if bottom > end + 0.01 {
+        true
     } else {
         return;
     };
-    ctx.data_mut(|d| d.insert_temp(modal.with("reveal-to"), to.max(0.0)));
+    ctx.data_mut(|d| d.insert_temp(modal.with("reveal-to"), (top, bottom, down)));
     ctx.request_discard("a modal brought its keyboard's control into view");
     if !ctx.will_discard() {
         ctx.request_repaint();
@@ -3649,10 +3854,22 @@ pub(crate) fn hung_frame(at: Pos2, w: f32, n: usize) -> Rect {
     Rect::from_min_size(at, vec2(w, n as f32 * HUNG_ROW_H + 2.0 * HUNG_IN))
 }
 
+/// The gutter a list that hangs keeps at its right for its thumb while it
+/// holds fewer entries than it has: the thumb and 2 points either side.
+pub(crate) const HUNG_GUTTER: f32 = THUMB_W + 4.0;
+
+/// The gutter a list that hangs keeps for its thumb, holding `n` of its
+/// `len` entries: [`HUNG_GUTTER`] where it holds fewer, none where it
+/// holds them all.
+fn hung_gutter(n: usize, len: usize) -> f32 {
+    if n < len { HUNG_GUTTER } else { 0.0 }
+}
+
 /// How wide a list that hangs is for entries whose words are `words_w`
-/// wide at most: the words, their padding and the frame's room.
-pub(crate) fn hung_width(words_w: f32) -> f32 {
-    words_w + 2.0 * HUNG_PAD + 2.0 * HUNG_IN
+/// wide at most, holding `n` of its `len`: the words, their padding, the
+/// thumb's gutter while it holds fewer than its all, and the frame's room.
+pub(crate) fn hung_width(words_w: f32, n: usize, len: usize) -> f32 {
+    words_w + 2.0 * HUNG_PAD + hung_gutter(n, len) + 2.0 * HUNG_IN
 }
 
 /// Where a list that hangs from a closed list's box whose left is
@@ -3677,7 +3894,8 @@ pub(crate) fn hung_first(cursor: Option<usize>, n: usize, len: usize) -> usize {
 /// raised under the pointer, with the hand, where `id_of` gives the entry
 /// an id — none takes nothing, a line that picks nothing. Holding fewer
 /// than its all, it shows the kit's thumb at rest at its right, where it
-/// stands among them ([`list_thumb`]), in its entries' padding.
+/// stands among them ([`list_thumb`]), in a gutter of its own the entries
+/// and their cursor stop short of ([`HUNG_GUTTER`]).
 /// `words(ui, k, room, on)` paints entry `k`'s words in `room`, the entry
 /// less its padding, `on` while it is the cursor's, which wears the ink on
 /// the accent. The list is the page's keys', as egui's own popup is not (it
@@ -3698,10 +3916,11 @@ pub(crate) fn hung_list(
     ui.painter().add(lifted().as_shape(frame, square()));
     ui.painter().rect_filled(frame, square(), pal.panel);
     ui.painter().rect_stroke(frame, square(), Stroke::new(1.0, pal.accent), StrokeKind::Inside);
+    let gutter = hung_gutter(n, len);
     let mut picked = None;
     for k in first..first + n {
         let top = frame.min.y + HUNG_IN + (k - first) as f32 * HUNG_ROW_H;
-        let row = Rect::from_min_size(pos2(frame.min.x + HUNG_IN, top), vec2((frame.width() - 2.0 * HUNG_IN).max(1.0), HUNG_ROW_H));
+        let row = Rect::from_min_size(pos2(frame.min.x + HUNG_IN, top), vec2((frame.width() - 2.0 * HUNG_IN - gutter).max(1.0), HUNG_ROW_H));
         let response = id_of(k).map(|id| hand(ui.interact(row, id, Sense::click())));
         let on = cursor == Some(k);
         if on {
@@ -3715,18 +3934,24 @@ pub(crate) fn hung_list(
         }
     }
     if n < len {
-        let pane = frame.shrink(HUNG_IN + 2.0);
+        // The thumb in the middle of its gutter, as far in from the frame's
+        // top and foot as from its sides.
+        let pane = frame.shrink(HUNG_IN + (gutter - THUMB_W) / 2.0);
         list_thumb(ui, pane, n, len, first, pal);
     }
     picked
 }
 
 /// [`hung_list`] on a layer of its own over the modal `parent`'s, so it
-/// hangs past the modal's body down to the page's foot, over the window
+/// hangs over the modal's lower rows past its body's view, over the window
 /// whichever of the two was last pressed (egui raises an area pressed on to
 /// the top of its order): what the list takes is its own, a press beside it
 /// the modal's. It shows `n` of its `len` entries from the one that keeps
-/// the `cursor` in sight ([`hung_first`]).
+/// the `cursor` in sight ([`hung_first`]), and never more than stand whole
+/// inside the modal's frame, over its pinned foot ([`hung_floor`]): an
+/// entry that would reach past them is left out, as a list's frame drawn
+/// over the window's edge or its buttons would hide them. Size the list
+/// with [`hung_floor`] so its width keeps the thumb's gutter it then needs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hung_over(
     ui: &Ui,
@@ -3741,6 +3966,11 @@ pub(crate) fn hung_over(
     words: impl FnMut(&Ui, usize, Rect, bool),
 ) -> Option<usize> {
     let ctx = ui.ctx().clone();
+    let n = hung_floor(ui, parent).map_or(n, |floor| n.min(hung_fits(frame.min.y, floor)));
+    if n == 0 {
+        return None;
+    }
+    let frame = hung_frame(frame.min, frame.width(), n);
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(frame.min).constrain(false).fade_in(false);
     let first = hung_first(cursor, n, len);
     let shown = area.show(&ctx, |ui| hung_list(ui, frame, first, n, len, cursor, id_of, pal, words));
@@ -4357,6 +4587,183 @@ mod tests {
                 // 20 under the three rows, its middle 17 into it.
                 let want = first.center().y - 12.0 + 3.0 * 24.0 + 20.0 + 17.0;
                 assert!((foot.center().y - want).abs() < 1.0, "a short body: the foot right under it: {first:?} {foot:?}");
+            }
+        }
+    }
+
+    /// Every one-line text a pass drew with where it stands and what
+    /// clipped it.
+    fn clipped_texts(out: &egui::FullOutput) -> Vec<(String, Rect, Rect)> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.rows.len() == 1 => Some((t.galley.text().to_string(), Rect::from_min_size(t.pos, t.galley.size()), c.clip_rect)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one-line texts a pass drew torn by their clip's foot or its top:
+    /// in view in part, not whole.
+    fn torn(out: &egui::FullOutput) -> Vec<String> {
+        let cut = |r: Rect, edge: f32| edge > r.min.y + 0.5 && edge < r.max.y - 0.5;
+        clipped_texts(out).into_iter().filter(|(_, r, clip)| clip.intersects(*r) && (cut(*r, clip.max.y) || cut(*r, clip.min.y))).map(|(t, ..)| t).collect()
+    }
+
+    #[test]
+    fn a_pinned_head_stands_whole_over_the_bodys_view_wherever_the_body_is_scrolled() {
+        let ctx = context();
+        let id = Id::new("probe-headed");
+        let size = vec2(600.0, 340.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let at = Cell::new(0usize);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let dialog = Dialog::new(id, over, 400.0, "Sheet").head(44.0).foot(54.0);
+            let room = dialog.body_room(ui);
+            assert!(room.y <= size.y - 32.0 - 2.0 * MODAL_PAD - TITLE_H - MODAL_GAP - 44.0 - 54.0 + 0.01, "the head's room is the body's no more: {room:?}");
+            let _ = dialog.show_pinned(
+                ui,
+                &pal,
+                |ui| {
+                    line(ui, 30.0, "HEAD", body(14.0), pal.text);
+                },
+                |ui| {
+                    for k in 0..30 {
+                        let row = line(ui, 24.0, &format!("row {k:02}"), body(14.0), pal.text);
+                        if k == at.get() {
+                            reveal(ui, id, k, row);
+                        }
+                    }
+                },
+                |ui, _| {
+                    ui.add_space(20.0);
+                    line(ui, 34.0, "FOOT", body(14.0), pal.text);
+                },
+            );
+        };
+        let settle = |run: &mut dyn FnMut(&mut Ui)| {
+            let mut out = pass(&ctx, size, Vec::new(), run);
+            for _ in 0..2 {
+                out = pass(&ctx, size, Vec::new(), run);
+            }
+            out
+        };
+        let out = settle(&mut run);
+        let find = |out: &egui::FullOutput, words: &str| clipped_texts(out).into_iter().find(|(t, ..)| t == words).unwrap_or_else(|| panic!("{words:?} drawn"));
+        let (_, head, clip) = find(&out, "HEAD");
+        assert!(clip.contains_rect(head), "the head whole: {head:?} in {clip:?}");
+        let (_, first, view) = find(&out, "row 00");
+        assert!(first.min.y >= head.max.y && view.min.y >= head.max.y - 0.5, "the body under the head: {first:?} {view:?}");
+        // The keys at the last row: the body scrolls under the head, which
+        // stands where it stood, whole.
+        at.set(29);
+        let out = settle(&mut run);
+        let (_, moved, clip) = find(&out, "HEAD");
+        assert!((moved.min.y - head.min.y).abs() < 0.5 && clip.contains_rect(moved), "the head held whole: {moved:?} in {clip:?}");
+        let (_, last, view) = find(&out, "row 29");
+        assert!(view.contains_rect(last) && view.min.y >= moved.max.y - 0.5, "the last row whole under the head: {last:?} in {view:?}");
+        let (_, gone, view) = find(&out, "row 00");
+        assert!(!view.intersects(gone), "the first rows scrolled away under it");
+    }
+
+    #[test]
+    fn a_scrolled_bodys_view_ends_between_its_rows_and_the_keys_bring_a_row_in_tearing_none() {
+        let ctx = context();
+        let id = Id::new("probe-rows");
+        // A body 180 points tall for rows 28 points apart: its foot falls
+        // inside the seventh.
+        let size = vec2(600.0, 300.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let at = Cell::new(0usize);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let _ = Dialog::new(id, over, 400.0, "Rows").show(ui, &pal, |ui| {
+                for k in 0..30 {
+                    if k > 0 {
+                        ui.add_space(4.0);
+                    }
+                    let row = line(ui, 24.0, &format!("row {k:02}"), body(14.0), pal.text);
+                    if k == at.get() {
+                        reveal(ui, id, k, row);
+                    }
+                }
+            });
+        };
+        let settle = |run: &mut dyn FnMut(&mut Ui)| {
+            let mut out = pass(&ctx, size, Vec::new(), run);
+            for _ in 0..2 {
+                out = pass(&ctx, size, Vec::new(), run);
+            }
+            out
+        };
+        let out = settle(&mut run);
+        let view = |out: &egui::FullOutput| clipped_texts(out).into_iter().find(|(t, ..)| t == "row 00").map(|(.., clip)| clip).expect("the body drawn");
+        let shown = |out: &egui::FullOutput| clipped_texts(out).into_iter().filter(|(t, r, clip)| t.starts_with("row ") && clip.contains_rect(*r)).map(|(t, ..)| t).collect::<Vec<_>>();
+        assert!(torn(&out).is_empty(), "at its top, no row torn: {:?}", torn(&out));
+        assert_eq!(shown(&out).len(), 6, "six rows whole, the seventh under the view's foot: {:?}", shown(&out));
+        let full = size.y - 32.0 - 2.0 * MODAL_PAD - TITLE_H - MODAL_GAP;
+        assert!(view(&out).height() < full - 1.0, "the view ended over the row it would cut: {:?}", view(&out));
+        // The keys far down and back up: each row comes in whole, none torn
+        // at either end of the view.
+        for k in [20, 29, 3, 0] {
+            at.set(k);
+            let out = settle(&mut run);
+            let row = format!("row {k:02}");
+            assert!(shown(&out).contains(&row), "{row} in view: {:?}", shown(&out));
+            assert!(torn(&out).is_empty(), "at {row}, no row torn: {:?}", torn(&out));
+        }
+        // At rest the pass asks for no other: no repaint loop.
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+        assert_eq!(delay, Some(std::time::Duration::MAX), "a body at rest asks for no pass of its own");
+    }
+
+    #[test]
+    fn a_list_hung_over_a_modal_stops_inside_its_frame_over_its_pinned_foot() {
+        let ctx = context();
+        let size = vec2(600.0, 400.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        for footed in [true, false] {
+            let id = Id::new("probe-hung-over").with(footed);
+            let (window, floor, foot) = (Cell::new(Rect::NOTHING), Cell::new(0.0), Cell::new(Rect::NOTHING));
+            let mut run = |ui: &mut Ui| {
+                let pal = Pal::now();
+                let dialog = Dialog::new(id, over, 400.0, "Sheet").foot(if footed { 54.0 } else { 0.0 });
+                let shown = dialog.show_footed(
+                    ui,
+                    &pal,
+                    |ui| {
+                        for k in 0..6 {
+                            line(ui, 24.0, &format!("row {k}"), body(14.0), pal.text);
+                        }
+                    },
+                    |ui, _| {
+                        ui.add_space(20.0);
+                        foot.set(line(ui, 34.0, "FOOT", body(14.0), pal.text));
+                    },
+                );
+                window.set(shown.window);
+                floor.set(hung_floor(ui, id).expect("the modal's floor"));
+                // Ten entries hung from under the body's first row: more
+                // than stand over the foot or inside the frame.
+                let top = shown.window.min.y + MODAL_PAD + TITLE_H + MODAL_GAP + 24.0;
+                let frame = hung_frame(pos2(shown.window.min.x + 120.0, top), 160.0, 10);
+                let words = |ui: &Ui, k: usize, room: Rect, _on: bool| {
+                    text(ui, room.left_center(), &format!("entry {k}"), body(14.0), pal.text, room.width(), Align2::LEFT_CENTER);
+                };
+                let _ = hung_over(ui, id.with("list"), id, frame, Some(0), 10, 10, |_| None, &pal, words);
+            };
+            let mut out = pass(&ctx, size, Vec::new(), &mut run);
+            for _ in 0..2 {
+                out = pass(&ctx, size, Vec::new(), &mut run);
+            }
+            let entries: Vec<Rect> = clipped_texts(&out).into_iter().filter(|(t, ..)| t.starts_with("entry ")).map(|(_, r, _)| r).collect();
+            assert!(!entries.is_empty() && entries.len() < 10, "{footed}: some entries, not all: {}", entries.len());
+            let lowest = entries.iter().map(|r| r.max.y).fold(0.0, f32::max);
+            assert!(lowest <= floor.get() && floor.get() <= window.get().max.y - MODAL_PAD + 0.5, "{footed}: inside the frame: {lowest} over {} in {:?}", floor.get(), window.get());
+            if footed {
+                assert!(floor.get() <= foot.get().min.y - 20.0 + 0.5, "over the pinned foot's room: {} over {:?}", floor.get(), foot.get());
             }
         }
     }
@@ -5716,7 +6123,8 @@ mod tests {
         assert_eq!(hung_fits(100.0, 100.0 + 2.0 * HUNG_IN + 3.0 * HUNG_ROW_H), 3);
         assert_eq!(hung_fits(100.0, 100.0 + 2.0 * HUNG_IN + 3.0 * HUNG_ROW_H - 0.5), 2, "part of an entry is no room");
         assert_eq!(hung_fits(100.0, 90.0), 0);
-        assert_eq!(hung_width(100.0), 100.0 + 2.0 * HUNG_PAD + 2.0 * HUNG_IN);
+        assert_eq!(hung_width(100.0, 3, 3), 100.0 + 2.0 * HUNG_PAD + 2.0 * HUNG_IN);
+        assert_eq!(hung_width(100.0, 3, 8), 100.0 + 2.0 * HUNG_PAD + HUNG_GUTTER + 2.0 * HUNG_IN, "the thumb's gutter while it holds fewer");
         assert_eq!(hung_left(50.0) + HUNG_IN + HUNG_PAD, 50.0 + SELECT_PAD, "its words under the box's");
         let frame = hung_frame(pos2(40.0, 60.0), 200.0, 3);
         assert_eq!(frame.height(), 3.0 * HUNG_ROW_H + 2.0 * HUNG_IN);
@@ -5749,6 +6157,31 @@ mod tests {
             let _ = pass(&ctx, size, events, &mut run);
         }
         assert_eq!(picked.get(), Some(0));
+    }
+
+    #[test]
+    fn a_hung_lists_thumb_stands_in_a_gutter_of_its_own_its_cursor_stopping_short_of_it() {
+        let ctx = context();
+        let size = vec2(400.0, 300.0);
+        let frame = hung_frame(pos2(40.0, 60.0), hung_width(120.0, 3, 8), 3);
+        let room = Cell::new(Rect::NOTHING);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let words = |_: &Ui, k: usize, r: Rect, _: bool| {
+                if k == 0 {
+                    room.set(r);
+                }
+            };
+            let _ = hung_list(ui, frame, 0, 3, 8, Some(0), |_| None, &pal, words);
+        };
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let pal = Pal::now();
+        let fills = |c: Color32| out.shapes.iter().filter_map(|s| match &s.shape { Shape::Rect(r) if r.fill == c => Some(r.rect), _ => None }).collect::<Vec<_>>();
+        let (cursor, thumb) = (fills(pal.accent), fills(pal.dim.gamma_multiply(THUMB_REST)));
+        assert_eq!((cursor.len(), thumb.len()), (1, 1), "the cursor lit and the thumb drawn");
+        assert!(cursor[0].max.x + 1.0 <= thumb[0].min.x, "the cursor stops short of the thumb: {:?} {:?}", cursor[0], thumb[0]);
+        assert!(thumb[0].max.x <= frame.max.x - HUNG_IN, "the thumb inside the frame: {:?}", thumb[0]);
+        assert!((room.get().width() - 120.0).abs() < 0.01, "the entry's words keep their room beside the gutter: {:?}", room.get());
     }
 
     #[test]

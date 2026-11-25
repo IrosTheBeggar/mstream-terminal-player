@@ -721,10 +721,13 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
     let mut caret = None;
     let mut anchor = None;
     let mut y = col.min.y;
+    // Each row the body's view ends over rather than through.
+    let row_at = |top: f32, h: f32| studio::body_row(ui, top, top + h);
 
     // The firmware: the pin, another release, a local build, each with its
     // lines under it.
     group_label(ui, col, y, &view.groups[0], pal);
+    row_at(y, LABEL_H);
     y += LABEL_H + m.label_gap;
     let rows_top = y;
     for (k, radio) in view.firmware.iter().enumerate() {
@@ -732,6 +735,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
             y += m.row_gap;
         }
         let row = Rect::from_min_size(pos2(col.min.x, y), vec2(col.width(), m.row));
+        row_at(y, m.row);
         if let Some(control) = radio_row(ui, id.with("firmware").with(k), row, radio, m, live, face, acts) {
             anchor = Some(control);
             stops[1] = Some(control);
@@ -745,6 +749,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
         if k == 1 {
             if let Some(line) = &view.release_line {
                 studio::dim_line(ui, sub, sub_w, line, face.ports, pal);
+                row_at(y, LINE_H);
                 y += LINE_H;
             }
             continue;
@@ -762,6 +767,9 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
             }
             Read::Refused(why) => refusal(ui, sub, sub_w, why, pal),
         }
+        for line in 0..read_lines {
+            row_at(y + line as f32 * LINE_H, LINE_H);
+        }
         y += read_lines as f32 * LINE_H;
         if read_lines > 0 && view.under != Under::Nothing {
             y += m.sub_gap;
@@ -771,6 +779,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
             Under::Choosers => {
                 let row = Rect::from_min_size(pos2(col.min.x + NAME_IN, y), vec2(sub_w, m.chooser));
                 choosers(ui, id, row, view, face, live, acts);
+                row_at(y, m.chooser);
                 stops[1] = Some(row);
                 y += m.chooser;
             }
@@ -780,6 +789,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
                     let input = studio::Input::of(field).mono().lit().focused(true, face.composition);
                     caret = studio::field_box(ui, id.with("path"), rect, &input, pal).caret;
                 }
+                row_at(y, m.field);
                 stops[5] = Some(rect);
                 y += m.field;
             }
@@ -789,6 +799,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
     // The flash mode: the two builds and their note.
     y += m.gap;
     group_label(ui, col, y, &view.groups[1], pal);
+    row_at(y, LABEL_H);
     y += LABEL_H + m.label_gap;
     let modes_top = y;
     for (k, radio) in view.modes.iter().enumerate() {
@@ -796,6 +807,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
             y += m.row_gap;
         }
         let row = Rect::from_min_size(pos2(col.min.x, y), vec2(col.width(), m.row));
+        row_at(y, m.row);
         radio_row(ui, id.with("mode").with(k), row, radio, m, live, face, acts);
         y += m.row;
     }
@@ -803,18 +815,21 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
     if let Some(note) = &view.mode_note {
         y += m.note_gap;
         studio::dim_line(ui, pos2(col.min.x + NAME_IN, y), col.width() - NAME_IN, note, face.ports, pal);
+        row_at(y, LINE_H);
         y += LINE_H;
     }
 
     // The erase box.
     y += m.gap;
     group_label(ui, col, y, &view.groups[2], pal);
+    row_at(y, LABEL_H);
     y += LABEL_H + m.label_gap;
     let row = Rect::from_min_size(pos2(col.min.x, y), vec2(col.width(), m.check));
     let (label, detail) = (t!("dev.adv_erase").to_string(), format!(" — {}", t!("dev.adv_erase_desc")));
     if studio::check_line_at(ui, id.with("erase"), row, view.erase, &label, &detail, view.erase_focus, pal).clicked() && live {
         acts.push(Act::SheetErase);
     }
+    row_at(y, m.check);
     stops[3] = Some(row);
     y += m.check;
 
@@ -824,6 +839,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
         studio::rule(ui, col.min.x, col.max.x, y, pal);
         let at = pos2(col.min.x, y + 1.0 + m.help_gap);
         Para::new(&view.help, body(13.0), pal.dim).spaced(LINE_H).rows(2).paint(ui, at, col.width());
+        row_at(y, shape.help(m));
         y += shape.help(m);
     }
 
@@ -832,6 +848,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
     let at = vec2(col.min.x, y);
     let (defaults, apply) = (t!("dev.adv_defaults").to_string(), t!("dev.adv_apply").to_string());
     let rects = [laid[0].translate(at), laid[1].translate(at)];
+    row_at(y, foot_h);
     if studio::form_button(ui, id.with("foot").with(0usize), rects[0], &defaults, false, pal).clicked() && live {
         acts.push(Act::Defaults);
     }
@@ -1032,11 +1049,6 @@ fn release_list(ui: &Ui, id: Id, list: &List, anchor: Rect, col: Rect, face: &Fa
         lead + said
     };
     let widest = list.rows.iter().map(natural).fold(0.0, f32::max);
-    let w = studio::hung_width(widest).min(col.width());
-    // Its column's words under the control's, as the cells hang theirs and
-    // the Settings board lines its entries up with its box's words: the
-    // lead's room stands left of them.
-    let left = (studio::hung_left(anchor.min.x) - LEAD_W).min(col.max.x - w).max(col.min.x);
     let top = anchor.max.y + 2.0;
     // Inside the sheet's body: its view's foot, which is the room the
     // Dialog gave it, stands under the body's own foot where the window
@@ -1046,6 +1058,13 @@ fn release_list(ui: &Ui, id: Id, list: &List, anchor: Rect, col: Rect, face: &Fa
     if fits == 0 {
         return;
     }
+    // As wide as its widest entry and the thumb's gutter while it holds
+    // fewer than its all, no wider than the column.
+    let w = studio::hung_width(widest, fits, list.rows.len()).min(col.width());
+    // Its column's words under the control's, as the cells hang theirs and
+    // the Settings board lines its entries up with its box's words: the
+    // lead's room stands left of them.
+    let left = (studio::hung_left(anchor.min.x) - LEAD_W).min(col.max.x - w).max(col.min.x);
     let cursor = list.rows.iter().position(|r| r.pick == Some(list.cursor));
     let start = studio::hung_first(cursor, fits, list.rows.len());
     let frame = studio::hung_frame(pos2(left, top), w, fits);
@@ -1695,6 +1714,30 @@ mod tests {
             .expect("the list's frame");
         assert!(list.height() > 2.0 * studio::HUNG_ROW_H, "{list:?}");
         assert!(list.max.y <= frame.max.y - MODAL_PAD + 0.5, "the list inside the sheet's body: {list:?} in {frame:?}");
+    }
+
+    #[test]
+    fn a_list_holding_fewer_than_its_all_stands_its_thumb_in_a_gutter_clear_of_its_cursor() {
+        let _en = english();
+        let pal = Pal::now();
+        let thumb_ink = pal.dim.gamma_multiply(studio::THUMB_REST);
+        let mut thumbs = 0;
+        for h in [352.0, 320.0, 300.0] {
+            let probe = Probe::new(vec2(WINDOW.x, h));
+            let (mut page, ends) = sheet_up();
+            page.act(Act::SheetSource(1));
+            ends.tell([fixtures::listed()]);
+            page.pump();
+            let _ = ends.sent();
+            let out = probe.settle(&mut page);
+            let fills = |c: Color32| out.shapes.iter().filter_map(|s| match &s.shape { egui::Shape::Rect(r) if r.fill == c => Some(r.rect), _ => None }).collect::<Vec<_>>();
+            let Some(thumb) = fills(thumb_ink).into_iter().find(|r| (r.width() - studio::THUMB_W).abs() < 0.01) else { continue };
+            thumbs += 1;
+            // The cursor's entry lit in the accent, beside the thumb's row.
+            let cursor = fills(pal.accent).into_iter().find(|r| (r.height() - studio::HUNG_ROW_H).abs() < 0.01).expect("the cursor lit");
+            assert!(cursor.max.x + 1.0 <= thumb.min.x, "{h}: the cursor stops short of the thumb: {cursor:?} {thumb:?}");
+        }
+        assert!(thumbs > 0, "somewhere the list held fewer than its all");
     }
 
     #[test]

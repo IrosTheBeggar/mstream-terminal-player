@@ -24,10 +24,13 @@
 //! Short of room, as the cells give way: the rule and the help go first,
 //! then the room between the blocks closes up, and what is left scrolls in
 //! the Dialog's body, the row with the keyboard brought into its view, and
-//! brought in again when its field or its list opens. The foot never
-//! scrolls: it is pinned whole under the body's view (the kit's
+//! brought in again when its field or its list opens; the view ends between
+//! rows, never through one. Neither the tab row nor the foot scrolls: the
+//! tabs are pinned whole under the title (the kit's `Dialog::head`), so the
+//! open tab can always be read, and the foot under the body's view (its
 //! `Dialog::foot`), as the cells keep their buttons and cut the rows over
-//! them. A list hangs only from a box in that view.
+//! them. A list hangs only from a box in that view, and no lower than the
+//! foot.
 
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
@@ -121,15 +124,22 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
     let held_key = id.with("held");
     let held = ctx.data(|d| d.get_temp::<f32>(held_key)).unwrap_or(HELD_BODY);
     let dialog = Dialog::new(id, face.full, SHEET_W, &title).hold(held);
-    // The blocks given way for the room the window gives its body; the
-    // foot pinned under the body's view with the room over it, so it stands
-    // whole at every size while the rows above it scroll, as the cells cut
-    // their rows over their buttons.
+    // The blocks given way for the room the window gives its body; the tab
+    // row pinned under the title with the room under it, and the foot under
+    // the body's view with the room over it, so both stand whole at every
+    // size — the open tab always read — while the rows between them
+    // scroll, as the cells cut their rows over their buttons.
     let plan = Plan::of(ui, &view, face.pal, dialog.body_room(ui));
-    let pinned = plan.gap + plan.foot_h;
-    let shown = dialog.foot(pinned).show_footed(
+    let head = if plan.tabs { SEG_H + plan.gap } else { 0.0 };
+    let mut tab_acts = Vec::new();
+    let shown = dialog.head(head).foot(plan.gap + plan.foot_h).show_pinned(
         ui,
         face.pal,
+        |ui| {
+            if plan.tabs {
+                tabs(ui, &view, face, id, &mut tab_acts);
+            }
+        },
         |ui| sheet_body(ui, &view, face, id, &plan),
         |ui, body| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -142,6 +152,7 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
         ctx.data_mut(|d| d.insert_temp(held_key, wanted));
         ctx.request_discard("the card's sheet held its top for a taller body");
     }
+    drawn.acts.extend(tab_acts);
     drawn.acts.extend(shown.inner.acts);
     drawn.caret = shown.inner.caret;
     if let (Some(cursor), Some(anchor)) = (sheet.list, shown.inner.hang)
@@ -360,9 +371,10 @@ fn help_para(words: &str, pal: &Pal) -> Para {
 }
 
 /// The sheet's body, laid out top-down in `ui`, the Dialog's, as `plan`
-/// gives it way: the tab row (not setting up), the rows, the fit, the rule
-/// and the help. The foot is pinned under it ([`foot`]); its height is the
-/// whole body's, the foot's with it.
+/// gives it way: the rows, the fit, the rule and the help, each a row the
+/// body's view ends over rather than through (`studio::body_row`). The tab
+/// row is pinned over it ([`tabs`]) and the foot under it ([`foot`]); its
+/// height is the whole sheet's, the tab row's and the foot's with it.
 fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Body {
     ui.spacing_mut().item_spacing.y = 0.0;
     let pal = face.pal;
@@ -377,15 +389,12 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Body {
     // The body's view, scrolled or not: what a list may hang from.
     let view = ui.clip_rect();
     let w = ui.available_width();
-    if plan.tabs {
-        tabs(ui, v, face, id, &mut out.acts);
-        ui.add_space(plan.gap);
-    }
     for (k, line) in plan.lines.iter().enumerate() {
         if k > 0 {
             ui.add_space(ROW_GAP);
         }
         let (slot, _) = ui.allocate_exact_size(vec2(w, line.height()), Sense::hover());
+        studio::body_row(ui, slot.min.y, slot.max.y);
         match line {
             Line::Peer(words) => {
                 let runs = studio::figured(words, &[], body(13.0), mono(12.5), pal.dim);
@@ -422,6 +431,7 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Body {
     if let Some((help, h)) = &plan.help {
         ui.add_space(plan.gap);
         let (rect, _) = ui.allocate_exact_size(vec2(w, *h), Sense::hover());
+        studio::body_row(ui, rect.min.y, rect.max.y);
         studio::rule(ui, rect.min.x, rect.max.x, rect.min.y, pal);
         help_para(help, pal).paint(ui, pos2(rect.min.x, rect.min.y + 1.0 + UNDER_RULE), w);
     }
@@ -429,10 +439,11 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Body {
 }
 
 /// The tab row (contract clause 48, the kit's segmented control as the
-/// board draws it): Music and Writing, the tab in view lit, and at the
-/// row's right, dim in the monospace, the card's drive and size, gone whole
-/// where they would come within 16 points of the tabs. A click on a tab is
-/// the cells' `CardSheetTab`, the open one's too (the keyboard back on its
+/// board draws it), pinned under the title (`Dialog::head`), never scrolled
+/// with the rows: Music and Writing, the tab in view lit, and at the row's
+/// right, dim in the monospace, the card's drive and size, gone whole where
+/// they would come within 16 points of the tabs. A click on a tab is the
+/// cells' `CardSheetTab`, the open one's too (the keyboard back on its
 /// first row).
 fn tabs(ui: &mut Ui, v: &View, face: &Face, id: Id, acts: &mut Vec<Act>) {
     let pal = face.pal;
@@ -668,6 +679,7 @@ fn step_mark(ui: &Ui, at: Pos2, plus: bool, color: Color32) {
 fn fit_block(ui: &mut Ui, fit: &Fitted, h: f32, pal: &Pal) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    studio::body_row(ui, rect.min.y, rect.max.y);
     match fit {
         Fitted::Asking(words) => {
             studio::searching_at(ui, pos2(rect.min.x, rect.min.y + FIT_LINE / 2.0), words, w, pal);
@@ -716,10 +728,10 @@ fn foot(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Option<Act> 
 /// wide as its widest entry and the box at least, the keyboard's `cursor`
 /// lit in the accent with its words on it, another raised under the
 /// pointer, each entry's words in the row's 14 points with their figures in
-/// the monospace; whole entries only down to the page's area's foot, where
-/// the cells cut it, from the one that keeps the cursor in sight with the
-/// kit's thumb saying where they stand, and none at all, frame and all,
-/// with nothing to list.
+/// the monospace; whole entries only down to the sheet's pinned foot,
+/// inside its frame (`studio::hung_floor`), from the one that keeps the
+/// cursor in sight with the kit's thumb saying where they stand in its own
+/// gutter, and none at all, frame and all, with nothing to list.
 /// A click on a row beneath it is the row's, as the cells' is. The entry a
 /// click landed on: the cells' `CardSheetPick`.
 fn hang(ui: &Ui, v: &View, face: &Face, parent: Id, anchor: Rect, cursor: usize) -> Option<usize> {
@@ -727,13 +739,14 @@ fn hang(ui: &Ui, v: &View, face: &Face, parent: Id, anchor: Rect, cursor: usize)
     let pal = face.pal;
     let over = face.full;
     let top = anchor.max.y;
-    let n = entries.len().min(studio::hung_fits(top, over.max.y));
+    let floor = studio::hung_floor(ui, parent).unwrap_or(over.max.y).min(over.max.y);
+    let n = entries.len().min(studio::hung_fits(top, floor));
     if n == 0 {
         return None;
     }
     let runs = |entry: &str, ink: Color32| studio::figured(entry, &[], body(VALUE), mono(12.5), ink);
     let widest = entries.iter().map(|e| studio::runs_width(ui, &runs(e, pal.text))).fold(0.0, f32::max);
-    let w = studio::hung_width(widest).max(anchor.width()).min(over.max.x - anchor.min.x).max(1.0);
+    let w = studio::hung_width(widest, n, entries.len()).max(anchor.width()).min(over.max.x - anchor.min.x).max(1.0);
     let frame = studio::hung_frame(pos2(anchor.min.x, top), w, n);
     // Its entries' ids are their list's (From's on Music, Into's on
     // Writing) and their numbers, as the rows' are their tab's.
@@ -1444,6 +1457,134 @@ mod tests {
         let out = probe.settle(&mut page);
         let apply = find(&out, "APPLY");
         assert!(ringed(&out).iter().any(|r| r.contains(apply.center()) && r.height() > studio::FORM_BUTTON_H), "{:?}", ringed(&out));
+    }
+
+    /// The one-line texts of the sheet's body a pass drew torn by its
+    /// view's foot or top: in view in part, not whole.
+    fn torn(out: &FullOutput, view: Rect) -> Vec<String> {
+        let cut = |r: Rect, edge: f32| edge > r.min.y + 0.5 && edge < r.max.y - 0.5;
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.rows.len() == 1 && c.clip_rect == view => Some((t.galley.text().to_string(), Rect::from_min_size(t.pos, t.galley.size()))),
+                _ => None,
+            })
+            .filter(|(_, r)| view.intersects(*r) && (cut(*r, view.max.y) || cut(*r, view.min.y)))
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    /// The body's view: what clips a row's label the body drew.
+    fn body_view(out: &FullOutput, label: &str) -> Rect {
+        out.shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == label => Some(c.clip_rect),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label:?} drawn"))
+    }
+
+    #[test]
+    fn the_tab_row_stands_whole_under_the_title_wherever_the_keyboard_takes_the_rows() {
+        let _en = english();
+        for size in [vec2(800.0, 448.0), FLOOR] {
+            let probe = Probe::new(size);
+            let (mut page, _ends, _inbox, _fold) = ready_sheet();
+            let out = probe.settle(&mut page);
+            let drive = "E: · 63.8 GB";
+            let (music, at_rest) = (find(&out, "MUSIC"), find(&out, drive));
+            for tab in [0, 1] {
+                page.act(Act::CardSheetTab(tab));
+                // Down to the tab's last row, the body scrolled under the tabs.
+                let last = sheet(&page).rows().len() - 2;
+                page.card.sheet.as_mut().expect("the sheet").focus = last;
+                let out = probe.settle(&mut page);
+                for words in ["MUSIC", "WRITING", drive] {
+                    assert!(whole(&out, words), "{words} whole at {size:?} on tab {tab}");
+                }
+                assert!((find(&out, "MUSIC").min.y - music.min.y).abs() < 0.5, "the tabs held under the title at {size:?}");
+                assert!((find(&out, drive).min.y - at_rest.min.y).abs() < 0.5, "the drive's line held with them");
+                let first = if tab == 0 { "NAME" } else { "CONVERT" };
+                let view = body_view(&out, first);
+                assert!(view.min.y >= music.max.y, "the body's view under the tabs at {size:?}: {view:?}");
+            }
+            // And at the tab's first row again, it stands where it stood.
+            page.card.sheet.as_mut().expect("the sheet").focus = 0;
+            let out = probe.settle(&mut page);
+            assert!(whole(&out, "CONVERT") && whole(&out, "WRITING"), "the first row in view under the tabs at {size:?}");
+        }
+    }
+
+    #[test]
+    fn the_bodys_view_ends_between_rows_never_through_one_wherever_the_keyboard_is() {
+        let _en = english();
+        for size in [vec2(800.0, 448.0), FLOOR] {
+            let probe = Probe::new(size);
+            let (mut page, _ends, _inbox, _fold) = ready_sheet();
+            for tab in [0, 1] {
+                page.act(Act::CardSheetTab(tab));
+                let rows = sheet(&page).rows().len();
+                for focus in (0..rows - 1).chain(std::iter::once(0)) {
+                    page.card.sheet.as_mut().expect("the sheet").focus = focus;
+                    let out = probe.settle(&mut page);
+                    let label = if tab == 0 { "FROM" } else { "INTO" };
+                    let view = out
+                        .shapes
+                        .iter()
+                        .filter_map(|c| match &c.shape {
+                            Shape::Text(t) if t.galley.text() == label || t.galley.text() == "NAME" || t.galley.text() == "CONVERT" => Some(c.clip_rect),
+                            _ => None,
+                        })
+                        .next()
+                        .unwrap_or_else(|| panic!("a row's label drawn at {size:?} on tab {tab}"));
+                    assert!(torn(&out, view).is_empty(), "no row torn at {size:?} on tab {tab}, row {focus}: {:?}", torn(&out, view));
+                }
+            }
+        }
+        // The Writing tab at the default size: its fit line is whole or out
+        // of view, never sliced through.
+        let probe = Probe::new(vec2(800.0, 448.0));
+        let (mut page, _ends, _inbox, _fold) = ready_sheet();
+        page.act(Act::CardSheetTab(1));
+        let out = probe.settle(&mut page);
+        let view = body_view(&out, "CONVERT");
+        let fits = out.shapes.iter().find_map(|c| match &c.shape {
+            Shape::Text(t) if t.galley.text().starts_with("Fits") => Some(Rect::from_min_size(t.pos, t.galley.size())),
+            _ => None,
+        });
+        if let Some(fits) = fits {
+            assert!(view.contains_rect(fits) || fits.min.y >= view.max.y - 0.5, "the fit line whole or out of view: {fits:?} in {view:?}");
+        }
+    }
+
+    #[test]
+    fn at_the_guis_floor_intos_list_stops_over_the_pinned_foot_inside_the_sheets_frame() {
+        let _en = english();
+        let probe = Probe::new(FLOOR);
+        let (mut page, _ends, _inbox, _fold) = ready_sheet();
+        page.act(Act::CardSheetTab(1));
+        page.card.sheet.as_mut().expect("the sheet").focus = 1;
+        press(&mut page, KeyCode::Enter);
+        let out = probe.settle(&mut page);
+        let all = list_entries(sheet(&page), &page.servers());
+        let shown: Vec<Rect> = all.iter().filter(|e| drew(&out, e)).map(|e| find(&out, e)).collect();
+        assert!(!shown.is_empty() && shown.len() < all.len(), "some of the list, its thumb for the rest: {}", shown.len());
+        let lowest = shown.iter().map(|r| r.max.y).fold(0.0, f32::max);
+        let foot = find(&out, "USE DEFAULTS");
+        assert!(lowest < foot.min.y - 10.0, "the list's entries over the foot's room: {lowest} over {foot:?}");
+        // The list's frame, its accent hairline round its entries, over the
+        // foot and so inside the sheet's frame.
+        let accent = Pal::now().accent;
+        let list = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Rect(r) if r.stroke.color == accent && r.stroke.width > 0.0 && r.rect.contains(shown[0].center()) => Some(r.rect),
+                _ => None,
+            })
+            .expect("the list's frame");
+        assert!(list.max.y <= foot.min.y - 10.0, "the frame over the foot: {list:?} over {foot:?}");
     }
 
     #[test]
