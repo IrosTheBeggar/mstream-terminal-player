@@ -1043,11 +1043,11 @@ fn release_list(ui: &Ui, id: Id, list: &List, anchor: Rect, col: Rect, face: &Fa
         return;
     }
     let cursor = list.rows.iter().position(|r| r.pick == Some(list.cursor));
-    let start = (cursor.unwrap_or(0) + 1).saturating_sub(fits).min(list.rows.len() - fits);
+    let start = studio::hung_first(cursor, fits, list.rows.len());
     let frame = studio::hung_frame(pos2(left, top), w, fits);
     let id_of = |k: usize| list.rows[k].pick.map(|pick| id.with("entry").with(pick));
     let words = |ui: &Ui, k: usize, room: Rect, on: bool| entry(ui, room, &list.rows[k], on, tag_w, date_w, face);
-    if let Some(k) = studio::hung_list(ui, frame, start, fits, cursor, id_of, pal, words)
+    if let Some(k) = studio::hung_list(ui, frame, start, fits, list.rows.len(), cursor, id_of, pal, words)
         && let Some(pick) = list.rows[k].pick
     {
         acts.push(Act::ListPick(pick));

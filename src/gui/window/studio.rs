@@ -620,14 +620,22 @@ pub(crate) fn sentence(ui: &mut Ui, head: &str, tail: &str, pal: &Pal) {
 
 /// A room's foot, one line across `rect`: what it is busy with in the
 /// accent wins, else its note — an error in gold, any other note dim —
-/// cut with an ellipsis where it runs long. Nothing at all draws nothing.
+/// cut with an ellipsis where it runs long, its figures ([`figured`]: a
+/// version, a count, a time) in the monospace a point under its words, as
+/// the canvases set a figure in a note. Nothing at all draws nothing.
 pub(crate) fn note_line(ui: &Ui, rect: Rect, busy: Option<&str>, note: Option<&(String, bool)>, pal: &Pal) {
+    note_line_naming(ui, rect, busy, note, &[], pal);
+}
+
+/// A [`note_line`] whose figures take in `also` too: the names no rule can
+/// tell from a word (the MP3 tab's ports).
+pub(crate) fn note_line_naming(ui: &Ui, rect: Rect, busy: Option<&str>, note: Option<&(String, bool)>, also: &[&str], pal: &Pal) {
     let (words, color) = match (busy, note) {
         (Some(busy), _) => (busy, pal.accent),
         (None, Some((note, is_err))) => (note.as_str(), if *is_err { pal.gold } else { pal.dim }),
         (None, None) => return,
     };
-    text(ui, rect.left_center(), words, body(13.0), color, rect.width(), Align2::LEFT_CENTER);
+    runs(ui, rect.left_center(), &figured(words, also, body(13.0), mono(12.0), color), rect.width(), Align2::LEFT_CENTER);
 }
 
 /// A room's foot as [`note_line`] draws it and, with nothing busy and no
@@ -1706,11 +1714,15 @@ pub(crate) struct Input<'a> {
     pub placeholder: &'a str,
     /// A filter's box: the canvas's magnifier 10 points in, the line 30.
     pub search: bool,
+    /// The value in the accent while focused, as the caret is: a line a
+    /// sheet opens in a row's place to edit it (the MP3 tab's Name and path
+    /// fields), which the cells set in the accent.
+    pub lit: bool,
 }
 
 impl<'a> Input<'a> {
     pub(crate) fn new(value: &'a str, caret: usize) -> Self {
-        Input { value, caret, focused: false, composition: "", masked: false, mono: false, enabled: true, placeholder: "", search: false }
+        Input { value, caret, focused: false, composition: "", masked: false, mono: false, enabled: true, placeholder: "", search: false, lit: false }
     }
 
     /// One of a page's own inputs: its value and its caret.
@@ -1744,6 +1756,10 @@ impl<'a> Input<'a> {
 
     pub(crate) fn search(self) -> Self {
         Input { search: true, ..self }
+    }
+
+    pub(crate) fn lit(self) -> Self {
+        Input { lit: true, ..self }
     }
 }
 
@@ -1801,10 +1817,11 @@ pub(crate) fn field_beside(ui: &mut Ui, id: Id, label: &str, input: &Input, box_
 
 /// A field's box at `rect`: the ground's fill in a strong-edged hairline,
 /// the accent's while focused and a brighter one under the pointer (the
-/// pointer wins); the value in the UI face (or the monospace), bullets for
-/// a masked one, a composition underlined before the caret, and a steady
-/// 1-point caret while focused. The line is windowed so the caret stays in
-/// view, the window kept from pass to pass under `id` as a text field's is.
+/// pointer wins); the value in the UI face (or the monospace), in the
+/// accent while a lit field is focused, bullets for a masked one, a
+/// composition underlined before the caret, and a steady 1-point caret
+/// while focused. The line is windowed so the caret stays in view, the
+/// window kept from pass to pass under `id` as a text field's is.
 pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -> Typed {
     let sense = if input.enabled { Sense::click() } else { Sense::hover() };
     let mut response = ui.interact(rect, id, sense);
@@ -1821,7 +1838,7 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
         } else {
             pal.edge_strong
         };
-        (pal.ground, edge, pal.text)
+        (pal.ground, edge, if focused && input.lit { pal.accent } else { pal.text })
     } else {
         (pal.panel, pal.edge, pal.dim)
     };
@@ -2558,6 +2575,7 @@ pub(crate) struct Dialog<'a> {
     close: bool,
     hold: Option<f32>,
     afresh: Option<&'a str>,
+    foot: f32,
 }
 
 /// What a [`Dialog`] measures over its room before it is drawn: its
@@ -2575,7 +2593,16 @@ struct Measured {
 
 impl<'a> Dialog<'a> {
     pub(crate) fn new(id: Id, over: Rect, width: f32, title: &'a str) -> Self {
-        Dialog { id, over, width, title, tone: None, close: true, hold: None, afresh: None }
+        Dialog { id, over, width, title, tone: None, close: true, hold: None, afresh: None, foot: 0.0 }
+    }
+
+    /// A foot `h` points tall, the room over it with it, pinned under the
+    /// body's view rather than scrolled with the body: a form's buttons
+    /// stand whole in view at every size, as the cells keep a sheet's
+    /// buttons and cut its rows over them, and the body scrolls above them
+    /// where it runs long. [`Dialog::show_footed`] draws it.
+    pub(crate) fn foot(self, h: f32) -> Self {
+        Dialog { foot: h.max(0.0), ..self }
     }
 
     /// A warning gate, as the cells draw every one: its title and frame in
@@ -2623,25 +2650,32 @@ impl<'a> Dialog<'a> {
         // a few ten-thousandths of a point under it, and the floor would
         // take a whole 32nd from the body for that. A view up to a 1024th
         // taller than the room costs nothing: the window it asks for is
-        // held to `max_h`.
-        let budget = ((max_h - fixed).max(0.0) + 1.0 / 1024.0).floor_ui();
+        // held to `max_h`. A pinned foot's room is the body's no more.
+        let budget = ((max_h - fixed - self.foot).max(0.0) + 1.0 / 1024.0).floor_ui();
         Measured { width, inner_w, title, fixed, max_h, budget }
     }
 
     /// The room the window gives its body over its room, known before it
-    /// is drawn: the body's width, and its height to the 32nd of a point,
-    /// as [`Dialog::show`] hands them to it — what a body that chooses its
-    /// own measures for its room (the MP3 tab's Advanced sheet) chooses
-    /// them by.
+    /// is drawn: the body's width, and its height to the 32nd of a point
+    /// (a pinned foot's room aside), as [`Dialog::show`] hands them to it —
+    /// what a body that chooses its own measures for its room (the MP3
+    /// tab's Advanced and Settings sheets) chooses them by.
     pub(crate) fn body_room(&self, ui: &Ui) -> Vec2 {
         let measured = self.measure(ui, Color32::WHITE);
         vec2(measured.inner_w, measured.budget)
     }
 
     pub(crate) fn show<R>(self, ui: &Ui, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> ModalShown<R> {
+        self.show_footed(ui, pal, body, |_, _| {})
+    }
+
+    /// [`Dialog::show`] with its pinned [`Dialog::foot`]: `foot` lays it
+    /// out top-down in its room right under the body's view, the window
+    /// wide, handed what the body returned to add to.
+    pub(crate) fn show_footed<R>(self, ui: &Ui, pal: &Pal, body: impl FnOnce(&mut Ui) -> R, foot: impl FnOnce(&mut Ui, &mut R)) -> ModalShown<R> {
         let title_color = self.tone.unwrap_or(pal.text);
         let Measured { width, title, fixed, max_h, budget, .. } = self.measure(ui, title_color);
-        let Dialog { id, over, tone, close, hold, afresh, .. } = self;
+        let Dialog { id, over, tone, close, hold, afresh, foot: foot_h, .. } = self;
         let ctx = ui.ctx().clone();
         let size_key = id.with("height");
         let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
@@ -2708,8 +2742,16 @@ impl<'a> Dialog<'a> {
                 let room = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), budget));
                 ui.scope_builder(UiBuilder::new().max_rect(room), body).inner
             });
-            let wanted = fixed + out.content_size.y.min(budget);
-            (closed, out.inner, wanted.min(max_h))
+            // The pinned foot right under the body's view, the body's width.
+            let shown_h = out.content_size.y.min(budget);
+            let mut said = out.inner;
+            if foot_h > 0.0 {
+                let room = Rect::from_min_size(pos2(inner.min.x, top + shown_h), vec2(inner.width(), foot_h));
+                let mut child = ui.new_child(UiBuilder::new().id_salt(id.with("pinned")).max_rect(room).layout(Layout::top_down(Align::Min)));
+                foot(&mut child, &mut said);
+            }
+            let wanted = fixed + shown_h + foot_h;
+            (closed, said, wanted.min(max_h))
         });
         let (closed, inner, wanted) = shown.inner;
         if known.is_none_or(|h| (h - wanted).abs() > 0.5) {
@@ -3620,24 +3662,34 @@ pub(crate) fn hung_left(box_left: f32) -> f32 {
     box_left + SELECT_PAD - HUNG_IN - HUNG_PAD
 }
 
+/// The first of `len` entries a list that hangs shows when it holds `n` of
+/// them: from its top, as far down as keeps the keyboard's `cursor` in
+/// sight.
+pub(crate) fn hung_first(cursor: Option<usize>, n: usize, len: usize) -> usize {
+    (cursor.unwrap_or(0) + 1).saturating_sub(n).min(len.saturating_sub(n))
+}
+
 /// The list that hangs open from a closed list's box inside a modal, as
 /// the MP3 tab's two sheets hang theirs, in `frame` ([`hung_frame`]): the
 /// panel's fill in the accent's hairline with the canvas's shadow, `n`
 /// entries [`HUNG_ROW_H`] tall 2 points in, from entry `first` of the
-/// list; the keyboard's `cursor` filled in the accent, another raised
-/// under the pointer, with the hand, where `id_of` gives the entry an id —
-/// none takes nothing, a line that picks nothing. `words(ui, k, room, on)`
-/// paints entry `k`'s words in `room`, the entry less its padding, `on`
-/// while it is the cursor's, which wears the ink on the accent. The list is
-/// the page's keys', as egui's own popup is not (it closes on a click
-/// outside it and takes keys of its own); the page says what a click off
-/// its entries does. The entry a click landed on.
+/// list's `len`; the keyboard's `cursor` filled in the accent, another
+/// raised under the pointer, with the hand, where `id_of` gives the entry
+/// an id — none takes nothing, a line that picks nothing. Holding fewer
+/// than its all, it shows the kit's thumb at rest at its right, where it
+/// stands among them ([`list_thumb`]), in its entries' padding.
+/// `words(ui, k, room, on)` paints entry `k`'s words in `room`, the entry
+/// less its padding, `on` while it is the cursor's, which wears the ink on
+/// the accent. The list is the page's keys', as egui's own popup is not (it
+/// closes on a click outside it and takes keys of its own); the page says
+/// what a click off its entries does. The entry a click landed on.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hung_list(
     ui: &Ui,
     frame: Rect,
     first: usize,
     n: usize,
+    len: usize,
     cursor: Option<usize>,
     id_of: impl Fn(usize) -> Option<Id>,
     pal: &Pal,
@@ -3662,6 +3714,10 @@ pub(crate) fn hung_list(
             picked = Some(k);
         }
     }
+    if n < len {
+        let pane = frame.shrink(HUNG_IN + 2.0);
+        list_thumb(ui, pane, n, len, first, pal);
+    }
     picked
 }
 
@@ -3669,7 +3725,8 @@ pub(crate) fn hung_list(
 /// hangs past the modal's body down to the page's foot, over the window
 /// whichever of the two was last pressed (egui raises an area pressed on to
 /// the top of its order): what the list takes is its own, a press beside it
-/// the modal's.
+/// the modal's. It shows `n` of its `len` entries from the one that keeps
+/// the `cursor` in sight ([`hung_first`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hung_over(
     ui: &Ui,
@@ -3678,13 +3735,15 @@ pub(crate) fn hung_over(
     frame: Rect,
     cursor: Option<usize>,
     n: usize,
+    len: usize,
     id_of: impl Fn(usize) -> Option<Id>,
     pal: &Pal,
     words: impl FnMut(&Ui, usize, Rect, bool),
 ) -> Option<usize> {
     let ctx = ui.ctx().clone();
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(frame.min).constrain(false).fade_in(false);
-    let shown = area.show(&ctx, |ui| hung_list(ui, frame, 0, n, cursor, id_of, pal, words));
+    let first = hung_first(cursor, n, len);
+    let shown = area.show(&ctx, |ui| hung_list(ui, frame, first, n, len, cursor, id_of, pal, words));
     ctx.set_sublayer(egui::LayerId::new(egui::Order::Foreground, parent), egui::LayerId::new(egui::Order::Foreground, id));
     shown.inner
 }
@@ -4249,6 +4308,90 @@ mod tests {
             let _ = pass(&ctx, size, Vec::new(), &mut run);
         }
         assert!((close_y(&ctx) - short).abs() < 0.5, "the title held where it stood");
+    }
+
+    #[test]
+    fn a_pinned_foot_stands_whole_under_the_bodys_view_while_a_long_body_scrolls_over_it() {
+        let ctx = context();
+        let id = Id::new("probe-footed");
+        for (h, rows) in [(500.0, 3), (300.0, 30)] {
+            let size = vec2(600.0, h);
+            let over = Rect::from_min_size(Pos2::ZERO, size);
+            let mut run = |ui: &mut Ui| {
+                let pal = Pal::now();
+                let dialog = Dialog::new(id, over, 400.0, "Sheet").foot(54.0);
+                let room = dialog.body_room(ui);
+                assert!(room.y <= h - 32.0 - 2.0 * MODAL_PAD - TITLE_H - MODAL_GAP - 54.0 + 0.01, "the foot's room is the body's no more: {room:?}");
+                let _ = dialog.show_footed(
+                    ui,
+                    &pal,
+                    |ui| {
+                        for k in 0..rows {
+                            line(ui, 24.0, &format!("row {k:02}"), body(14.0), pal.text);
+                        }
+                    },
+                    |ui, _| {
+                        ui.add_space(20.0);
+                        line(ui, 34.0, "FOOT", body(14.0), pal.text);
+                    },
+                );
+            };
+            let mut out = pass(&ctx, size, Vec::new(), &mut run);
+            for _ in 0..2 {
+                out = pass(&ctx, size, Vec::new(), &mut run);
+            }
+            let clipped = |words: &str| {
+                out.shapes.iter().find_map(|c| match &c.shape {
+                    Shape::Text(t) if t.galley.text() == words => Some((Rect::from_min_size(t.pos, t.galley.size()), c.clip_rect)),
+                    _ => None,
+                })
+            };
+            let (foot, clip) = clipped("FOOT").expect("the foot drawn");
+            assert!(clip.contains_rect(foot) && foot.max.y <= h - 16.0 - MODAL_PAD + 0.5, "{h}: the foot whole in the window: {foot:?} in {clip:?}");
+            let (first, view) = clipped("row 00").expect("the body drawn");
+            assert!(first.min.y >= view.min.y - 0.5, "{h}: the body from its top");
+            if rows == 30 {
+                assert!(view.max.y <= foot.min.y - 20.0 + 0.5, "{h}: the scrolled body's view ends over the foot's room: {view:?} over {foot:?}");
+            } else {
+                // Row 00's middle 12 under the body's top; the foot's line
+                // 20 under the three rows, its middle 17 into it.
+                let want = first.center().y - 12.0 + 3.0 * 24.0 + 20.0 + 17.0;
+                assert!((foot.center().y - want).abs() < 1.0, "a short body: the foot right under it: {first:?} {foot:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_that_hangs_shows_the_entries_that_keep_its_cursor_in_sight() {
+        assert_eq!(hung_first(None, 5, 8), 0);
+        assert_eq!(hung_first(Some(2), 5, 8), 0, "the cursor in the first five: from the top");
+        assert_eq!(hung_first(Some(5), 5, 8), 1, "the cursor just past them: the list a step down");
+        assert_eq!(hung_first(Some(7), 5, 8), 3, "on the last: the last five");
+        assert_eq!(hung_first(Some(7), 10, 8), 0, "room for all: from the top");
+    }
+
+    #[test]
+    fn a_lit_field_inks_its_words_in_the_accent_only_while_it_has_the_keyboard() {
+        let ctx = context();
+        let size = vec2(400.0, 200.0);
+        let pal = Pal::now();
+        for (focused, lit, ink) in [(true, true, pal.accent), (false, true, pal.text), (true, false, pal.text)] {
+            let mut run = |ui: &mut Ui| {
+                let input = Input::new("Car music", 9).focused(focused, "");
+                let input = if lit { input.lit() } else { input };
+                let _ = field_box(ui, Id::new("probe-lit"), Rect::from_min_size(pos2(20.0, 20.0), vec2(300.0, FIELD_H)), &input, &Pal::now());
+            };
+            let out = pass(&ctx, size, Vec::new(), &mut run);
+            let colors: Vec<Color32> = out
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    Shape::Text(t) if t.galley.text() == "Car music" => Some(t.galley.job.sections.iter().map(|s| s.format.color).collect()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            assert!(!colors.is_empty() && colors.iter().all(|c| *c == ink), "focused {focused}, lit {lit}: {colors:?}");
+        }
     }
 
     #[test]
@@ -5576,7 +5719,7 @@ mod tests {
                 let ink = if on { pal.on_accent } else { pal.text };
                 text(ui, room.left_center(), &format!("entry {k}"), body(14.0), ink, room.width(), Align2::LEFT_CENTER);
             };
-            if let Some(k) = hung_list(ui, frame, 0, 3, Some(2), id_of, &pal, words) {
+            if let Some(k) = hung_list(ui, frame, 0, 3, 3, Some(2), id_of, &pal, words) {
                 picked.set(Some(k));
             }
         };

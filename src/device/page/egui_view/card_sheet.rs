@@ -703,7 +703,9 @@ fn foot(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan, on_buttons: boo
 /// lit in the accent with its words on it, another raised under the
 /// pointer, each entry's words in the row's 14 points with their figures in
 /// the monospace; whole entries only down to the page's area's foot, where
-/// the cells cut it, and none at all, frame and all, with nothing to list.
+/// the cells cut it, from the one that keeps the cursor in sight with the
+/// kit's thumb saying where they stand, and none at all, frame and all,
+/// with nothing to list.
 /// A click on a row beneath it is the row's, as the cells' is. The entry a
 /// click landed on: the cells' `CardSheetPick`.
 fn hang(ui: &Ui, v: &View, face: &Face, parent: Id, anchor: Rect, cursor: usize) -> Option<usize> {
@@ -727,7 +729,7 @@ fn hang(ui: &Ui, v: &View, face: &Face, parent: Id, anchor: Rect, cursor: usize)
         let ink = if on { pal.on_accent } else { pal.text };
         studio::runs(ui, room.left_center(), &runs(&entries[i], ink), room.width(), Align2::LEFT_CENTER);
     };
-    studio::hung_over(ui, parent.with("list"), parent, frame, Some(cursor), n, id_of, pal, words)
+    studio::hung_over(ui, parent.with("list"), parent, frame, Some(cursor), n, entries.len(), id_of, pal, words)
 }
 
 /// The sheet's egui face run headless, as the window's panel runs it: the
