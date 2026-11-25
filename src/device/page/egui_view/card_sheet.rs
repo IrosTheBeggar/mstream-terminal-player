@@ -24,8 +24,10 @@
 //! Short of room, as the cells give way: the rule and the help go first,
 //! then the room between the blocks closes up, and what is left scrolls in
 //! the Dialog's body, the row with the keyboard brought into its view, and
-//! brought in again when its field or its list opens. A list hangs only
-//! from a box in that view.
+//! brought in again when its field or its list opens. The foot never
+//! scrolls: it is pinned whole under the body's view (the kit's
+//! `Dialog::foot`), as the cells keep their buttons and cut the rows over
+//! them. A list hangs only from a box in that view.
 
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
@@ -118,7 +120,23 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
     // body measured, run again when that moved it.
     let held_key = id.with("held");
     let held = ctx.data(|d| d.get_temp::<f32>(held_key)).unwrap_or(HELD_BODY);
-    let shown = Dialog::new(id, face.full, SHEET_W, &title).hold(held).show(ui, face.pal, |ui| sheet_body(ui, &view, face, id));
+    let dialog = Dialog::new(id, face.full, SHEET_W, &title).hold(held);
+    // The blocks given way for the room the window gives its body; the
+    // foot pinned under the body's view with the room over it, so it stands
+    // whole at every size while the rows above it scroll, as the cells cut
+    // their rows over their buttons.
+    let plan = Plan::of(ui, &view, face.pal, dialog.body_room(ui));
+    let pinned = plan.gap + plan.foot_h;
+    let shown = dialog.foot(pinned).show_footed(
+        ui,
+        face.pal,
+        |ui| sheet_body(ui, &view, face, id, &plan),
+        |ui, body| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(plan.gap);
+            body.acts.extend(foot(ui, &view, face, id, &plan));
+        },
+    );
     let wanted = HELD_BODY.max(shown.inner.height);
     if (wanted - held).abs() > 0.5 {
         ctx.data_mut(|d| d.insert_temp(held_key, wanted));
@@ -202,13 +220,13 @@ struct Plan {
 }
 
 impl Plan {
-    /// The sheet's body for a column `ui`'s width, measured in an invisible
-    /// child of it, and given way where `ui`'s room is short of it: the
+    /// The sheet's body for `room`, the room the Dialog gives its body (its
+    /// width, and its height with the foot in it), measured in an invisible
+    /// child of `ui`, and given way where the room is short of it: the
     /// rule and the help first, then the room between the blocks.
-    fn of(ui: &mut Ui, v: &View, pal: &Pal) -> Plan {
-        let w = ui.available_width();
-        let room = ui.available_height();
-        let mut probe = ui.new_child(UiBuilder::new().id_salt("mp3-card-sheet-measure").max_rect(ui.max_rect()));
+    fn of(ui: &mut Ui, v: &View, pal: &Pal, room: Vec2) -> Plan {
+        let (w, room) = (room.x, room.y);
+        let mut probe = ui.new_child(UiBuilder::new().id_salt("mp3-card-sheet-measure").max_rect(Rect::from_min_size(ui.max_rect().min, vec2(w, room))));
         probe.set_invisible();
         let at = probe.max_rect().min;
         let fit = fitted(v, pal).map(|fit| {
@@ -228,7 +246,7 @@ impl Plan {
         } else {
             (t!("dev.card.btn_defaults").to_string(), t!("dev.card.btn_apply").to_string())
         };
-        let foot_h = studio::foot_rects(ui, &[], &[(&foot.0, false), (&foot.1, true)], w).1;
+        let foot_h = studio::foot_rects(&probe, &[], &[(&foot.0, false), (&foot.1, true)], w).1;
         let mut plan = Plan { tabs: !v.sheet.setup, lines: lines(v), fit, help: Some((help, help_h)), foot, foot_h, gap: BLOCK_GAP };
         if plan.height() > room + 0.5 {
             plan.help = None;
@@ -341,12 +359,13 @@ fn help_para(words: &str, pal: &Pal) -> Para {
     Para::runs(&studio::figured(words, &[], body(13.0), mono(12.5), pal.dim)).spaced(HELP_LINE).rows(2)
 }
 
-/// The sheet's body, laid out top-down in `ui`, the Dialog's: the tab row
-/// (not setting up), the rows, the fit, the rule and the help, the foot.
-fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id) -> Body {
+/// The sheet's body, laid out top-down in `ui`, the Dialog's, as `plan`
+/// gives it way: the tab row (not setting up), the rows, the fit, the rule
+/// and the help. The foot is pinned under it ([`foot`]); its height is the
+/// whole body's, the foot's with it.
+fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Body {
     ui.spacing_mut().item_spacing.y = 0.0;
     let pal = face.pal;
-    let plan = Plan::of(ui, v, pal);
     let mut out = Body { height: plan.height(), ..Body::default() };
     let sheet = v.sheet;
     let focus = sheet.focus.min(sheet.rows().len().saturating_sub(1));
@@ -405,11 +424,6 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id) -> Body {
         let (rect, _) = ui.allocate_exact_size(vec2(w, *h), Sense::hover());
         studio::rule(ui, rect.min.x, rect.max.x, rect.min.y, pal);
         help_para(help, pal).paint(ui, pos2(rect.min.x, rect.min.y + 1.0 + UNDER_RULE), w);
-    }
-    ui.add_space(plan.gap);
-    let on_buttons = calm && sheet.row() == SRow::Buttons;
-    if let Some(act) = foot(ui, v, face, id, &plan, on_buttons, at) {
-        out.acts.push(act);
     }
     out
 }
@@ -485,7 +499,7 @@ fn row_at(ui: &Ui, v: &View, face: &Face, id: Id, slot: Rect, row: &SRow, lit: b
                 // for the input method; a click on it is the row's.
                 Some(field) => {
                     let rect = Rect::from_min_max(pos2(value_x, slot.min.y), pos2(slot.max.x, slot.max.y));
-                    let input = studio::Input::of(field).focused(true, face.composition).enabled(face.takes());
+                    let input = studio::Input::of(field).lit().focused(true, face.composition).enabled(face.takes());
                     let typed = studio::field_box(ui, id.with("name"), rect, &input, pal);
                     drawn.clicked |= typed.response.clicked();
                     drawn.caret = typed.caret;
@@ -673,23 +687,23 @@ fn fit_block(ui: &mut Ui, fit: &Fitted, h: f32, pal: &Pal) {
     }
 }
 
-/// The foot (the kit's, its two at its end): Use defaults and Apply, or
-/// setting up, Cancel and Set up, the second the lit primary. While the
-/// keyboard is on the buttons (`on_buttons`) the one it is on wears the
-/// accent's ring just outside it, and the foot is brought into the body's
-/// view. The act a click asks for, the cells' for the button.
-fn foot(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan, on_buttons: bool, at: usize) -> Option<Act> {
+/// The foot (the kit's, its two at its end), pinned under the body's view:
+/// Use defaults and Apply, or setting up, Cancel and Set up, the second the
+/// lit primary. While the keyboard is on the buttons the one it is on wears
+/// the accent's ring just outside it. The act a click asks for, the cells'
+/// for the button.
+fn foot(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Option<Act> {
     let pal = face.pal;
     let w = ui.available_width();
     let top = ui.cursor().min;
     let end = [(plan.foot.0.as_str(), false), (plan.foot.1.as_str(), true)];
     let clicked = studio::foot(ui, id.with("foot"), &[], &end, None, pal);
+    let on_buttons = v.sheet.field.is_none() && v.sheet.list.is_none() && v.sheet.row() == SRow::Buttons;
     if on_buttons {
-        let (rects, h) = studio::foot_rects(ui, &[], &end, w);
+        let (rects, _) = studio::foot_rects(ui, &[], &end, w);
         if let Some(rect) = rects.get(usize::from(v.sheet.on_apply)) {
             studio::button_ring(ui, rect.translate(top.to_vec2()), pal);
         }
-        studio::reveal(ui, id, at, Rect::from_min_size(top, vec2(w, h)));
     }
     let other = if v.sheet.setup { Act::CardSheetClose } else { Act::CardDefaults };
     clicked.map(|k| if k == 0 { other } else { Act::CardApply })
@@ -1390,5 +1404,89 @@ mod tests {
         let out = probe.settle(&mut page);
         let apply = find(&out, "APPLY");
         assert!(apply.min.y > 0.0 && apply.max.y < FLOOR.y - 16.0, "{apply:?}");
+    }
+
+    /// Whether the pass drew `words` (the topmost of them) whole inside
+    /// the rect it was clipped to: not cut by a view's edge.
+    fn whole(out: &FullOutput, words: &str) -> bool {
+        out.shapes.iter().rev().find_map(|clipped| match &clipped.shape {
+            Shape::Text(t) if t.galley.text() == words => Some(clipped.clip_rect.contains_rect(Rect::from_min_size(t.pos, t.galley.size()))),
+            _ => None,
+        }) == Some(true)
+    }
+
+    #[test]
+    fn the_foot_stands_whole_under_the_body_at_every_size_while_the_rows_scroll_above_it() {
+        let _en = english();
+        for size in [vec2(800.0, 448.0), FLOOR] {
+            let probe = Probe::new(size);
+            let (mut page, _ends, _inbox, _fold) = ready_sheet();
+            for tab in [0, 1] {
+                page.act(Act::CardSheetTab(tab));
+                let out = probe.settle(&mut page);
+                for words in ["USE DEFAULTS", "APPLY"] {
+                    assert!(whole(&out, words), "{words} whole at {size:?} on tab {tab}: {:?}", find(&out, words));
+                    assert!(find(&out, words).max.y <= size.y - 16.0, "{words} in the window at {size:?}");
+                }
+                // The rows over it, in the body's view only: none drawn
+                // under the foot.
+                let apply = find(&out, "APPLY");
+                let under = out.shapes.iter().filter(|c| matches!(&c.shape, Shape::Text(_)) && c.clip_rect.max.y > apply.min.y && c.clip_rect.max.y < apply.max.y);
+                assert_eq!(under.count(), 0, "no row's view runs past the foot's top at {size:?}");
+            }
+        }
+        // The keyboard on the buttons rings the one it is on, the foot in
+        // view with no scroll asked for.
+        let probe = Probe::new(FLOOR);
+        let (mut page, _ends, _inbox, _fold) = ready_sheet();
+        page.card.sheet.as_mut().expect("the sheet").focus = 99;
+        press(&mut page, KeyCode::Down);
+        let out = probe.settle(&mut page);
+        let apply = find(&out, "APPLY");
+        assert!(ringed(&out).iter().any(|r| r.contains(apply.center()) && r.height() > studio::FORM_BUTTON_H), "{:?}", ringed(&out));
+    }
+
+    #[test]
+    fn at_the_guis_floor_intos_list_keeps_its_cursor_in_sight_and_its_thumb_says_where() {
+        let _en = english();
+        let probe = Probe::new(FLOOR);
+        let (mut page, _ends, _inbox, _fold) = ready_sheet();
+        page.act(Act::CardSheetTab(1));
+        page.card.sheet.as_mut().expect("the sheet").focus = 1;
+        press(&mut page, KeyCode::Enter);
+        let all = list_entries(sheet(&page), &page.servers());
+        let last = all.last().expect("codecs").clone();
+        for _ in 0..all.len() {
+            press(&mut page, KeyCode::Down);
+        }
+        assert_eq!(sheet(&page).list, Some(all.len() - 1), "the cursor on the last entry");
+        let out = probe.settle(&mut page);
+        assert_drew(&out, &[&last]);
+        assert!(find(&out, &last).max.y <= FLOOR.y, "the cursor's entry in sight");
+        assert!(!drew(&out, &all[0]), "the first ones above the list's top");
+        // The kit's thumb at rest in the list's frame: fewer than its all.
+        let thumb = Pal::now().dim.gamma_multiply(studio::THUMB_REST);
+        assert!(out.shapes.iter().any(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == thumb && (r.rect.width() - studio::THUMB_W).abs() < 0.01)), "the thumb drawn");
+    }
+
+    #[test]
+    fn the_name_fields_words_are_the_accents_as_its_caret_and_its_edge_are() {
+        let _en = english();
+        let probe = Probe::new(BOARD);
+        let (mut page, _ends, _inbox, _fold) = ready_sheet();
+        page.act(Act::CardSheetRow(0));
+        assert!(sheet(&page).field.is_some(), "the Name field open");
+        let out = probe.settle(&mut page);
+        let accent = Pal::now().accent;
+        let sections: Vec<Color32> = out
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == "Car music" => Some(t.galley.job.sections.iter().map(|s| s.format.color).collect()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(sections.iter().all(|c| *c == accent) && !sections.is_empty(), "the typed name in the accent: {sections:?}");
     }
 }

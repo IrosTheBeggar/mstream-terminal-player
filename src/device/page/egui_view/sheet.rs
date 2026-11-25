@@ -777,7 +777,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
             Under::Field => {
                 let rect = Rect::from_min_size(pos2(col.min.x + NAME_IN, y), vec2(sub_w, m.field));
                 if let Some(field) = &sheet.field {
-                    let input = studio::Input::of(field).mono().focused(true, face.composition);
+                    let input = studio::Input::of(field).mono().lit().focused(true, face.composition);
                     caret = studio::field_box(ui, id.with("path"), rect, &input, pal).caret;
                 }
                 stops[5] = Some(rect);
@@ -996,7 +996,8 @@ fn choosers(ui: &Ui, id: Id, row: Rect, view: &View, face: &Face, live: bool, ac
 /// the keyboard's cursor lit, an entry raised under the pointer. Its
 /// column's words stand under the control's; it is as wide as its widest
 /// entry, no wider than the column, and keeps inside it; as tall as its
-/// entries, no lower than the body's view, its cursor kept in sight. With
+/// entries, no lower than the body's foot or its view, its cursor kept in
+/// sight. With
 /// not one entry of room it is not drawn and still holds the keys.
 ///
 /// A click on an entry that picks asks for [`Act::ListPick`]; one anywhere
@@ -1037,7 +1038,10 @@ fn release_list(ui: &Ui, id: Id, list: &List, anchor: Rect, col: Rect, face: &Fa
     // lead's room stands left of them.
     let left = (studio::hung_left(anchor.min.x) - LEAD_W).min(col.max.x - w).max(col.min.x);
     let top = anchor.max.y + 2.0;
-    let bottom = view.max.y.min(face.full.max.y);
+    // Inside the sheet's body: its view's foot, which is the room the
+    // Dialog gave it, stands under the body's own foot where the window
+    // has shrunk to the body, and the list would hang past the frame.
+    let bottom = view.max.y.min(col.max.y).min(face.full.max.y);
     let fits = studio::hung_fits(top, bottom).min(list.rows.len());
     if fits == 0 {
         return;
@@ -1655,6 +1659,68 @@ mod tests {
             assert_eq!((sheet.source, sheet.focus, sheet.erase), (Source::Release, Stop::Sub, false), "{words:?}: nothing else");
             assert!(ends.sent().is_empty(), "{words:?}: nothing asked of the worker");
         }
+    }
+
+    #[test]
+    fn at_the_guis_default_size_the_list_hangs_inside_the_sheets_frame() {
+        let _en = english();
+        let probe = Probe::new(WINDOW);
+        let (mut page, ends) = sheet_up();
+        page.act(Act::SheetSource(1));
+        ends.tell([fixtures::listed()]);
+        page.pump();
+        let _ = ends.sent();
+        let out = probe.settle(&mut page);
+        // The window's frame: the strong edge round the sheet, as tall as
+        // its body.
+        let pal = Pal::now();
+        let frame = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.stroke.color == pal.edge_strong && r.rect.width() > 400.0 => Some(r.rect),
+                _ => None,
+            })
+            .max_by(|a, b| a.area().total_cmp(&b.area()))
+            .expect("the sheet's window");
+        // The list's frame: the tallest hairline in the accent.
+        let list = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.stroke.color == pal.accent && r.fill == Color32::TRANSPARENT => Some(r.rect),
+                _ => None,
+            })
+            .max_by(|a, b| a.height().total_cmp(&b.height()))
+            .expect("the list's frame");
+        assert!(list.height() > 2.0 * studio::HUNG_ROW_H, "{list:?}");
+        assert!(list.max.y <= frame.max.y - MODAL_PAD + 0.5, "the list inside the sheet's body: {list:?} in {frame:?}");
+    }
+
+    #[test]
+    fn the_path_fields_words_are_the_accents_as_its_caret_and_its_edge_are() {
+        let _en = english();
+        let probe = Probe::new(BOARD);
+        let (mut page, _ends) = sheet_up();
+        let out = probe.settle(&mut page);
+        probe.click(&mut page, find(&out, "A local build").center());
+        let out = probe.settle(&mut page);
+        probe.click(&mut page, find(&out, "Type a path").center());
+        if let Some(field) = page.sheet.as_mut().and_then(|s| s.field.as_mut()) {
+            *field = tui_input::Input::default();
+        }
+        type_in(&mut page, "qK1");
+        let out = probe.settle(&mut page);
+        let accent = Pal::now().accent;
+        let colors: Vec<Color32> = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == "qK1" => Some(t.galley.job.sections.iter().map(|s| s.format.color).collect()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(!colors.is_empty() && colors.iter().all(|c| *c == accent), "the typed path in the accent: {colors:?}");
     }
 
     #[test]
