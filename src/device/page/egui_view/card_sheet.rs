@@ -732,8 +732,10 @@ fn foot(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Option<Act> 
 /// inside its frame (`studio::hung_floor`), from the one that keeps the
 /// cursor in sight with the kit's thumb saying where they stand in its own
 /// gutter, and none at all, frame and all, with nothing to list.
-/// A click on a row beneath it is the row's, as the cells' is. The entry a
-/// click landed on: the cells' `CardSheetPick`.
+/// A click on a row beneath it is the row's, as the cells' is; one on its
+/// frame off its entries (its thumb, the thumb's gutter) is the list's and
+/// takes nothing, never the row it hides. The entry a click landed on: the
+/// cells' `CardSheetPick`.
 fn hang(ui: &Ui, v: &View, face: &Face, parent: Id, anchor: Rect, cursor: usize) -> Option<usize> {
     let entries = list_entries(v.sheet, v.servers);
     let pal = face.pal;
@@ -1399,16 +1401,19 @@ mod tests {
         let out = probe.settle(&mut page);
         assert_drew(&out, &["Settings · Car music", "NAME", "Car music"]);
         assert!(!drew(&out, &t!("dev.card.help_name")), "the help goes first, as the cells' does");
-        // Into's list hangs down to the area's foot, whole entries only:
-        // from the body's top, the second row's foot leaves room for five.
+        // Into's list hangs down to the sheet's pinned foot, whole entries
+        // only: from the second row's foot it leaves room for two over it.
         page.act(Act::CardSheetTab(1));
         page.card.sheet.as_mut().expect("the sheet").focus = 1;
         press(&mut page, KeyCode::Enter);
         let out = probe.settle(&mut page);
         let all = list_entries(sheet(&page), &page.servers());
-        let shown: Vec<Rect> = all.iter().filter(|e| drew(&out, e)).map(|e| find(&out, e)).collect();
-        assert!(!shown.is_empty() && shown.len() < all.len(), "{} of {}", shown.len(), all.len());
-        assert!(shown.iter().all(|r| r.max.y <= FLOOR.y), "{shown:?}");
+        // Under Into's row: the closed box over it says one of them too.
+        let into = find(&out, "INTO");
+        let shown: Vec<Rect> = all.iter().filter(|e| drew(&out, e)).map(|e| find(&out, e)).filter(|r| r.min.y > into.max.y).collect();
+        assert_eq!(shown.len(), 2, "two of {}: {shown:?}", all.len());
+        let foot = find(&out, "USE DEFAULTS");
+        assert!(shown.iter().all(|r| r.max.y <= foot.min.y), "over the foot: {shown:?} over {foot:?}");
         assert!(!drew(&out, "MP3 320k"), "the last ones past the foot");
         // The keyboard on the buttons: the foot brought into the body's view.
         press(&mut page, KeyCode::Esc);
@@ -1608,6 +1613,63 @@ mod tests {
         // The kit's thumb at rest in the list's frame: fewer than its all.
         let thumb = Pal::now().dim.gamma_multiply(studio::THUMB_REST);
         assert!(out.shapes.iter().any(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == thumb && (r.rect.width() - studio::THUMB_W).abs() < 0.01)), "the thumb drawn");
+    }
+
+    #[test]
+    fn a_press_on_a_hung_lists_thumb_its_gutter_or_its_frame_is_the_lists_never_the_row_beneath() {
+        let _en = english();
+        for size in [vec2(800.0, 448.0), FLOOR] {
+            let probe = Probe::new(size);
+            let (mut page, _ends, _inbox, _fold) = ready_sheet();
+            page.act(Act::CardSheetTab(1));
+            page.card.sheet.as_mut().expect("the sheet").focus = 1;
+            press(&mut page, KeyCode::Enter);
+            let out = probe.settle(&mut page);
+            let all = list_entries(sheet(&page), &page.servers());
+            // Under Into's row: the closed box over it says one of them too.
+            let into = find(&out, "INTO");
+            let shown: Vec<Rect> = all.iter().filter(|e| drew(&out, e)).map(|e| find(&out, e)).filter(|r| r.min.y > into.max.y).collect();
+            assert!(!shown.is_empty() && shown.len() < all.len(), "some of Into's list at {size:?}, its thumb for the rest: {}", shown.len());
+            let entry = shown[0];
+            let accent = Pal::now().accent;
+            let frame = out
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    Shape::Rect(r) if r.stroke.color == accent && r.stroke.width > 0.0 && r.rect.contains(entry.center()) => Some(r.rect),
+                    _ => None,
+                })
+                .expect("the list's frame");
+            let rest = Pal::now().dim.gamma_multiply(studio::THUMB_REST);
+            let thumb = out
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    Shape::Rect(r) if r.fill == rest && (r.rect.width() - studio::THUMB_W).abs() < 0.01 && frame.contains_rect(r.rect) => Some(r.rect),
+                    _ => None,
+                })
+                .expect("the thumb in the list's frame");
+            let (want, focus, list) = (sheet(&page).want.clone(), sheet(&page).focus, sheet(&page).list);
+            // Down the thumb, down its gutter's right, and on the frame's
+            // edges: rows of the sheet lie beneath every one.
+            let mut presses = Vec::new();
+            let mut y = frame.min.y + 1.0;
+            while y < frame.max.y - 0.5 {
+                presses.push(pos2(thumb.center().x, y));
+                presses.push(pos2(frame.max.x - 1.0, y));
+                y += 10.0;
+            }
+            presses.push(pos2(frame.min.x + 1.0, entry.center().y));
+            presses.push(pos2(frame.center().x, frame.max.y - 1.0));
+            for at in presses {
+                probe.click(&mut page, at);
+                assert_eq!(sheet(&page).want, want, "a press at {at:?} in the list's frame {frame:?} at {size:?} changed no setting");
+                assert_eq!((sheet(&page).focus, sheet(&page).list), (focus, list), "and moved neither the keyboard nor the list, at {at:?}");
+            }
+            // An entry still takes its own press.
+            probe.click(&mut page, entry.center());
+            assert_eq!(sheet(&page).list, None, "a pick closes the list");
+        }
     }
 
     #[test]

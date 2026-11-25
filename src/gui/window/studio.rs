@@ -2949,10 +2949,14 @@ impl<'a> Dialog<'a> {
 /// Where a body's view scrolled down to show a control from `top` to its
 /// foot starts, its view's top at least at `low` (where the control's foot
 /// meets the view's): the highest top of the body's `rows` from there that
-/// still shows the control whole — so no row is torn over it — else the
-/// control's own top.
+/// still shows the control whole — so no row is torn over it — else, where
+/// the body says of no row there (rows it sets at places of its own, the
+/// Users room's grant), `low` itself, the control's foot on the view's, so
+/// the view moves just as far as it must and never a page at a step; and
+/// the control's own top where it is taller than the view.
 fn row_top(rows: &[Rangef], low: f32, top: f32) -> f32 {
-    rows.iter().map(|r| r.min).filter(|t| *t >= low - 0.01 && *t <= top + 0.01).fold(top, f32::min)
+    let t = rows.iter().map(|r| r.min).filter(|t| *t >= low - 0.01 && *t <= top + 0.01).fold(f32::INFINITY, f32::min);
+    if t.is_finite() { t } else { low.min(top) }
 }
 
 /// How low a list that hangs over the modal `modal`'s body may reach, as
@@ -3010,7 +3014,9 @@ pub(crate) fn gate(ui: &Ui, id: Id, over: Rect, title: &str, sentences: Vec<Para
 /// the pass runs again with the body where it goes, or where egui runs no
 /// more passes this frame, the next frame is asked for. A control under
 /// the view comes in with the view's top on a row's top, its foot ending
-/// between rows ([`Dialog`]), so the move tears no row at either end.
+/// between rows ([`Dialog`]), so the move tears no row at either end; in a
+/// body that says of no row there ([`body_row`]), with its foot on the
+/// view's foot.
 pub(crate) fn reveal(ui: &Ui, modal: Id, at: usize, rect: Rect) {
     let ctx = ui.ctx();
     let Some(body) = ctx.data(|d| d.get_temp::<BodyView>(modal.with("view"))) else { return };
@@ -3946,12 +3952,15 @@ pub(crate) fn hung_list(
 /// hangs over the modal's lower rows past its body's view, over the window
 /// whichever of the two was last pressed (egui raises an area pressed on to
 /// the top of its order): what the list takes is its own, a press beside it
-/// the modal's. It shows `n` of its `len` entries from the one that keeps
-/// the `cursor` in sight ([`hung_first`]), and never more than stand whole
-/// inside the modal's frame, over its pinned foot ([`hung_floor`]): an
-/// entry that would reach past them is left out, as a list's frame drawn
-/// over the window's edge or its buttons would hide them. Size the list
-/// with [`hung_floor`] so its width keeps the thumb's gutter it then needs.
+/// the modal's. Its whole frame is its own too: a press on its thumb, on
+/// the gutter the thumb stands in or on the frame's edge, off its entries,
+/// takes nothing and never reaches the modal's row hidden under it. It
+/// shows `n` of its `len` entries from the one that keeps the `cursor` in
+/// sight ([`hung_first`]), and never more than stand whole inside the
+/// modal's frame, over its pinned foot ([`hung_floor`]): an entry that
+/// would reach past them is left out, as a list's frame drawn over the
+/// window's edge or its buttons would hide them. Size the list with
+/// [`hung_floor`] so its width keeps the thumb's gutter it then needs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hung_over(
     ui: &Ui,
@@ -3973,7 +3982,14 @@ pub(crate) fn hung_over(
     let frame = hung_frame(frame.min, frame.width(), n);
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(frame.min).constrain(false).fade_in(false);
     let first = hung_first(cursor, n, len);
-    let shown = area.show(&ctx, |ui| hung_list(ui, frame, first, n, len, cursor, id_of, pal, words));
+    let shown = area.show(&ctx, |ui| {
+        // Made before its entries, which so take their own presses over it:
+        // egui gives a press to the topmost layer with a control under it,
+        // and with nothing of the list's there that was the modal's row
+        // beneath, whose setting it turned unseen.
+        let _ = ui.interact(frame, id.with("frame"), Sense::click());
+        hung_list(ui, frame, first, n, len, cursor, id_of, pal, words)
+    });
     ctx.set_sublayer(egui::LayerId::new(egui::Order::Foreground, parent), egui::LayerId::new(egui::Order::Foreground, id));
     shown.inner
 }
@@ -4717,6 +4733,56 @@ mod tests {
         let out = pass(&ctx, size, Vec::new(), &mut run);
         let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
         assert_eq!(delay, Some(std::time::Duration::MAX), "a body at rest asks for no pass of its own");
+    }
+
+    #[test]
+    fn a_body_whose_rows_say_nothing_scrolls_a_row_at_a_time_as_the_keys_step_past_its_foot() {
+        let ctx = context();
+        let id = Id::new("probe-silent-rows");
+        let size = vec2(600.0, 300.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let at = Cell::new(0usize);
+        let (first, cursor) = (Cell::new(Rect::NOTHING), Cell::new(Rect::NOTHING));
+        // Rows set at places of the body's own, as the Users room's grant
+        // sets its libraries: none says where it is.
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let _ = Dialog::new(id, over, 400.0, "Rows").show(ui, &pal, |ui| {
+                let w = ui.available_width();
+                for k in 0..30 {
+                    let (_, rect) = ui.allocate_space(vec2(w, 30.0));
+                    if k == 0 {
+                        first.set(rect);
+                    }
+                    if k == at.get() {
+                        cursor.set(rect);
+                        reveal(ui, id, k, rect);
+                    }
+                }
+            });
+        };
+        let settle = |run: &mut dyn FnMut(&mut Ui)| {
+            for _ in 0..3 {
+                let _ = pass(&ctx, size, Vec::new(), run);
+            }
+        };
+        settle(&mut run);
+        let home = first.get().min.y;
+        let foot = ctx.data(|d| d.get_temp::<BodyView>(id.with("view"))).expect("the body's view").view.max.y;
+        let mut was = 0.0;
+        let mut moved = 0;
+        for k in 1..16 {
+            at.set(k);
+            settle(&mut run);
+            let scrolled = home - first.get().min.y;
+            assert!(cursor.get().max.y <= foot + 0.5, "row {k} whole in view: {:?} over {foot}", cursor.get());
+            assert!(scrolled - was <= 30.0 + 0.5, "a step down moves the body a row at most, not a page: {was} then {scrolled} at row {k}");
+            if scrolled > was + 0.5 {
+                moved += 1;
+            }
+            was = scrolled;
+        }
+        assert!(moved >= 8, "the body followed the keys down: {moved} steps moved it");
     }
 
     #[test]
