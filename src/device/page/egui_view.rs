@@ -163,8 +163,9 @@ pub(super) struct Drawn {
     pub(super) caret: Option<Pos2>,
     /// How tall its card stands at rest, from its top through its bottom
     /// row and its foot's padding — and, while Details is open, through
-    /// Details too, its log at its newest two lines: what the frame
-    /// measures to choose its [`Space`]. Nothing for a modal.
+    /// Details too, its log at its newest lines up to board.rs's
+    /// `LOG_REST`: what the frame measures to choose its [`Space`]. Nothing
+    /// for a modal.
     pub(super) rest: f32,
 }
 

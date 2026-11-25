@@ -110,17 +110,19 @@ impl Grid {
 
 /// The board in view, its card in the column's `room` (cells.rs's `card`):
 /// its head, its value blocks, its bottom row, and Details while open. The
-/// card is as tall as its rows and no taller than the room, cut inside its
-/// frame from the foot; the bottom row is never cut — the value rows give
-/// way above it, whole lines at a time — so its primary stands at every
-/// size the page is drawn at. Details takes what is left under it, its log
-/// the rows its other rows leave; while it is open the value rows give way
-/// to its head too ([`details_head`]), so its door never stands open over
-/// nothing.
+/// card is as tall as its rows and no taller than the room; short of room
+/// it keeps what [`keep`] keeps, in its order — the bottom row whole with
+/// its primary at every size the page is drawn at, the block that says what
+/// the primary will do ([`says`]: the one the primary acts on, Firmware or
+/// the SD card), Details' rule and its links, its log's newest lines, its
+/// facts, then the other value rows, whole lines from the foot — and its
+/// log takes the room left, down to the room's foot. Its rest is its height
+/// with every row and its log at [`LOG_REST`] lines, which the frame
+/// measures.
 pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, room: Rect) -> Drawn {
     let s = face.space;
     let grid = Grid::of(room, face);
-    let card = clipped(ui, room, "mp3-board");
+    let mut card = clipped(ui, room, "mp3-board");
     let mut y = room.min.y + s.pad_y;
     y = studio::card_head(&card, pos2(grid.x, y), grid.w, &cells::board_name(board), &cells::head_right(page, board), face.pal);
     if let Some(words) = cells::identity(page, board) {
@@ -131,32 +133,78 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, board: &Board, roo
         Row::Actions { primary: Some(_), .. } => TALL_H,
         _ => TEXT_BUTTON_H,
     };
+    let blocks = cells::value_blocks(page, board, WIDE);
     let details = if page.details { cells::details_rows(page, board) } else { Vec::new() };
-    let head = if details.is_empty() { 0.0 } else { details_head(face) };
-    // The measuring run sees the card whole; the drawing cuts the values
-    // short of the bottom row's place at the room's foot.
+    let port = board.port();
+    // The value rows a row at a time, each with its block; the blocks that
+    // say what the primary will do, the one it acts on among them.
+    let flat: Vec<(usize, &Row)> = blocks.iter().enumerate().flat_map(|(b, rows)| rows.iter().map(move |r| (b, r))).collect();
+    let acts_on = match page.primary_of(board) {
+        Some(Primary::Format) => Some(1),
+        Some(_) => Some(0),
+        None => None,
+    };
+    let said: Vec<bool> = blocks.iter().enumerate().map(|(b, rows)| acts_on == Some(b) || says(&rows.iter().collect::<Vec<_>>(), face)).collect();
+    let says_rows: Vec<usize> = (0..flat.len()).filter(|&i| said[flat[i].0]).collect();
+    // The other rows go a line at a time from the foot: the board has no
+    // give-way of its own (contract clauses 4 and 20a).
+    let give_way: Vec<Vec<usize>> = (0..flat.len()).rev().filter(|&i| !said[flat[i].0]).map(|i| vec![i]).collect();
+    let want = Want::of(page, port, face, room, y - room.min.y + s.gap + actions_h + s.pad_y, flat.len(), give_way, says_rows, &details);
+    let salt = Id::new("mp3-board").with(port);
+    // The value rows `keep` asks after, measured as they are drawn: blocks
+    // a block's gap apart, under the head.
+    let quiet = Face { live: false, ..*face };
+    let mut probe = card.new_child(UiBuilder::new().id_salt("mp3-board-measure").max_rect(room));
+    probe.set_invisible();
+    let kept = keep(&want, face, |mask| {
+        let mut none = Vec::new();
+        let mut paint = Paint::new(&probe, &quiet, grid, y, f32::INFINITY, salt, &mut none);
+        values(&mut paint, &flat, mask);
+        paint.y - y
+    });
+    // The drawing holds to the room's foot whatever the measures say.
     let foot = if face.live { room.max.y - s.pad_y } else { f32::INFINITY };
     let mut acts = Vec::new();
-    let salt = Id::new("mp3-board").with(board.port());
-    let mut paint = Paint::new(&card, face, grid, y, foot - actions_h - s.gap - head, salt, &mut acts);
-    for block in cells::value_blocks(page, board, WIDE) {
-        paint.blank();
-        paint.rows(page, board.port(), &block);
-    }
+    let mut paint = Paint::new(&card, face, grid, y, foot - actions_h - s.gap, salt, &mut acts);
+    values(&mut paint, &flat, &kept.values);
     paint.floor = foot;
     paint.cut = false;
     paint.blank();
-    paint.row(page, board.port(), &actions, 0.0);
-    // Details counts at rest while it is open — a failed write opens it by
-    // itself on the log's newest lines (the Failed board) — so the frame
-    // closes up to show it rather than leave it under the card's foot.
-    let rest = paint.y + s.pad_y - room.min.y + details_h(page, board.port(), &details, face);
+    paint.row(page, port, &actions);
     if face.live {
-        paint.rows(page, board.port(), &details);
+        paint.log = kept.log();
+        for row in kept.details(&details) {
+            if paint.cut {
+                break;
+            }
+            paint.row(page, port, row);
+        }
     }
+    // Its rest: every row, Details' too while it is open — a failed write
+    // opens it by itself on the log's newest lines (the Failed board) — so
+    // the frame closes up to show them rather than leave them under the
+    // card's foot.
+    let rest = want.fixed + kept.height;
     let bottom = (paint.y + s.pad_y).min(room.max.y);
     studio::hairline(&card, Rect::from_min_max(room.min, pos2(room.max.x, bottom)), face.pal);
     Drawn { acts, caret: None, rest }
+}
+
+/// The kept value rows of `flat` (each with its block) through `paint`,
+/// `mask` saying which, each block with a row kept a block's gap under the
+/// last.
+fn values(paint: &mut Paint, flat: &[(usize, &Row)], mask: &[bool]) {
+    let mut block = None;
+    for (i, (b, row)) in flat.iter().enumerate() {
+        if !mask[i] || paint.cut {
+            continue;
+        }
+        if block != Some(*b) {
+            paint.blank();
+            block = Some(*b);
+        }
+        paint.value(row);
+    }
 }
 
 /// The card with no board (contract clause 30; the cells' `empty_card`):
@@ -352,27 +400,197 @@ pub(super) fn lead_of(text: &str) -> (Option<Lead>, &str) {
     }
 }
 
-/// What Details' `rows` (the cells' own, none while it is shut) add to a
-/// card's rest: each row as [`Paint`] sets it, and its log's newest two
-/// lines under their gap where `port`'s log has them (the cells keep three
-/// at the GUI's floor). What the frame closes up for while Details is open.
-pub(super) fn details_h(page: &Page, port: &str, rows: &[Row], face: &Face) -> f32 {
-    let fixed: f32 = rows.iter().map(|r| fixed_h(r, face)).sum();
-    let lines = page.log_for(port).len().min(2);
-    let log = rows.iter().any(|r| matches!(r, Row::Log)) && lines > 0;
-    fixed + if log { face.space.gap + lines as f32 * LOG_ROW } else { 0.0 }
+// ── What a card keeps in its room ─────────────────────────────────────────
+
+/// The log's lines a card counts at rest while Details is open, as many as
+/// it has up to these: a write's last rung, from its 0% to its failure's
+/// hint (the Failed board's log ends so), so a window short of the boards'
+/// measures closes up to show them and the boards' own shows them at its
+/// measures. Past them the log takes only the room left.
+pub(super) const LOG_REST: usize = 7;
+/// The log's newest lines Details keeps, short of room, before its facts
+/// give way.
+const LOG_LEAST: usize = 2;
+
+/// What a card asks of its room, for [`keep`]: the room's height (none in
+/// the measuring run, which keeps every row), what it takes whatever it
+/// keeps — its padding, its head, its bottom row and the gap over it — its
+/// value rows by their number, the other ones' turns to give way (a turn's
+/// rows at a time) and the ones that say what the primary will do
+/// ([`says`]), top to foot; and while Details is open, its facts, the log's
+/// lines it counts, and what its rows after the log (its links) take.
+pub(super) struct Want {
+    pub(super) room: f32,
+    pub(super) fixed: f32,
+    values: usize,
+    give_way: Vec<Vec<usize>>,
+    says: Vec<usize>,
+    open: bool,
+    facts: usize,
+    log: usize,
+    links: f32,
 }
 
-/// The least of Details the value rows above it give way to while it is
-/// open: its rule and its first fact (a board's port, a card's drive).
-pub(super) fn details_head(face: &Face) -> f32 {
-    2.0 * face.space.gap + 1.0 + FACT_H
+impl Want {
+    /// What a card in `room` asks with Details' `details` rows (the cells'
+    /// own, none while it is shut) and `port`'s log: in the live run the log
+    /// counts every line it has, in the measuring run [`LOG_REST`] at most.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn of(page: &Page, port: &str, face: &Face, room: Rect, fixed: f32, values: usize, give_way: Vec<Vec<usize>>, says: Vec<usize>, details: &[Row]) -> Want {
+        let at = details.iter().position(|r| matches!(r, Row::Log));
+        let lines = at.map_or(0, |_| page.log_for(port).len());
+        let links = at.map_or(0.0, |at| details[at + 1..].iter().map(|r| fixed_h(r, face)).sum());
+        Want {
+            room: if face.live { room.height() } else { f32::INFINITY },
+            fixed,
+            values,
+            give_way,
+            says,
+            open: !details.is_empty(),
+            facts: details.iter().filter(|r| matches!(r, Row::Fact { .. })).count(),
+            log: if face.live { lines } else { lines.min(LOG_REST) },
+            links,
+        }
+    }
+}
+
+/// What a card keeps of its rows ([`keep`]): each value row, Details' rule,
+/// its first facts, its log's newest lines and its links; and how tall
+/// what it keeps stands under its fixed part.
+pub(super) struct Kept {
+    pub(super) values: Vec<bool>,
+    rule: bool,
+    facts: usize,
+    log: usize,
+    links: bool,
+    pub(super) height: f32,
+}
+
+impl Kept {
+    /// Details' `rows` it keeps, in their order: the rule, the first facts,
+    /// the log in its lines ([`Paint::row`] gives it them), the links with
+    /// the gap over them.
+    pub(super) fn details<'r>(&self, rows: &'r [Row]) -> Vec<&'r Row> {
+        let mut facts = 0;
+        let mut after = false;
+        let mut kept = Vec::new();
+        for row in rows {
+            let keep = match row {
+                Row::Rule => self.rule,
+                Row::Fact { .. } => {
+                    facts += 1;
+                    facts <= self.facts
+                }
+                Row::Log => {
+                    after = true;
+                    self.log > 0
+                }
+                _ if after => self.links,
+                _ => true,
+            };
+            if keep {
+                kept.push(row);
+            }
+        }
+        kept
+    }
+
+    /// The log's lines it keeps.
+    pub(super) fn log(&self) -> usize {
+        self.log
+    }
+}
+
+/// What a card keeps where its room is short of every row (contract
+/// clause 70), in the order it keeps them: its bottom row with its primary
+/// (the fixed part, always); the value rows that say what the primary will
+/// do; while Details is open its rule and its links — a control never
+/// vanishes while the room holds it — then its log's newest two lines,
+/// then its facts, cut from the foot; then the other value rows, given way
+/// in their turns. What room is left the log takes, its newest lines as
+/// many as fit and it has. Short of room for even the bottom row and the
+/// rows that say what it will do, Details goes whole and those rows are cut
+/// from the foot. `values_h` measures the value rows a mask keeps.
+pub(super) fn keep(want: &Want, face: &Face, mut values_h: impl FnMut(&[bool]) -> f32) -> Kept {
+    let gap = face.space.gap;
+    let log_h = |n: usize| if n > 0 { gap + n as f32 * LOG_ROW } else { 0.0 };
+    let details = |k: &Kept| {
+        let rule = if k.rule { 2.0 * gap + 1.0 } else { 0.0 };
+        rule + k.facts as f32 * FACT_H + log_h(k.log) + if k.links { want.links } else { 0.0 }
+    };
+    let open = want.open;
+    let mut kept = Kept {
+        values: vec![true; want.values],
+        rule: open,
+        facts: if open { want.facts } else { 0 },
+        log: if open { want.log.min(LOG_LEAST) } else { 0 },
+        links: open,
+        height: 0.0,
+    };
+    let mut v = values_h(&kept.values);
+    let over = |k: &Kept, v: f32| want.fixed + v + details(k) > want.room + 0.01;
+    for turn in &want.give_way {
+        if !over(&kept, v) {
+            break;
+        }
+        for &i in turn {
+            kept.values[i] = false;
+        }
+        v = values_h(&kept.values);
+    }
+    while over(&kept, v) && kept.facts > 0 {
+        kept.facts -= 1;
+    }
+    while over(&kept, v) && kept.log > 0 {
+        kept.log -= 1;
+    }
+    if over(&kept, v) {
+        kept.links = false;
+        kept.rule = false;
+    }
+    for &i in want.says.iter().rev() {
+        if !over(&kept, v) {
+            break;
+        }
+        kept.values[i] = false;
+        v = values_h(&kept.values);
+    }
+    // The room left is the log's.
+    while kept.rule && kept.log < want.log {
+        kept.log += 1;
+        if over(&kept, v) {
+            kept.log -= 1;
+            break;
+        }
+    }
+    kept.height = v + details(&kept);
+    kept
+}
+
+/// Whether a value block (a labelled row and the lines under it) says what
+/// the card's primary will do or what is under way, so it is kept before
+/// the other value rows (contract clause 70): it holds a control (a link,
+/// the next write with its Reset), its first line is led by a gold or a
+/// danger LED (a failure's or a warning's words, what the primary mends),
+/// or it is work under way (its first line a scan, or its words in the
+/// accent: a write, a format, a sync).
+pub(super) fn says(rows: &[&Row], face: &Face) -> bool {
+    if rows.iter().any(|r| matches!(r, Row::Link { .. } | Row::Next { .. })) {
+        return true;
+    }
+    let first = match rows.first() {
+        Some(Row::Value { left, .. } | Row::Wide { left, .. }) => Lined::of(left, face),
+        _ => return false,
+    };
+    let pal = face.pal;
+    let warns = first.lamp.is_some_and(|c| c == pal.gold || c == pal.danger);
+    let busy = first.meter.is_some() || (!first.spans.is_empty() && first.spans.iter().all(|(_, c, _)| *c == pal.accent));
+    warns || busy
 }
 
 /// The height a row after a log takes as [`Paint`] sets it, for the log
-/// to leave it, and what the cells count of it when a card's rows give way
-/// (card.rs).
-pub(super) fn fixed_h(row: &Row, face: &Face) -> f32 {
+/// to leave it.
+fn fixed_h(row: &Row, face: &Face) -> f32 {
     match row {
         Row::Blank => face.space.gap,
         Row::Link { .. } => TEXT_BUTTON_H,
@@ -409,6 +627,8 @@ pub(super) struct Paint<'u, 'f, 'a> {
     pub(super) floor: f32,
     /// A row did not fit: the rows after it are not drawn.
     pub(super) cut: bool,
+    /// The log's lines, as many as [`keep`] gives it.
+    pub(super) log: usize,
     last: Option<Kind>,
     /// The card's own: its kind and its subject, a board's port or a
     /// card's key.
@@ -420,7 +640,7 @@ pub(super) struct Paint<'u, 'f, 'a> {
 
 impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
     pub(super) fn new(ui: &'u Ui, face: &'f Face<'f>, grid: Grid, y: f32, floor: f32, salt: Id, acts: &'a mut Vec<Act>) -> Self {
-        Paint { ui, face, grid, y, floor, cut: false, last: None, salt, ids: Vec::new(), acts }
+        Paint { ui, face, grid, y, floor, cut: false, log: 0, last: None, salt, ids: Vec::new(), acts }
     }
 
     /// The id of the control whose words are `words` and whose act is
@@ -456,20 +676,17 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         Some(top)
     }
 
-    /// `rows` in order; the log among them is given what the rows after it
-    /// leave it. `port` is whose log.
-    pub(super) fn rows(&mut self, page: &mut Page, port: &str, rows: &[Row]) {
-        for (i, row) in rows.iter().enumerate() {
-            if self.cut {
-                return;
-            }
-            let tail: f32 = rows[i + 1..].iter().map(|r| fixed_h(r, self.face)).sum();
-            self.row(page, port, row, tail);
+    /// One row; the log, `port`'s, in its [`Paint::log`] lines.
+    pub(super) fn row(&mut self, page: &mut Page, port: &str, row: &Row) {
+        match row {
+            Row::Log => self.log(page, port),
+            row => self.value(row),
         }
     }
 
-    /// One row; `tail` is what the rows after it take, which a log leaves.
-    pub(super) fn row(&mut self, page: &mut Page, port: &str, row: &Row, tail: f32) {
+    /// One row of those that read nothing of the page but what they hold:
+    /// every row but the log.
+    pub(super) fn value(&mut self, row: &Row) {
         match row {
             Row::Blank => self.blank(),
             Row::Wide { left, right } => self.line(None, left, right.as_ref(), false),
@@ -480,7 +697,7 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             Row::Actions { links, primary, covered } => self.actions(links, primary.as_ref(), *covered),
             Row::Rule => self.rule(),
             Row::Fact { label, value, style } => self.fact(label, value, *style),
-            Row::Log => self.log(page, port, tail),
+            Row::Log => {}
         }
     }
 
@@ -728,22 +945,22 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         self.last = Some(Kind::Fact);
     }
 
-    /// The log under a block's gap, in the rows the card leaves it less
-    /// `tail` (what the rows after it take), and no more than it has: its
-    /// newest lines, `mm:ss` dim and then the line in its kind's colour, all
-    /// in the monospace, each cut with an ellipsis at the content's end, or
-    /// short of the thumb's room while there are more lines than rows (the
-    /// Done board's log; the Failed board's, which all fit, has none) —
-    /// scrolled up by the page's own count (the wheel's over it, a line a
-    /// notch), else following the newest line on the pane's foot. No room
-    /// for a line: no log, and no gap for it.
-    fn log(&mut self, page: &mut Page, port: &str, tail: f32) {
+    /// The log under a block's gap, in the [`Paint::log`] rows [`keep`]
+    /// gives it, and no more than it has or the floor leaves: its newest
+    /// lines, `mm:ss` dim and then the line in its kind's colour, all in the
+    /// monospace, each cut with an ellipsis at the content's end, or short of
+    /// the thumb's room while there are more lines than rows (the Done
+    /// board's log; the Failed board's, which all fit, has none) — scrolled
+    /// up by the page's own count (the wheel's over it, a line a notch),
+    /// else following the newest line on the pane's foot. No room for a
+    /// line: no log, and no gap for it.
+    fn log(&mut self, page: &mut Page, port: &str) {
         let face = self.face;
         let gap = face.space.gap;
         let lines: Vec<LogLine> = page.log_for(port).into_iter().cloned().collect();
         let top = self.y + gap;
-        let room = self.floor - top - tail;
-        let rows = (((room + 0.01) / LOG_ROW).floor().max(0.0) as usize).min(lines.len());
+        let room = self.floor - top;
+        let rows = (((room + 0.01) / LOG_ROW).floor().max(0.0) as usize).min(lines.len()).min(self.log);
         if self.cut || rows == 0 {
             return;
         }
@@ -1233,10 +1450,11 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn at_the_guis_floor_details_opens_on_its_port_at_least_the_values_giving_way_to_it() {
+    fn at_the_guis_floor_details_keeps_its_links_and_its_newest_line_the_value_lines_giving_way_first() {
         let _en = english();
-        // Two boards and the one in view just written: the subjects row
-        // and the Done card's lines leave Details no room of its own here.
+        // Two boards and the one in view just written: the subjects row,
+        // the identity line and the Done card's lines leave Details no room
+        // of its own here.
         let (mut page, ends) = locked(|e| e.boards(vec![fixtures::old("COM3", "v0.7.0"), fixtures::old("COM5", "v0.7.0")]));
         ends.writing(62);
         ends.tell([log("writing… 100%", LogKind::Phase), log("mstream-mp3-player v0.8.0", LogKind::Quiet)]);
@@ -1244,23 +1462,64 @@ pub(super) mod tests {
         page.pump();
         page.act(Act::Details);
         // At the floor and in shorter areas still, where the card at rest
-        // fills its room even closed up: its port's fact stands under the
-        // door, the value lines giving way from the foot up, never the
-        // head or the bottom row.
-        let lines = |out: &FullOutput| texts(out).into_iter().filter(|(_, r)| r.max.y < find(out, "Details").min.y).count();
-        let mut gave_way = false;
-        for h in [FLOOR.y, 320.0, 300.0, 280.0] {
+        // fills its room even closed up: Write again and the format, whole
+        // under its rule, and the log's newest line, the value lines giving
+        // way first (nothing here is the primary's: there is none), never
+        // the head or the bottom row.
+        let chip = "Up to date · v0.8.0 · just written";
+        for h in [FLOOR.y, 320.0, 300.0] {
             let probe = Headless::new(vec2(FLOOR.x, h));
             let out = probe.settle(&mut page);
-            assert_drew(&out, &["Details", "PORT", "M5Stack Core2"]);
-            let (port, room) = (find(&out, "PORT"), card_room_of(&out, "PORT"));
-            assert!(port.max.y <= room.max.y - super::super::TIGHT.pad_y + 0.5, "{h}: the port's fact whole on the card: {port:?} in {room:?}");
-            page.act(Act::Details);
-            let shut = probe.settle(&mut page);
-            page.act(Act::Details);
-            gave_way |= lines(&probe.settle(&mut page)) < lines(&shut);
+            assert_drew(&out, &["Details", "M5Stack Core2", "Write v0.8.0 again", "Format as FAT32…"]);
+            let (format, room) = (find(&out, "Format as FAT32…"), card_room_of(&out, "Format as FAT32…"));
+            assert!(format.max.y <= room.max.y - super::super::TIGHT.pad_y + 0.5, "{h}: the format's link whole on the card: {format:?} in {room:?}");
+            assert!(!drew(&out, chip), "{h}: the value lines gave way first");
+            // Where a line of the log has room over them, its newest.
+            if h >= 320.0 {
+                assert!(find(&out, "mstream-mp3-player v0.8.0").max.y < find(&out, "Write v0.8.0 again").min.y, "{h}: the log's newest line over the links");
+            }
         }
-        assert!(gave_way, "somewhere a value line gave way to Details' head");
+        // Closed, the card is the card at rest again.
+        page.act(Act::Details);
+        let out = Headless::new(FLOOR).settle(&mut page);
+        assert_drew(&out, &[chip, "Details"]);
+    }
+
+    #[test]
+    fn short_of_room_a_card_keeps_its_rows_in_the_contracts_order_and_its_log_takes_what_is_left() {
+        let pal = Pal::now();
+        let full = Rect::from_min_size(Pos2::ZERO, FLOOR);
+        let face = Face { pal: &pal, composition: "", key_hints: false, full, space: super::super::TIGHT, ports: &[], live: true, inert: false };
+        // Five value rows 30 points each; the second says what the primary
+        // will do, the others go from the foot. Details: four facts, a long
+        // log, its rule (21 points in the tighter set) and its links (66).
+        let values_h = |mask: &[bool]| mask.iter().filter(|k| **k).count() as f32 * 30.0;
+        let want = |room: f32| Want { room, fixed: 100.0, values: 5, give_way: vec![vec![4], vec![3], vec![2], vec![0]], says: vec![1], open: true, facts: 4, log: 40, links: 66.0 };
+        let kept = |room: f32| {
+            let k = keep(&want(room), &face, values_h);
+            (k.values.iter().filter(|v| **v).count(), k.values[1], k.facts, k.log, k.links && k.rule)
+        };
+        // Every row, its log 2 lines (10 over them, 18 each) and the room
+        // left: the log's.
+        let all = 100.0 + 150.0 + 21.0 + 80.0 + 66.0;
+        assert_eq!(kept(all + 46.0), (5, true, 4, 2, true));
+        assert_eq!(kept(all + 46.0 + 3.0 * 18.0), (5, true, 4, 5, true), "the room left is the log's");
+        // Then the other value rows from the foot, then the facts from the
+        // foot, then the log's newest lines, then Details whole; the row
+        // that says what the primary will do last of all.
+        assert_eq!(kept(all + 46.0 - 30.0), (4, true, 4, 2, true));
+        let least = 100.0 + 30.0 + 21.0 + 66.0;
+        assert_eq!(kept(least + 46.0 + 80.0), (1, true, 4, 2, true));
+        assert_eq!(kept(least + 46.0 + 60.0), (1, true, 3, 2, true));
+        assert_eq!(kept(least + 46.0), (1, true, 0, 2, true));
+        assert_eq!(kept(least + 28.0), (1, true, 0, 1, true));
+        assert_eq!(kept(least), (1, true, 0, 0, true), "the rule and the links over any line of the log");
+        assert_eq!(kept(least - 1.0), (1, true, 0, 0, false));
+        assert_eq!(kept(120.0), (0, false, 0, 0, false));
+        // The measuring run keeps every row, its log at the lines it counts.
+        let k = keep(&Want { room: f32::INFINITY, log: LOG_REST, ..want(0.0) }, &face, values_h);
+        assert_eq!((k.facts, k.log), (4, LOG_REST));
+        assert!((100.0 + k.height - (all + 10.0 + LOG_REST as f32 * 18.0)).abs() < 0.01, "its rest: {}", k.height);
     }
 
     #[test]

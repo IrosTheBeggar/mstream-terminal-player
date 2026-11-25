@@ -520,6 +520,102 @@ fn a_card_a_fraction_of_a_point_too_tall_for_its_room_tightens_and_keeps_its_eve
     assert!(head > TIGHT.top + head_mid(TIGHT) + 4.0, "only as far as it needs: {head}");
 }
 
+/// COM3 beside a card, its write failed past 40% with `lines` lines of its
+/// log before the failure and its hint, as the Failed board has it.
+fn failed_beside_a_card(lines: usize) -> Page {
+    let (mut page, ends) = with_card(Ends::update_available);
+    page.act(Act::Primary);
+    page.act(Act::Write);
+    ends.writing(38);
+    ends.tell((0..lines).map(|i| log_line(&format!("wrote chunk {i:02}"))));
+    let fail = |text: &str, kind| crate::device::desk::Event::Log { port: Some("COM3".into()), text: text.into(), kind };
+    ends.tell([fail("the board stopped answering", LogKind::Fail), fail("Try again; if it keeps failing, use another cable.", LogKind::Quiet)]);
+    ends.failed();
+    page.pump();
+    assert!(page.details, "a failure opens Details by itself");
+    page
+}
+
+/// The log lines a pass drew, top to foot.
+fn log_drawn(out: &FullOutput) -> Vec<(String, Rect)> {
+    let mut lines: Vec<(String, Rect)> = texts(out).into_iter().filter(|(t, _)| t.starts_with("wrote chunk") || t.starts_with("the board stopped") || t.starts_with("Try again;")).collect();
+    lines.sort_by(|a, b| a.1.min.y.total_cmp(&b.1.min.y));
+    lines
+}
+
+#[test]
+fn at_the_guis_default_size_a_failures_log_takes_the_room_under_the_card_down_to_the_busy_line() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let mut page = failed_beside_a_card(40);
+    let out = probe.settle(&mut page);
+    // Its newest lines, as many as fit and at least a write's last rung:
+    // the frame closes up for them rather than leave the busy line's room
+    // blank under two.
+    let lines = log_drawn(&out);
+    assert!(lines.len() >= super::board::LOG_REST, "the log's newest lines: {:?}", lines.iter().map(|(t, _)| t).collect::<Vec<_>>());
+    assert_eq!(lines.last().map(|(t, _)| t.as_str()), Some("Try again; if it keeps failing, use another cable."), "following the newest");
+    assert_drew(&out, &["TRY AGAIN", "Write failed · the board is half written", "PORT"]);
+    // The card spent down to its room's foot: no room for another line
+    // left under the log.
+    let (last, room) = (lines.last().expect("a line").1, card_room_of(&out, "the board stopped answering"));
+    assert!(room.max.y - last.max.y < 18.0 + ROOMY.pad_y, "the log down to the card's foot: {last:?} in {room:?}");
+    let busy_top = WINDOW.y - TIGHT.under_busy - studio::NOTE_H;
+    assert!(room.max.y >= busy_top - ROOMY.over_busy - 0.5, "the card's room down to the busy line: {room:?}");
+}
+
+#[test]
+fn at_the_guis_default_size_details_after_a_write_keeps_its_facts_its_newest_lines_and_its_links() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let (mut page, ends) = with_card(Ends::update_available);
+    page.act(Act::Primary);
+    page.act(Act::Write);
+    ends.writing(62);
+    ends.tell((0..30).map(|i| log_line(&format!("wrote chunk {i:02}"))));
+    // Its firmware the one that formats (`clock=`): the format is offered.
+    let mut board = fixtures::answering_with("COM3", "v0.8.0", |s| s.clock = crate::device::board::Clock::Ok);
+    board.probe = Some(Ok(crate::device::board::Probe { info: fixtures::info("COM3"), on_board: Some(fixtures::ours("v0.8.0")) }));
+    board.written = Some(Written::Done {
+        version: "v0.8.0".into(),
+        took: std::time::Duration::from_secs(41),
+        skipped: false,
+        install: false,
+        boot: None,
+        image: crate::device::firmware::tests::pin_facts("v0.8.0", crate::device::firmware::Mode::Qio),
+        looping: None,
+    });
+    ends.tell([crate::device::desk::Event::Board(fixtures::judged(board))]);
+    page.pump();
+    page.act(Act::Details);
+    let out = probe.settle(&mut page);
+    // Its facts whole, its log's newest lines, Write again and the format:
+    // no control gone at the size most windows are; the value lines gave
+    // way to them first.
+    assert_drew(&out, &["PORT", "BOARD", "ON THE BOARD", "THIS PLAYER", "WRITTEN", "CARD", "wrote chunk 29", "wrote chunk 28", "Write v0.8.0 again", "Format as FAT32…"]);
+    assert!(!drew(&out, "FIRMWARE"), "the value lines gave way first");
+    let (format, room) = (find(&out, "Format as FAT32…"), card_room_of(&out, "Format as FAT32…"));
+    assert!(format.max.y <= room.max.y - TIGHT.pad_y + 0.5 && room.max.y - format.max.y < 18.0 + ROOMY.pad_y + 6.0, "the card spent down to its foot: {format:?} in {room:?}");
+}
+
+#[test]
+fn at_the_guis_default_size_a_cards_details_keeps_next_sync_its_facts_its_log_and_sync_again() {
+    let _en = english();
+    let probe = Probe::new(WINDOW);
+    let (mut page, ends) = with_card(Ends::up_to_date);
+    page.act(Act::Card(0));
+    let key = page.cards()[0].key.clone();
+    let said = |text: &str| crate::device::desk::Event::Log { port: Some(key.clone()), text: text.into(), kind: LogKind::Fact };
+    ends.tell([said("E: put in: Car music, revision 42"), said("asked Home: 12 new, 2 removed")]);
+    page.pump();
+    page.act(Act::Details);
+    let out = probe.settle(&mut page);
+    assert_drew(&out, &["NEXT SYNC", "SYNC", "DRIVE", "CARD", "SERVER", "REMOVES", "E: put in: Car music, revision 42", "asked Home: 12 new, 2 removed", "Sync again"]);
+    assert!(!drew(&out, "CONVERTS"), "the other value rows gave way first");
+    let again = find(&out, "Sync again");
+    assert!(again.max.y <= card_room_of(&out, "Sync again").max.y - TIGHT.pad_y + 0.5, "Sync again whole on the card: {again:?}");
+}
+
 /// Where the head's name stands its middle under the column's top with
 /// `space`.
 fn head_mid(space: Space) -> f32 {

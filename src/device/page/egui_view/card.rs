@@ -12,10 +12,14 @@
 //! searching shape with its share, the figures in the monospace and the
 //! card's drive letter with them; then the bottom row (board.rs's
 //! `Paint`), and Details with its facts, the card's own log and Sync
-//! again. Short of room the rows give way as the cells give them way
-//! (`give_way_rows`), measured in points: the dim explanation lines first,
-//! the last first, then Converts; then the values are cut whole lines at a
-//! time above the bottom row, which is never cut. The bottom row's links
+//! again. Short of room the card keeps its rows in clause 70's order
+//! (board.rs's `keep`): the bottom row, never cut; the rows that say what
+//! the primary will do (Next sync, a problem's words, a sync under way);
+//! Details' rule and Sync again, its log's newest lines and its facts; and
+//! last the other value rows, which give way as the cells give theirs
+//! (`give_way_rows`), measured in points — the dim explanation lines
+//! first, the last first, then Converts — and then whole lines from the
+//! foot. The log takes the room left. The bottom row's links
 //! give way as the cells' do (`give_way`): Send the plays first, then the
 //! links from the end. Details' Drive fact gives way a piece at a time,
 //! its serial first and then its clusters, and its Removes fact cuts its
@@ -38,10 +42,10 @@ use ratatui::text::Line;
 use super::super::card::{CardGate, GateKind, plan_of, span};
 use super::super::cells::{self, Row};
 use super::super::*;
-use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, PLAIN, Paint, SCAN, WIDE, clipped, details_h, details_head, fixed_h, lead_of};
+use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, PLAIN, Paint, SCAN, WIDE, Want, clipped, keep, lead_of};
 use super::{Drawn, Face, tone, unled};
 use crate::device::card::worker::CardView;
-use crate::gui::window::studio::{self, HEAD_H, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
+use crate::gui::window::studio::{self, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
 
 /// A value's lines are the board card's (board.rs's measures: a plain
 /// value 13.5 on 20, a verdict behind its LED 14 on 20, an explanation's
@@ -63,12 +67,16 @@ const LIB_APART: f32 = 8.0;
 
 /// The card `view` in the column's `room` (the cells' `card_view`): its
 /// head, its value rows, its bottom row, and Details while open, in a
-/// hairline frame as tall as its rows and no taller than the room. Its rest
-/// is its height through its bottom row with every row it has, and through
-/// Details while it is open, as the frame measures it; the measuring run
-/// (`face.live` false) draws no control and gives nothing way. While
-/// Details is open the value rows give way to its head too (board.rs's
-/// `details_head`), so its door never stands open over nothing.
+/// hairline frame as tall as its rows and no taller than the room. Short of
+/// room it keeps what board.rs's `keep` keeps, in its order: the bottom row
+/// whole, the rows that say what the primary will do (Next sync, a
+/// problem's words, a sync under way: board.rs's `says`), Details' rule
+/// and Sync again, its log's newest lines, its facts, then the other value
+/// rows, given way as the cells give them way ([`turns`]) and then from the
+/// foot; its log takes the room left. Its rest is its height with every
+/// row it has, and through Details while it is open, its log at board.rs's
+/// `LOG_REST` lines, as the frame measures it; the measuring run
+/// (`face.live` false) draws no control.
 pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, room: Rect) -> Drawn {
     let s = face.space;
     let grid = Grid::of(room, face);
@@ -79,33 +87,29 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
         Row::Actions { primary: Some(_), .. } => TALL_H,
         _ => TEXT_BUTTON_H,
     };
-    let mut values = laid.values;
-    if face.live {
-        // Short of room, the rows the cells give way go first, measured in
-        // points with Details' rows (but its log, which takes what is left)
-        // as the cells measure them.
-        let details_h = if page.details { laid.details.iter().map(|r| fixed_h(r, face)).sum::<f32>() } else { 0.0 };
-        let fixed = 2.0 * s.pad_y + HEAD_H + s.gap + actions_h + details_h;
-        let mut probe = ui.new_child(UiBuilder::new().id_salt("mp3-card-measure").max_rect(room));
-        probe.set_invisible();
-        let measure = Values { ui: &probe, face, grid, floor: f32::INFINITY, drive: &drive };
-        while fixed + measure.paint(0.0, &values) > room.height() + 0.5 && give_way(&mut values) {}
-    }
-    let card = clipped(ui, room, "mp3-card");
+    let mut card = clipped(ui, room, "mp3-card");
     let y = studio::card_head(&card, pos2(grid.x, room.min.y + s.pad_y), grid.w, &laid.name, &laid.right, face.pal);
-    // The measuring run sees the card whole; the drawing cuts the values
-    // short of the bottom row's place at the room's foot.
+    let values = &laid.values;
+    let said = saying(values, face);
+    let says_rows: Vec<usize> = (0..values.len()).filter(|&i| said[i]).collect();
+    let want = Want::of(page, &view.key, face, room, y - room.min.y + s.gap + actions_h + s.pad_y, values.len(), turns(values, &said), says_rows, &laid.details);
+    let kept_rows = |mask: &[bool]| values.iter().zip(mask).filter(|(_, k)| **k).map(|(r, _)| r).collect::<Vec<&Row>>();
+    let mut probe = card.new_child(UiBuilder::new().id_salt("mp3-card-measure").max_rect(room));
+    probe.set_invisible();
+    let measure = Values { ui: &probe, face, grid, floor: f32::INFINITY, drive: &drive };
+    let kept = keep(&want, face, |mask| measure.paint(y, &kept_rows(mask)) - y);
+    // The drawing holds to the room's foot whatever the measures say.
     let foot = if face.live { room.max.y - s.pad_y } else { f32::INFINITY };
-    let head = if laid.details.is_empty() { 0.0 } else { details_head(face) };
-    let y = Values { ui: &card, face, grid, floor: foot - actions_h - s.gap - head, drive: &drive }.paint(y, &values);
+    let y = Values { ui: &card, face, grid, floor: foot - actions_h - s.gap, drive: &drive }.paint(y, &kept_rows(&kept.values));
     let mut acts = Vec::new();
     let mut paint = Paint::new(&card, face, grid, y, foot, Id::new("mp3-card").with(&view.key), &mut acts);
     paint.blank();
-    paint.row(page, &view.key, &actions, 0.0);
-    let rest = paint.y + s.pad_y - room.min.y + details_h(page, &view.key, &laid.details, face);
+    paint.row(page, &view.key, &actions);
     if page.details && face.live {
-        details(&mut paint, page, &card, face, grid, view, &laid.details);
+        paint.log = kept.log();
+        details(&mut paint, page, &card, face, grid, view, &kept.details(&laid.details));
     }
+    let rest = want.fixed + kept.height;
     let bottom = (paint.y + s.pad_y).min(room.max.y);
     studio::hairline(&card, Rect::from_min_max(room.min, pos2(room.max.x, bottom)), face.pal);
     Drawn { acts, caret: None, rest }
@@ -149,27 +153,55 @@ impl Laid {
     }
 }
 
-/// The cells' give-way of the card's rows (cells/card.rs's
-/// `give_way_rows`), one step: the last dim explanation line goes, else
-/// the Converts row and the lines under it; never the head, Holds, Space
-/// or the bottom row. Whether anything went.
-fn give_way(rows: &mut Vec<Row>) -> bool {
+/// Which of the card's value `rows` say what its primary will do or what
+/// is under way, each with its block (a labelled row and the lines under
+/// it): Next sync's, and a block board.rs's `says` keeps — a problem's
+/// words behind a gold or a danger LED, a sync's scan.
+fn saying(rows: &[Row], face: &Face) -> Vec<bool> {
+    let next = t!("dev.card.label_next").to_string();
+    let mut said = vec![false; rows.len()];
+    let starts = |row: &Row| matches!(row, Row::Value { label: Some(_), .. } | Row::Bar { label: Some(_), .. });
+    let mut at = 0;
+    while at < rows.len() {
+        let end = (at + 1..rows.len()).find(|&i| starts(&rows[i])).unwrap_or(rows.len());
+        let block: Vec<&Row> = rows[at..end].iter().collect();
+        let named = matches!(&rows[at], Row::Value { label: Some(l), .. } if *l == next);
+        if named || super::board::says(&block, face) {
+            said[at..end].iter_mut().for_each(|s| *s = true);
+        }
+        at = end;
+    }
+    said
+}
+
+/// The other value rows' turns to give way, a turn's rows at a time: as
+/// the cells give theirs way (cells/card.rs's `give_way_rows`) — each dim
+/// explanation line, the last first, then the Converts row with the lines
+/// under it — and then each row left, from the foot. The rows `said` keeps
+/// take no turn.
+fn turns(rows: &[Row], said: &[bool]) -> Vec<Vec<usize>> {
     let dim = crate::kit::dim();
     let dim_line = |row: &Row| match row {
         Row::Value { label: None, left, right: None } => !left.spans.is_empty() && left.spans.iter().all(|s| s.style == dim),
         _ => false,
     };
-    if let Some(at) = rows.iter().rposition(dim_line) {
-        rows.remove(at);
-        return true;
+    let mut gone = said.to_vec();
+    let mut turns = Vec::new();
+    for i in (0..rows.len()).rev() {
+        if !gone[i] && dim_line(&rows[i]) {
+            gone[i] = true;
+            turns.push(vec![i]);
+        }
     }
     let converts = t!("dev.card.label_converts").to_string();
-    let Some(at) = rows.iter().position(|r| matches!(r, Row::Value { label: Some(l), .. } if *l == converts)) else { return false };
-    rows.remove(at);
-    while matches!(rows.get(at), Some(Row::Value { label: None, right: None, .. })) {
-        rows.remove(at);
+    if let Some(at) = rows.iter().position(|r| matches!(r, Row::Value { label: Some(l), .. } if *l == converts)).filter(|&at| !said[at]) {
+        let under = (at + 1..rows.len()).take_while(|&i| matches!(rows[i], Row::Value { label: None, right: None, .. }));
+        let turn: Vec<usize> = std::iter::once(at).chain(under).filter(|&i| !gone[i]).collect();
+        turn.iter().for_each(|&i| gone[i] = true);
+        turns.push(turn);
     }
-    true
+    turns.extend((0..rows.len()).rev().filter(|&i| !gone[i]).map(|i| vec![i]));
+    turns
 }
 
 /// The bottom row's links given way in points as the cells give them way
@@ -313,7 +345,7 @@ impl Values<'_, '_> {
     /// view's rows, which the cells set one under another), a line under
     /// its block's last 4 points, 6 under a meter. Returns where the next
     /// row starts.
-    fn paint(&self, mut y: f32, rows: &[Row]) -> f32 {
+    fn paint(&self, mut y: f32, rows: &[&Row]) -> f32 {
         let mut last = None;
         for row in rows {
             let labelled = matches!(row, Row::Value { label: Some(_), .. } | Row::Bar { label: Some(_), .. });
@@ -467,23 +499,21 @@ impl Values<'_, '_> {
 
 // ── Details ───────────────────────────────────────────────────────────────
 
-/// Details' `rows` (the cells' `details_rows`) under the bottom row through
-/// `paint`: the rule, the facts — Drive and Removes giving way their own
-/// way — the card's own log in the rows the rest leave it, and Sync again.
-fn details(paint: &mut Paint, page: &mut Page, ui: &Ui, face: &Face, grid: Grid, view: &CardView, rows: &[Row]) {
+/// Details' `rows` (the cells' `details_rows`, as board.rs's `keep` kept
+/// them) under the bottom row through `paint`: the rule, the facts — Drive
+/// and Removes giving way their own way — the card's own log in the lines
+/// it was given, and Sync again.
+fn details(paint: &mut Paint, page: &mut Page, ui: &Ui, face: &Face, grid: Grid, view: &CardView, rows: &[&Row]) {
     let drive = t!("dev.card.fact_drive").to_string();
     let removes = t!("dev.card.fact_removes").to_string();
-    for (i, row) in rows.iter().enumerate() {
+    for row in rows {
         if paint.cut {
             return;
         }
         match row {
             Row::Fact { label, value, .. } if *label == drive => drive_fact(paint, ui, face, grid, view, label, value),
             Row::Fact { label, value, .. } if *label == removes => removes_fact(paint, ui, face, grid, view, label, value),
-            row => {
-                let tail: f32 = rows[i + 1..].iter().map(|r| fixed_h(r, face)).sum();
-                paint.row(page, &view.key, row, tail);
-            }
+            row => paint.row(page, &view.key, row),
         }
     }
 }
@@ -1073,24 +1103,31 @@ mod tests {
         let out = probe.settle(&mut page);
         assert_drew(&out, &["CONVERTS", &dims[0], &dims[1], "SYNC"]);
         assert_eq!(fonts_of(&out, &dims[1]), [body(13.0)], "an explanation dim, 13 points");
-        // At the GUI's floor with Details open, the rows give way as
-        // give_way_rows gives them way, and the head, Holds, Space and the
-        // bottom row stay, the primary whole over the busy line. Its dim
-        // lines are a sentence each whose words the cells' wrap parts with
-        // plain spaces, so its first step passes them by: Converts goes,
-        // and the lines under it with it.
+        // At the GUI's floor at rest, the rows give way as give_way_rows
+        // gives them way: its dim lines a sentence each whose words the
+        // cells' wrap parts with plain spaces, so its first step passes
+        // them by and Converts goes, and the lines under it with it, while
+        // the head, Holds, Space, Next sync and the bottom row stay, the
+        // primary whole over the busy line.
         let probe = Probe::new(FLOOR);
         let (mut page, _inbox) = alone(gift);
-        page.act(Act::Details);
         let out = probe.settle(&mut page);
         assert!(!drew(&out, "CONVERTS") && !drew(&out, &dims[0]) && !drew(&out, &dims[1]), "{:?}", words_of(&out));
-        assert_drew(&out, &["Car music", "HOLDS", "SPACE", "LAST SYNC", "Details", "SYNC"]);
+        assert_drew(&out, &["Car music", "HOLDS", "SPACE", "LAST SYNC", "NEXT SYNC", "Details", "SYNC"]);
         let primary = find(&out, "SYNC");
         assert!(primary.max.y + 12.0 < FLOOR.y - studio::NOTE_H, "the primary over the busy line: {primary:?}");
+        // With Details open the other value rows give way to it whole lines
+        // from the foot, Next sync (what Sync will do) kept over them all.
+        page.act(Act::Details);
+        let out = probe.settle(&mut page);
+        assert_drew(&out, &["Car music", "NEXT SYNC", "Details", "SYNC", "DRIVE", "Sync again"]);
+        assert!(!drew(&out, "LAST SYNC"), "the value rows from the foot first: {:?}", words_of(&out));
+        let again = find(&out, "Sync again");
+        assert!(again.max.y + 12.0 < FLOOR.y - studio::NOTE_H, "Sync again whole on the card: {again:?}");
     }
 
     #[test]
-    fn at_the_guis_floor_details_opens_on_its_drive_at_least_under_a_synced_card_beside_a_board() {
+    fn at_the_guis_floor_details_keeps_next_sync_its_drive_and_sync_again_under_a_synced_card_beside_a_board() {
         let _en = english();
         let done = cards::with(cards::ready("E:", now()), |c| {
             c.ended = Some(Ended::Done { tracks: 4_822, took: 60, skipped: Vec::new(), plays: 37 });
@@ -1100,10 +1137,13 @@ mod tests {
         page.act(Act::Card(0));
         page.act(Act::Details);
         let out = probe.settle(&mut page);
-        assert_drew(&out, &["Details", "DRIVE", "SYNC"]);
-        let drive = find(&out, "DRIVE");
-        assert!(drive.max.y + 12.0 <= FLOOR.y - studio::NOTE_H, "the drive's fact on the card: {drive:?}");
-        assert_drew(&out, &["Car music", "HOLDS", "SPACE"]);
+        // Next sync, what Sync will do, stands over the bottom row; Details
+        // keeps its rule, Sync again and its facts from the top, the other
+        // value rows giving way to them.
+        assert_drew(&out, &["Car music", "NEXT SYNC", "Details", "SYNC", "DRIVE", "Sync again"]);
+        let (drive, again) = (find(&out, "DRIVE"), find(&out, "Sync again"));
+        assert!(drive.max.y < again.min.y && again.max.y + 12.0 <= FLOOR.y - studio::NOTE_H, "the drive's fact and Sync again on the card: {drive:?} {again:?}");
+        assert!(!drew(&out, "HOLDS") && !drew(&out, "SPACE"), "the other value rows gave way: {:?}", words_of(&out));
     }
 
     #[test]
@@ -1133,13 +1173,13 @@ mod tests {
     }
 
     #[test]
-    fn the_give_way_takes_the_last_dim_line_then_converts_and_the_lines_under_it_as_the_cells_do() {
+    fn the_give_way_takes_the_last_dim_line_then_converts_and_the_lines_under_it_as_the_cells_do_then_the_rest_from_the_foot() {
         let _en = english();
         let dim = crate::kit::dim();
         let value = |label: Option<&str>, spans: Vec<ratatui::text::Span<'static>>| Row::Value { label: label.map(str::to_string), left: Line::from(spans), right: None };
         let word = |w: &'static str| ratatui::text::Span::styled(w, dim);
         let converts = t!("dev.card.label_converts").to_string();
-        let mut rows = vec![
+        let rows = vec![
             value(Some("Holds"), vec![ratatui::text::Span::raw("Rock")]),
             value(None, vec![word("first")]),
             value(Some(converts.as_str()), vec![ratatui::text::Span::raw("Opus")]),
@@ -1147,16 +1187,15 @@ mod tests {
             value(None, vec![word("two"), ratatui::text::Span::raw(" "), word("words")]),
             value(Some("Last"), vec![ratatui::text::Span::raw("now")]),
         ];
-        let left = |rows: &[Row]| rows.iter().map(|r| if let Row::Value { left, .. } = r { left.to_string() } else { String::new() }).collect::<Vec<_>>();
-        assert!(give_way(&mut rows));
-        assert_eq!(left(&rows), ["Rock", "first", "Opus", "two words", "now"], "the last dim line first");
-        assert!(give_way(&mut rows));
-        assert_eq!(left(&rows), ["Rock", "Opus", "two words", "now"], "then the one before it");
-        // A sentence the cells' wrap parts with plain spaces is no dim line
-        // to them: Converts goes, with it.
-        assert!(give_way(&mut rows));
-        assert_eq!(left(&rows), ["Rock", "now"]);
-        assert!(!give_way(&mut rows), "never Holds or the rest");
+        // The last dim line first, then the one before it; a sentence the
+        // cells' wrap parts with plain spaces is no dim line to them, so
+        // Converts goes with it; then the rest from the foot.
+        let none = vec![false; rows.len()];
+        assert_eq!(turns(&rows, &none), [vec![3], vec![1], vec![2, 4], vec![5], vec![0]]);
+        // A row that says what the primary will do takes no turn.
+        let mut said = none.clone();
+        said[5] = true;
+        assert_eq!(turns(&rows, &said), [vec![3], vec![1], vec![2, 4], vec![0]]);
     }
 
     #[test]
