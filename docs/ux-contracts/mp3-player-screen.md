@@ -3522,7 +3522,7 @@ setting no locale, prints in English.
     row's setting unseen).
   - **Looks left as they are**: at the GUI's floor the removals gate's
     foot stands half under its body's view until the body is scrolled, as
-    the kit's gate does (a foot's buttons say no row of the body's, so the
+    the kit's gate does (a gate's answers say no row of the body's, so the
     view never ends over them and hides them); the Advanced sheet's erase
     line takes the click on its box and its words, the kit's check line,
     where the cells take the whole row; a Settings row the cells cut at a

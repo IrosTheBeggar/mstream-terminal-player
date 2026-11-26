@@ -873,3 +873,38 @@ from every locale. The rooms' own strings (`admin.*`, `usr.*`, `bak.*`,
     in the accent the rule beside it takes then (clause 35), in every
     placement; in the Log room it holds the keys, so the ring is always
     there.
+- **2026-11-25 — A modal's rows, by what they draw.** The MP3 tab's
+  rounds gave the kit's modal a rule: its body's view ends between rows,
+  never through one, and comes in on a row's top. Rendered before and
+  after in every room, it read wrong in five places at the GUI's default
+  window and its floor, each mended in the kit or the room:
+  - **A field's label and its box are two rows**, so a view whose top
+    cuts the label leaves the box and its caret whole under it; Torrents'
+    entries lost the whole field, the input method's candidates floating
+    over the blank.
+  - **A label, a check line, a line of ticks and a list's row are rows by
+    their capitals, their box and their words**, not the room over and
+    under them, so a view that reaches only that room keeps them: the
+    Federation mint's fourth line of ticks and Users' "server audio" no
+    longer go for a few empty points, nor does a keyboard walk pass a row
+    too far. The keyboard's line, its look as tall as its row, stays
+    whole or goes whole.
+  - **The rooms' own rows say where they are**: Backups' destination,
+    its numbers band (labels, boxes, hints) and its patterns' box,
+    Discovery's sheet's facts and description and its blocked list's
+    last line, a verdict's lines. The keys' move stops on the first row
+    whole over the control rather than passing rows it could not see:
+    Discovery's sheet at the floor opens on its first action under the
+    facts again, and Backups' walk to the patterns keeps the numbers in
+    view, no hint's foot torn under the title. Walking back to one of
+    Discovery's fields brings its label with its box.
+  - **A form's buttons are a row down to their words**: the view ends
+    over a button whose words it would cut, never on a sliver of it, and
+    lets one whose words it shows whole stand, its foot under the view's.
+    A gate's answers say no row, as the MP3 tab's gates' do: a gate is
+    there to be answered, so the view never ends over them and hides
+    them.
+  - **A figure that starts with a digit ends before a point a letter
+    follows**: a file named for its number keeps its extension in the
+    words' face (a note's "Track 12.flac" sets "12" in the monospace),
+    so an ellipsis falls in the words, not after "12".
