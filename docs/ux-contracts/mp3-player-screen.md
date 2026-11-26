@@ -1807,24 +1807,31 @@ comes from the cache, or a download, beside them.
     content's end, its why in a tooltip while it waits. A card spends its
     room down to the busy line before it leaves anything out; short of room
     it keeps, in this order: its bottom row with the primary, never cut,
-    whose links drop from the end (a card's Send the plays first); the
-    value rows that say what the primary will do — the block a board's
-    primary acts on (Firmware, or the SD card for Format), Next sync and
-    Next write, a failure's or a warning's words behind a gold LED, and a
-    block that holds a control (the SD card's Count free space or Format
-    link, Next write's Reset), so no control goes while the room holds it
-    — and work under way (a write, a format, a sync); while Details is
-    open, its rule and its links (Write again, Format as FAT32…, Sync
-    again), so its door never stands open over nothing and no control of
-    its goes at the default window; then its log's newest two lines; then
-    its facts, cut from the foot; then the other value rows, given way as
-    the cells give theirs (a card's dim lines first, then Converts) and
-    then whole lines from the foot. What room is left the log takes, its
-    newest lines, as many as fit and it has. Only where the bottom row and
+    whose links drop from the end (a card's Send the plays first); its
+    headline, its first value row — a board's Firmware row with its verdict
+    ("Up to date · v0.14.0 · just written", or the write's words over its
+    bar), a card's Holds or the row that stands in its place (Format,
+    Check) — so a card with Details open still says what it is at the
+    default window; the value rows that say what the primary will do — the
+    block a board's primary acts on (Firmware, or the SD card for Format),
+    Next sync and Next write, a failure's or a warning's words behind a
+    gold LED, and a block that holds a control (the SD card's Count free
+    space or Format link, Next write's Reset), so no control goes while the
+    room holds it — and work under way (a write, a format, a sync); while
+    Details is open, its rule and its links (Write again, Format as FAT32…,
+    Sync again), so its door never stands open over nothing and no control
+    of its goes at the default window; then its log's newest two lines;
+    then a card's Space, its bar with its figures, whole; then its facts,
+    cut from the foot; then the other value rows, given way as the cells
+    give theirs (a card's dim lines first, then Converts) and then whole
+    lines from the foot. What room is left the log takes, its newest lines,
+    as many as fit and it has. Only where the bottom row, the headline and
     the rows that say what it will do leave no room for even Details' rule
     and links does Details go whole, its door open over nothing, and its
     links' keys, where they have them, still reach them as the footer says
-    (w writes again, f formats), as the cells' keys reach a link they cut.
+    (w writes again, f formats), as the cells' keys reach a link they cut;
+    shorter still, the rows that say what the primary will do go from the
+    foot, and the headline last.
     Details' facts are a line each, never wrapped (a card's Drive gives way
     a piece at a time and its Removes cuts its path, never its count), its
     log a line a notch under the wheel, a thumb while it overflows.
@@ -1855,36 +1862,40 @@ comes from the cache, or a download, beside them.
     box is ticked (clause 58); the install's erase box is the same line,
     its cost hung under it.
 72. **The sheets are the kit's modal** over the page's area, their close
-    the kit's with the cells' tooltip. The Advanced options sheet is held
-    at its tallest state's top; where the window is short its rows close up
-    together toward a tighter set, its help giving way first, and short of
-    even that its body scrolls, the keyboard's stop brought into view. The
-    Settings sheet is held so too, its help and then its gaps giving way,
-    its body scrolled with the keyboard's row in view and brought in again
-    when its field or its list opens; its tab row, with its card's drive
-    and size, is pinned under its title as its foot is under its body (the
-    kit's Dialog head and foot), so the open tab is read at every size and
-    only the rows between them scroll. On both a scrolled body's view ends
-    between rows, never through one — the kit's rule for every Dialog whose
-    body says where its rows are: at its top, where the keys or the reveal
-    take it, and under the wheel, it ends over the top of a row its foot
-    would cut and starts under the foot of one its top would, the room left
-    blank, and the keys bring a row in with the view's top on a row's. On
-    both: each choice is the kit's round mark, its chosen one in the accent
-    where the keyboard is (the Advanced sheet's group, the Settings sheet's
-    row) and the text colour elsewhere, as the cells colour theirs; each
-    closed list (the release, From, Into) is the kit's box, its words in
-    the accent's semibold while the keyboard is on it; each list that hangs
-    is the kit's, framed in the accent, the keyboard's cursor filled, an
-    entry raised under the pointer, its figures in the monospace, and,
-    holding fewer entries than it has, the kit's thumb in a gutter of its
-    own its entries stop short of — the release list inside the sheet's
-    body, its words under its control's, a press off its entries closing
-    it; From's and Into's on a layer of their own over the sheet's lower
-    rows, inside its frame and over its pinned foot, never lower, and only
-    from a box in the body's view, a press on their frame off their entries
-    (the thumb, its gutter, the frame's edge) taking nothing and never the
-    row they hide. The keyboard's button in a foot wears the accent's ring
+    the kit's with the cells' tooltip. Each sheet's foot is pinned under its
+    body's view (the kit's Dialog foot), its buttons whole at every size,
+    as the cells keep a sheet's buttons and cut its rows over them. The
+    Advanced options sheet is held at its tallest state's top; where the
+    window is short its rows close up together toward a tighter set, its
+    help giving way first, and short of even that its body scrolls above
+    its foot, the keyboard's stop brought into view. The Settings sheet is
+    held so too, its help and then its gaps giving way, its body scrolled
+    with the keyboard's row in view and brought in again when its field or
+    its list opens; its tab row, with its card's drive and size, is pinned
+    under its title (the kit's Dialog head), so the open tab is read at
+    every size and only the rows between the tabs and the foot scroll. On
+    both a scrolled body's view ends between rows, never through one — the
+    kit's rule for every Dialog whose body says where its rows are: at its
+    top, where the keys or the reveal take it, and under the wheel, it ends
+    over the top of a row its foot would cut and starts under the foot of
+    one its top would, the room left blank, and the keys bring a row in
+    with the view's top on a row's. On both: each choice is the kit's round
+    mark, its chosen one in the accent where the keyboard is (the Advanced
+    sheet's group, the Settings sheet's row) and the text colour elsewhere,
+    as the cells colour theirs; each closed list (the release, From, Into)
+    is the kit's box, its words in the accent's semibold while the keyboard
+    is on it; each list that hangs is the kit's, framed in the accent, the
+    keyboard's cursor filled, an entry raised under the pointer, its
+    figures in the monospace, and, holding fewer entries than it has, the
+    kit's thumb in a gutter of its own its entries stop short of — the
+    release list inside the sheet's body's view and over its pinned foot,
+    never lower, its words under its control's, a press off its entries
+    (on the foot's buttons too, which take no hover under it) closing it;
+    From's and Into's on a layer of their own over the sheet's lower rows,
+    inside its frame and over its pinned foot, never lower, and only from a
+    box in the body's view, a press on their frame off their entries (the
+    thumb, its gutter, the frame's edge) taking nothing and never the row
+    they hide. The keyboard's button in a foot wears the accent's ring
     3 points out of it; an Apply with no whole image is drawn dim and takes
     nothing.
 
@@ -3486,30 +3497,38 @@ setting no locale, prints in English.
     room: the admin rooms' and the wizard's forms end so too, the kit's own
     rows saying where they are), a list hung over a Dialog stops inside its
     frame over its pinned foot, and a list's thumb has a gutter of its own
+    (clause 72). The third tour of the window found two more at the default
+    window: Details opened on a card gave way its headline with the other
+    value rows — the Done board lost its "Up to date · v0.14.0 · just
+    written" line, a card its Holds and its Space — and the Advanced
+    sheet's release list, its thumb's gutter wider, hung over the corner of
+    Use defaults, the sheet's foot its body's last row; now the headline is
+    kept right after the bottom row and a card's Space ahead of Details'
+    facts (clause 70), and the Advanced sheet's foot is pinned under its
+    body as the Settings sheet's is, its release list stopping over it
     (clause 72).
   - **Where the two faces part**: while Details is open on a card short
     of room, egui keeps its rows in clause 70's order — the bottom row, the
-    rows that say what the primary will do, Details' rule and links, its
-    log's newest lines, its facts, then the other value rows — where the
-    cells keep the value rows and cut Details from the foot, so at the
-    GUI's default window and its floor the two say different words in the
-    same state; and the egui frame closes up toward its tighter set and
-    holds there for the window's size (clause 68), where the cells have no
-    measures to close; and a press on From's or Into's list's frame off its
-    entries (its thumb, the thumb's gutter, the frame's edge) takes nothing
-    in egui, where a press on the cells' border is the Settings row's it
-    lies over (2026-11-25: egui's turned that row's setting unseen).
+    headline, the rows that say what the primary will do, Details' rule and
+    links, its log's newest lines, a card's Space, its facts, then the
+    other value rows — where the cells keep the value rows and cut Details
+    from the foot, so at the GUI's default window and its floor the two say
+    different words in the same state; and the egui frame closes up toward
+    its tighter set and holds there for the window's size (clause 68),
+    where the cells have no measures to close; and a press on From's or
+    Into's list's frame off its entries (its thumb, the thumb's gutter, the
+    frame's edge) takes nothing in egui, where a press on the cells' border
+    is the Settings row's it lies over (2026-11-25: egui's turned that
+    row's setting unseen).
   - **Looks left as they are**: at the GUI's floor the removals gate's
     foot stands half under its body's view until the body is scrolled, as
     the kit's gate does (a foot's buttons say no row of the body's, so the
-    view never ends over them and hides them); the Advanced sheet's foot is
-    its body's last row, not pinned, and its release list may hang over
-    its corner where the body is short; the Advanced sheet's erase line
-    takes the click on its box and its words, the kit's check line, where
-    the cells take the whole row; a Settings row the cells cut at a small
-    size can still be scrolled to and clicked; the Name field's caret goes
-    up to the GUI while the field is scrolled out of view, since the field
-    has the keys.
+    view never ends over them and hides them); the Advanced sheet's erase
+    line takes the click on its box and its words, the kit's check line,
+    where the cells take the whole row; a Settings row the cells cut at a
+    small size can still be scrolled to and clicked; the Name field's caret
+    goes up to the GUI while the field is scrolled out of view, since the
+    field has the keys.
   - **Left for the owner's ruling**: what the spec checks found of the
     code against this contract, which the egui face draws as the model
     holds it, as the cells do:
