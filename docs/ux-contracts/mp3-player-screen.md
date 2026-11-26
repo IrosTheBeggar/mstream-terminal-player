@@ -1824,7 +1824,10 @@ comes from the cache, or a download, beside them.
     then a card's Space, its bar with its figures, whole; then its facts,
     cut from the foot; then the other value rows, given way as the cells
     give theirs (a card's dim lines first, then Converts) and then whole
-    lines from the foot. What room is left the log takes, its newest lines,
+    lines from the foot. A Space the room cannot hold whole leaves its room
+    to what stands after it, in that order: the facts from the top, and
+    with every fact back, the other value rows, the last to give way the
+    first back. What room is left the log takes, its newest lines,
     as many as fit and it has. Only where the bottom row, the headline and
     the rows that say what it will do leave no room for even Details' rule
     and links does Details go whole, its door open over nothing, and its
@@ -3506,7 +3509,17 @@ setting no locale, prints in English.
     kept right after the bottom row and a card's Space ahead of Details'
     facts (clause 70), and the Advanced sheet's foot is pinned under its
     body as the Settings sheet's is, its release list stopping over it
-    (clause 72).
+    (clause 72). Their review found three more: the room a card's Space
+    left when it gave way went to the log's older lines, so a card a
+    little over the GUI's floor (26 and 27 rows) lost its facts to them;
+    with the keys on a sheet's pinned buttons the stop they had come from
+    was still taken as theirs, so going back to it after the wheel had
+    moved the body left it out of view; and a local build's file named
+    from a figure (4MB-merged.bin) set its extension in the words' face
+    though the sheet names the file a figure. Now the room a Space leaves
+    is its facts' and then the other value rows' (clause 70), the buttons
+    are noted as the keys' stop so the next is brought into view (clause
+    72), and a file named so is one figure whole.
   - **Where the two faces part**: while Details is open on a card short
     of room, egui keeps its rows in clause 70's order — the bottom row, the
     headline, the rows that say what the primary will do, Details' rule and
