@@ -627,6 +627,29 @@ fn at_the_guis_default_size_a_cards_details_keeps_its_holds_its_space_next_sync_
     assert!(again.max.y <= card_room_of(&out, "Sync again").max.y - TIGHT.pad_y + 0.5, "Sync again whole on the card: {again:?}");
 }
 
+#[test]
+fn a_little_over_the_guis_floor_the_room_a_cards_space_leaves_goes_to_its_facts_before_more_of_its_log() {
+    let _en = english();
+    let (mut page, ends) = with_card(Ends::up_to_date);
+    page.act(Act::Card(0));
+    let key = page.cards()[0].key.clone();
+    let said = |text: String| crate::device::desk::Event::Log { port: Some(key.clone()), text, kind: LogKind::Fact };
+    ends.tell((0..12).map(|i| said(format!("asked Home: step {i:02}"))));
+    page.pump();
+    page.act(Act::Details);
+    // At 27 and 26 rows the Space, whole, has no room beside Details' rule,
+    // Sync again and the log's newest two lines, and gives way; the room it
+    // leaves is the facts' from the top before it is the log's older lines'.
+    for h in [400.0, 384.0] {
+        let out = Probe::new(vec2(WINDOW.x, h)).settle(&mut page);
+        let words = || texts(&out).into_iter().map(|(t, _)| t).collect::<Vec<_>>();
+        assert_drew(&out, &["HOLDS", "NEXT SYNC", "SYNC", "Sync again", "asked Home: step 11", "asked Home: step 10"]);
+        assert!(!drew(&out, "SPACE"), "{h}: the Space gave way whole: {:?}", words());
+        assert!(drew(&out, "DRIVE"), "{h}: the first fact kept in the room the Space left: {:?}", words());
+        assert!(find(&out, "DRIVE").max.y < find(&out, "asked Home: step 10").min.y, "{h}: the fact over the log");
+    }
+}
+
 /// Where the head's name stands its middle under the column's top with
 /// `space`.
 fn head_mid(space: Space) -> f32 {

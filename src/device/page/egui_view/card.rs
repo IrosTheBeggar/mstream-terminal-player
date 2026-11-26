@@ -1159,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn at_the_guis_floor_details_keeps_holds_next_sync_and_sync_again_under_a_synced_card_beside_a_board() {
+    fn at_the_guis_floor_details_keeps_holds_next_sync_its_first_facts_and_sync_again_under_a_synced_card_beside_a_board() {
         let _en = english();
         let done = cards::with(cards::ready("E:", now()), |c| {
             c.ended = Some(Ended::Done { tracks: 4_822, took: 60, skipped: Vec::new(), plays: 37 });
@@ -1171,14 +1171,15 @@ mod tests {
         let out = probe.settle(&mut page);
         // Its headline, Holds, and Next sync, what Sync will do, stand over
         // the bottom row; Details keeps its rule and Sync again, the other
-        // value rows giving way to them, and the Space and the facts too
-        // where the room holds none of them.
-        assert_drew(&out, &["Car music", "HOLDS", "Rock, Jazz from Home", "NEXT SYNC", "Details", "SYNC", "Sync again"]);
-        let (holds, again) = (find(&out, "HOLDS"), find(&out, "Sync again"));
+        // value rows giving way to them; the Space, whole, has no room
+        // here, and the room it leaves is its facts' from the top.
+        assert_drew(&out, &["Car music", "HOLDS", "Rock, Jazz from Home", "NEXT SYNC", "Details", "SYNC", "DRIVE", "Sync again"]);
+        let (holds, drive, again) = (find(&out, "HOLDS"), find(&out, "DRIVE"), find(&out, "Sync again"));
         assert!(holds.max.y < find(&out, "NEXT SYNC").min.y, "Holds first, as the card has it");
+        assert!(find(&out, "Details").max.y < drive.min.y && drive.max.y < again.min.y, "the drive's fact under the bottom row, over Sync again: {drive:?}");
         assert!(again.max.y + 12.0 <= FLOOR.y - studio::NOTE_H, "Sync again on the card: {again:?}");
         assert!(!drew(&out, "LAST SYNC") && !drew(&out, "CONVERTS"), "the other value rows gave way: {:?}", words_of(&out));
-        assert!(!drew(&out, "SPACE") && !drew(&out, "DRIVE"), "and the Space and the facts at the floor: {:?}", words_of(&out));
+        assert!(!drew(&out, "SPACE"), "and the Space at the floor: {:?}", words_of(&out));
     }
 
     #[test]

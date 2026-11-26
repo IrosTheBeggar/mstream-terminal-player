@@ -538,11 +538,13 @@ impl Kept {
 /// vanishes while the room holds it — then its log's newest two lines;
 /// then an SD card's Space, its bar and its figures, whole; then its facts,
 /// cut from the foot; then the other value rows, given way in their turns.
-/// What room is left the log takes, its newest lines as many as fit and it
-/// has. Short of room for even the bottom row, the headline and the rows
-/// that say what it will do, Details goes whole and those rows are cut
-/// from the foot, the headline last. `values_h` measures the value rows a
-/// mask keeps.
+/// A Space that gives way leaves its room to what stands after it, in that
+/// order: its facts from the top, and once they are all back, the other
+/// value rows, the last turn to give way first. What room is left the log
+/// takes, its newest lines as many as fit and it has. Short of room for
+/// even the bottom row, the headline and the rows that say what it will
+/// do, Details goes whole and those rows are cut from the foot, the
+/// headline last. `values_h` measures the value rows a mask keeps.
 pub(super) fn keep(want: &Want, face: &Face, mut values_h: impl FnMut(&[bool]) -> f32) -> Kept {
     let gap = face.space.gap;
     let log_h = |n: usize| if n > 0 { gap + n as f32 * LOG_ROW } else { 0.0 };
@@ -551,10 +553,11 @@ pub(super) fn keep(want: &Want, face: &Face, mut values_h: impl FnMut(&[bool]) -
         rule + k.facts as f32 * FACT_H + log_h(k.log) + if k.links { want.links } else { 0.0 }
     };
     let open = want.open;
+    let facts = if open { want.facts } else { 0 };
     let mut kept = Kept {
         values: vec![true; want.values],
         rule: open,
-        facts: if open { want.facts } else { 0 },
+        facts,
         log: if open { want.log.min(LOG_LEAST) } else { 0 },
         links: open,
         height: 0.0,
@@ -562,6 +565,7 @@ pub(super) fn keep(want: &Want, face: &Face, mut values_h: impl FnMut(&[bool]) -
     let mut v = values_h(&kept.values);
     let over = |k: &Kept, v: f32| want.fixed + v + details(k) > want.room + 0.01;
     let order = &want.order;
+    let mut gone = 0;
     for turn in &order.give_way {
         if !over(&kept, v) {
             break;
@@ -570,6 +574,7 @@ pub(super) fn keep(want: &Want, face: &Face, mut values_h: impl FnMut(&[bool]) -
             kept.values[i] = false;
         }
         v = values_h(&kept.values);
+        gone += 1;
     }
     while over(&kept, v) && kept.facts > 0 {
         kept.facts -= 1;
@@ -579,6 +584,31 @@ pub(super) fn keep(want: &Want, face: &Face, mut values_h: impl FnMut(&[bool]) -
             kept.values[i] = false;
         }
         v = values_h(&kept.values);
+        // The room the Space leaves is what stands after it: the facts
+        // first, from the top; then, with every fact back, the other value
+        // rows, the turn that gave way last the first back.
+        while kept.facts < facts {
+            kept.facts += 1;
+            if over(&kept, v) {
+                kept.facts -= 1;
+                break;
+            }
+        }
+        if kept.facts == facts {
+            for turn in order.give_way[..gone].iter().rev() {
+                for &i in turn {
+                    kept.values[i] = true;
+                }
+                let back = values_h(&kept.values);
+                if over(&kept, back) {
+                    for &i in turn {
+                        kept.values[i] = false;
+                    }
+                    break;
+                }
+                v = back;
+            }
+        }
     }
     while over(&kept, v) && kept.log > 0 {
         kept.log -= 1;
@@ -1503,11 +1533,13 @@ pub(super) mod tests {
         // At the floor and a little under it, where the card at rest fills
         // its room even closed up: the headline, the Firmware row with its
         // verdict, kept right after the bottom row; Write again and the
-        // format, whole under its rule, and where a line of the log has room
-        // over them, its newest; the other value line, the SD card's, giving
-        // way first (nothing here is the primary's: there is none), never
-        // the head or the bottom row.
+        // format, whole under its rule; at the floor the log's newest line
+        // over them, which a little under it, where the room holds it no
+        // more, gives way before the links and the headline; the other
+        // value line, the SD card's, giving way first (nothing here is the
+        // primary's: there is none), never the head or the bottom row.
         let chip = "Up to date · v0.8.0 · just written";
+        let newest = "mstream-mp3-player v0.8.0";
         for h in [FLOOR.y, 320.0] {
             let probe = Headless::new(vec2(FLOOR.x, h));
             let out = probe.settle(&mut page);
@@ -1517,8 +1549,11 @@ pub(super) mod tests {
             assert!(!drew(&out, "SD CARD"), "{h}: the other value line gave way first");
             assert!(find(&out, chip).max.y < find(&out, "Details").min.y, "{h}: the headline over the bottom row");
             assert!(!drew(&out, "writing… 100%"), "{h}: never the older line");
-            if drew(&out, "mstream-mp3-player v0.8.0") {
-                assert!(find(&out, "mstream-mp3-player v0.8.0").max.y < find(&out, "Write v0.8.0 again").min.y, "{h}: the log's newest line over the links");
+            if h == FLOOR.y {
+                assert_drew(&out, &[newest]);
+            }
+            if drew(&out, newest) {
+                assert!(find(&out, newest).max.y < find(&out, "Write v0.8.0 again").min.y, "{h}: the log's newest line over the links");
             }
         }
         // Shorter than the GUI ever draws it, the bottom row and the
@@ -1566,7 +1601,21 @@ pub(super) mod tests {
         assert_eq!(kept(kept3 + 46.0 + 80.0), (3, all3, 4, 2, true));
         assert_eq!(kept(kept3 + 46.0 + 60.0), (3, all3, 3, 2, true));
         assert_eq!(kept(kept3 + 46.0), (3, all3, 0, 2, true), "the Space over any fact");
-        assert_eq!(kept(kept3 + 45.0), (2, two, 0, 3, true), "the Space whole, and the room it leaves the log's");
+        assert_eq!(kept(kept3 + 45.0), (2, two, 1, 2, true), "the Space whole, and the room it leaves the facts' first");
+        assert_eq!(kept(kept3 + 35.0), (2, two, 0, 3, true), "and the log's where it holds no fact");
+        // A card of one fact whose Space, 70 points, leaves room for more:
+        // the fact back, then the other value row that gave way last (20),
+        // before another line of the log.
+        let heights = [30.0, 30.0, 70.0, 20.0, 30.0];
+        let tall_space = |mask: &[bool]| mask.iter().zip(heights).filter(|(k, _)| **k).map(|(_, h)| h).sum::<f32>();
+        let one_fact = |room: f32| {
+            let k = keep(&Want { facts: 1, ..want(room) }, &face, tall_space);
+            (k.values.clone(), k.facts, k.log)
+        };
+        let base = 100.0 + 60.0 + 21.0 + 66.0 + 46.0;
+        assert_eq!(one_fact(base + 20.0 + 20.0 + 7.0), (vec![true, true, false, true, false], 1, 2), "the fact, then the row back, then the log");
+        assert_eq!(one_fact(base + 20.0 + 17.0), (vec![true, true, false, false, false], 1, 2), "the fact, the row not whole: nothing more");
+        assert_eq!(one_fact(base + 20.0 + 20.0 + 19.0), (vec![true, true, false, true, false], 1, 3), "the room left the log's");
         let least = 100.0 + 60.0 + 21.0 + 66.0;
         assert_eq!(kept(least + 46.0), (2, two, 0, 2, true));
         assert_eq!(kept(least + 28.0), (2, two, 0, 1, true));
