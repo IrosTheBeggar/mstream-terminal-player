@@ -754,7 +754,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
     let mut asked = Vec::new();
     let acts = &mut asked;
     // Where the keyboard can be, as `View::stop` numbers it; the buttons'
-    // stands pinned in view, and is never brought there.
+    // stands pinned in view, and is never brought there, only noted.
     let mut stops: [Option<Rect>; 6] = [None; 6];
     let mut caret = None;
     let mut anchor = None;
@@ -885,11 +885,12 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
             let anchor = anchor.unwrap_or_else(|| Rect::from_min_size(pos2(col.min.x + NAME_IN, rows_top + m.row), vec2(1.0, 1.0)));
             release_list(ui, id, list, anchor, col, face, acts);
         }
-        None => {
-            if let Some(rect) = stops[view.stop] {
-                studio::reveal(ui, id, view.stop, rect);
-            }
-        }
+        None => match stops[view.stop] {
+            Some(rect) => studio::reveal(ui, id, view.stop, rect),
+            // The buttons', pinned in sight: noted, so the stop the keys
+            // go back to comes into view wherever the wheel left the body.
+            None => studio::reveal_pinned(ui, id, view.stop),
+        },
     }
     Body { acts: asked, caret, view: ui.clip_rect(), foot: Rect::NOTHING }
 }
@@ -1538,6 +1539,80 @@ mod tests {
         assert_eq!(sheet(&page).focus, Stop::Buttons);
         let out = probe.settle(&mut page);
         assert!(in_view(&out, "APPLY") && in_view(&out, "USE DEFAULTS") && foot_of(&probe) == foot, "the buttons in view where they stood");
+    }
+
+    /// Whether the sheet drew `words` whole in the body's view: not where it
+    /// drew them out of it, nor where it drew none.
+    fn seen(out: &FullOutput, words: &str) -> bool {
+        texts(out).into_iter().any(|(t, at, clip)| t == words && clip.contains_rect(at.shrink(0.5)))
+    }
+
+    /// Whether every text the sheet drew within `row`'s height stands whole
+    /// in view, and it drew one.
+    fn row_seen(out: &FullOutput, row: Rect) -> bool {
+        let inside: Vec<(Rect, Rect)> = texts(out).into_iter().filter(|(_, at, _)| at.min.y >= row.min.y - 0.5 && at.max.y <= row.max.y + 0.5).map(|(_, at, clip)| (at, clip)).collect();
+        !inside.is_empty() && inside.iter().all(|(at, clip)| clip.contains_rect(at.shrink(0.5)))
+    }
+
+    /// A wheel's turn of `dy` points over `at` (up the body for a positive
+    /// one), and the passes egui eases the scroll over.
+    fn wheel(probe: &Probe, page: &mut Page, at: Pos2, dy: f32) {
+        let turn = Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, dy), phase: egui::TouchPhase::Move, modifiers: Default::default() };
+        let _ = probe.pass(page, vec![Event::PointerMoved(at), turn]);
+        for _ in 0..40 {
+            let _ = probe.pass(page, Vec::new());
+        }
+    }
+
+    #[test]
+    fn at_the_floor_the_stop_the_keys_go_back_to_from_the_buttons_comes_into_view_wherever_the_wheel_left_the_body() {
+        let _en = english();
+        let probe = Probe::new(FLOOR);
+        let (mut page, ends) = sheet_up();
+        // The tallest the sheet stands, as above: its body scrolls.
+        typed(&probe, &mut page, &ends, REFUSED);
+        let why = format!("{REFUSED} is not an mstream-mp3-player image — it says arduino-lib-builder and nothing else");
+        ends.tell([Told::Vetted { path: REFUSED.into(), result: Err(DeviceError::Firmware(why)) }]);
+        page.pump();
+        let out = probe.settle(&mut page);
+        probe.click(&mut page, find(&out, "Type a path").center());
+        press(&mut page, KeyCode::Esc);
+        while sheet(&page).focus != Stop::Erase {
+            press(&mut page, KeyCode::Tab);
+        }
+        let out = probe.settle(&mut page);
+        assert!(seen(&out, "Erase the whole flash first"), "the erase line brought into view");
+        // On to the buttons, and the wheel takes the body up to its top.
+        press(&mut page, KeyCode::Tab);
+        assert_eq!(sheet(&page).focus, Stop::Buttons);
+        let _ = probe.settle(&mut page);
+        let over_body = pos2(FLOOR.x / 2.0, foot_of(&probe).min.y - 40.0);
+        wheel(&probe, &mut page, over_body, 5000.0);
+        let out = probe.settle(&mut page);
+        assert!(!seen(&out, "Erase the whole flash first"), "the wheel took the body off the erase line");
+        // Back to Erase: the keys moved, so their stop comes into view.
+        press(&mut page, KeyCode::BackTab);
+        assert_eq!(sheet(&page).focus, Stop::Erase);
+        let out = probe.settle(&mut page);
+        assert!(seen(&out, "Erase the whole flash first"), "the erase line brought back into view");
+        // And round the other way: from Firmware back to the buttons, the
+        // wheel down to the body's end, and Tab on to Firmware again.
+        while sheet(&page).focus != Stop::Firmware {
+            press(&mut page, KeyCode::BackTab);
+        }
+        let pin = Id::new("mp3-sheet").with("firmware").with(0usize);
+        let out = probe.settle(&mut page);
+        assert!(row_seen(&out, probe.rect_of(pin)), "the firmware's first row brought into view");
+        press(&mut page, KeyCode::BackTab);
+        assert_eq!(sheet(&page).focus, Stop::Buttons);
+        let _ = probe.settle(&mut page);
+        wheel(&probe, &mut page, over_body, -5000.0);
+        let out = probe.settle(&mut page);
+        assert!(!row_seen(&out, probe.rect_of(pin)), "the wheel took the body off the firmware's rows");
+        press(&mut page, KeyCode::Tab);
+        assert_eq!(sheet(&page).focus, Stop::Firmware);
+        let out = probe.settle(&mut page);
+        assert!(row_seen(&out, probe.rect_of(pin)), "the firmware's first row brought back into view");
     }
 
     // ── The keyboard's walk ───────────────────────────────────────────────

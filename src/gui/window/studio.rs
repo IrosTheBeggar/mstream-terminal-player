@@ -3164,6 +3164,18 @@ pub(crate) fn reveal(ui: &Ui, modal: Id, at: usize, rect: Rect) {
     }
 }
 
+/// The keyboard's control in the modal `modal` that stands outside its
+/// body's view, always in sight (a button of its pinned foot), by
+/// [`reveal`]'s number for it, `at`: nothing is brought into view, but the
+/// keyboard is noted there as [`reveal`] notes it, so the control in the
+/// body the keys go to next is a move and comes into view, wherever the
+/// wheel left the body meanwhile.
+pub(crate) fn reveal_pinned(ui: &Ui, modal: Id, at: usize) {
+    let ctx = ui.ctx();
+    let Some(body) = ctx.data(|d| d.get_temp::<BodyView>(modal.with("view"))) else { return };
+    ctx.data_mut(|d| d.insert_temp(modal.with("revealed"), (at, body.full)));
+}
+
 // ── Pictures, steps and a button at rest ─────────────────────────────────
 //
 // What the setup wizard's frame needed first (src/setup/egui_view.rs) and
@@ -3463,15 +3475,20 @@ pub(crate) fn halved(image: &egui::ColorImage) -> egui::ColorImage {
 /// full stop) — when that run starts with a digit (`21.4`, `1,284`,
 /// `14:03`, a serial, and a percentage with its sign, `62%`), is a version
 /// (`v0.14.0`, `v0.14.0-5-g4e94418`), is a hex string of six or more with
-/// a digit in it (an ELF), or is one of `also` (a port's name, which no
-/// rule can tell from a word). A run that starts with a digit ends before
-/// a point a letter follows: a file named for its number keeps its
-/// extension in the words' face (`12.flac`'s figure is its `12`).
+/// a digit in it (an ELF), or is one of `also` (a port's name or a file's,
+/// which no rule can tell from a word), matched whole. Any other run that
+/// starts with a digit ends before a point a letter follows: a file named
+/// for its number keeps its extension in the words' face (`12.flac`'s
+/// figure is its `12`), unless `also` names it.
 fn figure_span(word: &str, also: &[&str]) -> Option<Range<usize>> {
     let start = word.find(|c: char| c.is_ascii_alphanumeric() || c == '/')?;
     let joins = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | ',' | ':' | '-' | '+' | '_' | '/');
     let len = word[start..].find(|c: char| !joins(c)).unwrap_or(word.len() - start);
-    let mut core = word[start..start + len].trim_end_matches(['.', ',', ':', '-']);
+    let whole = word[start..start + len].trim_end_matches(['.', ',', ':', '-']);
+    if !whole.is_empty() && also.contains(&whole) {
+        return Some(start..start + whole.len());
+    }
+    let mut core = whole;
     if core.starts_with(|c: char| c.is_ascii_digit())
         && let Some(at) = core.as_bytes().windows(2).position(|pair| pair[0] == b'.' && pair[1].is_ascii_alphabetic())
     {
@@ -3484,13 +3501,13 @@ fn figure_span(word: &str, also: &[&str]) -> Option<Range<usize>> {
     let hex = core.len() >= 6 && core.chars().all(|c| c.is_ascii_hexdigit()) && core.chars().any(|c| c.is_ascii_digit());
     let end = start + core.len();
     let end = if digit && word[end..].starts_with('%') { end + 1 } else { end };
-    (digit || version || hex || also.contains(&core)).then(|| start..end)
+    (digit || version || hex).then(|| start..end)
 }
 
 /// `s` as runs in `font` and `color`, each figure in it ([`figure_span`]:
-/// a size, a version, a count, a time, a serial, a port named in `also`)
-/// set in `figure` instead, as the canvas sets a page's figures in the
-/// grid's monospace inside its sentences. The words between keep their
+/// a size, a version, a count, a time, a serial, a port or a file named in
+/// `also`) set in `figure` instead, as the canvas sets a page's figures in
+/// the grid's monospace inside its sentences. The words between keep their
 /// spaces, so the line says what the cells say.
 pub(crate) fn figured(s: &str, also: &[&str], font: FontId, figure: FontId, color: Color32) -> Vec<Run> {
     let mut parts: Vec<Run> = Vec::new();
@@ -6245,6 +6262,12 @@ mod tests {
         let note = "EACCES: permission denied, open '/srv/music/2024/07 Track 12.flac' (errno -13)";
         assert_eq!(figures_in(note, &[]), ["12", "13"], "a path and a file's extension stay words");
         assert_eq!(figures_in("ELF 11c35a4a.bin · 2026.11.25.log · 1.5e3", &[]), ["11c35a4a", "2026.11.25", "1.5e3"], "a point a letter follows ends a figure, any other joins it");
+        // A name the caller names a figure is one whole, its extension and
+        // all, whatever it starts with; one it does not name keeps the cut.
+        let build = "4MB-merged.bin · v0.8.0 · 1,048,576 B";
+        assert_eq!(figures_in(build, &["4MB-merged.bin"]), ["4MB-merged.bin", "v0.8.0", "1,048,576"], "a file named in `also` whole");
+        assert_eq!(figures_in("0.8.1-rc1.bin, read", &["0.8.1-rc1.bin"]), ["0.8.1-rc1.bin"], "and less the mark it ends on");
+        assert_eq!(figures_in(build, &["firmware.bin"]), ["4MB-merged", "v0.8.0", "1,048,576"], "another file's extension stays a word");
     }
 
     #[test]

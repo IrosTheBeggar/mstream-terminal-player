@@ -389,6 +389,7 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Body {
     // The body's view, scrolled or not: what a list may hang from.
     let view = ui.clip_rect();
     let w = ui.available_width();
+    let mut met = false;
     for (k, line) in plan.lines.iter().enumerate() {
         if k > 0 {
             ui.add_space(ROW_GAP);
@@ -412,6 +413,7 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Body {
                 }
                 out.caret = out.caret.or(row_drawn.caret);
                 if *i == focus {
+                    met = true;
                     studio::reveal(ui, id, at, row_drawn.rect);
                     // A list hangs only from a box in the body's view, as
                     // the cells hang none from a row they cut: never over
@@ -423,6 +425,11 @@ fn sheet_body(ui: &mut Ui, v: &View, face: &Face, id: Id, plan: &Plan) -> Body {
                 }
             }
         }
+    }
+    // The keys on the buttons, pinned in sight under the body: noted, so
+    // the row they go back to comes into view wherever the wheel left it.
+    if !met {
+        studio::reveal_pinned(ui, id, at);
     }
     if let Some((fit, h)) = &plan.fit {
         ui.add_space(plan.gap);
@@ -1462,6 +1469,32 @@ mod tests {
         let out = probe.settle(&mut page);
         let apply = find(&out, "APPLY");
         assert!(ringed(&out).iter().any(|r| r.contains(apply.center()) && r.height() > studio::FORM_BUTTON_H), "{:?}", ringed(&out));
+    }
+
+    #[test]
+    fn at_the_guis_floor_the_row_the_keys_go_back_to_from_the_buttons_comes_into_view_wherever_the_wheel_left_the_body() {
+        let _en = english();
+        let probe = Probe::new(FLOOR);
+        let (mut page, _ends, _inbox, _fold) = ready_sheet();
+        page.act(Act::CardSheetTab(1));
+        // The keys on the Writing tab's last row, Player, the body scrolled
+        // to it; then on to the buttons.
+        let last = sheet(&page).rows().len() - 2;
+        page.card.sheet.as_mut().expect("the sheet").focus = last;
+        let out = probe.settle(&mut page);
+        assert!(whole(&out, "PLAYER"), "the last row brought into view");
+        press(&mut page, KeyCode::Down);
+        assert_eq!(sheet(&page).row(), SRow::Buttons);
+        let out = probe.settle(&mut page);
+        // The wheel takes the body back to its top, Player out of its view.
+        wheel(&probe, &mut page, body_view(&out, "PLAYER").center(), 2000.0);
+        let out = probe.settle(&mut page);
+        assert!(!whole(&out, "PLAYER") && whole(&out, "CONVERT"), "the body at its top");
+        // Up, back to Player: the keys moved, so their row comes into view.
+        press(&mut page, KeyCode::Up);
+        assert_eq!(sheet(&page).row(), SRow::Player);
+        let out = probe.settle(&mut page);
+        assert!(whole(&out, "PLAYER"), "Player brought back into view");
     }
 
     /// The one-line texts of the sheet's body a pass drew torn by its
