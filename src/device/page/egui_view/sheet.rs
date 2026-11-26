@@ -3,11 +3,13 @@
 //! kit's Dialog over the page's area and its scrim, the page inert beneath,
 //! for the board in view. Its three groups — the firmware's choices with
 //! what was picked under them, the flash mode with its marks by source, the
-//! erase box — then the help and the foot, each in the words the cells give
+//! erase box — then the help, and under them the foot, pinned under the
+//! body's view (the kit's `Dialog::foot`), as the Settings sheet's is, so
+//! its buttons stand whole at every size; each in the words the cells give
 //! it under the same conditions (their `sheet_lines`, `mode_lines`,
 //! `release_facts`, `help_text` and `list_rows`, said again here for the
-//! rows in points), and over its lower rows the release list while it
-//! hangs open.
+//! rows in points), and over its lower rows, never lower than the foot, the
+//! release list while it hangs open.
 //!
 //! The keyboard is the model's: Tab, the arrows, Space, Enter and Esc still
 //! walk the sheet's stops, move the list's cursor and edit the path field
@@ -26,7 +28,8 @@
 //! toward a tighter set, as far as the tallest state needs and no further,
 //! so no row moves between one state and the next; the help gives way in a
 //! state with no room left for it, as the cells' gives way first; and short
-//! of even that, the body scrolls, the keyboard's stop brought into view.
+//! of even that, the body scrolls above the pinned foot, the keyboard's
+//! stop brought into view.
 
 use std::path::Path;
 
@@ -220,11 +223,17 @@ impl Shape {
         if self.help_lines == 0 { 0.0 } else { 1.0 + m.help_gap + self.help_lines as f32 * LINE_H }
     }
 
-    /// The body's height: the three groups, the help where it stands, the
-    /// foot.
-    fn height(&self, m: &Measures) -> f32 {
+    /// The body's height over its pinned foot: the three groups, the help
+    /// where it stands.
+    fn body(&self, m: &Measures) -> f32 {
         let help = if self.help_lines == 0 { 0.0 } else { m.gap + self.help(m) };
-        self.firmware(m) + m.gap + self.mode(m) + m.gap + self.erase(m) + help + m.gap + self.foot_h
+        self.firmware(m) + m.gap + self.mode(m) + m.gap + self.erase(m) + help
+    }
+
+    /// The sheet's height under its title: its body, and its foot with the
+    /// gap over it.
+    fn height(&self, m: &Measures) -> f32 {
+        self.body(m) + m.gap + self.foot_h
     }
 }
 
@@ -659,22 +668,47 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face) -> Drawn {
     let view = View::of(page, &sheet, &board);
     let id = Id::new("mp3-sheet");
     let dialog = Dialog::new(id, face.full, SHEET_W, &view.title);
+    // The measures are chosen for the whole room under the title, the foot
+    // in it, as is the height the window is held for; the foot then takes
+    // its own room out of it, under the body's view, the gap over it.
     let room = dialog.body_room(ui);
     let foot_h = foot(ui, room.x).1;
     let measures = Measures::for_room(&Shape { help_lines: 0, ..Shape::tallest(foot_h) }, room.y);
     let hold = Shape::tallest(foot_h).height(&measures);
-    let mut acts = Vec::new();
-    let shown = dialog.hold(hold).show(ui, face.pal, |ui| sheet_body(ui, id, &view, &sheet, &measures, face, &mut acts));
-    // Under the hanging list the close, as every click off its rows, only
-    // closes the list (the body's catch says so).
-    if shown.closed && view.list.is_none() {
-        acts.push(Act::SheetClose);
+    let shown = dialog.hold(hold).foot(measures.gap + foot_h).show_footed(
+        ui,
+        face.pal,
+        |ui| sheet_body(ui, id, &view, &sheet, &measures, face),
+        |ui, out| sheet_foot(ui, id, &view, &measures, face, out),
+    );
+    let mut out = shown.inner;
+    if view.list.is_some() {
+        // Under the hanging list a click off the body and its foot — on the
+        // title, the close or the scrim — only closes the list, as the
+        // cells' close is registered over the whole area.
+        let off = |p: Pos2| face.full.contains(p) && !out.view.contains(p) && !out.foot.contains(p);
+        if ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(off)) {
+            out.acts.push(Act::ListClose);
+        }
+    } else if shown.closed {
+        out.acts.push(Act::SheetClose);
     }
     // The cells' keyed tooltip on their close, which the kit's has not.
     close_tip(ui, id, face);
-    drawn.acts = acts;
-    drawn.caret = shown.inner;
+    drawn.acts = out.acts;
+    drawn.caret = out.caret;
     drawn
+}
+
+/// What the sheet's body hands back, and its foot adds to: the acts their
+/// clicks asked for, the path field's caret while it has the keyboard, and
+/// where the body's view and the pinned foot stood, which take their own
+/// clicks under the hanging list.
+struct Body {
+    acts: Vec<Act>,
+    caret: Option<Pos2>,
+    view: Rect,
+    foot: Rect,
 }
 
 /// The foot's two buttons, Use defaults and Apply, ending at the right of
@@ -695,11 +729,11 @@ fn lines_of(ui: &Ui, words: &str, size: f32, w: f32) -> usize {
 }
 
 /// The sheet's body in the Dialog's `ui`, top to bottom in `m`: the three
-/// groups, the help where this state leaves it room, the foot, and over
-/// them the release list while it hangs. The caret of the path field while
-/// it has the keyboard.
-#[allow(clippy::too_many_arguments)]
-fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, face: &Face, acts: &mut Vec<Act>) -> Option<Pos2> {
+/// groups, the help where this state leaves it room, and over them the
+/// release list while it hangs; its foot is pinned under it
+/// ([`sheet_foot`]). Its acts, the caret of the path field while it has the
+/// keyboard, and its view.
+fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, face: &Face) -> Body {
     let pal = face.pal;
     let w = ui.available_width();
     let budget = ui.max_rect().height();
@@ -709,14 +743,18 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
         Read::Facts(..) => 2,
         Read::Refused(why) => lines_of(ui, why, 13.0, w - NAME_IN - MARK_IN),
     };
-    let (laid, foot_h) = foot(ui, w);
+    let foot_h = foot(ui, w).1;
     let mut shape = view.shape(read_lines, lines_of(ui, &view.help, 13.0, w), foot_h);
-    if shape.height(m) > budget + 0.01 {
+    if shape.body(m) > budget + 0.01 {
         shape.help_lines = 0;
     }
-    let (area, _) = ui.allocate_exact_size(vec2(w, shape.height(m)), Sense::hover());
+    let (area, _) = ui.allocate_exact_size(vec2(w, shape.body(m)), Sense::hover());
     let col = area;
     let live = view.list.is_none();
+    let mut asked = Vec::new();
+    let acts = &mut asked;
+    // Where the keyboard can be, as `View::stop` numbers it; the buttons'
+    // stands pinned in view, and is never brought there.
     let mut stops: [Option<Rect>; 6] = [None; 6];
     let mut caret = None;
     let mut anchor = None;
@@ -840,33 +878,7 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
         let at = pos2(col.min.x, y + 1.0 + m.help_gap);
         Para::new(&view.help, body(13.0), pal.dim).spaced(LINE_H).rows(2).paint(ui, at, col.width());
         row_at(y, shape.help(m));
-        y += shape.help(m);
     }
-
-    // The foot: Use defaults, and Apply where an image is whole.
-    y += m.gap;
-    let at = vec2(col.min.x, y);
-    let (defaults, apply) = (t!("dev.adv_defaults").to_string(), t!("dev.adv_apply").to_string());
-    let rects = [laid[0].translate(at), laid[1].translate(at)];
-    row_at(y, foot_h);
-    if studio::form_button(ui, id.with("foot").with(0usize), rects[0], &defaults, false, pal).clicked() && live {
-        acts.push(Act::Defaults);
-    }
-    if view.can_apply {
-        if studio::form_button(ui, id.with("foot").with(1usize), rects[1], &apply, true, pal).clicked() && live {
-            acts.push(Act::Apply);
-        }
-    } else {
-        let _ = studio::form_button_off(ui, id.with("foot").with(1usize), rects[1], &apply, pal);
-    }
-    // The keyboard's button: ringed, as the cells put it on their slab; an
-    // Apply that cannot apply wears no ring, as it wears no slab.
-    if let Some(on_apply) = view.buttons_focus
-        && (view.can_apply || !on_apply)
-    {
-        studio::button_ring(ui, rects[usize::from(on_apply)], pal);
-    }
-    stops[4] = Some(rects[0].union(rects[1]));
 
     match &view.list {
         Some(list) => {
@@ -879,7 +891,47 @@ fn sheet_body(ui: &mut Ui, id: Id, view: &View, sheet: &Sheet, m: &Measures, fac
             }
         }
     }
-    caret
+    Body { acts: asked, caret, view: ui.clip_rect(), foot: Rect::NOTHING }
+}
+
+/// The sheet's foot in its pinned room under the body's view (the kit's
+/// `Dialog::foot`), the room `m`'s gap over it: Use defaults, and Apply
+/// where an image is whole, each asking for its act, and the keyboard's
+/// button ringed. Under the hanging list its buttons are dead, as every
+/// control of the body's is under the body's catch: no hover, no hand, and
+/// a click on the foot only closes the list.
+fn sheet_foot(ui: &mut Ui, id: Id, view: &View, m: &Measures, face: &Face, out: &mut Body) {
+    let pal = face.pal;
+    let room = ui.max_rect();
+    let laid = foot(ui, room.width()).0;
+    let at = vec2(room.min.x, room.min.y + m.gap);
+    let (defaults, apply) = (t!("dev.adv_defaults").to_string(), t!("dev.adv_apply").to_string());
+    let rects = [laid[0].translate(at), laid[1].translate(at)];
+    let live = view.list.is_none();
+    if studio::form_button(ui, id.with("foot").with(0usize), rects[0], &defaults, false, pal).clicked() && live {
+        out.acts.push(Act::Defaults);
+    }
+    if view.can_apply {
+        if studio::form_button(ui, id.with("foot").with(1usize), rects[1], &apply, true, pal).clicked() && live {
+            out.acts.push(Act::Apply);
+        }
+    } else {
+        let _ = studio::form_button_off(ui, id.with("foot").with(1usize), rects[1], &apply, pal);
+    }
+    // The keyboard's button: ringed, as the cells put it on their slab; an
+    // Apply that cannot apply wears no ring, as it wears no slab.
+    if let Some(on_apply) = view.buttons_focus
+        && (view.can_apply || !on_apply)
+    {
+        studio::button_ring(ui, rects[usize::from(on_apply)], pal);
+    }
+    // Over the buttons, made after them so it takes their presses, as the
+    // body's catch is over its controls; and the body's catch, whose view
+    // can reach under a short body over the foot, never takes them.
+    if !live && ui.interact(room, id.with("foot-close"), Sense::click()).clicked() {
+        out.acts.push(Act::ListClose);
+    }
+    out.foot = room;
 }
 
 /// A group's label at `y`: the kit's small capitals, dim.
@@ -1013,14 +1065,16 @@ fn choosers(ui: &Ui, id: Id, row: Rect, view: &View, face: &Face, live: bool, ac
 /// the keyboard's cursor lit, an entry raised under the pointer. Its
 /// column's words stand under the control's; it is as wide as its widest
 /// entry, no wider than the column, and keeps inside it; as tall as its
-/// entries, no lower than the body's foot or its view, its cursor kept in
-/// sight. With
-/// not one entry of room it is not drawn and still holds the keys.
+/// entries, no lower than the body's foot or its view, nor than the sheet's
+/// floor over its pinned foot (`studio::hung_floor`), as the Settings
+/// sheet's lists stop, its cursor kept in sight. With not one entry of room
+/// it is not drawn and still holds the keys.
 ///
 /// A click on an entry that picks asks for [`Act::ListPick`]; one anywhere
-/// else in the page's area, the sheet's controls under it, its close and
-/// the scrim beside it, only [`Act::ListClose`], as the cells register
-/// their close over the whole area under the list's rows.
+/// else in the body, the sheet's controls under it, only [`Act::ListClose`],
+/// as the cells register their close over the whole area under the list's
+/// rows (the foot, the title, its close and the scrim say so too: [`show`],
+/// [`sheet_foot`]).
 fn release_list(ui: &Ui, id: Id, list: &List, anchor: Rect, col: Rect, face: &Face, acts: &mut Vec<Act>) {
     let pal = face.pal;
     let view = ui.clip_rect();
@@ -1028,11 +1082,6 @@ fn release_list(ui: &Ui, id: Id, list: &List, anchor: Rect, col: Rect, face: &Fa
     // sheet's controls under it take none, show no hover and no hand.
     let catch = ui.interact(view, id.with("list-close"), Sense::click());
     if catch.clicked() {
-        acts.push(Act::ListClose);
-    }
-    // And one off the body, on the title, the close or the scrim.
-    let elsewhere = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| face.full.contains(p) && !view.contains(p)));
-    if elsewhere {
         acts.push(Act::ListClose);
     }
     let tag_w = list.tags.iter().map(|t| studio::width_of(ui, t, mono(12.5))).fold(0.0, f32::max) + COLUMN_GAP;
@@ -1052,8 +1101,10 @@ fn release_list(ui: &Ui, id: Id, list: &List, anchor: Rect, col: Rect, face: &Fa
     let top = anchor.max.y + 2.0;
     // Inside the sheet's body: its view's foot, which is the room the
     // Dialog gave it, stands under the body's own foot where the window
-    // has shrunk to the body, and the list would hang past the frame.
-    let bottom = view.max.y.min(col.max.y).min(face.full.max.y);
+    // has shrunk to the body, and the list would hang past the frame; and
+    // never over the pinned foot, the sheet's floor as it last stood.
+    let floor = studio::hung_floor(ui, id).unwrap_or(f32::INFINITY);
+    let bottom = view.max.y.min(col.max.y).min(face.full.max.y).min(floor);
     let fits = studio::hung_fits(top, bottom).min(list.rows.len());
     if fits == 0 {
         return;
@@ -1434,8 +1485,24 @@ mod tests {
         assert!(in_view(&out, "APPLY") && in_view(&out, "USE DEFAULTS"), "the foot whole in view");
     }
 
+    /// Where the sheet's two buttons stand, Use defaults and Apply together.
+    fn foot_of(probe: &Probe) -> Rect {
+        let button = |k: usize| probe.rect_of(Id::new("mp3-sheet").with("foot").with(k));
+        button(0).union(button(1))
+    }
+
+    /// Every text drawn whole in the body's view, the foot's own aside, ends
+    /// over the foot's top: no row of the body runs under the pinned foot.
+    fn over_the_foot(out: &FullOutput, foot: Rect) {
+        for (words, at, clip) in texts(out) {
+            if clip.contains_rect(at.shrink(0.5)) && !["USE DEFAULTS", "APPLY"].contains(&words.as_str()) {
+                assert!(at.max.y <= foot.min.y + 0.5, "{words:?} over the foot: {at:?}, the foot {foot:?}");
+            }
+        }
+    }
+
     #[test]
-    fn at_the_floor_the_tallest_state_scrolls_and_the_keyboards_stop_is_brought_into_view() {
+    fn at_the_floor_the_tallest_state_scrolls_under_its_pinned_foot_the_keyboards_stop_brought_into_view() {
         let _en = english();
         let probe = Probe::new(FLOOR);
         let (mut page, ends) = sheet_up();
@@ -1448,16 +1515,29 @@ mod tests {
         let out = probe.settle(&mut page);
         probe.click(&mut page, find(&out, "Type a path").center());
         assert!(page.typing());
+        // The foot stands whole in view under the body, pinned as the
+        // Settings sheet's is; the field with the keys over it, the rows
+        // past the view's foot scrolled to.
         let out = probe.settle(&mut page);
-        assert!(!in_view(&out, "APPLY"), "the foot under the fold");
-        // The keys leave the field and walk to the buttons: the foot comes
-        // into view on the pass the keyboard reaches it.
+        let foot = foot_of(&probe);
+        assert!(in_view(&out, "APPLY") && in_view(&out, "USE DEFAULTS"), "the foot pinned whole in view");
+        assert!(probe.rect_of(Id::new("mp3-sheet").with("path")).max.y <= foot.min.y + 0.5, "the field over the foot");
+        assert!(!in_view(&out, "ERASE"), "the body runs on past its view");
+        over_the_foot(&out, foot);
+        // The keys leave the field and walk down: the erase line comes into
+        // view over the foot, which never moved; on the buttons, still there.
         press(&mut page, KeyCode::Esc);
-        while sheet(&page).focus != Stop::Buttons {
+        while sheet(&page).focus != Stop::Erase {
             press(&mut page, KeyCode::Tab);
         }
         let out = probe.settle(&mut page);
-        assert!(in_view(&out, "APPLY"), "the foot brought into view");
+        assert!(in_view(&out, "Erase the whole flash first"), "the erase line brought into view");
+        assert_eq!(foot_of(&probe), foot, "the foot where it stood");
+        over_the_foot(&out, foot);
+        press(&mut page, KeyCode::Tab);
+        assert_eq!(sheet(&page).focus, Stop::Buttons);
+        let out = probe.settle(&mut page);
+        assert!(in_view(&out, "APPLY") && in_view(&out, "USE DEFAULTS") && foot_of(&probe) == foot, "the buttons in view where they stood");
     }
 
     // ── The keyboard's walk ───────────────────────────────────────────────
@@ -1714,6 +1794,65 @@ mod tests {
             .expect("the list's frame");
         assert!(list.height() > 2.0 * studio::HUNG_ROW_H, "{list:?}");
         assert!(list.max.y <= frame.max.y - MODAL_PAD + 0.5, "the list inside the sheet's body: {list:?} in {frame:?}");
+    }
+
+    /// GitHub's list grown to ten releases behind the pin, v0.7.9 down to
+    /// v0.7.0: more than the list holds over the sheet in the GUI's window.
+    fn many() -> Told {
+        let template = crate::device::firmware::tests::listed().into_iter().find(|r| r.tag == "v0.7.0").expect("v0.7.0 listed");
+        let releases = (0..10).rev().map(|k| Release { tag: format!("v0.7.{k}"), date: format!("2026-10-{:02}", 1 + k), ..template.clone() }).collect();
+        let asked = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_791_621_660);
+        Told::Releases(Ok(crate::device::desk::ReleaseList { releases, asked }))
+    }
+
+    /// The frame of the list that hangs: the tallest hairline in the accent.
+    fn list_frame(out: &FullOutput) -> Rect {
+        let accent = Pal::now().accent;
+        let frames = out.shapes.iter().filter_map(|c| match &c.shape {
+            egui::Shape::Rect(r) if r.stroke.color == accent && r.fill == Color32::TRANSPARENT => Some(r.rect),
+            _ => None,
+        });
+        frames.max_by(|a, b| a.height().total_cmp(&b.height())).expect("the list's frame")
+    }
+
+    #[test]
+    fn at_the_guis_default_size_and_floor_the_release_list_stops_over_the_pinned_foot_its_cursor_in_sight() {
+        let _en = english();
+        let pal = Pal::now();
+        let thumb_ink = pal.dim.gamma_multiply(studio::THUMB_REST);
+        for size in [WINDOW, FLOOR] {
+            let probe = Probe::new(size);
+            let (mut page, ends) = sheet_up();
+            page.act(Act::SheetSource(1));
+            ends.tell([many()]);
+            page.pump();
+            let _ = ends.sent();
+            let out = probe.settle(&mut page);
+            // Its frame ends over the buttons, which stand whole beneath it,
+            // never hidden at a corner; it holds fewer than its ten, its
+            // thumb saying so.
+            let (list, foot) = (list_frame(&out), foot_of(&probe));
+            assert!(list.height() >= studio::HUNG_ROW_H, "{size:?}: at least an entry: {list:?}");
+            assert!(list.max.y <= foot.min.y + 0.5, "{size:?}: the list over the foot: {list:?}, the foot {foot:?}");
+            assert!(in_view(&out, "APPLY") && in_view(&out, "USE DEFAULTS"), "{size:?}: the foot whole");
+            let thumb = out.shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == thumb_ink && (r.rect.width() - studio::THUMB_W).abs() < 0.01));
+            assert!(thumb, "{size:?}: fewer than its all, and its thumb");
+            // The cursor walked to the oldest: lit, in the frame, still over
+            // the foot.
+            for _ in 0..9 {
+                press(&mut page, KeyCode::Down);
+            }
+            let out = probe.settle(&mut page);
+            let (list, oldest) = (list_frame(&out), find(&out, "v0.7.0"));
+            let lit = out.shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == pal.accent && r.rect.contains(oldest.center())));
+            assert!(lit && list.contains_rect(oldest), "{size:?}: the cursor on v0.7.0, lit in the frame: {oldest:?} in {list:?}");
+            assert!(list.max.y <= foot_of(&probe).min.y + 0.5, "{size:?}: still over the foot: {list:?}");
+            // A click on Use defaults under the list only closes it.
+            probe.click(&mut page, foot_of(&probe).left_center() + vec2(8.0, 0.0));
+            assert!(page.sheet.is_some() && sheet(&page).list.is_none(), "{size:?}: the cells' ListClose");
+            assert_eq!((sheet(&page).source, sheet(&page).erase), (Source::Release, false), "{size:?}: nothing else");
+            assert!(ends.sent().is_empty(), "{size:?}: nothing asked of the worker");
+        }
     }
 
     #[test]
