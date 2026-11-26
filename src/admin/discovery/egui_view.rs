@@ -29,7 +29,7 @@ use crate::gui::window::studio::{
     self, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, RowCtx, SEG_H, Seg, TICK_H, Table, add_card, bare, body, caps, caps_width, cell,
     field, field_box, foot, form_button, gate, hand, ink, label, label_at, led, led_cell, led_mid, line, list_row, mono,
     name_cell, reveal, runs, runs_width, searching, segmented, segmented_width, small_caps, small_caps_width, square, strong,
-    text, tick_card, tick_grid, unkeyed, width_of,
+    text, tick_card, tick_grid, unkeyed, width_of, words_row,
 };
 use crate::input::KeyModifiers;
 
@@ -239,11 +239,10 @@ pub(crate) fn show(ui: &mut Ui, room: &mut Room, composition: &str, key_hints: b
 // ── Text ──────────────────────────────────────────────────────────────────
 
 /// Runs as one paragraph wrapped at `w` (a measure narrower than the
-/// column, the pitch's), a row of `ui`.
+/// column, the pitch's), a row of `ui`, each of its lines a row of a
+/// modal's body.
 fn para(ui: &mut Ui, w: f32, parts: &[Run]) -> Rect {
-    let drawn = Para::runs(parts).paint(ui, ui.cursor().min, w);
-    let (rect, _) = ui.allocate_exact_size(vec2(w.min(ui.available_width()), drawn.height()), Sense::hover());
-    rect
+    Para::runs(parts).show_in(ui, w)
 }
 
 /// A label and its hint (which carries its own " · ") from `at`, the line's
@@ -932,10 +931,12 @@ fn modals(ui: &Ui, room: &Room, over: Rect, pal: &Pal, typing: Typing, key_hints
 }
 
 /// One of the sheet's facts: its label in the canvas's column, and its
-/// value's runs, after an LED when it has one, cut to the row.
+/// value's runs, after an LED when it has one, cut to the row — a line of
+/// words, the view ending over it rather than through it.
 fn fact(ui: &mut Ui, label: &str, value: &[Run], lamp: Option<Color32>, pal: &Pal) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
+    words_row(ui, row.center().y);
     small_caps(ui, row.left_center(), label, pal.dim, FACT_COL - 12.0, Align2::LEFT_CENTER);
     let mut x = row.min.x + FACT_COL;
     if let Some(color) = lamp {
@@ -1094,13 +1095,15 @@ fn compose(ui: &Ui, over: Rect, c: &Compose, pal: &Pal, composition: &str, pass:
         let focused = c.focus.is_none();
         let input = studio::Input::of(&c.message).focused(focused, composition);
         let label = t!("p2p.compose_message", n = c.message.value().chars().count()).to_string();
+        let top = ui.cursor().min.y;
         let typed = field(ui, Id::new("disc-compose-message"), &label, &input, pal);
         if typed.response.clicked() {
             does.push(Act::ComposeFocusMessage);
         }
-        // The message is the keys' stop after the last library.
+        // The message is the keys' stop after the last library: the label
+        // with its box, the field, not its box alone.
         if focused {
-            reveal(ui, Id::new("disc-compose"), usize::MAX, typed.response.rect);
+            reveal(ui, Id::new("disc-compose"), usize::MAX, typed.response.rect.with_min_y(top));
         }
         let caret = if focused { typed.caret } else { None };
         ui.add_space(18.0);
@@ -1166,13 +1169,15 @@ fn identity(ui: &Ui, over: Rect, d: &IdentityDraft, pal: &Pal, composition: &str
         for (description, value, label, hint, id) in fields {
             let focused = d.on_description == description;
             let input = studio::Input::of(value).focused(focused, composition);
+            let top = ui.cursor().min.y;
             let typed = field(ui, Id::new(id), &label, &input, pal);
             if typed.response.clicked() {
                 does.push(Act::IdentityFocus(description));
             }
             if focused {
                 caret = typed.caret;
-                reveal(ui, Id::new("disc-identity"), usize::from(description), typed.response.rect);
+                // The label with its box: the field, not its box alone.
+                reveal(ui, Id::new("disc-identity"), usize::from(description), typed.response.rect.with_min_y(top));
             }
             ui.add_space(4.0);
             line(ui, 18.0, &hint, body(12.5), pal.dim);
@@ -1266,6 +1271,7 @@ fn blocked(ui: &Ui, room: &Room, over: Rect, sel: usize, pal: &Pal, pass: &mut P
         }
         ui.add_space(14.0);
         let (foot, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
+        words_row(ui, foot.center().y);
         text(ui, foot.right_center(), &t!("p2p.blocked_unblock"), body(13.0), pal.dim, w, Align2::RIGHT_CENTER);
         picked
     });
@@ -1624,6 +1630,84 @@ mod tests {
         }
         let out = walked(&ctx, &mut room, SMALL);
         assert!(in_view(&out, &first) && !in_view(&out, &last), "and back on the first");
+    }
+
+    #[test]
+    fn a_sheet_at_the_floor_opens_on_its_first_action_under_the_facts_just_over_it() {
+        let _en = english();
+        let ctx = context();
+        let mut room = on();
+        // jazz-corner's sheet at the GUI's floor (100×24): the first action
+        // under the fold, the body moved just far enough to show it. Its
+        // facts and description are rows of the body, so the move stops on
+        // the first one whole over it rather than passing them all.
+        let floor = vec2(664.0, 256.0);
+        let jazz = room.rows().iter().position(|p| p.payload.name == "jazz-corner").expect("jazz-corner's row");
+        room.act(Act::OpenSheet(jazz));
+        let out = settle(&ctx, &mut room, floor).0;
+        assert!(in_view(&out, "Download the snapshot"), "the cursor's row in view");
+        assert!(in_view(&out, "SNAPSHOT") && in_view(&out, "FEDERATION"), "the facts over it in view: {:?}", drawn(&out));
+        // The blocked list's last row, the keys on it: the list's words, not
+        // its rows' room, are what the view keeps whole, and its own line
+        // under the list ends the view over it, never through it.
+        room.act(Act::SheetClose);
+        let mut s = status_on();
+        s.blocked_peers = (0..12).map(|i| hex(&format!("b{i:02}c0d0e0"))).collect();
+        let ids = s.blocked_peers.clone();
+        room.apply(loaded(s));
+        room.act(Act::BlockedOpen);
+        let _ = settle(&ctx, &mut room, floor);
+        for _ in 0..11 {
+            handle_key(&mut room, key(KeyCode::Down));
+        }
+        let out = walked(&ctx, &mut room, floor);
+        let unblock = t!("p2p.blocked_unblock").to_string();
+        let torn = |words: &str| {
+            out.shapes.iter().any(|clipped| match &clipped.shape {
+                Shape::Text(text) if text.galley.text() == words => {
+                    let ink = text.visual_bounding_rect();
+                    clipped.clip_rect.intersects(ink) && !clipped.clip_rect.expand(0.5).contains_rect(ink)
+                }
+                _ => false,
+            })
+        };
+        assert!(in_view(&out, &ids[11]) && in_view(&out, &ids[8]), "the last row and the three over it in view");
+        assert!(!torn(&unblock), "the list's own line whole or out of view, never cut");
+    }
+
+    #[test]
+    fn the_identitys_fields_at_the_floor_keep_their_boxes_and_leave_no_sliver_of_save() {
+        let _en = english();
+        let ctx = context();
+        let floor = vec2(664.0, 256.0);
+        let mut room = on();
+        room.act(Act::IdentityOpen);
+        let _ = settle(&ctx, &mut room, floor);
+        // The keys on the description: the body moves no further than the
+        // name's box, so Save stays under the view's foot, never a sliver
+        // of it over the foot.
+        if let Modal::Identity(d) = &mut room.modal {
+            d.on_description = true;
+        }
+        let out = walked(&ctx, &mut room, floor);
+        let description = "Vinyl, jazz and field recordings";
+        assert!(in_view(&out, description), "the description's box in view: {:?}", drawn(&out));
+        let clip = out
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                Shape::Text(text) if text.galley.text() == description => Some(clipped.clip_rect),
+                _ => None,
+            })
+            .expect("the description drawn");
+        let save = spot(&ctx, Id::new("disc-identity-foot").with(0usize));
+        assert!(clip.max.y <= save.min.y + 0.5 || in_view(&out, "SAVE"), "Save out of view or its words whole, never a sliver: {save:?} under {clip:?}");
+        // And back to the name: its label comes in with its box.
+        if let Modal::Identity(d) = &mut room.modal {
+            d.on_description = false;
+        }
+        let out = walked(&ctx, &mut room, floor);
+        assert!(in_view(&out, "SERVER NAME") && in_view(&out, "mStream Den"), "the name's label with its box: {:?}", drawn(&out));
     }
 
     #[test]

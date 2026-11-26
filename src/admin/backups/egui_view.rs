@@ -19,10 +19,10 @@ use super::super::{EguiShown, age_text, iso_unix, unix_now};
 use super::*;
 use crate::api::types::ActiveBackup;
 use crate::gui::window::studio::{
-    self, BROWSE_ROWS, BROWSER_W, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, Table, add_card, bare, body, cadence, cell, checkbox,
-    chip, field_box, fitted, folder_browser, foot, foot_line, form_button, gate, hand, ink, label, led_cell, line, meter,
-    meter_lit, mono, name_cell, path_cell, radio, reveal, ring, ring_since, room_rects, small_caps, square, state_line,
-    strong, text, unkeyed, verdict, width_of, with_figures,
+    self, BROWSE_ROWS, BROWSER_W, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, Table, add_card, bare, body, body_row, cadence, cell,
+    checkbox, chip, field_box, fitted, folder_browser, foot, foot_line, form_button, gate, hand, ink, label, label_at, led_cell,
+    line, meter, meter_lit, mono, name_cell, path_cell, radio, reveal, ring, ring_since, room_rects, square, state_line, strong,
+    text, unkeyed, verdict, width_of, with_figures, words_row,
 };
 
 /// The canvas's room between the room's blocks, the note line's among them.
@@ -417,6 +417,9 @@ fn choices(ui: &mut Ui, id: Id, names: &[String], chosen: usize, pal: &Pal) -> (
     }
     let (rect, _) = ui.allocate_exact_size(vec2(w, (row + 1) as f32 * H), Sense::hover());
     let group = Rect::from_min_size(rect.min, vec2(widest, rect.height()));
+    // One hairline round them all: the modal's view ends over the group,
+    // never through it.
+    body_row(ui, group.min.y, group.max.y);
     ui.painter().rect_filled(group, square(), pal.panel);
     let mut clicked = None;
     for (i, (name, (x, row, nw))) in names.iter().zip(spots).enumerate() {
@@ -476,6 +479,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         let w = ui.available_width();
         if editing {
             let (row, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+            words_row(ui, row.center().y);
             let name = text(ui, row.left_center(), &f.library_name, strong(14.0), pal.text, w, Align2::LEFT_CENTER);
             let from = name.max.x;
             if from < row.max.x {
@@ -483,6 +487,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
             }
         } else if room.libraries.is_empty() {
             let (row, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+            words_row(ui, row.center().y);
             text(ui, row.left_center(), &t!("bak.no_libraries"), body(13.5), pal.dim, w, Align2::LEFT_CENTER);
         } else {
             let names: Vec<String> = room.libraries.iter().map(|(name, _)| name.clone()).collect();
@@ -521,6 +526,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         ui.add_space(LABEL_GAP);
         let w = ui.available_width();
         let (line, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
+        body_row(ui, line.min.y, line.max.y);
         // Bare of the cells' key, as the canvas draws it.
         let browse = unkeyed(&t!("bak.browse_button")).0.to_string();
         let bw = browse_button_width(ui, &browse).min(w * 0.5);
@@ -551,11 +557,16 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         ];
         let w = ui.available_width();
         let (band, _) = ui.allocate_exact_size(vec2(w, 14.0 + LABEL_GAP + FIELD_H + LABEL_GAP + 16.0), Sense::hover());
+        // Its labels, its boxes and its hints three rows, so the view ends
+        // between them, as between a field's label and its box.
+        let boxes = band.min.y + 14.0 + LABEL_GAP;
+        body_row(ui, boxes, boxes + FIELD_H);
+        words_row(ui, boxes + FIELD_H + LABEL_GAP + 8.0);
         let col_w = (w - 32.0) / 3.0;
         for (i, (field, label, hint, value, muted)) in numbers.iter().enumerate() {
             let x = band.min.x + i as f32 * (col_w + 16.0);
-            small_caps(ui, pos2(x, band.min.y + 7.0), label, pal.dim, col_w, Align2::LEFT_CENTER);
-            let boxed = Rect::from_min_size(pos2(x, band.min.y + 14.0 + LABEL_GAP), vec2(NUMBER_W.min(col_w), FIELD_H));
+            label_at(ui, pos2(x, band.min.y + 7.0), label, col_w, pal);
+            let boxed = Rect::from_min_size(pos2(x, boxes), vec2(NUMBER_W.min(col_w), FIELD_H));
             let on = focused == *field && !*muted;
             let input = studio::Input::of(value).mono().enabled(!*muted).focused(on, composition);
             let typed = field_box(ui, id.with("number").with(i), boxed, &input, pal);
@@ -574,6 +585,7 @@ fn form(ui: &Ui, room: &Room, f: &Form, over: Rect, composition: &str, pal: &Pal
         label(ui, &t!("bak.field_excludes"), pal);
         ui.add_space(LABEL_GAP);
         let (boxed, _) = ui.allocate_exact_size(vec2(ui.available_width(), FIELD_H), Sense::hover());
+        body_row(ui, boxed.min.y, boxed.max.y);
         let input = studio::Input::of(&f.excludes).mono().focused(focused == Field::Excludes, composition);
         let typed = field_box(ui, id.with("excludes"), boxed, &input, pal);
         if typed.response.clicked() {
@@ -1323,6 +1335,51 @@ mod tests {
         let _ = pass(&ctx, &mut room, LARGE);
         let _ = click_id(&ctx, &mut room, LARGE, id.with("foot").with(1usize));
         assert_eq!(room.queued, Some(Op::Remove(1)), "Act::RemoveConfirm");
+    }
+
+    #[test]
+    fn the_keys_on_the_patterns_at_the_floor_move_the_form_just_far_enough_and_tear_no_hint() {
+        let _en = english();
+        let ctx = context();
+        // The form at the GUI's floor (100×24): the keys step down to the
+        // patterns. The numbers band over them is the form's own rows, its
+        // boxes and its hints, so the move stops on the boxes rather than
+        // passing the band and leaving a hint's foot torn under the title.
+        let floor = vec2(664.0, 256.0);
+        let mut room = idle();
+        press(&mut room, KeyCode::Char('a'));
+        room.queued = None;
+        let _ = pass(&ctx, &mut room, floor);
+        let _ = pass(&ctx, &mut room, floor);
+        let last = form(&room).fields().len() - 1;
+        assert_eq!(form(&room).fields()[last], Field::Excludes, "the patterns are the form's last field");
+        for k in 0..=last {
+            if let Modal::Form(f) = &mut room.modal {
+                f.focus = k;
+            }
+            let _ = pass(&ctx, &mut room, floor);
+        }
+        let (out, _) = pass(&ctx, &mut room, floor);
+        let state = |words: &str| {
+            out.shapes.iter().find_map(|clipped| match &clipped.shape {
+                Shape::Text(text) if text.galley.text() == words => {
+                    let ink = text.visual_bounding_rect();
+                    Some(if clipped.clip_rect.expand(0.5).contains_rect(ink) {
+                        "whole"
+                    } else if clipped.clip_rect.intersects(ink) {
+                        "torn"
+                    } else {
+                        "out"
+                    })
+                }
+                _ => None,
+            })
+        };
+        for hint in ["0 = no trash", "0 = off", "daily only"] {
+            assert_eq!(state(hint), Some("whole"), "{hint:?}: the band over the patterns kept in view");
+        }
+        assert_eq!(state("Thumbs.db, desktop.ini, .DS_Store, ._*"), Some("whole"), "the patterns, the keys' field, in view");
+        assert_ne!(state("RETENTION DAYS"), Some("torn"), "a label over the band left out whole, never torn");
     }
 
     #[test]
