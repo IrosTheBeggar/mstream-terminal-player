@@ -11,7 +11,7 @@ use egui::epaint::Shape;
 use egui::{Event, FullOutput, MouseWheelUnit, PointerButton, Vec2};
 
 use super::super::fixtures;
-use super::board::tests::card_room_of;
+use super::board::tests::{card_room_of, filled};
 use super::*;
 use crate::device::card::worker::{self, Fold, Link, fixtures as cards};
 
@@ -565,7 +565,7 @@ fn at_the_guis_default_size_a_failures_log_takes_the_room_under_the_card_down_to
 }
 
 #[test]
-fn at_the_guis_default_size_details_after_a_write_keeps_its_facts_its_newest_lines_and_its_links() {
+fn at_the_guis_default_size_details_after_a_write_keeps_its_headline_its_links_its_newest_lines_and_its_facts() {
     let _en = english();
     let probe = Probe::new(WINDOW);
     let (mut page, ends) = with_card(Ends::update_available);
@@ -589,17 +589,20 @@ fn at_the_guis_default_size_details_after_a_write_keeps_its_facts_its_newest_lin
     page.pump();
     page.act(Act::Details);
     let out = probe.settle(&mut page);
-    // Its facts whole, its log's newest lines, Write again and the format:
-    // no control gone at the size most windows are; the value lines gave
-    // way to them first.
-    assert_drew(&out, &["PORT", "BOARD", "ON THE BOARD", "THIS PLAYER", "WRITTEN", "CARD", "wrote chunk 29", "wrote chunk 28", "Write v0.8.0 again", "Format as FAT32…"]);
-    assert!(!drew(&out, "FIRMWARE"), "the value lines gave way first");
+    // Its headline, the Firmware row with its verdict, still says what the
+    // board is; Write again and the format, its log's newest lines and its
+    // facts from the top: no control gone at the size most windows are. The
+    // other value line, the SD card's, gave way first, then the last fact.
+    assert_drew(&out, &["FIRMWARE", "Up to date · v0.8.0 · just written", "Write v0.8.0 again", "Format as FAT32…", "wrote chunk 29", "wrote chunk 28"]);
+    assert_drew(&out, &["PORT", "BOARD", "ON THE BOARD", "THIS PLAYER", "WRITTEN"]);
+    assert!(!drew(&out, "SD CARD"), "the other value line gave way first");
+    assert!(find(&out, "FIRMWARE").max.y < find(&out, "Details").min.y, "the headline over the bottom row");
     let (format, room) = (find(&out, "Format as FAT32…"), card_room_of(&out, "Format as FAT32…"));
     assert!(format.max.y <= room.max.y - TIGHT.pad_y + 0.5 && room.max.y - format.max.y < 18.0 + ROOMY.pad_y + 6.0, "the card spent down to its foot: {format:?} in {room:?}");
 }
 
 #[test]
-fn at_the_guis_default_size_a_cards_details_keeps_next_sync_its_facts_its_log_and_sync_again() {
+fn at_the_guis_default_size_a_cards_details_keeps_its_holds_its_space_next_sync_its_log_and_sync_again() {
     let _en = english();
     let probe = Probe::new(WINDOW);
     let (mut page, ends) = with_card(Ends::up_to_date);
@@ -610,8 +613,16 @@ fn at_the_guis_default_size_a_cards_details_keeps_next_sync_its_facts_its_log_an
     page.pump();
     page.act(Act::Details);
     let out = probe.settle(&mut page);
-    assert_drew(&out, &["NEXT SYNC", "SYNC", "DRIVE", "CARD", "SERVER", "REMOVES", "E: put in: Car music, revision 42", "asked Home: 12 new, 2 removed", "Sync again"]);
-    assert!(!drew(&out, "CONVERTS"), "the other value rows gave way first");
+    // Its headline, Holds, still says what the card is, and its Space, bar
+    // and figures, how full it is; Next sync, what Sync will do; Details'
+    // log and Sync again, its facts from the top.
+    assert_drew(&out, &["HOLDS", "Rock, Jazz from Home", "SPACE", "41.2 of 63.8 GB used · 4,812 tracks", "22.6 GB free", "NEXT SYNC", "SYNC"]);
+    assert_drew(&out, &["DRIVE", "E: put in: Car music, revision 42", "asked Home: 12 new, 2 removed", "Sync again"]);
+    let (lit, unlit) = (filled(&out, Pal::now().accent, 10.0).len(), filled(&out, Pal::now().unlit, 10.0).len());
+    assert!(lit > 0 && lit + unlit > 60, "the Space's bar across the value column: {lit} lit, {unlit} not");
+    // The other value rows gave way first, then the facts from the foot.
+    assert!(!drew(&out, "LAST SYNC") && !drew(&out, "CONVERTS"), "the other value rows gave way first");
+    assert!(!drew(&out, "REMOVES") && !drew(&out, "PLAYS"), "then the facts from the foot");
     let again = find(&out, "Sync again");
     assert!(again.max.y <= card_room_of(&out, "Sync again").max.y - TIGHT.pad_y + 0.5, "Sync again whole on the card: {again:?}");
 }

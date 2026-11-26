@@ -13,11 +13,12 @@
 //! card's drive letter with them; then the bottom row (board.rs's
 //! `Paint`), and Details with its facts, the card's own log and Sync
 //! again. Short of room the card keeps its rows in clause 70's order
-//! (board.rs's `keep`): the bottom row, never cut; the rows that say what
-//! the primary will do (Next sync, a problem's words, a sync under way);
-//! Details' rule and Sync again, its log's newest lines and its facts; and
-//! last the other value rows, which give way as the cells give theirs
-//! (`give_way_rows`), measured in points — the dim explanation lines
+//! (board.rs's `keep`): the bottom row, never cut; its headline, Holds or
+//! the row in its place; the rows that say what the primary will do (Next
+//! sync, a problem's words, a sync under way); Details' rule and Sync
+//! again, its log's newest lines; its Space, the bar and its figures; its
+//! facts; and last the other value rows, which give way as the cells give
+//! theirs (`give_way_rows`), measured in points — the dim explanation lines
 //! first, the last first, then Converts — and then whole lines from the
 //! foot. The log takes the room left. The bottom row's links
 //! give way as the cells' do (`give_way`): Send the plays first, then the
@@ -42,7 +43,7 @@ use ratatui::text::Line;
 use super::super::card::{CardGate, GateKind, plan_of, span};
 use super::super::cells::{self, Row};
 use super::super::*;
-use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, PLAIN, Paint, SCAN, WIDE, Want, clipped, keep, lead_of};
+use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, Order, PLAIN, Paint, SCAN, WIDE, Want, clipped, headline, keep, lead_of};
 use super::{Drawn, Face, tone, unled};
 use crate::device::card::worker::CardView;
 use crate::gui::window::studio::{self, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
@@ -69,15 +70,16 @@ const LIB_APART: f32 = 8.0;
 /// head, its value rows, its bottom row, and Details while open, in a
 /// hairline frame as tall as its rows and no taller than the room. Short of
 /// room it keeps what board.rs's `keep` keeps, in its order: the bottom row
-/// whole, the rows that say what the primary will do (Next sync, a
+/// whole, its headline (its first value row: Holds, or the row in its
+/// place), the rows that say what the primary will do (Next sync, a
 /// problem's words, a sync under way: board.rs's `says`), Details' rule
-/// and Sync again, its log's newest lines, its facts, then the other value
-/// rows, given way as the cells give them way ([`turns`]) and then from the
-/// foot; its log takes the room left. Its rest is its height with every
-/// row it has, and through Details while it is open, its log at board.rs's
-/// `LOG_REST` lines (fewer where it has fewer, unless its sync or a job of
-/// its is under way), as the frame measures it; the measuring run
-/// (`face.live` false) draws no control.
+/// and Sync again, its log's newest lines, its Space ([`space_of`]), its
+/// facts, then the other value rows, given way as the cells give them way
+/// ([`turns`]) and then from the foot; its log takes the room left. Its
+/// rest is its height with every row it has, and through Details while it
+/// is open, its log at board.rs's `LOG_REST` lines (fewer where it has
+/// fewer, unless its sync or a job of its is under way), as the frame
+/// measures it; the measuring run (`face.live` false) draws no control.
 pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, room: Rect) -> Drawn {
     let s = face.space;
     let grid = Grid::of(room, face);
@@ -92,11 +94,18 @@ pub(super) fn show(ui: &mut Ui, page: &mut Page, face: &Face, view: &CardView, r
     let y = studio::card_head(&card, pos2(grid.x, room.min.y + s.pad_y), grid.w, &laid.name, &laid.right, face.pal);
     let values = &laid.values;
     let said = saying(values, face);
-    let says_rows: Vec<usize> = (0..values.len()).filter(|&i| said[i]).collect();
+    // Its headline, Holds or the row in its place; then, where a reason of
+    // their own does not keep them, the rows that say what the primary
+    // will do and its Space; the rest give way in their turns.
+    let head = headline(values.len());
+    let says: Vec<usize> = (0..values.len()).filter(|&i| said[i] && !head.contains(&i)).collect();
+    let space: Vec<usize> = space_of(values, &said).into_iter().filter(|i| !head.contains(i)).collect();
+    let apart: Vec<bool> = (0..values.len()).map(|i| said[i] || head.contains(&i) || space.contains(&i)).collect();
+    let order = Order { head, says, space, give_way: turns(values, &apart) };
     // Its work under way: a sync, or a job of its own (set-up, settings,
     // the plays, the eject); each tells its log a line a step.
     let under_way = view.run.is_some() || view.busy.is_some();
-    let want = Want::of(page, &view.key, face, room, y - room.min.y + s.gap + actions_h + s.pad_y, values.len(), turns(values, &said), says_rows, &laid.details, under_way);
+    let want = Want::of(page, &view.key, face, room, y - room.min.y + s.gap + actions_h + s.pad_y, values.len(), order, &laid.details, under_way);
     let kept_rows = |mask: &[bool]| values.iter().zip(mask).filter(|(_, k)| **k).map(|(r, _)| r).collect::<Vec<&Row>>();
     let mut probe = card.new_child(UiBuilder::new().id_salt("mp3-card-measure").max_rect(room));
     probe.set_invisible();
@@ -164,10 +173,9 @@ impl Laid {
 fn saying(rows: &[Row], face: &Face) -> Vec<bool> {
     let next = t!("dev.card.label_next").to_string();
     let mut said = vec![false; rows.len()];
-    let starts = |row: &Row| matches!(row, Row::Value { label: Some(_), .. } | Row::Bar { label: Some(_), .. });
     let mut at = 0;
     while at < rows.len() {
-        let end = (at + 1..rows.len()).find(|&i| starts(&rows[i])).unwrap_or(rows.len());
+        let end = block_end(rows, at);
         let block: Vec<&Row> = rows[at..end].iter().collect();
         let named = matches!(&rows[at], Row::Value { label: Some(l), .. } if *l == next);
         if named || super::board::says(&block, face) {
@@ -178,11 +186,31 @@ fn saying(rows: &[Row], face: &Face) -> Vec<bool> {
     said
 }
 
+/// Where the block of value `rows` that starts at `at` ends: at the next
+/// labelled row, or at their end.
+fn block_end(rows: &[Row], at: usize) -> usize {
+    let starts = |row: &Row| matches!(row, Row::Value { label: Some(_), .. } | Row::Bar { label: Some(_), .. });
+    (at + 1..rows.len()).find(|&i| starts(&rows[i])).unwrap_or(rows.len())
+}
+
+/// The card's Space among its value `rows`, by their numbers: its bar and
+/// the figures under it, or its one line where it has no bar (a card a
+/// newer player wrote, a locked one); none where it has none (a sync under
+/// way, which draws its own rows in their place), and none of the rows
+/// `said` keeps for a reason of their own.
+fn space_of(rows: &[Row], said: &[bool]) -> Vec<usize> {
+    let space = t!("dev.card.label_space").to_string();
+    let named = |row: &Row| matches!(row, Row::Value { label: Some(l), .. } | Row::Bar { label: Some(l), .. } if *l == space);
+    let Some(at) = rows.iter().position(named) else { return Vec::new() };
+    (at..block_end(rows, at)).filter(|&i| !said[i]).collect()
+}
+
 /// The other value rows' turns to give way, a turn's rows at a time: as
 /// the cells give theirs way (cells/card.rs's `give_way_rows`) — each dim
 /// explanation line, the last first, then the Converts row with the lines
-/// under it — and then each row left, from the foot. The rows `said` keeps
-/// take no turn.
+/// under it — and then each row left, from the foot. The rows kept apart
+/// (`said`: the headline, the rows that say what the primary will do, the
+/// Space) take no turn.
 fn turns(rows: &[Row], said: &[bool]) -> Vec<Vec<usize>> {
     let dim = crate::kit::dim();
     let dim_line = |row: &Row| match row {
@@ -1131,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn at_the_guis_floor_details_keeps_next_sync_its_drive_and_sync_again_under_a_synced_card_beside_a_board() {
+    fn at_the_guis_floor_details_keeps_holds_next_sync_and_sync_again_under_a_synced_card_beside_a_board() {
         let _en = english();
         let done = cards::with(cards::ready("E:", now()), |c| {
             c.ended = Some(Ended::Done { tracks: 4_822, took: 60, skipped: Vec::new(), plays: 37 });
@@ -1141,13 +1169,16 @@ mod tests {
         page.act(Act::Card(0));
         page.act(Act::Details);
         let out = probe.settle(&mut page);
-        // Next sync, what Sync will do, stands over the bottom row; Details
-        // keeps its rule, Sync again and its facts from the top, the other
-        // value rows giving way to them.
-        assert_drew(&out, &["Car music", "NEXT SYNC", "Details", "SYNC", "DRIVE", "Sync again"]);
-        let (drive, again) = (find(&out, "DRIVE"), find(&out, "Sync again"));
-        assert!(drive.max.y < again.min.y && again.max.y + 12.0 <= FLOOR.y - studio::NOTE_H, "the drive's fact and Sync again on the card: {drive:?} {again:?}");
-        assert!(!drew(&out, "HOLDS") && !drew(&out, "SPACE"), "the other value rows gave way: {:?}", words_of(&out));
+        // Its headline, Holds, and Next sync, what Sync will do, stand over
+        // the bottom row; Details keeps its rule and Sync again, the other
+        // value rows giving way to them, and the Space and the facts too
+        // where the room holds none of them.
+        assert_drew(&out, &["Car music", "HOLDS", "Rock, Jazz from Home", "NEXT SYNC", "Details", "SYNC", "Sync again"]);
+        let (holds, again) = (find(&out, "HOLDS"), find(&out, "Sync again"));
+        assert!(holds.max.y < find(&out, "NEXT SYNC").min.y, "Holds first, as the card has it");
+        assert!(again.max.y + 12.0 <= FLOOR.y - studio::NOTE_H, "Sync again on the card: {again:?}");
+        assert!(!drew(&out, "LAST SYNC") && !drew(&out, "CONVERTS"), "the other value rows gave way: {:?}", words_of(&out));
+        assert!(!drew(&out, "SPACE") && !drew(&out, "DRIVE"), "and the Space and the facts at the floor: {:?}", words_of(&out));
     }
 
     #[test]
@@ -1200,6 +1231,29 @@ mod tests {
         let mut said = none.clone();
         said[5] = true;
         assert_eq!(turns(&rows, &said), [vec![3], vec![1], vec![2, 4], vec![0]]);
+    }
+
+    #[test]
+    fn a_cards_space_is_its_bar_and_the_figures_under_it_kept_apart_from_the_turns() {
+        let _en = english();
+        let value = |label: Option<&str>, words: &'static str| Row::Value { label: label.map(str::to_string), left: Line::from(words), right: None };
+        let space = t!("dev.card.label_space").to_string();
+        let bar = Row::Bar { label: Some(space.clone()), permille: 650, color: crate::kit::theme::th().accent };
+        let figures = Row::Value { label: None, left: Line::from("41.2 of 63.8 GB used"), right: Some(Line::from("22.6 GB free")) };
+        let rows = vec![value(Some("Holds"), "Rock"), bar, figures, value(Some("Last"), "now"), value(Some("Next"), "12 new")];
+        let none = vec![false; rows.len()];
+        assert_eq!(space_of(&rows, &none), [1, 2], "the bar and its figures, to the next label");
+        // Kept apart with the headline, they take no turn: the rest go from
+        // the foot.
+        let apart = [true, true, true, false, false];
+        assert_eq!(turns(&rows, &apart), [vec![4], vec![3]]);
+        // Its one line where it has no bar; none where a sync draws its own
+        // rows in its place, or a reason of their own keeps them.
+        let line = vec![value(Some("Holds"), "Rock"), value(Some(space.as_str()), "41.2 of 63.8 GB used")];
+        assert_eq!(space_of(&line, &[false, false]), [1]);
+        assert_eq!(space_of(&line, &[false, true]), Vec::<usize>::new());
+        let syncing = vec![value(Some("Holds"), "Rock"), value(Some("Syncing"), "1,204 of 4,812")];
+        assert_eq!(space_of(&syncing, &[false, false]), Vec::<usize>::new());
     }
 
     #[test]
