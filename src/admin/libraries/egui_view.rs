@@ -20,7 +20,7 @@ use egui::{Color32, FontId, Id, Pos2, Rect, Ui, pos2, vec2};
 use super::*;
 use crate::admin::EguiShown;
 use crate::gui::window::studio::{
-    self, BROWSER_W, Col, Dialog, FIELD_H, FOLDER_ROW_H, Glyph, Icon, Pal, Para, Table, add_card, body, checkbox,
+    self, BROWSE_ROWS, BROWSER_W, Col, Dialog, FIELD_H, FOLDER_ROW_H, Glyph, Icon, Pal, Para, Table, add_card, body, checkbox,
     cut_start, field_beside, field_box, folder_browser, folder_row, foot, gate, icon_button, ink, label, line, mono,
     path_cell, room_rects, strong,
 };
@@ -138,12 +138,11 @@ fn libraries(ui: &mut Ui, room: &mut Room, pal: &Pal, acts: &mut Vec<Act>) {
 fn browser(ui: &Ui, over: Rect, browse: &Browse, pal: &Pal, acts: &mut Vec<Act>) {
     let id = Id::new("libraries-browse");
     let shown = Dialog::new(id, over, BROWSER_W, &t!("browse.title")).show(ui, pal, |ui| {
-        let picked = folder_browser(ui, id.with("list"), &browse.path, &browse.dirs, browse.sel, &t!("browse.empty"), pal);
-        let act = picked.map(Act::BrowseRow);
         let (up, open, add, close) = (t!("browse.up"), t!("browse.open"), t!("browse.add"), t!("browse.close"));
         let start = [(up.as_ref(), false), (open.as_ref(), false), (add.as_ref(), true), (close.as_ref(), false)];
         let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseAdd, Act::BrowseCancel];
-        foot(ui, id.with("foot"), &start, &[], None, pal).map(|k| meant[k].clone()).or(act)
+        let browsed = folder_browser(ui, id, &browse.path, &browse.dirs, browse.sel, &t!("browse.empty"), BROWSE_ROWS, &start, pal);
+        browsed.button.map(|k| meant[k].clone()).or(browsed.row.map(Act::BrowseRow))
     });
     if shown.closed {
         acts.push(Act::BrowseCancel);
@@ -228,7 +227,7 @@ fn name(ui: &Ui, over: Rect, draft: &NameDraft, composition: &str, pal: &Pal, ac
         // second indented under the first's words in their grid, joined and
         // hung beside the dash.
         let permanent = format!("{} {}", t!("admin.name_permanent_1").trim(), t!("admin.name_permanent_2").trim());
-        listed(&permanent, body(13.0), pal.gold).line(1.45).show(ui);
+        Para::listed(&permanent, body(13.0), pal.gold).line(1.45).show(ui);
         ui.add_space(12.0);
         // The refusal's line is kept empty until there is one, so the
         // window does not grow under the hand that pressed Add.
@@ -254,12 +253,12 @@ fn remove(ui: &Ui, over: Rect, room: &Room, i: usize, pal: &Pal, acts: &mut Vec<
     let name = room.libs.get(i).map(|l| l.name.clone()).unwrap_or_default();
     let title = t!("admin.remove_title", name = name);
     let sentences = vec![
-        listed(&t!("admin.remove_files_stay"), body(14.0), pal.ok),
-        listed(&t!("admin.remove_users", name = name), body(14.0), pal.gold),
-        listed(&t!("admin.remove_tracks"), body(14.0), pal.gold),
+        Para::listed(&t!("admin.remove_files_stay"), body(14.0), pal.ok),
+        Para::listed(&t!("admin.remove_users", name = name), body(14.0), pal.gold),
+        Para::listed(&t!("admin.remove_tracks"), body(14.0), pal.gold),
     ];
     let (keep, go) = (t!("admin.remove_keep"), t!("admin.remove_confirm"));
-    match gate(ui, Id::new("libraries-gate"), over, &title, sentences, [&keep, &go], pal) {
+    match gate(ui, Id::new("libraries-gate"), over, &title, sentences, [&keep, &go], pal).inner {
         Some(true) => acts.push(Act::RemoveConfirm),
         Some(false) => acts.push(Act::RemoveCancel),
         None => {}
@@ -267,16 +266,6 @@ fn remove(ui: &Ui, over: Rect, room: &Room, i: usize, pal: &Pal, acts: &mut Vec<
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────
-
-/// A sentence of the room's in `font` and `color`, wrapped to the column;
-/// one the cells lead with a dash ("− …") hangs its lines beside the dash,
-/// as a list item does, rather than under it.
-fn listed(s: &str, font: FontId, color: Color32) -> Para {
-    match s.strip_prefix('−') {
-        Some(rest) => Para::new(rest.trim_start(), font, color).lead("−"),
-        None => Para::new(s, font, color),
-    }
-}
 
 /// `s` in one line from `rect`'s left, its middle on `rect`'s, cut plainly
 /// at the rect's right edge: no ellipsis, as the canvas clips a long name.

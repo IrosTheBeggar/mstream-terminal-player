@@ -19,7 +19,7 @@ use super::super::{EguiShown, age_text, iso_unix, unix_now};
 use super::*;
 use crate::api::types::ActiveBackup;
 use crate::gui::window::studio::{
-    self, BROWSER_W, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, Table, add_card, bare, body, cadence, cell, checkbox,
+    self, BROWSE_ROWS, BROWSER_W, Col, Dialog, FIELD_H, Glyph, Pal, Para, Run, Table, add_card, bare, body, cadence, cell, checkbox,
     chip, field_box, fitted, folder_browser, foot, foot_line, form_button, gate, hand, ink, label, led_cell, line, meter,
     meter_lit, mono, name_cell, path_cell, radio, reveal, ring, ring_since, room_rects, small_caps, square, state_line,
     strong, text, unkeyed, verdict, width_of, with_figures,
@@ -647,15 +647,12 @@ fn dest_verdict(ui: &mut Ui, f: &Form, pal: &Pal) {
 fn browser(ui: &Ui, browse: &Browse, over: Rect, pal: &Pal, acts: &mut Vec<Act>) {
     let id = Id::new("backups-browser");
     let shown = Dialog::new(id, over, BROWSER_W, &t!("bak.browser_title")).show(ui, pal, |ui| {
-        if let Some(i) = folder_browser(ui, id.with("list"), &browse.path, &browse.dirs, browse.sel, &t!("browse.empty"), pal) {
-            acts.push(Act::BrowseRow(i));
-        }
         let (up, open, choose, close) = (t!("browse.up"), t!("browse.open"), t!("bak.browse_use"), t!("browse.close"));
         let start = [(up.as_ref(), false), (open.as_ref(), false), (choose.as_ref(), true), (close.as_ref(), false)];
         let meant = [Act::BrowseUp, Act::BrowseEnter, Act::BrowseChoose, Act::BrowseCancel];
-        if let Some(k) = foot(ui, id.with("foot"), &start, &[], None, pal) {
-            acts.push(meant[k].clone());
-        }
+        let browsed = folder_browser(ui, id, &browse.path, &browse.dirs, browse.sel, &t!("browse.empty"), BROWSE_ROWS, &start, pal);
+        acts.extend(browsed.row.map(Act::BrowseRow));
+        acts.extend(browsed.button.map(|k| meant[k].clone()));
     });
     if shown.closed {
         acts.push(Act::BrowseCancel);
@@ -756,7 +753,7 @@ fn remove_gate(ui: &Ui, room: &Room, id: i64, over: Rect, pal: &Pal, acts: &mut 
     let title = t!("bak.remove_title", library = library, path = path);
     let sentences = ["bak.remove_1", "bak.remove_2"].map(|key| Para::new(&t!(key), body(14.0), pal.gold)).into();
     let (keep, go) = (t!("bak.remove_keep"), t!("bak.remove_confirm"));
-    match gate(ui, Id::new("backups-remove"), over, &title, sentences, [&keep, &go], pal) {
+    match gate(ui, Id::new("backups-remove"), over, &title, sentences, [&keep, &go], pal).inner {
         Some(true) => acts.push(Act::RemoveConfirm),
         Some(false) => acts.push(Act::RemoveCancel),
         None => {}

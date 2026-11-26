@@ -1,9 +1,11 @@
 //! The wizard as a window's face (gui/window/face.rs): `setup --window` and
 //! `qr --window`, the one [`Wizard`] the terminal drives, drawn in the
 //! player's own window instead. The two halves are the terminal loop's
-//! (`setup::frame`, `setup::input`); what the window adds is the cursor for
-//! the pointer's hand, pictures as textures over the grid, and an input
-//! method for the field with the keyboard.
+//! (`setup::frame_drawn`, `setup::input`); what the window adds is the
+//! cursor for the pointer's hand, pictures as textures over the grid, an
+//! input method for the field with the keyboard, and the wizard drawn by
+//! egui over the whole grid (egui_view.rs) wherever the window hands it a
+//! panel, the cells left blank under it.
 
 use std::io;
 use std::sync::Arc;
@@ -11,15 +13,40 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use ratatui::Frame;
-use ratatui::crossterm::event::Event as TermEvent;
+use ratatui::crossterm::event::{Event as TermEvent, KeyEventKind};
 use ratatui::layout::{Position, Rect};
 
-use super::{Done, Job, Outcome, Wizard, render, session_title};
+use super::cells::render;
+use super::egui_view::{self, View};
+use super::{Done, Job, Outcome, Wizard, session_title};
 use crate::api::Client;
-use crate::gui::window::WindowTerminal;
 use crate::gui::window::face::Face;
+use crate::gui::window::panel::{self, Panel, caret_cell};
+use crate::gui::window::{GRID, WindowTerminal};
 use crate::gui::{Flow, Host};
 use crate::tui::graphics::{Graphics, PictureHost};
+
+/// The grid the face opens at while it draws with egui: the canvas's 1280
+/// by 800 points, in the window's 8 by 16 point cells. The window fits it
+/// to a screen with less room (`window::on_screen`), and the view lays
+/// itself out at whatever size the window is, down to the cells' floor. In
+/// cells the face opens at the window's own grid, where the wizard was laid
+/// out.
+const BOARDS: (u16, u16) = (160, 50);
+
+/// What runs one egui pass over a cell rect of the grid, `pass` drawing
+/// it, and says whether the pointer is over something a click acts on: the
+/// window's panel (panel.rs), or a test's own context. None when there is
+/// no window to run it in yet, and the cells draw instead.
+trait Runs {
+    fn run(&self, area: Rect, grid: Rect, pass: &mut dyn FnMut(&mut egui::Ui)) -> Option<bool>;
+}
+
+impl Runs for Panel {
+    fn run(&self, area: Rect, grid: Rect, pass: &mut dyn FnMut(&mut egui::Ui)) -> Option<bool> {
+        self.show(area, grid, pass).map(|shown| shown.hand)
+    }
+}
 
 /// The wizard and the two ends of its worker, as `run_tui` holds them.
 ///
@@ -34,17 +61,31 @@ use crate::tui::graphics::{Graphics, PictureHost};
 /// swallows it. A resize arrives as `TermEvent::Resize`, which the wizard
 /// ignores, because `render` reads the frame's area on every draw.
 ///
-/// Every way out exits 0: each [`Outcome`] the input half returns, and the
-/// close button, which ends the loop without passing through it. A Cmd-Q
-/// on a Mac ends the process inside AppKit once the window's teardown
-/// returns, so it never reaches [`Face::exit_code`]; that exit is 0 too.
-/// The host keeps its own codes: [`NO_WINDOW`](crate::gui::window::NO_WINDOW)
-/// (3) when no window opens, which a launcher takes as "use the terminal
-/// route", and 1 when a frame fails.
+/// Every way out exits 0: each [`Outcome`] the input half returns, one a
+/// click in the egui pass returns (none can yet: the cells have no click
+/// that ends the wizard either), and the close button, which ends the loop
+/// without passing through either. A Cmd-Q on a Mac ends the process inside
+/// AppKit once the window's teardown returns, so it never reaches
+/// [`Face::exit_code`]; that exit is 0 too. The host keeps its own codes:
+/// [`NO_WINDOW`](crate::gui::window::NO_WINDOW) (3) when no window opens,
+/// which a launcher takes as "use the terminal route", and 1 when a frame
+/// fails.
 pub(crate) struct WizardFace {
     wizard: Wizard,
     to_worker: Sender<(Arc<Client>, Job)>,
     from_worker: Receiver<Done>,
+    /// The wizard is drawn by egui: unless `MSTREAM_WINDOW_CELLS` keeps
+    /// every page in cells (`panel::wanted`). Decided once, as the face is
+    /// made, so the grid it opens at and the panel it takes agree.
+    egui: bool,
+    /// What runs the egui pass: the window's panel, once it is handed over
+    /// to a face that draws with egui.
+    panel: Option<Arc<dyn Runs>>,
+    /// The egui view's own between frames: when a key was last pressed.
+    view: View,
+    /// A click in the egui pass ended the wizard: the host leaves after the
+    /// frame ([`Face::ended`]).
+    ended: Option<Outcome>,
 }
 
 impl WizardFace {
@@ -53,8 +94,65 @@ impl WizardFace {
         to_worker: Sender<(Arc<Client>, Job)>,
         from_worker: Receiver<Done>,
     ) -> Self {
-        WizardFace { wizard, to_worker, from_worker }
+        WizardFace { wizard, to_worker, from_worker, egui: panel::wanted(), panel: None, view: View::default(), ended: None }
     }
+
+    /// The frame half with the wizard drawn as this face draws it: by egui
+    /// over the whole grid while it holds a panel that runs, the cells left
+    /// blank under it, so no cell, cover or picture shows through; else in
+    /// cells, as a terminal draws it (and as the window did before its
+    /// panel). The worker's answers, the dispatch, the checks, the poll and
+    /// the dwell are the one frame half's either way (`setup::frame_drawn`).
+    fn frame_on<B>(&mut self, terminal: &mut ratatui::Terminal<B>, pointer: &mut dyn FnMut(bool)) -> io::Result<Duration>
+    where
+        B: ratatui::backend::Backend<Error = io::Error>,
+    {
+        let WizardFace { wizard, to_worker, from_worker, panel, view, ended, .. } = self;
+        let mut draw = |frame: &mut Frame, wizard: &mut Wizard| {
+            let drew = panel.as_deref().and_then(|runs| egui_frame(runs, frame.area(), wizard, view, ended));
+            if drew.is_none() {
+                render(frame, wizard);
+            }
+            drew
+        };
+        super::frame_drawn(terminal, wizard, pointer, to_worker, from_worker, &mut draw)
+    }
+}
+
+/// One egui pass of the wizard over `grid`, the whole of it, the cells
+/// under it left blank: the hand, or None when `runs` has no window to run
+/// it in. What the host reads of a frame is left where the cells leave it:
+/// once the pass has run, the cells' frame begun and its registries
+/// emptied (nothing of a frame drawn in cells is hit, tipped or noted under
+/// the view), then the caret of the field with the keyboard lifted to the
+/// cell under its foot and noted on the wizard's surface, where
+/// `Face::caret_at` reads it, as the GUI lifts an admin room's
+/// (gui/admin.rs). With no pass the surface is left to the cells' own
+/// draw, which begins the frame itself: begun twice, it would forget the
+/// footprints of last frame's modal that the wordmark is drawn by. The
+/// input method's composition is handed down from the same surface. A
+/// click that ended the wizard is kept in `ended`.
+fn egui_frame(runs: &dyn Runs, grid: Rect, wizard: &mut Wizard, view: &View, ended: &mut Option<Outcome>) -> Option<bool> {
+    let composition = wizard.ui.composition().to_string();
+    let key_hints = wizard.ui.key_hints;
+    let mut seen: Option<egui_view::Shown> = None;
+    let hand = runs.run(grid, grid, &mut |ui| {
+        let next = egui_view::show(ui, wizard, view, &composition, key_hints);
+        seen = Some(match seen.take() {
+            Some(last) => last.and(next),
+            None => next,
+        });
+    })?;
+    wizard.ui.begin_frame();
+    if let Some(seen) = seen {
+        if let Some(foot) = seen.caret {
+            wizard.ui.note_caret(caret_cell(foot, seen.points, grid));
+        }
+        if seen.outcome.is_some() {
+            *ended = seen.outcome;
+        }
+    }
+    Some(hand)
 }
 
 impl Face for WizardFace {
@@ -63,30 +161,43 @@ impl Face for WizardFace {
         session_title(self.wizard.standalone)
     }
 
-    // The grid is the host's 100×30: the wizard needs 58×20, and the
-    // hosted Done page's two columns fit the wordmark band and a code of
-    // up to 15 rows in it.
+    /// Drawn by egui, the canvas's size, fitted to the screen by the host;
+    /// in cells the host's 100×30: the wizard needs 58×20, and the hosted
+    /// Done page's two columns fit the wordmark band and a code of up to 15
+    /// rows in it.
+    fn grid(&self) -> (u16, u16) {
+        if self.egui { BOARDS } else { GRID }
+    }
 
     fn frame(
         &mut self,
         terminal: &mut WindowTerminal,
         host: &mut dyn Host,
     ) -> io::Result<Duration> {
-        super::frame(
-            terminal,
-            &mut self.wizard,
-            &mut |hand| host.pointer(hand),
-            &self.to_worker,
-            &self.from_worker,
-        )
+        self.frame_on(terminal, &mut |hand| host.pointer(hand))
     }
 
     /// Matched whole, so an [`Outcome`] added later (a finished wizard told
     /// from an abandoned one) is decided here, beside [`Face::exit_code`].
+    /// A key pressed is the egui view's news too: it hides the tooltips
+    /// for the dwell after it, as the cells' surface hides its own.
     fn input(&mut self, event: TermEvent) -> Flow {
+        if let TermEvent::Key(key) = &event
+            && key.kind == KeyEventKind::Press
+        {
+            self.view.key();
+        }
         match super::input(&mut self.wizard, event) {
             Some(Outcome::Quit) => Flow::Quit,
             None => Flow::Continue,
+        }
+    }
+
+    /// Matched whole, as [`Face::input`]'s outcome is.
+    fn ended(&self) -> bool {
+        match self.ended {
+            Some(Outcome::Quit) => true,
+            None => false,
         }
     }
 
@@ -109,6 +220,16 @@ impl Face for WizardFace {
         self.wizard.ui.watch_overlays(overlays);
     }
 
+    /// The panel the wizard is drawn into by egui, over the whole grid,
+    /// unless `MSTREAM_WINDOW_CELLS` keeps it in cells. Its pictures are
+    /// egui's textures then; what [`Face::host_pictures`] hands over serves
+    /// the cells alone, as they draw before the window can run a pass.
+    fn host_panel(&mut self, panel: Arc<Panel>) {
+        if self.egui {
+            self.panel = Some(panel);
+        }
+    }
+
     /// The op each entry queued (the wizard's ping, the page's Quick
     /// Connect load) on the wire while the window and its renderer are
     /// built, as the GUI's connect is. Ops are single-flight, so frame 1's
@@ -128,8 +249,13 @@ impl Face for WizardFace {
         self.wizard.ui.hit(at).map(|act| format!("{act:?}"))
     }
 
+    /// The cells as the window holds them: blank under the egui view, which
+    /// paints over them, so the fidelity dump compares the cells alone and
+    /// runs no second pass; the wizard in cells otherwise.
     fn render_test(&mut self, frame: &mut Frame<'_>) {
-        render(frame, &mut self.wizard);
+        if self.panel.is_none() {
+            render(frame, &mut self.wizard);
+        }
     }
 }
 
@@ -213,8 +339,9 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use rust_i18n::t;
 
+    use super::super::cells::{LOGO, done_buttons};
     use super::super::tests::{IoTest, LOCALE_LOCK, click_rect, row_text};
-    use super::super::{Act, LOGO, LoginField, Modal, Op, POLL, Screen, done_buttons};
+    use super::super::{Act, LoginField, Modal, Op, POLL, Screen};
     use super::*;
     use crate::tui::art::Art;
 
@@ -485,16 +612,210 @@ mod tests {
 
     /// The window's title is the terminal session's, which a launcher and
     /// anyone scripting against window titles already know: English, and
-    /// one for each entry. Both open at the host's own grid.
+    /// one for each entry. In cells both open at the host's own grid; drawn
+    /// by egui, at the canvas's 1280 by 800 points, which the host fits to
+    /// the screen.
     #[test]
     fn the_faces_titles_are_the_sessions() {
-        let (wizard, _jobs, _answers) = WizardFace::opened(false);
+        let (mut wizard, _jobs, _answers) = WizardFace::opened(false);
         assert_eq!(wizard.title(), session_title(false));
         assert_eq!(wizard.title(), "mStream Setup");
-        let (page, _jobs, _answers) = WizardFace::opened(true);
+        let (mut page, _jobs, _answers) = WizardFace::opened(true);
         assert_eq!(page.title(), session_title(true));
         assert_eq!(page.title(), "mStream Quick Connect");
+        (wizard.egui, page.egui) = (false, false);
         assert_eq!((wizard.grid(), page.grid()), ((100, 30), (100, 30)));
+        (wizard.egui, page.egui) = (true, true);
+        assert_eq!((wizard.grid(), page.grid()), ((160, 50), (160, 50)));
+    }
+
+    /// An egui pass run headless, as the window's panel runs one: over the
+    /// grid's cells at the window's 8 by 16 points a cell, with the events
+    /// a test hands it, on a clock of its own.
+    struct Headless {
+        ctx: egui::Context,
+        events: std::cell::RefCell<Vec<egui::Event>>,
+        clock: std::cell::Cell<f64>,
+    }
+
+    impl Headless {
+        fn new() -> Arc<Headless> {
+            let ctx = egui::Context::default();
+            crate::gui::window::panel::fonts(&ctx);
+            Arc::new(Headless { ctx, events: Default::default(), clock: Default::default() })
+        }
+
+        /// The middle, in points, of what `id` drew last pass.
+        fn at(&self, id: egui::Id) -> egui::Pos2 {
+            self.ctx.read_response(id).unwrap_or_else(|| panic!("{id:?} was drawn")).rect.center()
+        }
+    }
+
+    impl Runs for Headless {
+        fn run(&self, area: Rect, _grid: Rect, pass: &mut dyn FnMut(&mut egui::Ui)) -> Option<bool> {
+            let cell = |c: u16, size: f32| f32::from(c) * size;
+            let points = egui::Rect::from_min_size(
+                egui::pos2(cell(area.x, 8.0), cell(area.y, 16.0)),
+                egui::vec2(cell(area.width, 8.0), cell(area.height, 16.0)),
+            );
+            self.clock.set(self.clock.get() + 0.05);
+            let events = self.events.take();
+            let input = egui::RawInput { screen_rect: Some(points), events, time: Some(self.clock.get()), ..Default::default() };
+            let mut out = self.ctx.run_ui(input, |ui| pass(ui));
+            out.textures_delta.clear();
+            Some(out.platform_output.cursor_icon == egui::CursorIcon::PointingHand)
+        }
+    }
+
+    /// The panel's answer before there is a window: no pass.
+    struct NoWindow;
+
+    impl Runs for NoWindow {
+        fn run(&self, _area: Rect, _grid: Rect, _pass: &mut dyn FnMut(&mut egui::Ui)) -> Option<bool> {
+            None
+        }
+    }
+
+    /// One frame half of `face` on a test terminal of the boards' grid, the
+    /// pointer's asks recorded: the cells it drew.
+    fn frame_of(face: &mut WizardFace, asked: &mut Vec<bool>) -> Buffer {
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(BOARDS.0, BOARDS.1))).unwrap();
+        face.frame_on(&mut terminal, &mut |hand| asked.push(hand)).unwrap();
+        terminal.backend().0.buffer().clone()
+    }
+
+    /// The setup face with egui's pass to run, as the window hands it one.
+    fn on_egui(runs: Arc<dyn Runs>) -> Opened {
+        let (mut face, jobs, answers) = WizardFace::opened(false);
+        face.egui = true;
+        face.panel = Some(runs);
+        (face, jobs, answers)
+    }
+
+    /// With a pass to run, the wizard is drawn by egui over the whole grid:
+    /// the cells are left blank under it, nothing of theirs registered; a
+    /// press egui took does what the cells' press does, its op sent by the
+    /// same frame half after the draw, and the hand follows egui's pointer.
+    #[test]
+    fn the_egui_frame_leaves_the_cells_blank_and_its_clicks_are_the_cells_acts() {
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        let runs = Headless::new();
+        let (mut face, jobs, _answers) = on_egui(runs.clone());
+        let mut asked = Vec::new();
+        face.wizard.queue(Op::Ping, t!("busy.reaching"));
+        let buf = frame_of(&mut face, &mut asked);
+        assert!(buf.content().iter().all(|cell| cell.symbol() == " "), "every cell blank under the view");
+        assert!(face.wizard.ui.clicks.is_empty(), "nothing of the cells' is hit under the view");
+        let (_, job) = jobs.try_recv().expect("the boot ping, sent by the frame half");
+        assert!(matches!(job, Job::Plain(Op::Ping)));
+        // The pointer over the card: the hand, asked for once.
+        let add = runs.at(egui::Id::new("setup-add"));
+        runs.events.borrow_mut().push(egui::Event::PointerMoved(add));
+        frame_of(&mut face, &mut asked);
+        frame_of(&mut face, &mut asked);
+        assert_eq!(asked, [true], "the hand over the card");
+        face.wizard.apply(Done::Ping(Ok(Vec::new())));
+        // A press and its release: the card's act, its op on the wire.
+        for pressed in [true, false] {
+            let button = egui::Event::PointerButton { pos: add, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+            runs.events.borrow_mut().push(button);
+            frame_of(&mut face, &mut asked);
+        }
+        let (_, job) = jobs.try_recv().expect("the picker's op, sent after the draw");
+        assert!(matches!(job, Job::Plain(Op::PickNative)), "the card is the cells' Browse");
+        assert!(!face.ended(), "no click here ends the wizard");
+    }
+
+    /// The field with the keyboard in the egui view notes its caret on the
+    /// wizard's surface, lifted to the cell under its foot, which is what
+    /// the window reads for its input method and its paste; the input
+    /// method's composition reaches that field, the caret after it; and
+    /// with no field there is no caret.
+    #[test]
+    fn the_egui_fields_caret_is_lifted_to_its_cell_and_the_composition_reaches_it() {
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        let runs = Headless::new();
+        let (mut face, _jobs, _answers) = on_egui(runs.clone());
+        let mut asked = Vec::new();
+        face.wizard.add_folder("/srv/music".to_string());
+        frame_of(&mut face, &mut asked);
+        assert_eq!(face.caret_at(), None, "no field, no caret");
+        face.wizard.act(Act::RenameFolder(0));
+        frame_of(&mut face, &mut asked);
+        frame_of(&mut face, &mut asked);
+        let at = face.caret_at().expect("the name's field has the keyboard");
+        let field = runs.ctx.read_response(egui::Id::new("setup-rename")).expect("the field").rect;
+        let cell = egui::Rect::from_min_size(egui::pos2(f32::from(at.x) * 8.0, f32::from(at.y) * 16.0), egui::vec2(8.0, 16.0));
+        assert!(cell.intersects(field), "the caret's cell is in the field: {at:?} {field:?}");
+        face.set_composition("にほん");
+        frame_of(&mut face, &mut asked);
+        let after = face.caret_at().expect("still the field's");
+        assert!(after.x > at.x && after.y == at.y, "after the composition: {at:?} {after:?}");
+        face.set_composition("");
+        let esc = TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(face.input(esc), Flow::Continue);
+        frame_of(&mut face, &mut asked);
+        assert_eq!(face.caret_at(), None, "the field gone, its caret with it");
+    }
+
+    /// Before there is a window the panel runs no pass, and the cells draw
+    /// as they always have, their frame begun once: a modal over the
+    /// wordmark stands the picture down by last frame's footprints and the
+    /// figlet stands in, and the frame after that is the poll's, as in a
+    /// window drawn in cells
+    /// (`a_modal_over_the_wordmark_stands_it_down_and_the_figlet_stands_in`).
+    #[test]
+    fn with_no_pass_to_run_the_cells_draw_as_today() {
+        let _guard = LOCALE_LOCK.read().unwrap_or_else(|e| e.into_inner());
+        let (mut face, _jobs, _answers) = on_egui(Arc::new(NoWindow));
+        let mut asked = Vec::new();
+        let buf = frame_of(&mut face, &mut asked);
+        let text = rows(&buf).join("\n");
+        assert!(text.contains(&t!("folders.add_card").to_string()), "the cells' card: {text}");
+        assert!(!face.wizard.ui.clicks.is_empty(), "and the cells' clicks");
+
+        // At the window's usual grid, where the browser crosses the band.
+        let host = on_a_recording_host(&mut face);
+        let mut terminal = Terminal::new(IoTest(TestBackend::new(100, 30))).unwrap();
+        let mut frame = |face: &mut WizardFace| {
+            let wait = face.frame_on(&mut terminal, &mut |_| {}).unwrap();
+            (wait, terminal.backend().0.buffer().clone())
+        };
+        let _ = frame(&mut face);
+        let told = host.told();
+        let [Told::Placed(band)] = told[..] else { panic!("the wordmark alone: {told:?}") };
+        face.open_the_browser();
+        let (wait, _) = frame(&mut face);
+        assert_eq!(wait, Duration::ZERO, "the frame drawn by the browser's footprint, now");
+        let _ = host.told();
+        let (wait, buf) = frame(&mut face);
+        let told = host.told();
+        assert!(matches!(told[..], [Told::Over(_)]), "no picture under the browser: {told:?}");
+        assert!(row_text(&buf, band.y).contains(LOGO[0].trim()), "the figlet stands in: {:#?}", rows(&buf));
+        assert_eq!(wait, POLL, "and nothing more to draw at once");
+    }
+
+    /// A key pressed is the egui view's news (its tooltips hide for the
+    /// dwell after it, as the cells' do; egui_view.rs tests the hiding),
+    /// and the pointer's moves are not. A pass that ended the wizard is the
+    /// host's quit, with the exit every way out has.
+    #[test]
+    fn a_key_is_the_views_news_and_an_ended_pass_is_the_hosts_quit() {
+        let (mut face, _jobs, _answers) = WizardFace::opened(false);
+        let moved = TermEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Moved,
+            column: 3,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(face.input(moved), Flow::Continue);
+        assert!(!face.view.key_pressed(), "a move is no key");
+        assert_eq!(face.input(TermEvent::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))), Flow::Continue);
+        assert!(face.view.key_pressed());
+        assert!(!face.ended());
+        face.ended = Some(Outcome::Quit);
+        assert!(face.ended(), "the host leaves after this frame");
+        assert_eq!(face.exit_code(), 0);
     }
 
     /// The op an entry queued goes to the worker before the first frame:

@@ -253,7 +253,7 @@ fn tabs(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
 /// Requests: the inbox's card, then the table. Accept, decline, withdraw
 /// and dismiss are keys only, as in the cells: no row carries a button.
 fn requests(ui: &mut Ui, room: &Room, pal: &Pal, got: &mut Gathered) {
-    if tick_card(ui, Id::new("fed-inbox"), room.accept_requests, &t!("fed.inbox_label"), &t!("fed.inbox_hint"), pal).clicked() {
+    if tick_card(ui, Id::new("fed-inbox"), room.accept_requests, &t!("fed.inbox_label"), &t!("fed.inbox_hint"), false, pal).clicked() {
         got.acts.push(Act::ToggleInbox);
     }
     ui.add_space(GAP);
@@ -735,7 +735,7 @@ fn peer_name(ui: &Ui, name: &tui_input::Input, preview: &TicketPreview, over: Re
 #[allow(clippy::too_many_arguments)]
 fn warn(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (String, Act), go: (String, Act), pal: &Pal, got: &mut Gathered) {
     let sentences = lines.iter().map(|line| Para::new(line, body(14.0), pal.gold)).collect();
-    match gate(ui, id, over, title, sentences, [&safe.0, &go.0], pal) {
+    match gate(ui, id, over, title, sentences, [&safe.0, &go.0], pal).inner {
         Some(true) => got.acts.push(go.1),
         Some(false) => got.acts.push(safe.1),
         None => {}

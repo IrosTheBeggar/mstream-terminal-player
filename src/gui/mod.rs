@@ -4669,9 +4669,9 @@ impl window::face::Face for GuiFace {
 
     /// The egui panel, for the pages that have an egui face. Set aside with
     /// `MSTREAM_WINDOW_CELLS=1`, which keeps every page in cells: the
-    /// spike's way to put the two side by side.
+    /// spike's way to put the two side by side (`panel::wanted`).
     fn host_panel(&mut self, panel: std::sync::Arc<window::panel::Panel>) {
-        if std::env::var_os("MSTREAM_WINDOW_CELLS").is_none_or(|v| v.is_empty() || v == "0") {
+        if window::panel::wanted() {
             self.gui.panel = Some(panel);
         }
     }

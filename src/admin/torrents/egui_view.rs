@@ -1143,7 +1143,7 @@ impl Entry<'_> {
 #[allow(clippy::too_many_arguments)]
 fn warn(ui: &Ui, id: Id, over: Rect, title: &str, lines: &[String], safe: (String, Act), go: (String, Act), pal: &Pal, out: &mut Out) {
     let sentences = lines.iter().map(|words| Para::new(words, body(14.0), pal.gold)).collect();
-    match gate(ui, id, over, title, sentences, [&safe.0, &go.0], pal) {
+    match gate(ui, id, over, title, sentences, [&safe.0, &go.0], pal).inner {
         Some(true) => out.acts.push(go.1),
         Some(false) => out.acts.push(safe.1),
         None => {}
