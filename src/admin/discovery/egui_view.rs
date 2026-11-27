@@ -1656,7 +1656,14 @@ mod tests {
         let ids = s.blocked_peers.clone();
         room.apply(loaded(s));
         room.act(Act::BlockedOpen);
-        let _ = settle(&ctx, &mut room, floor);
+        let clip_of = |out: &egui::FullOutput, words: &str| {
+            out.shapes.iter().find_map(|clipped| match &clipped.shape {
+                Shape::Text(text) if text.galley.text() == words => Some(clipped.clip_rect),
+                _ => None,
+            })
+        };
+        // The body's view from its top, as it opens unscrolled.
+        let top = clip_of(&settle(&ctx, &mut room, floor).0, &ids[0]).expect("the first row drawn").min.y;
         for _ in 0..11 {
             handle_key(&mut room, key(KeyCode::Down));
         }
@@ -1671,7 +1678,21 @@ mod tests {
                 _ => false,
             })
         };
-        assert!(in_view(&out, &ids[11]) && in_view(&out, &ids[8]), "the last row and the three over it in view");
+        // The last row in view and as many over it as the view holds: the
+        // walk moves the view no further than the cursor's row needs, its
+        // top on the nearest row's, and keeps the rows' words whole, not
+        // their room, so from the body's top as it opened to the window's
+        // foot (16 points and the modal's 24 of padding over the floor's)
+        // the rows stand a pitch apart, a band of words each. Four in Segoe
+        // UI, three where the sheet's title wraps, as in a face as wide as
+        // DejaVu Sans; a walk a row too far, as the rows' room kept whole
+        // made it, shows one fewer.
+        let ink = |id: &str| found(&out, id).unwrap_or_else(|| panic!("{id} drawn"));
+        let pitch = ink(&ids[11]).min.y - ink(&ids[10]).min.y;
+        let view_h = floor.y - 16.0 - 24.0 - top;
+        let holds = ((view_h + 0.5 - crate::gui::window::studio::WORDS_BAND) / pitch).floor() as usize + 1;
+        let shown: Vec<bool> = ids.iter().map(|id| in_view(&out, id)).collect();
+        assert!(shown.iter().enumerate().all(|(i, s)| *s == (i + holds >= ids.len())), "the last row and the {} over it in view: {shown:?}", holds - 1);
         assert!(!torn(&unblock), "the list's own line whole or out of view, never cut");
     }
 

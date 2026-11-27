@@ -1430,7 +1430,7 @@ fn flow(wants: &[f32], room: f32, gap: f32) -> Vec<(usize, f32, f32)> {
 
 /// How tall a line of words a row stands on its middle inks: a 16-point
 /// mark or a line of words up to 14 points, and a point over and under.
-const WORDS_BAND: f32 = BOX + 2.0;
+pub(crate) const WORDS_BAND: f32 = BOX + 2.0;
 
 /// A line of words (or a 16-point mark) standing on `mid`, a row of a
 /// [`Dialog`]'s body ([`body_row`]): the [`WORDS_BAND`] it inks, not the
@@ -5537,9 +5537,30 @@ mod tests {
         let (words, figure) = (all("words"), all("4096"));
         let (b_words, b_figure) = (words[0].1, figure[0].1);
         assert!((b_words - b_figure).abs() <= 1.0, "a monospace line centred beside words sits on their baseline: {b_words} {b_figure}");
-        // The LED: under the line's middle, over the baseline, and higher
-        // on capitals than on small letters.
-        assert!(leds[0] > 200.0 + 2.0 && leds[0] < b_words - 5.0, "on the small letters' middle: {leds:?}, baseline {b_words}");
+        // The LED: on the middle of the small letters' ink, as "words" drew
+        // them ("w", "o", "r" and "s"; the "d" reaches higher), within a
+        // point, the band's edges and the baseline each landing on a pixel —
+        // not on the line's middle, which the room a face leaves for accents
+        // over them puts several points higher in Segoe UI, and the room
+        // Calibri leaves under them 4 lower; and higher on capitals than on
+        // small letters.
+        let small = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == "words" => {
+                    let row = &t.galley.rows[0];
+                    let ink = row.row.glyphs.iter().filter(|g| g.chr != 'd').map(|g| {
+                        let top = t.pos.y + row.pos.y + g.pos.y + g.uv_rect.offset.y;
+                        (top, top + g.uv_rect.size.y)
+                    });
+                    Some(ink.fold((f32::MAX, f32::MIN), |(a, b), (top, foot)| (a.min(top), b.max(foot))))
+                }
+                _ => None,
+            })
+            .expect("\"words\" drawn");
+        let middle = (small.0 + small.1) / 2.0;
+        assert!((leds[0] - middle).abs() <= 1.0, "on the small letters' middle: {leds:?}, their ink {small:?}, baseline {b_words}");
         assert!(leds[1] < leds[0], "a capital's middle is higher: {leds:?}");
     }
 
