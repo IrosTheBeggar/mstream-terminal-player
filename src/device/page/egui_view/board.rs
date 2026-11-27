@@ -128,6 +128,20 @@ pub(super) fn words_baseline(ui: &Ui, runs: &[Run], size: f32, line_h: f32) -> f
     para.spaced(line_h).baseline(ui)
 }
 
+/// Where a Details fact, one line on its row's middle `mid`, stands its
+/// words' baseline: where a line of the UI face at the values' size
+/// centred there does ([`studio::centred_baseline`]), whether its value
+/// leads with words or with a figure. Its label, its value and a Removes
+/// fact's path and count stand on it, as a value row's label stands on its
+/// words. Centred on the middle, a label stood 2 points over its value's
+/// words in Segoe UI, a point in DejaVu Sans and Noto Sans; and a value
+/// centred by its first run's size stood half a point higher where a
+/// figure leads it (the Drive fact's letter, the Port fact's port), as the
+/// Removes fact's path stood over its count.
+pub(super) fn fact_baseline(ui: &Ui, mid: f32) -> f32 {
+    mid + studio::centred_baseline(ui, PLAIN.0)
+}
+
 /// The board in view, its card in the column's `room` (cells.rs's `card`):
 /// its head, its value blocks, its bottom row, and Details while open. The
 /// card is as tall as its rows and no taller than the room; short of room
@@ -1029,13 +1043,13 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
 
     /// A Details fact: its label, and its value on one line, its figures in
     /// the monospace, cut with an ellipsis at the column's end: it never
-    /// wraps.
+    /// wraps. The two stand on the fact's baseline ([`fact_baseline`]).
     fn fact(&mut self, label: &str, value: &str, style: Style) {
         let Some(top) = self.room(0.0, FACT_H) else { return };
-        let mid = top + FACT_H / 2.0;
-        self.label(Some(label), mid);
+        let on = fact_baseline(self.ui, top + FACT_H / 2.0);
+        self.grid.label_on(self.ui, label, on, self.face.pal);
         let runs = studio::figured(value, self.face.ports, body(PLAIN.0), mono(FIGURE), tone(style, self.face.pal));
-        studio::runs(self.ui, pos2(self.grid.value_x(), mid), &runs, self.grid.value_w(), Align2::LEFT_CENTER);
+        studio::runs_on(self.ui, self.grid.value_x(), on, &runs, self.grid.value_w(), Align::Min);
         self.y = top + FACT_H;
         self.last = Some(Kind::Fact);
     }

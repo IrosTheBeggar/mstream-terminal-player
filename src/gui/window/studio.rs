@@ -277,7 +277,7 @@ fn first_baseline(galley: &egui::Galley) -> Option<f32> {
 /// at `size` centred there. Every line the kit centres stands on it,
 /// whatever its face, so a figure in the monospace sits on the baseline of
 /// the words beside it rather than half its smaller descent higher.
-fn centred_baseline(ui: &Ui, size: f32) -> f32 {
+pub(crate) fn centred_baseline(ui: &Ui, size: f32) -> f32 {
     let face = metrics(ui, &body(size));
     face.baseline - face.row / 2.0
 }

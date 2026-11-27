@@ -251,6 +251,13 @@ fn details_open_on_its_facts_and_its_log_pinned_to_the_newest_line_which_the_whe
     let out = probe.settle(&mut page);
     assert_drew(&out, &["PORT", "line 59"]);
     assert!(!drew(&out, "line 00"), "the oldest lines above the pane");
+    // A fact's label on its value's baseline, the port leading the value
+    // as a figure: within a tenth of a point, where centred on the row a
+    // label stood 2 points over its value's words in Segoe UI, and a
+    // value led by a figure half a point over one led by words.
+    let port = texts(&out).into_iter().map(|(t, _)| t).find(|t| t.starts_with("COM3 · ")).expect("the Port fact's value");
+    let (label, value) = (baseline(&out, "PORT"), baseline(&out, &port));
+    assert!((label - value).abs() < 0.1, "Port on its value's baseline: {label} {value}");
     // A notch up over the log: a line older, the follow stopped.
     let at = find(&out, "line 59").center();
     let wheel = Event::MouseWheel { unit: MouseWheelUnit::Line, delta: vec2(0.0, 1.0), phase: egui::TouchPhase::Move, modifiers: Default::default() };

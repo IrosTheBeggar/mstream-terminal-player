@@ -36,14 +36,14 @@
 //! at its body's top, and swallows what comes within its guard
 //! (`CHAIN_GUARD`) in the model, which every click here goes through.
 
-use egui::{Align2, Color32, FontId, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Align2, Color32, FontId, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use ratatui::style::Style;
 use ratatui::text::Line;
 
 use super::super::card::{CardGate, GateKind, plan_of, span};
 use super::super::cells::{self, Row};
 use super::super::*;
-use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, Order, PLAIN, Paint, SCAN, WIDE, Want, clipped, headline, keep, lead_of, words_baseline};
+use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, Order, PLAIN, Paint, SCAN, WIDE, Want, clipped, fact_baseline, headline, keep, lead_of, words_baseline};
 use super::{Drawn, Face, tone, unled};
 use crate::device::card::worker::CardView;
 use crate::gui::window::studio::{self, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
@@ -534,7 +534,7 @@ impl Values<'_, '_> {
             let small = studio::metrics(self.ui, &body(PLAIN.0)).small;
             studio::led(self.ui, pos2(end - w + 3.0, on - small / 2.0), lamp);
         }
-        studio::runs_on(self.ui, end, on, &runs, w + 1.0, egui::Align::Max);
+        studio::runs_on(self.ui, end, on, &runs, w + 1.0, Align::Max);
     }
 }
 
@@ -560,16 +560,17 @@ fn details(paint: &mut Paint, page: &mut Page, ui: &Ui, face: &Face, grid: Grid,
 }
 
 /// A fact's row at `paint`'s place, its label in the label column, `value`
-/// drawing its words on the row's middle from the value column's left in
-/// the column's width; none past the floor, and nothing after it.
+/// drawing its words on the fact's baseline ([`fact_baseline`]) from the
+/// value column's left in the column's width, the label on it too; none
+/// past the floor, and nothing after it.
 fn fact_row(paint: &mut Paint, ui: &Ui, face: &Face, grid: Grid, label: &str, value: impl FnOnce(f32, f32, f32)) {
     if paint.cut || paint.y + FACT_H > paint.floor + 0.01 {
         paint.cut = true;
         return;
     }
-    let mid = paint.y + FACT_H / 2.0;
-    grid.label(ui, label, mid, face.pal);
-    value(mid, grid.value_x(), grid.value_w());
+    let on = fact_baseline(ui, paint.y + FACT_H / 2.0);
+    grid.label_on(ui, label, on, face.pal);
+    value(on, grid.value_x(), grid.value_w());
     paint.y += FACT_H;
 }
 
@@ -586,12 +587,12 @@ fn drive_fact(paint: &mut Paint, ui: &Ui, face: &Face, grid: Grid, view: &CardVi
     pieces.reverse();
     let drive = view.drive();
     let runs = |words: &str| figured(words, face.ports, &drive, body(PLAIN.0), mono(FIGURE), face.pal.text);
-    fact_row(paint, ui, face, grid, label, |mid, x, w| {
+    fact_row(paint, ui, face, grid, label, |on, x, w| {
         let mut keep = pieces.len();
         while keep > 1 && studio::runs_width(ui, &runs(&pieces[..keep].join(" · "))) > w {
             keep -= 1;
         }
-        studio::runs(ui, pos2(x, mid), &runs(&pieces[..keep].join(" · ")), w, Align2::LEFT_CENTER);
+        studio::runs_on(ui, x, on, &runs(&pieces[..keep].join(" · ")), w, Align::Min);
     });
 }
 
@@ -601,24 +602,25 @@ fn drive_fact(paint: &mut Paint, ui: &Ui, face: &Face, grid: Grid, view: &CardVi
 fn removes_fact(paint: &mut Paint, ui: &Ui, face: &Face, grid: Grid, view: &CardView, label: &str, value: &str) {
     let path = plan_of(view).and_then(|p| p.removals.first()).cloned().unwrap_or_default();
     let at = (!path.is_empty()).then(|| value.find(&path)).flatten();
-    fact_row(paint, ui, face, grid, label, |mid, x, w| {
+    fact_row(paint, ui, face, grid, label, |on, x, w| {
         let figures = |words: &str| studio::figured(words, face.ports, body(PLAIN.0), mono(FIGURE), face.pal.text);
         let (before, after) = match at {
             Some(at) => (figures(&value[..at]), figures(&value[at + path.len()..])),
             None => {
-                studio::runs(ui, pos2(x, mid), &figures(value), w, Align2::LEFT_CENTER);
+                studio::runs_on(ui, x, on, &figures(value), w, Align::Min);
                 return;
             }
         };
         let (before_w, after_w) = (studio::runs_width(ui, &before), studio::runs_width(ui, &after));
         let mut from = x;
         if !before.is_empty() {
-            from = studio::runs(ui, pos2(from, mid), &before, w, Align2::LEFT_CENTER).max.x;
+            from = studio::runs_on(ui, from, on, &before, w, Align::Min).max.x;
         }
         let room = (w - before_w - after_w).max(1.0);
+        let mid = studio::mid_on(ui, on, FIGURE);
         let drawn = studio::text(ui, pos2(from, mid), &path, mono(FIGURE), face.pal.text, room, Align2::LEFT_CENTER);
         if !after.is_empty() {
-            studio::runs(ui, pos2(drawn.max.x, mid), &after, (x + w - drawn.max.x).max(1.0), Align2::LEFT_CENTER);
+            studio::runs_on(ui, drawn.max.x, on, &after, (x + w - drawn.max.x).max(1.0), Align::Min);
         }
     });
 }
@@ -1133,8 +1135,20 @@ mod tests {
         let (mut page, _inbox) = alone(cards::ready("E:", now()));
         page.act(Act::Details);
         let out = probe.settle(&mut page);
-        assert!(!galley(&out, "E: · FAT32 on MBR · 63.8 GB · 32 KB clusters · 1A2B-3C4D").elided);
-        assert!(!galley(&out, "Velvet Static/Harbour Songs/04 - Low Tide.flac").elided);
+        let (drive_v, path_v) = ("E: · FAT32 on MBR · 63.8 GB · 32 KB clusters · 1A2B-3C4D", "Velvet Static/Harbour Songs/04 - Low Tide.flac");
+        assert!(!galley(&out, drive_v).elided);
+        assert!(!galley(&out, path_v).elided);
+        // Each fact's label on its value's baseline, whether a figure leads
+        // the value (the drive letter, the path) or words do (the Card
+        // fact), and the Removes fact's count on its path's: within a
+        // tenth of a point, where centred on the row a label stood 2 points
+        // over its value's words in Segoe UI, and a value led by a figure
+        // half a point over one led by words.
+        let card_v = "id 5eedc0de0a1b2c3d · rev. 42 · mStream Player 0.14.0";
+        for (label, value) in [("DRIVE", drive_v), ("CARD", card_v), ("REMOVES", path_v), ("REMOVES", " and 1 more")] {
+            let (on, value_on) = (baseline(&out, label), baseline(&out, value));
+            assert!((on - value_on).abs() < 0.1, "{label} on its value's baseline: {on} {value_on}, {value:?}");
+        }
         // A volume's long name (Linux, macOS) and a long path at the cells'
         // least width: the Drive fact keeps the most pieces that fit, each
         // whole, the serial first to go; the path is cut, never the count.
