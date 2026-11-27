@@ -1,33 +1,46 @@
-//! A region of the window drawn by egui rather than as cells: the egui
-//! spike's seam, the stats page its first tenant. Covers (covers.rs) put
-//! pictures over cells the drawing path left blank; a panel puts a whole
-//! page there. Three hands meet here, all on the window's thread:
+//! What of the window egui draws rather than the cells: the egui spike's
+//! seam. Covers (covers.rs) put pictures over cells the drawing path left
+//! blank; a panel puts egui's paint there, in two layers, each with a
+//! context of its own:
 //!
-//! - the host's (mod.rs): winit's events, fed to egui while a panel is on
-//!   screen. The pointer inside the region is egui's alone — a press there,
-//!   its drag and its release, the wheel; everything else still goes to the
-//!   grid as before, the keys above all, so a page keeps its keymap and the
-//!   GUI's own keys still switch rooms.
-//! - the face's: while it draws, [`Panel::show`] runs one egui pass over
-//!   the cells it names and tessellates it; the face leaves those cells
-//!   blank, as it does under a cover.
-//! - the post-processor's: after the text blit and the covers, the pass is
-//!   painted over the region ([`Painter`], from `CoverPost::process`).
+//! - the PAGE layer: a page hosted in a region of the grid (the Stats
+//!   page, the MP3 Player's, the Admin rooms and the log, the setup wizard
+//!   over the whole grid), its pass run mid-draw where the face draws the
+//!   page ([`Panel::show`]). egui is told the region IS its screen, so
+//!   everything it draws, popups included, stays inside the cells the page
+//!   owns; and any cells overlay that touches the region (a modal, the
+//!   cells' server menu, a tooltip) stands the whole layer down.
+//! - the CHROME layer: the GUI's own top strip, transport bar and their
+//!   popups (src/gui/chrome.rs), whose screen is the whole window, so a
+//!   popup goes anywhere. Its one pass runs at the very end of the face's
+//!   draw ([`Panel::show_chrome`]), once the cells have registered all that
+//!   stands over it; it stays painted under the cells' overlays, each part
+//!   cut around those the cells stacked over it ([`Part`]).
 //!
-//! The region's place is the cell rect's share of the grid, which is its
-//! share of the surface (covers.rs says why), in egui's points. egui is told
-//! the region IS its screen, so everything it draws — popups included —
-//! stays inside the cells the page owns.
+//! Three hands meet here, all on the window's thread:
 //!
-//! What it does not do yet: a GUI overlay that opens over the region (the
-//! header's server menu, a modal, a tooltip) stands the panel down for as
-//! long as it is up, rather than being painted over it; and an input
-//! method never reaches egui, so a panel has no text fields.
+//! - the host's (mod.rs): winit's events, fed to egui while a layer is on
+//!   screen. The router ([`Panel::route`]) gives the page the pointer inside
+//!   its region — a press there, its drag and its release, the wheel — and
+//!   the chrome the primary presses on the cells it claims ([`Claims`]);
+//!   everything else still goes to the grid as before, the keys above all,
+//!   so a page keeps its keymap and the GUI's own keys still switch rooms.
+//! - the face's: while it draws, each layer's pass runs and tessellates;
+//!   the face leaves those cells blank, as it does under a cover.
+//! - the post-processor's: after the text blit and the covers, the page's
+//!   paint then the chrome's, in one pass of one renderer ([`Painter`],
+//!   from `CoverPost::process`).
+//!
+//! A layer's place is the cell rect's share of the grid, which is its share
+//! of the surface (covers.rs says why), in egui's points. An input method
+//! never reaches egui, so a panel has no text fields of egui's own.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use egui::epaint::{ClippedPrimitive, ImageDelta, TextureId};
+use egui::epaint::{ClippedPrimitive, ImageDelta, Primitive, TextureId};
 use egui::{FontData, FontDefinitions, FontFamily, pos2};
 use ratatui::layout::{Position, Rect};
 use winit::event::WindowEvent;
@@ -81,24 +94,112 @@ pub(crate) struct Shown {
     pub hand: bool,
 }
 
+/// The grid in egui's points as the chrome's pass holds it, its screen
+/// the whole window: where any cell stands. A cell is the window's share
+/// of the grid, 8 by 16 points at the window's opening size but not
+/// always; `ppp` is the pixels in a point, which the edges round to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Cells {
+    pub points: egui::Rect,
+    pub grid: Rect,
+    pub ppp: f32,
+}
+
+impl Cells {
+    /// A cell's size in points.
+    pub(crate) fn cell(&self) -> egui::Vec2 {
+        egui::vec2(
+            self.points.width() / f32::from(self.grid.width.max(1)),
+            self.points.height() / f32::from(self.grid.height.max(1)),
+        )
+    }
+
+    /// `cells` in points, each edge on the whole pixel [`Panel::show`]
+    /// rounds a region's edge to, so the strip's foot is row 1's top and a
+    /// part meets the page beside it with no seam.
+    pub(crate) fn rect(&self, cells: Rect) -> egui::Rect {
+        self.edges(cells, f32::round, f32::round)
+    }
+
+    /// `cells` in points with its edges rounded out to whole pixels: a hole
+    /// cut for the cells' own drawing never leaves a sliver of it covered.
+    pub(crate) fn hole(&self, cells: Rect) -> egui::Rect {
+        self.edges(cells, f32::floor, f32::ceil)
+    }
+
+    fn edges(&self, cells: Rect, low: fn(f32) -> f32, high: fn(f32) -> f32) -> egui::Rect {
+        let ppp = self.ppp.max(f32::MIN_POSITIVE);
+        let along = |c: u16, from: u16, n: u16, origin: f32, span: f32, round: fn(f32) -> f32| {
+            let share = f32::from(c.saturating_sub(from)) / f32::from(n.max(1));
+            origin + round(share * span * ppp) / ppp
+        };
+        let (g, p) = (self.grid, self.points);
+        egui::Rect::from_min_max(
+            pos2(along(cells.x, g.x, g.width, p.min.x, p.width(), low), along(cells.y, g.y, g.height, p.min.y, p.height(), low)),
+            pos2(
+                along(cells.right(), g.x, g.width, p.min.x, p.width(), high),
+                along(cells.bottom(), g.y, g.height, p.min.y, p.height(), high),
+            ),
+        )
+    }
+
+    /// The cell under `at`.
+    pub(crate) fn under(&self, at: egui::Pos2) -> Position {
+        cell_under(at, self.points, self.grid)
+    }
+}
+
+/// Where the chrome takes the pointer, from its pass until the next, in
+/// cells of the grid.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Claims {
+    /// The cells where a primary press is the chrome's: the strip's live
+    /// runs of row 0, and while a popup is up the whole grid less the cells
+    /// of what the cells stacked over it.
+    pub live: Vec<Rect>,
+    /// A popup holds the pointer: the page layer hears none of it, and the
+    /// hand is the chrome's alone.
+    pub popup: bool,
+}
+
+impl Claims {
+    /// Whether a press on `cell` is the chrome's.
+    pub(crate) fn holds(&self, cell: Position) -> bool {
+        self.live.iter().any(|rect| rect.contains(cell))
+    }
+}
+
+/// A part of the chrome's paint — the strip, the bar, a popup, a tooltip —
+/// by where it stands, in points, and the rects in points cut out of it
+/// (what the cells stacked over that part this frame, [`Cells::hole`]). A
+/// primitive belongs to the part whose rect holds its clip rect.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Part {
+    pub rect: egui::Rect,
+    pub holes: Vec<egui::Rect>,
+}
+
+/// What the chrome's pass drew, for the face's frame: whether the pointer
+/// is over something it would act on, on a cell the chrome claims.
+pub(crate) struct ChromeShown {
+    pub hand: bool,
+}
+
 /// The panel as the host and the face share it.
 pub(crate) struct Panel {
     board: Arc<Board>,
     live: Mutex<Live>,
 }
 
-struct Live {
-    /// Made on attach, styled and given its faces on the first pass.
+/// One egui layer: its context and winit state, the button a press held
+/// for it, and when it asked to run again.
+struct Layer {
+    /// Made with the panel, styled and given its faces on the first pass.
     ctx: egui::Context,
     fonts_set: bool,
     state: Option<egui_winit::State>,
-    window: Option<Arc<Window>>,
-    /// The region in physical pixels, as the last pass placed it.
-    region: Option<egui::Rect>,
-    /// The pointer, in physical pixels, as winit last placed it.
-    cursor: Option<(f32, f32)>,
-    /// A press began in the region, of this button: its drag and release
-    /// are egui's too, and egui holds the button down until it hears the
+    /// A press this layer took, of this button: its drag and release are
+    /// the layer's too, and egui holds the button down until it hears the
     /// release.
     captured: Option<egui::PointerButton>,
     /// Events egui has been given since its last pass.
@@ -107,18 +208,67 @@ struct Live {
     repaint_at: Option<Instant>,
 }
 
+impl Layer {
+    fn new() -> Layer {
+        Layer { ctx: egui::Context::default(), fonts_set: false, state: None, captured: None, pending: false, repaint_at: None }
+    }
+
+    /// Events for egui's next pass, and a pass owed.
+    fn hear(&mut self, events: Vec<egui::Event>) {
+        if events.is_empty() {
+            return;
+        }
+        if let Some(state) = self.state.as_mut() {
+            state.egui_input_mut().events.extend(events);
+            self.pending = true;
+        }
+    }
+
+    /// Whether this layer's next pass is owed now.
+    fn owed(&self) -> bool {
+        self.pending || self.repaint_at.is_some_and(|at| at <= Instant::now())
+    }
+}
+
+struct Live {
+    page: Layer,
+    chrome: Layer,
+    window: Option<Arc<Window>>,
+    /// The page's region in physical pixels, as its last pass placed it.
+    region: Option<egui::Rect>,
+    /// The chrome's screen as its last pass placed it: the grid, and the
+    /// window in physical pixels.
+    screen: Option<(Rect, egui::Rect)>,
+    /// What the chrome's last pass claims of the pointer.
+    claims: Claims,
+    /// A press the grid took, of this button: the chrome takes nothing
+    /// until its release.
+    grid_held: Option<egui::PointerButton>,
+    /// The pointer, in physical pixels, as winit last placed it.
+    cursor: Option<(f32, f32)>,
+    /// The areas the chrome's last pass showed: one new in a pass was laid
+    /// out unseen in it, and the next pass is owed at once.
+    areas: HashSet<egui::LayerId>,
+}
+
+/// The top bit of a texture id the chrome's paint is moved to: its
+/// context numbers its textures from `Managed(0)` as the page's does, and
+/// one renderer draws both ([`remapped`]). No id the renderer hands out
+/// for a native texture of its own reaches it.
+const CHROME_TEXTURES: u64 = 1 << 62;
+
 impl Panel {
     pub(super) fn new(board: Arc<Board>) -> Panel {
         let live = Live {
-            ctx: egui::Context::default(),
-            fonts_set: false,
-            state: None,
+            page: Layer::new(),
+            chrome: Layer::new(),
             window: None,
             region: None,
+            screen: None,
+            claims: Claims::default(),
+            grid_held: None,
             cursor: None,
-            captured: None,
-            pending: false,
-            repaint_at: None,
+            areas: HashSet::new(),
         };
         Panel { board, live: Mutex::new(live) }
     }
@@ -127,19 +277,35 @@ impl Panel {
         self.live.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The window, once it exists: egui's input is read against it.
+    /// The window, once it exists: egui's input is read against it. The
+    /// faces the passes set their words in are read meanwhile, off the
+    /// window's thread, so the first frame finds them read.
     pub(super) fn attach(&self, window: Arc<Window>) {
         let mut live = self.lock();
-        let state = egui_winit::State::new(
-            live.ctx.clone(),
-            egui::ViewportId::ROOT,
-            &*window,
-            Some(window.scale_factor() as f32),
-            window.theme(),
-            None,
-        );
-        live.state = Some(state);
+        let Live { page, chrome, .. } = &mut *live;
+        for layer in [page, chrome] {
+            let state = egui_winit::State::new(
+                layer.ctx.clone(),
+                egui::ViewportId::ROOT,
+                &*window,
+                Some(window.scale_factor() as f32),
+                window.theme(),
+                None,
+            );
+            layer.state = Some(state);
+        }
         live.window = Some(window);
+        let lang = rust_i18n::locale().to_string();
+        let _ = std::thread::Builder::new().name("window-faces".into()).spawn(move || {
+            let _ = definitions(&lang);
+        });
+    }
+
+    /// A window attached, of some size: a pass would run.
+    pub(crate) fn ready(&self) -> bool {
+        let live = self.lock();
+        let size = live.window.as_ref().map(|window| window.inner_size());
+        live.page.state.is_some() && size.is_some_and(|size| size.width > 0 && size.height > 0)
     }
 
     /// One of winit's events that is not the pointer's — the modifiers,
@@ -155,88 +321,108 @@ impl Panel {
         ) {
             return;
         }
-        let on_screen = self.board.panel_on_screen();
+        let page_on = self.board.panel_on_screen();
+        let chrome_on = self.board.chrome_on_screen();
         let mut live = self.lock();
-        let Live { state, window, captured, cursor, ctx, pending, .. } = &mut *live;
-        let (Some(state), Some(window)) = (state.as_mut(), window.as_deref()) else {
-            *captured = None;
+        let Live { page, chrome, window, cursor, grid_held, .. } = &mut *live;
+        let Some(window) = window.as_deref() else {
+            page.captured = None;
+            chrome.captured = None;
+            *grid_held = None;
             return;
         };
         // The window lost the keyboard mid-press: the release may never
-        // come, so egui is told the button let go where the pointer stands,
-        // or its drag would hold until the next press.
+        // come, so each layer is told the button let go where the pointer
+        // stands, or its drag would hold until the next press.
         if matches!(event, WindowEvent::Focused(false)) {
-            let ppp = window.scale_factor() as f32 * ctx.zoom_factor();
-            let at = cursor.map(|(x, y)| pos2(x, y) / ppp);
-            let release = let_go(captured, at, !on_screen);
-            if !release.is_empty() {
-                state.egui_input_mut().events.extend(release);
-                *pending = true;
+            *grid_held = None;
+            for (layer, on) in [(&mut *page, page_on), (&mut *chrome, chrome_on)] {
+                let ppp = window.scale_factor() as f32 * layer.ctx.zoom_factor();
+                let at = cursor.map(|(x, y)| pos2(x, y) / ppp);
+                let release = let_go(&mut layer.captured, at, !on);
+                layer.hear(release);
             }
         }
-        let _ = state.on_window_event(window, event);
+        for layer in [page, chrome] {
+            if let Some(state) = layer.state.as_mut() {
+                let _ = state.on_window_event(window, event);
+            }
+        }
     }
 
     /// The pointer, as the window hands it to the grid (input.rs's [`Raw`],
-    /// a person's or the script's), egui's to see while a panel is on
-    /// screen. True when it is egui's alone and the grid must not see it: a
-    /// press in the region, the release of a press that began there, the
-    /// wheel over it. A move goes to both, so the GUI's hovers let go.
+    /// a person's or the script's), egui's to see while a layer is on
+    /// screen ([`route_both`]). True when it is egui's alone and the grid
+    /// must not see it: a press a layer took, the release of a press one
+    /// took, the wheel over the page. A move goes to the grid too, so the
+    /// GUI's hovers let go.
     pub(super) fn route(&self, raw: &Raw) -> bool {
-        let on_screen = self.board.panel_on_screen();
+        let page_on = self.board.panel_on_screen();
+        let chrome_on = self.board.chrome_on_screen();
         let mut live = self.lock();
-        // The pointer's place is kept while the panel stands down too (an
-        // overlay over it, or no panel up): a press that comes after with no
-        // move between, on the panel back on screen, lands where it is and
-        // not where the pointer stood before the stand-down.
+        // The pointer's place is kept while the layers stand down too (an
+        // overlay over the page, or no layer up): a press that comes after
+        // with no move between, on a layer back on screen, lands where it is
+        // and not where the pointer stood before the stand-down.
         if let Raw::Move { x, y } = raw {
             live.cursor = Some((*x as f32, *y as f32));
         }
-        let Live { state, window, region, cursor, captured, pending, ctx, .. } = &mut *live;
-        let (Some(state), Some(window)) = (state.as_mut(), window.as_deref()) else { return false };
-        let ppp = window.scale_factor() as f32 * ctx.zoom_factor();
-        let inside = match (*region, *cursor) {
-            (Some(region), Some((x, y))) => region.contains(pos2(x, y)),
-            _ => false,
-        };
-        let at = cursor.map(|(x, y)| pos2(x, y) / ppp);
-        let (events, ours) = routed(raw, on_screen, inside, at, ppp, captured);
-        if !events.is_empty() {
-            state.egui_input_mut().events.extend(events);
-            *pending = true;
-        }
-        ours
-    }
-
-    /// The face's frame must run its pass though the player has nothing
-    /// new: egui was given input, or asked to run again by now.
-    pub(super) fn wants_pass(&self) -> bool {
-        if !self.board.panel_on_screen() {
+        let Live { page, chrome, window, region, screen, claims, grid_held, cursor, .. } = &mut *live;
+        let Some(window) = window.as_deref() else { return false };
+        if page.state.is_none() {
             return false;
         }
+        let ppp = window.scale_factor() as f32 * page.ctx.zoom_factor();
+        let pointer = cursor.map(|(x, y)| pos2(x, y));
+        let in_page = match (*region, pointer) {
+            (Some(region), Some(at)) => region.contains(at),
+            _ => false,
+        };
+        let claimed = match (*screen, pointer) {
+            (Some((grid, px)), Some(at)) if px.contains(at) => claims.holds(cell_under(at, px, grid)),
+            _ => false,
+        };
+        let seat = Seat { page_on, chrome_on, in_page, claimed, popup: chrome_on && claims.popup, at: pointer.map(|at| at / ppp), ppp };
+        let mut holds = Holds { page: page.captured, chrome: chrome.captured, grid: *grid_held };
+        let routed = route_both(raw, seat, &mut holds);
+        (page.captured, chrome.captured, *grid_held) = (holds.page, holds.chrome, holds.grid);
+        page.hear(routed.page);
+        chrome.hear(routed.chrome);
+        routed.ours
+    }
+
+    /// The face's frame must run its passes though the player has nothing
+    /// new: a layer on screen was given input, or asked to run again by
+    /// now.
+    pub(super) fn wants_pass(&self) -> bool {
+        let page_on = self.board.panel_on_screen();
+        let chrome_on = self.board.chrome_on_screen();
         let live = self.lock();
-        live.pending || live.repaint_at.is_some_and(|at| at <= Instant::now())
+        (page_on && live.page.owed()) || (chrome_on && live.chrome.owed())
     }
 
-    /// When egui wants its next pass, while a panel is on screen.
+    /// When egui wants its next pass, of a layer on screen.
     pub(super) fn wake_at(&self) -> Option<Instant> {
-        if !self.board.panel_on_screen() {
-            return None;
-        }
-        self.lock().repaint_at
+        let page_on = self.board.panel_on_screen();
+        let chrome_on = self.board.chrome_on_screen();
+        let live = self.lock();
+        let page = live.page.repaint_at.filter(|_| page_on);
+        let chrome = live.chrome.repaint_at.filter(|_| chrome_on);
+        page.into_iter().chain(chrome).min()
     }
 
-    /// One egui pass over `area`, a cell rect of `grid` the face leaves
-    /// blank this frame, with `run` drawing into it; its paint waits on the
-    /// board for the post-processor. None before there is a window, when
-    /// the face draws the cells itself.
+    /// One egui pass of the page layer over `area`, a cell rect of `grid`
+    /// the face leaves blank this frame, with `run` drawing into it; its
+    /// paint waits on the board for the post-processor. None before there
+    /// is a window, when the face draws the cells itself.
     pub(crate) fn show(&self, area: Rect, grid: Rect, run: &mut dyn FnMut(&mut egui::Ui)) -> Option<Shown> {
         let mut live = self.lock();
-        if !live.fonts_set {
-            fonts(&live.ctx);
-            live.fonts_set = true;
+        let Live { page, window, region, .. } = &mut *live;
+        if !page.fonts_set {
+            fonts(&page.ctx);
+            page.fonts_set = true;
         }
-        let Live { ctx, state, window, region, pending, repaint_at, .. } = &mut *live;
+        let Layer { ctx, state, pending, repaint_at, .. } = page;
         let (Some(state), Some(window)) = (state.as_mut(), window.clone()) else { return None };
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 || area.width == 0 || area.height == 0 {
@@ -265,6 +451,272 @@ impl Panel {
         self.board.panel_drawn(area, Paint::pass(jobs, output.pixels_per_point, output.textures_delta));
         Some(Shown { hand })
     }
+
+    /// The chrome layer's pass for this frame, over the whole window, the
+    /// `grid` its screen: `run` draws it once (egui may run it again) on a
+    /// `Ui` the whole window, handed where the cells stand ([`Cells`]),
+    /// and says where each part of its paint stands with what to cut out of
+    /// it ([`Part`]); a primitive in none of them is cut out of `every`, the
+    /// safe side. From this pass to the next, a primary press on the cells
+    /// `claims` holds is the chrome's ([`Panel::route`]). The paint waits
+    /// on the board for the post-processor, after the page's. None before
+    /// there is a window, when the face draws the chrome in cells.
+    pub(crate) fn show_chrome(
+        &self,
+        grid: Rect,
+        claims: Claims,
+        every: &[Rect],
+        run: &mut dyn FnMut(&mut egui::Ui, Cells) -> Vec<Part>,
+    ) -> Option<ChromeShown> {
+        let page_on = self.board.panel_on_screen();
+        let mut live = self.lock();
+        let Live { page, chrome, window, screen, claims: kept, cursor, areas, .. } = &mut *live;
+        if !chrome.fonts_set {
+            fonts(&chrome.ctx);
+            chrome.fonts_set = true;
+        }
+        let (Some(state), Some(window)) = (chrome.state.as_mut(), window.clone()) else { return None };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 || grid.width == 0 || grid.height == 0 {
+            return None;
+        }
+        let px = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.width as f32, size.height as f32));
+        let ppp = window.scale_factor() as f32 * chrome.ctx.zoom_factor();
+        let cells = Cells { points: egui::Rect::from_min_max(px.min / ppp, px.max / ppp), grid, ppp };
+        let mut input = state.take_egui_input(&window);
+        input.screen_rect = Some(cells.points);
+        let mut parts = Vec::new();
+        let mut output = chrome.ctx.run_ui(input, |ui| parts = run(ui, cells));
+        chrome.pending = false;
+        let shown = chrome.ctx.memory(|memory| memory.areas().visible_layer_ids());
+        let appeared = shown.iter().any(|layer| !areas.contains(layer));
+        *areas = shown.into_iter().collect();
+        let delay = output.viewport_output.get(&egui::ViewportId::ROOT).map(|viewport| viewport.repaint_delay);
+        chrome.repaint_at = chrome_repaint(delay, appeared).map(|delay| Instant::now() + delay);
+        // egui shows the hand over its own rows wherever they are; the cells
+        // under a hole cut for an overlay of theirs have no control of the
+        // chrome's, so the hand stops at what the chrome claims.
+        let at = cursor.map(|(x, y)| pos2(x, y)).filter(|at| px.contains(*at));
+        let claimed = at.is_some_and(|at| claims.holds(cell_under(at, px, grid)));
+        let hand = claimed && output.platform_output.cursor_icon == egui::CursorIcon::PointingHand;
+        let jobs = chrome.ctx.tessellate(std::mem::take(&mut output.shapes), output.pixels_per_point);
+        let every: Vec<egui::Rect> = every.iter().map(|rect| cells.hole(*rect)).collect();
+        let jobs = holed(jobs, &parts, &every);
+        // A popup that comes up takes the pointer off the page: egui's last
+        // hover there lets go.
+        if claims.popup && !kept.popup && page_on {
+            page.hear(vec![egui::Event::PointerGone]);
+        }
+        *kept = claims;
+        *screen = Some((grid, px));
+        let paint = remapped(Paint::pass(jobs, output.pixels_per_point, output.textures_delta));
+        self.board.chrome_drawn(grid, paint);
+        Some(ChromeShown { hand })
+    }
+}
+
+/// When the chrome's next pass is owed, after one whose egui asked for one
+/// after `delay`: a delay egui gave is kept (a tooltip's dwell), and the
+/// immediate pass it asks after every pass that had input is not, since a
+/// move draws a frame of the GUI's anyway and egui hit-tests it against
+/// this pass's paint; but where an area `appeared` in this pass, which egui
+/// laid out unseen, the next pass is owed at once, to show it.
+fn chrome_repaint(delay: Option<Duration>, appeared: bool) -> Option<Duration> {
+    if appeared {
+        return Some(Duration::ZERO);
+    }
+    delay.filter(|delay| !delay.is_zero() && *delay < Duration::from_secs(60))
+}
+
+/// `jobs`, each primitive cut out of the holes of the part it belongs to:
+/// where its clip rect meets a hole, the primitive is drawn once for each
+/// piece of its clip rect left round the holes, and not at all where none
+/// is left. It belongs to the smallest of `parts` whose rect holds its clip
+/// rect, and to none, the safe side, takes `every` hole.
+fn holed(jobs: Vec<ClippedPrimitive>, parts: &[Part], every: &[egui::Rect]) -> Vec<ClippedPrimitive> {
+    let mut out = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let clip = job.clip_rect;
+        let holds = |rect: &egui::Rect| rect.expand(0.01).contains_rect(clip);
+        let part = parts.iter().filter(|part| holds(&part.rect)).min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()));
+        let holes = part.map_or(every, |part| &part.holes[..]);
+        let meets: Vec<egui::Rect> = holes.iter().copied().filter(|hole| hole.intersects(clip) && hole.intersect(clip).is_positive()).collect();
+        if meets.is_empty() {
+            out.push(job);
+            continue;
+        }
+        for piece in without(clip, &meets) {
+            out.push(ClippedPrimitive { clip_rect: piece, primitive: job.primitive.clone() });
+        }
+    }
+    out
+}
+
+/// `rect` less `holes`: the pieces of it no hole covers, none overlapping.
+fn without(rect: egui::Rect, holes: &[egui::Rect]) -> Vec<egui::Rect> {
+    let mut pieces = vec![rect];
+    for hole in holes {
+        let mut next = Vec::with_capacity(pieces.len() + 3);
+        for piece in pieces {
+            let cut = piece.intersect(*hole);
+            if !cut.is_positive() {
+                next.push(piece);
+                continue;
+            }
+            let band = |min: egui::Pos2, max: egui::Pos2| egui::Rect::from_min_max(min, max);
+            if cut.min.y > piece.min.y {
+                next.push(band(piece.min, pos2(piece.max.x, cut.min.y)));
+            }
+            if cut.max.y < piece.max.y {
+                next.push(band(pos2(piece.min.x, cut.max.y), piece.max));
+            }
+            if cut.min.x > piece.min.x {
+                next.push(band(pos2(piece.min.x, cut.min.y), pos2(cut.min.x, cut.max.y)));
+            }
+            if cut.max.x < piece.max.x {
+                next.push(band(pos2(cut.max.x, cut.min.y), pos2(piece.max.x, cut.max.y)));
+            }
+        }
+        pieces = next;
+    }
+    pieces
+}
+
+/// The chrome's paint with its textures moved to ids of their own
+/// ([`CHROME_TEXTURES`]): its deltas, its frees and its meshes alike, so
+/// one renderer holds both layers' textures and the page's are never
+/// touched.
+fn remapped(mut paint: Paint) -> Paint {
+    let remap = |id: TextureId| match id {
+        TextureId::Managed(n) => TextureId::User(CHROME_TEXTURES | n),
+        user => user,
+    };
+    for (id, _) in &mut paint.set {
+        *id = remap(*id);
+    }
+    for id in &mut paint.free {
+        *id = remap(*id);
+    }
+    for job in paint.jobs.iter_mut().flatten() {
+        if let Primitive::Mesh(mesh) = &mut job.primitive {
+            mesh.texture_id = remap(mesh.texture_id);
+        }
+    }
+    paint
+}
+
+/// Where the pointer is, as the router reads it for one event.
+#[derive(Clone, Copy, Debug)]
+struct Seat {
+    /// The page layer is on screen and painted (`Board::panel_on_screen`).
+    page_on: bool,
+    /// The chrome layer is on screen (`Board::chrome_on_screen`).
+    chrome_on: bool,
+    /// The pointer is inside the page's region.
+    in_page: bool,
+    /// The pointer's cell is one the chrome claims.
+    claimed: bool,
+    /// A chrome popup holds the pointer.
+    popup: bool,
+    /// The pointer, in egui's points.
+    at: Option<egui::Pos2>,
+    ppp: f32,
+}
+
+/// The button a press held for each of the two layers, or for the grid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Holds {
+    page: Option<egui::PointerButton>,
+    chrome: Option<egui::PointerButton>,
+    grid: Option<egui::PointerButton>,
+}
+
+/// What each layer is given of one of the pointer's events, and whether
+/// it was egui's alone.
+#[derive(Debug, Default)]
+struct Routed {
+    page: Vec<egui::Event>,
+    chrome: Vec<egui::Event>,
+    ours: bool,
+}
+
+/// One of the pointer's events, routed between the page layer, the chrome
+/// layer and the grid. In order:
+///
+/// 1. A held button stays with whoever took its press, until its release:
+///    the chrome, the page (the page's own rules, [`routed`]), or the grid,
+///    which the chrome then leaves alone: a page's press dragged onto row 0
+///    stays the page's, and a grid press whose release lands after a chrome
+///    popup came up is still the grid's, so its grip or bar hears the Up.
+/// 2. A primary press is the chrome's where the chrome is on screen,
+///    nothing holds a button and the press's cell is one it claims.
+/// 3. Otherwise it is the page's by the page's rules, which hears nothing
+///    while a chrome popup holds the pointer; else the grid's.
+/// 4. A secondary or middle press and the wheel are never the chrome's.
+/// 5. A move reaches the chrome unless the page or the grid holds a button
+///    (the chrome heard the pointer go at that press), and the page as its
+///    rules say unless a popup holds the pointer or the chrome holds a
+///    button; the grid always hears it.
+/// 6. The pointer leaving the window lets go of every hold.
+fn route_both(raw: &Raw, seat: Seat, holds: &mut Holds) -> Routed {
+    let page_on = seat.page_on && !seat.popup;
+    let page = |raw: &Raw, holds: &mut Holds| routed(raw, page_on, seat.in_page, seat.at, seat.ppp, &mut holds.page);
+    let gone = || if seat.chrome_on { vec![egui::Event::PointerGone] } else { Vec::new() };
+    let mut out = Routed::default();
+    match raw {
+        Raw::Leave => {
+            (out.page, _) = page(raw, holds);
+            out.chrome = let_go(&mut holds.chrome, seat.at, !seat.chrome_on);
+            out.chrome.extend(gone());
+            holds.grid = None;
+        }
+        Raw::Button { button, down } => {
+            let pressed = pointer_button(button);
+            if holds.chrome.is_some() {
+                if !*down && holds.chrome == Some(pressed) {
+                    out.chrome = let_go(&mut holds.chrome, seat.at, !seat.chrome_on);
+                }
+                out.ours = true;
+                return out;
+            }
+            let free = holds.page.is_none() && holds.grid.is_none();
+            if *down && pressed == egui::PointerButton::Primary && free && seat.chrome_on && seat.claimed {
+                if let Some(pos) = seat.at {
+                    holds.chrome = Some(pressed);
+                    out.chrome = vec![egui::Event::PointerButton { pos, button: pressed, pressed: true, modifiers: egui::Modifiers::default() }];
+                    if page_on {
+                        out.page = vec![egui::Event::PointerGone];
+                    }
+                    out.ours = true;
+                    return out;
+                }
+            }
+            let held = holds.page.is_some();
+            (out.page, out.ours) = page(raw, holds);
+            if *down {
+                if !out.ours {
+                    holds.grid.get_or_insert(pressed);
+                }
+                // Another layer's press: nothing of the chrome lights while
+                // it lasts.
+                if !held {
+                    out.chrome = gone();
+                }
+            } else if !out.ours && holds.grid == Some(pressed) {
+                holds.grid = None;
+            }
+        }
+        Raw::Move { .. } => {
+            if holds.chrome.is_none() {
+                (out.page, _) = page(raw, holds);
+            }
+            if seat.chrome_on && holds.page.is_none() && holds.grid.is_none() {
+                out.chrome = seat.at.map(egui::Event::PointerMoved).into_iter().collect();
+            }
+        }
+        _ => (out.page, out.ours) = page(raw, holds),
+    }
+    out
 }
 
 /// What [`Panel::route`] makes of one of the pointer's events: what egui is
@@ -388,16 +840,24 @@ impl Paint {
     }
 }
 
-/// egui's paint on the backend's device, owned by the post-processor. The
-/// renderer is made on the first pass there is something to paint, so a
-/// window that never shows a panel never compiles egui's pipeline.
+/// egui's paint on the backend's device, owned by the post-processor: the
+/// page layer's, then the chrome's over it, through one renderer (the
+/// chrome's textures moved to ids of their own, [`remapped`]). The renderer
+/// is made on the first pass there is something to paint, so a window that
+/// never shows egui never compiles its pipeline.
 #[derive(Default)]
 pub(crate) struct Painter {
     renderer: Option<egui_wgpu::Renderer>,
-    /// The last pass's shapes: painted again on every process, since the
-    /// text blit before it paints the whole surface.
-    jobs: Vec<ClippedPrimitive>,
+    /// Each layer's last pass's shapes: painted again on every process,
+    /// since the text blit before them paints the whole surface.
+    page: Vec<ClippedPrimitive>,
+    chrome: Vec<ClippedPrimitive>,
     pixels_per_point: f32,
+    /// What one pass paints: the page's shapes while it is not stood down,
+    /// then the chrome's; made again when either changes.
+    jobs: Vec<ClippedPrimitive>,
+    page_shown: bool,
+    stale: bool,
 }
 
 impl Painter {
@@ -410,17 +870,41 @@ impl Painter {
         surface_config: &wgpu::SurfaceConfiguration,
         surface_view: &wgpu::TextureView,
     ) {
-        let (set, free, visible) = {
+        let (mut set, mut free, page_shown) = {
             let mut paint = board.panel();
             if let Some(jobs) = paint.jobs.take() {
-                self.jobs = jobs;
+                self.page = jobs;
                 self.pixels_per_point = paint.pixels_per_point;
+                self.stale = true;
             }
-            if paint.area.is_none() {
-                self.jobs.clear();
+            if paint.area.is_none() && !self.page.is_empty() {
+                self.page.clear();
+                self.stale = true;
             }
             (std::mem::take(&mut paint.set), std::mem::take(&mut paint.free), !paint.under)
         };
+        {
+            let mut paint = board.chrome();
+            if let Some(jobs) = paint.jobs.take() {
+                self.chrome = jobs;
+                self.pixels_per_point = paint.pixels_per_point;
+                self.stale = true;
+            }
+            if paint.area.is_none() && !self.chrome.is_empty() {
+                self.chrome.clear();
+                self.stale = true;
+            }
+            set.append(&mut paint.set);
+            free.append(&mut paint.free);
+        }
+        if page_shown != self.page_shown {
+            self.page_shown = page_shown;
+            self.stale = true;
+        }
+        if std::mem::take(&mut self.stale) {
+            let page = self.page.iter().filter(|_| page_shown);
+            self.jobs = page.chain(&self.chrome).cloned().collect();
+        }
         if set.is_empty() && free.is_empty() && self.jobs.is_empty() {
             return;
         }
@@ -430,7 +914,7 @@ impl Painter {
         for (id, delta) in &set {
             renderer.update_texture(device, queue, *id, delta);
         }
-        if visible && !self.jobs.is_empty() {
+        if !self.jobs.is_empty() {
             let screen = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [surface_config.width, surface_config.height],
                 pixels_per_point: self.pixels_per_point,
@@ -486,6 +970,14 @@ pub(crate) fn fonts_every_script(ctx: &egui::Context) {
 /// The faces [`fonts`] describes, with the CJK one for `lang` where it has
 /// one.
 fn install_fonts(ctx: &egui::Context, lang: &str) {
+    ctx.set_fonts(definitions(lang));
+}
+
+/// [`install_fonts`]'s faces as egui is given them: the system's borrowed
+/// from the shared copy read once for the process ([`readable`]), so the
+/// page's context and the chrome's, and a page's faces set again, hold one
+/// copy of each between them.
+fn definitions(lang: &str) -> FontDefinitions {
     let mut fonts = FontDefinitions::empty();
     fonts.font_data.insert("Ubuntu-Light".into(), Arc::new(FontData::from_static(epaint_default_fonts::UBUNTU_LIGHT)));
     fonts.font_data.insert("Hack".into(), Arc::new(FontData::from_static(epaint_default_fonts::HACK_REGULAR)));
@@ -518,7 +1010,7 @@ fn install_fonts(ctx: &egui::Context, lang: &str) {
     fonts.families.insert(FontFamily::Proportional, proportional);
     fonts.families.insert(FontFamily::Monospace, monospace);
     fonts.families.insert(FontFamily::Name(STRONG.into()), bold);
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 /// Ideographs that Japanese and Chinese share, whose ink together spans
@@ -569,21 +1061,39 @@ fn ink_under_middle(face: &FontData, sample: &str) -> Option<f32> {
     Some((middle - (ink.y_min + ink.y_max) / 2.0) / em)
 }
 
-/// A face egui can read, from `path`'s `index`th.
-fn readable(path: &std::path::Path, index: u32) -> Option<FontData> {
-    let bytes = std::fs::read(path).ok()?;
-    if skrifa::FontRef::from_index(&bytes, index).is_err() {
+/// The faces read from disk, once each for the process's life, by path:
+/// their bytes leaked, so egui borrows them (`FontData::from_static`),
+/// where it would copy owned bytes into every set of fonts it builds — one
+/// copy of a 14 to 20 megabyte CJK collection for each context, and again
+/// for each install. At most a UI face's pair and a CJK collection or two
+/// are ever read. None for a path that would not read.
+static FACES: Mutex<Vec<(PathBuf, Option<&'static [u8]>)>> = Mutex::new(Vec::new());
+
+/// A face egui can read, from `path`'s `index`th, borrowed from the shared
+/// copy ([`FACES`]), which the first ask reads; an ask while another
+/// thread reads one waits for it.
+fn readable(path: &Path, index: u32) -> Option<FontData> {
+    let mut faces = FACES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let bytes = match faces.iter().find(|(read, _)| read == path) {
+        Some((_, bytes)) => *bytes,
+        None => {
+            let bytes = std::fs::read(path).ok().map(|bytes| &*Box::leak(bytes.into_boxed_slice()));
+            faces.push((path.to_path_buf(), bytes));
+            bytes
+        }
+    }?;
+    drop(faces);
+    if skrifa::FontRef::from_index(bytes, index).is_err() {
         eprintln!("gui --window: {} is not a face egui can read", path.display());
         return None;
     }
-    let mut face = FontData::from_owned(bytes);
+    let mut face = FontData::from_static(bytes);
     face.index = index;
     Some(face)
 }
 
 /// Where each platform keeps its UI face, regular and semibold, best first.
-fn system_ui_faces() -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
-    use std::path::PathBuf;
+fn system_ui_faces() -> (Vec<PathBuf>, Vec<PathBuf>) {
     if cfg!(windows) {
         let fonts = std::env::var_os("WINDIR")
             .map(PathBuf::from)
@@ -817,5 +1327,222 @@ mod tests {
         let (released, _) = feed(&[(button(false), false)], &mut captured);
         run(released);
         assert!(!ctx.input(|i| i.pointer.any_down()), "and lets it go with the hand");
+    }
+
+    // ── The two layers ──────────────────────────────────────────────────
+
+    /// The pointer on screen with both layers up, inside the page's region
+    /// or not, on a cell the chrome claims or not.
+    fn seat(in_page: bool, claimed: bool) -> Seat {
+        Seat { page_on: true, chrome_on: true, in_page, claimed, popup: false, at: Some(pos2(40.0, 30.0)), ppp: PPP }
+    }
+
+    fn right(down: bool) -> Raw {
+        Raw::Button { button: Button::Right, down }
+    }
+
+    fn pressed_by(events: &[egui::Event]) -> bool {
+        events.iter().any(|e| matches!(e, egui::Event::PointerButton { pressed: true, .. }))
+    }
+
+    /// A primary press on a cell the chrome claims is the chrome's alone,
+    /// and so are its drag's moves and its release; the page hears that the
+    /// pointer went; a second button meanwhile is the chrome's to swallow.
+    #[test]
+    fn a_primary_press_on_a_claimed_cell_is_the_chromes_with_its_release() {
+        let mut holds = Holds::default();
+        let press = route_both(&button(true), seat(false, true), &mut holds);
+        assert!(press.ours && pressed_by(&press.chrome), "{press:?}");
+        assert_eq!(holds.chrome, Some(egui::PointerButton::Primary));
+        assert!(matches!(press.page[..], [egui::Event::PointerGone]), "the page lets go of its hover: {press:?}");
+        let moved = route_both(&Raw::Move { x: 1.0, y: 1.0 }, seat(true, false), &mut holds);
+        assert!(!moved.ours && moved.page.is_empty() && !moved.chrome.is_empty(), "the drag is the chrome's, the grid hears it too: {moved:?}");
+        let other = route_both(&right(true), seat(true, false), &mut holds);
+        assert!(other.ours && other.page.is_empty() && other.chrome.is_empty(), "another button while it is held: {other:?}");
+        let release = route_both(&button(false), seat(true, false), &mut holds);
+        assert!(release.ours && release.chrome.iter().any(|e| release_at(e).is_some()), "{release:?}");
+        assert_eq!(holds, Holds::default());
+    }
+
+    /// A press off the chrome's cells goes where it went before: inside the
+    /// page's region the page's, outside it the grid's, which the chrome
+    /// leaves alone until its release — though the release lands on a cell
+    /// the chrome claims, and a press there meanwhile is not the chrome's.
+    #[test]
+    fn a_press_the_grid_took_is_the_grids_until_its_release() {
+        let mut holds = Holds::default();
+        let page = route_both(&button(true), seat(true, false), &mut holds);
+        assert!(page.ours && pressed_by(&page.page) && holds.page.is_some(), "{page:?}");
+        assert!(matches!(page.chrome[..], [egui::Event::PointerGone]), "the chrome lets go of its hover: {page:?}");
+        let dragged = route_both(&Raw::Move { x: 1.0, y: 1.0 }, seat(false, true), &mut holds);
+        assert!(dragged.chrome.is_empty() && !dragged.page.is_empty(), "a page's drag onto the strip is the page's: {dragged:?}");
+        let release = route_both(&button(false), seat(false, true), &mut holds);
+        assert!(release.ours && release.chrome.is_empty(), "and so is its release: {release:?}");
+
+        let grid = route_both(&button(true), seat(false, false), &mut holds);
+        assert!(!grid.ours && grid.page.is_empty() && holds.grid == Some(egui::PointerButton::Primary), "{grid:?}");
+        let moved = route_both(&Raw::Move { x: 1.0, y: 1.0 }, seat(false, true), &mut holds);
+        assert!(moved.chrome.is_empty() && !moved.ours, "the chrome hears no move while the grid holds: {moved:?}");
+        let up = route_both(&button(false), seat(false, true), &mut holds);
+        assert!(!up.ours && up.chrome.is_empty(), "the grid's release, on a claimed cell: {up:?}");
+        assert_eq!(holds, Holds::default());
+        let next = route_both(&button(true), seat(false, true), &mut holds);
+        assert!(next.ours && pressed_by(&next.chrome), "free again: {next:?}");
+    }
+
+    /// The chrome never takes a secondary or middle press nor the wheel,
+    /// claimed cell or not: they go where they went before. While a popup
+    /// holds the pointer the page hears none of them, nor the moves.
+    #[test]
+    fn the_wheel_and_other_buttons_are_never_the_chromes_and_a_popup_quiets_the_page() {
+        let mut holds = Holds::default();
+        for raw in [right(true), Raw::Wheel(Wheel::Lines(1.0)), Raw::Button { button: Button::Middle, down: true }] {
+            let out = route_both(&raw, seat(false, true), &mut holds);
+            assert!(out.chrome.iter().all(|e| matches!(e, egui::Event::PointerGone)), "{raw:?}: {out:?}");
+            assert!(!out.ours, "{raw:?} is the grid's");
+            holds = Holds::default();
+        }
+        let wheel = route_both(&Raw::Wheel(Wheel::Lines(1.0)), seat(true, false), &mut holds);
+        assert!(wheel.ours && !wheel.page.is_empty(), "the page's wheel as before: {wheel:?}");
+        let popup = Seat { popup: true, ..seat(true, false) };
+        for raw in [Raw::Wheel(Wheel::Lines(1.0)), Raw::Move { x: 1.0, y: 1.0 }, right(true)] {
+            let out = route_both(&raw, popup, &mut holds);
+            assert!(out.page.is_empty() && !out.ours, "{raw:?} under a popup: {out:?}");
+            holds = Holds::default();
+        }
+        let claimed = Seat { popup: true, ..seat(true, true) };
+        let press = route_both(&button(true), claimed, &mut holds);
+        assert!(press.ours && pressed_by(&press.chrome) && press.page.is_empty(), "the popup's press: {press:?}");
+    }
+
+    /// The chrome off screen (the mini player) takes nothing and hears
+    /// nothing, as the page layer off screen; the pointer leaving the
+    /// window lets go of every hold.
+    #[test]
+    fn a_chrome_off_screen_takes_nothing_and_leaving_lets_go_of_everything() {
+        let mut holds = Holds::default();
+        let off = Seat { chrome_on: false, ..seat(false, true) };
+        let press = route_both(&button(true), off, &mut holds);
+        assert!(!press.ours && press.chrome.is_empty(), "{press:?}");
+        assert!(route_both(&Raw::Move { x: 1.0, y: 1.0 }, off, &mut holds).chrome.is_empty());
+        let mut holds = Holds::default();
+        route_both(&button(true), seat(false, true), &mut holds);
+        let gone = route_both(&Raw::Leave, seat(false, true), &mut holds);
+        assert!(gone.chrome.iter().any(|e| release_at(e).is_some()), "a release that may never come is made now: {gone:?}");
+        assert!(matches!(gone.chrome.last(), Some(egui::Event::PointerGone)));
+        assert_eq!(holds, Holds::default());
+    }
+
+    fn mesh_job(clip: egui::Rect) -> ClippedPrimitive {
+        ClippedPrimitive { clip_rect: clip, primitive: Primitive::Mesh(egui::Mesh::default()) }
+    }
+
+    /// A primitive crossing a hole of its part is drawn in the pieces round
+    /// it; one inside a hole is not drawn; one apart from every hole is
+    /// drawn as it was; a part's holes are its own, so a popup's primitive
+    /// ignores what only the strip is cut around; and a primitive in no
+    /// part takes every hole.
+    #[test]
+    fn the_chromes_paint_is_cut_round_the_holes_of_its_own_part() {
+        let r = |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
+        let strip = Part { rect: r(0.0, 0.0, 800.0, 16.0), holes: vec![r(100.0, 0.0, 200.0, 480.0)] };
+        let menu = Part { rect: r(500.0, 16.0, 790.0, 200.0), holes: vec![] };
+        let every = [r(100.0, 0.0, 200.0, 480.0), r(600.0, 100.0, 700.0, 150.0)];
+        let jobs = vec![mesh_job(strip.rect), mesh_job(r(120.0, 2.0, 180.0, 14.0)), mesh_job(r(300.0, 0.0, 400.0, 16.0)), mesh_job(menu.rect), mesh_job(r(0.0, 300.0, 800.0, 480.0))];
+        let out = holed(jobs, &[strip.clone(), menu.clone()], &every);
+        let clips: Vec<egui::Rect> = out.iter().map(|job| job.clip_rect).collect();
+        assert!(clips.contains(&r(0.0, 0.0, 100.0, 16.0)) && clips.contains(&r(200.0, 0.0, 800.0, 16.0)), "the strip round its hole: {clips:?}");
+        assert!(!clips.iter().any(|clip| clip.intersects(r(100.5, 0.5, 199.5, 15.5)) && clip.max.y <= 16.0), "nothing of it in the hole: {clips:?}");
+        assert!(clips.contains(&r(300.0, 0.0, 400.0, 16.0)), "apart from the hole, whole");
+        assert!(clips.contains(&menu.rect), "the menu ignores the overlays under it: {clips:?}");
+        let loose: Vec<_> = clips.iter().filter(|clip| clip.min.y >= 300.0).collect();
+        assert_eq!(loose.len(), 2, "in no part, cut round every hole that meets it: {loose:?}");
+        assert!(!loose.iter().any(|clip| clip.intersects(r(100.5, 300.5, 199.5, 479.5))));
+    }
+
+    /// The chrome's textures move to ids of their own, in its deltas, its
+    /// frees and its meshes alike, and a page's id never is one of them.
+    #[test]
+    fn the_chromes_textures_never_land_on_a_pages_ids() {
+        let delta = ImageDelta::full(egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]), egui::TextureOptions::LINEAR);
+        let mut mesh = egui::Mesh::with_texture(TextureId::Managed(0));
+        mesh.colored_vertex(pos2(0.0, 0.0), egui::Color32::WHITE);
+        let job = ClippedPrimitive { clip_rect: egui::Rect::EVERYTHING, primitive: Primitive::Mesh(mesh) };
+        let paint = Paint { jobs: Some(vec![job]), set: vec![(TextureId::Managed(0), delta)], free: vec![TextureId::Managed(3)], ..Paint::default() };
+        let paint = remapped(paint);
+        let chrome = |n: u64| TextureId::User(CHROME_TEXTURES | n);
+        assert_eq!(paint.set[0].0, chrome(0));
+        assert_eq!(paint.free, [chrome(3)]);
+        let Some(Primitive::Mesh(mesh)) = paint.jobs.as_ref().and_then(|jobs| jobs.first()).map(|job| &job.primitive) else { panic!("a mesh") };
+        assert_eq!(mesh.texture_id, chrome(0));
+        for n in [0, 1, 7, 1 << 20] {
+            assert_ne!(chrome(n), TextureId::Managed(n), "never a page's");
+            assert_ne!(chrome(n), TextureId::User(n), "nor a native texture's");
+        }
+    }
+
+    /// The chrome asks for no pass for the input it just heard: the GUI
+    /// draws a frame for every move anyway. It keeps a delay egui gave (a
+    /// tooltip's dwell), and asks at once where an area came up unseen.
+    #[test]
+    fn the_chrome_asks_for_a_pass_only_for_a_dwell_or_an_area_that_came_up() {
+        assert_eq!(chrome_repaint(Some(Duration::ZERO), false), None, "the pass after input: none");
+        assert_eq!(chrome_repaint(None, false), None);
+        assert_eq!(chrome_repaint(Some(Duration::from_millis(500)), false), Some(Duration::from_millis(500)), "the dwell kept");
+        assert_eq!(chrome_repaint(Some(Duration::MAX), false), None, "never is never");
+        assert_eq!(chrome_repaint(Some(Duration::ZERO), true), Some(Duration::ZERO), "an area laid out unseen");
+        // egui's own: a pass that heard a move asks at once, and one that
+        // shows an area for the first time sees it among the visible ones.
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
+        let run = |events: Vec<egui::Event>, area: bool| {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                if area {
+                    egui::Area::new(egui::Id::new("probe-area")).fixed_pos(pos2(10.0, 10.0)).show(ui.ctx(), |ui| ui.label("x"));
+                }
+            });
+            out.textures_delta.clear();
+            let visible = ctx.memory(|m| m.areas().visible_layer_ids());
+            (out.viewport_output[&egui::ViewportId::ROOT].repaint_delay, visible)
+        };
+        let (delay, before) = run(vec![egui::Event::PointerMoved(pos2(5.0, 5.0))], false);
+        assert_eq!(delay, Duration::ZERO, "egui asks at once after a move");
+        let (_, after) = run(Vec::new(), true);
+        assert!(after.iter().any(|layer| !before.contains(layer)), "the area is visible in its first pass");
+    }
+
+    /// The cells' edges in points: on the pixels a page's region rounds to,
+    /// so the strip's foot is row 1's top; a hole's rounded out; the cell
+    /// under a point.
+    #[test]
+    fn the_cells_stand_on_whole_pixels_and_holes_round_out() {
+        let cells = Cells { points: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 480.0)), grid: Rect::new(0, 0, 100, 30), ppp: 1.0 };
+        assert_eq!(cells.cell(), egui::vec2(8.0, 16.0));
+        assert_eq!(cells.rect(Rect::new(0, 0, 100, 1)), egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 16.0)));
+        assert_eq!(cells.rect(Rect::new(0, 0, 100, 1)).max.y, cells.rect(Rect::new(0, 1, 100, 1)).min.y);
+        // 1003×487 pixels at a scale of 1.25 is no whole number of points a cell.
+        let odd = Cells { points: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(802.4, 389.6)), grid: Rect::new(0, 0, 101, 26), ppp: 1.25 };
+        let row = odd.rect(Rect::new(3, 5, 7, 2));
+        for edge in [row.min.x, row.min.y, row.max.x, row.max.y] {
+            assert!(((edge * 1.25) - (edge * 1.25).round()).abs() < 1e-3, "{edge} on a whole pixel");
+        }
+        let hole = odd.hole(Rect::new(3, 5, 7, 2));
+        assert!(hole.contains_rect(row), "{hole:?} round {row:?}");
+        assert_eq!(cells.under(pos2(17.0, 33.0)), Position { x: 2, y: 2 });
+    }
+
+    /// Two contexts' faces, and a page's set again, borrow one copy of
+    /// each face's bytes.
+    #[test]
+    fn every_context_borrows_one_copy_of_each_face() {
+        let (one, two) = (definitions("ja"), definitions("ja"));
+        assert_eq!(one.font_data.len(), two.font_data.len());
+        for (name, data) in &one.font_data {
+            let (std::borrow::Cow::Borrowed(a), std::borrow::Cow::Borrowed(b)) = (&data.font, &two.font_data[name].font) else {
+                panic!("{name} is borrowed, never owned");
+            };
+            assert!(std::ptr::eq(*a, *b), "{name}: one copy");
+        }
     }
 }
