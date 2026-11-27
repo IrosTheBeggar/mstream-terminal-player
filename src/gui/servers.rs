@@ -28,6 +28,10 @@ use crate::tui::worker::{ApiCmd, Event};
 use crate::tui::app::Effect;
 
 use super::{Act, Gui, SettingsRoom, accent, bright_bold, put, sel};
+// The header's label moved to the strip with the rest of row 0; the
+// shell's tests still reach it here.
+#[cfg(test)]
+pub(super) use super::strip::header_label;
 
 /// The mark a password field draws for each character of its value, and of
 /// an input method's composition in it.
@@ -1423,63 +1427,6 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
 }
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
-
-/// The header's right corner: the server label (a dropdown trigger once a
-/// second server is saved) and the [+] that adds one.
-pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let plus = Rect { x: area.width.saturating_sub(5), y: 0, width: 3, height: 1 };
-    let plus_hover = gui.ui.hovers(plus);
-    put(frame, plus.x, 0, "[+]", if plus_hover { bright_bold() } else { dim() });
-    gui.ui.click(plus, Act::SrvAdd);
-    gui.ui.tip(plus, t!("gui.srv.add").to_string());
-
-    // The label names the session's server whether or not it answered: a
-    // server that would not connect keeps its place here, and the picker
-    // with it, so there is always a way to another (contract clause 13).
-    if gui.app.session.server_id.is_empty() && gui.app.session.server.is_empty() {
-        return;
-    }
-    let server = gui.app.server_display();
-    // Shown only while more than one server can be picked: parked and
-    // missing peers do not count (contract clause 12).
-    let many = gui.config.servers.iter().filter(|e| config::selectable(e)).count() > 1;
-    let chevron = if legacy_conhost() { " v" } else { " ▾" };
-    let mark = if many { chevron } else { "" };
-    let strip_end = super::top_strip_end_with(&super::device::strip_mark(gui));
-    let Some((x, label)) = header_label(&server, mark, strip_end, plus.x) else { return };
-    let width = crate::kit::width(&label) as u16;
-    let rect = Rect { x, y: 0, width, height: 1 };
-    let hover = many && gui.ui.hovers(rect);
-    put(frame, x, 0, &label, if hover { bright_bold() } else { dim() });
-    if many {
-        // No dwell tooltip here: it matured right where the dropdown
-        // opens and sat on top of the first rows.
-        gui.ui.click(rect, Act::SrvMenu);
-    }
-}
-
-/// Where the header's server label stands, and what it says: right-aligned
-/// a blank cell short of `[+]` at `plus`, and starting at least a blank cell
-/// past the top bar's strip, which ends at `strip_end` — the label must
-/// never cover the strip, whose clicks it would take (mp3-player-screen
-/// contract, clause 16). A name longer than the room between is cut short
-/// with the kit's mark, the menu `mark` kept after it. Cells, not
-/// characters. None when not even two cells of the name fit.
-pub(super) fn header_label(
-    server: &str,
-    mark: &str,
-    strip_end: u16,
-    plus: u16,
-) -> Option<(u16, String)> {
-    let room = plus.saturating_sub(1).saturating_sub(strip_end + 1) as usize;
-    let fits = room.saturating_sub(crate::kit::width(mark));
-    if fits < 2 {
-        return None;
-    }
-    let label = format!("{}{mark}", super::bar::clip(server, fits));
-    let width = crate::kit::width(&label) as u16;
-    Some((plus.saturating_sub(width + 1), label))
-}
 
 /// What a room shows while no session is up, `gap` rows under `content`'s
 /// top: "reaching…" while a connect is out; the server that would not

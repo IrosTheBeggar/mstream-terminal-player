@@ -42,6 +42,7 @@ mod servers;
 mod server_log;
 mod sonic;
 mod stats;
+mod strip;
 mod torrent;
 mod torrent_meta;
 mod vizwin;
@@ -81,6 +82,9 @@ use crate::tui::worker::{AudioCmd, Event};
 use crate::tui::{self, worker};
 
 use bar::{BarView, Now};
+// The strip's geometry, which the shell's tests measure.
+#[cfg(test)]
+use strip::{TOP_KEYS, top_rects, top_strip_end};
 
 /// Below this the layout has nowhere honest to put the bar. The installer's
 /// own window is 100×30; anyone smaller gets the mini player — the cover
@@ -1535,106 +1539,6 @@ fn demo_now() -> Now {
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
-/// The top bar's tabs at the left — Library, Stats, Admin, MP3 Player: the
-/// kit's tab slab for the screen that is up, dim text for the others,
-/// bright under the pointer. Now Playing has no tab (it opens on `0`), so
-/// while it is up no tab wears the slab. While the MP3 Player tab's page
-/// writes, the strip is drawn inert — nothing lights, nothing answers a
-/// click — since the tab cannot be left (mp3-player-screen contract,
-/// clause 9).
-fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
-    // While a sync runs the MP3 Player tab wears its percentage after its
-    // name, in the accent, dim while paused (mp3-player-screen contract,
-    // clause 16; the pick of 2026-10-19 over a chip at the bar's right).
-    let mark = device::sync_mark(gui);
-    let mp3 = match &mark {
-        Some((_, pct, _)) => format!("{} {pct}%", t!("gui.top.mp3")),
-        None => t!("gui.top.mp3").to_string(),
-    };
-    let tabs = [
-        (Screen::Library, t!("gui.top.library").to_string()),
-        (Screen::Stats, t!("sta.title").to_string()),
-        (Screen::Admin, t!("gui.top.admin").to_string()),
-        (Screen::Device, mp3),
-    ];
-    let viz = t!("gui.top.viz");
-    let rects = top_rects([&tabs[0].1, &tabs[1].1, &tabs[2].1, &tabs[3].1, &viz]);
-    let live = !device::writing(gui);
-    for ((screen, label), rect) in tabs.into_iter().zip(rects) {
-        let style = if gui.screen == screen {
-            sel().add_modifier(Modifier::BOLD)
-        } else if live && gui.ui.hovers(rect) {
-            bright_bold()
-        } else {
-            dim()
-        };
-        put(frame, rect.x, 0, &format!(" {label} "), style);
-        if let Some((_, pct, paused)) = mark.as_ref().filter(|_| screen == Screen::Device && gui.screen != screen) {
-            let words = format!("{pct}%");
-            let x = rect.right().saturating_sub(crate::kit::width(&words) as u16 + 1);
-            let tone = if *paused { dim() } else { Style::default().fg(th().accent) };
-            put(frame, x, 0, &words, tone);
-        }
-        if live {
-            gui.ui.click(rect, Act::Screen(screen));
-        }
-    }
-    // The Visualizer item: not a screen but a window (visualizer-window
-    // contract, entry 1) — lit while one is open, bright under the pointer.
-    let rect = rects[4];
-    let style = if vizwin::is_open(gui) {
-        Style::default().fg(th().accent).add_modifier(Modifier::BOLD)
-    } else if live && gui.ui.hovers(rect) {
-        bright_bold()
-    } else {
-        dim()
-    };
-    put(frame, rect.x, 0, &format!(" {viz} "), style);
-    if live {
-        gui.ui.click(rect, Act::VizWindow);
-        gui.ui.tip_keyed(rect, t!("gui.top.viz_tip").to_string());
-    }
-}
-
-/// Where the top bar's items stand, left to right from x 1 with a cell
-/// between them: each its label's cells and a space either side. Cells,
-/// not characters: a Japanese or Chinese label is two cells a character,
-/// and counting characters left the Admin tab's right half dead under the
-/// Visualizer item's rect.
-fn top_rects<const N: usize>(labels: [&str; N]) -> [Rect; N] {
-    let mut x = 1;
-    labels.map(|label| {
-        let rect = Rect { x, y: 0, width: crate::kit::width(label) as u16 + 2, height: 1 };
-        x += rect.width + 1;
-        rect
-    })
-}
-
-/// The top bar's labels, left to right: the four tabs, then the
-/// Visualizer item.
-const TOP_KEYS: [&str; 5] =
-    ["gui.top.library", "sta.title", "gui.top.admin", "gui.top.mp3", "gui.top.viz"];
-
-/// Where the top bar's strip ends — the cell after the Visualizer item —
-/// in the language on screen: the header's server label starts a blank
-/// cell past it, cut short where it would not (servers::draw_header;
-/// mp3-player-screen contract, clause 16).
-#[cfg(test)]
-pub(super) fn top_strip_end() -> u16 {
-    top_strip_end_with("")
-}
-
-/// [`top_strip_end`] with the MP3 Player tab wearing `mark` (a sync's
-/// percentage, clause 16): the server label's cut measures the strip with
-/// it.
-pub(super) fn top_strip_end_with(mark: &str) -> u16 {
-    let mut labels = TOP_KEYS.map(|key| t!(key).to_string());
-    if !mark.is_empty() {
-        labels[3] = format!("{} {mark}", labels[3]);
-    }
-    top_rects([&labels[0], &labels[1], &labels[2], &labels[3], &labels[4]])[4].right()
-}
-
 /// One run of text at a cell, clipped at the frame's edge — written into
 /// the buffer directly: the hub's primitive runs a few hundred times a
 /// frame, and a `Paragraph` per call was a handful of allocations each.
@@ -1887,8 +1791,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     gui.last_width = area.width;
     gui.last_height = area.height;
 
-    draw_top_tabs(frame, gui);
-    servers::draw_header(frame, gui, area);
+    strip::draw(frame, gui, area);
 
     // An armed pick is a mode, and it shows where the picking happens: a
     // banner row above the room (or the stage), the room one row lower for
