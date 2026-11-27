@@ -876,7 +876,13 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     quick::settle_screen(gui);
     draw_first_list(frame, gui, area);
     draw_recent_list(frame, gui, area);
-    quick::draw(frame, gui, area);
+    // Where egui draws quick config (src/gui/chrome.rs), its slot here.
+    if gui.faces.quick {
+        #[cfg(feature = "window")]
+        super::chrome::quick_mark(gui);
+    } else {
+        quick::draw(frame, gui, area);
+    }
     sheets::draw(frame, gui, area);
     seeds::draw(frame, gui, area);
     draw_chooser(frame, gui, area);

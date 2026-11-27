@@ -17,6 +17,10 @@ use crate::kit::theme::{legacy_conhost, th};
 
 use super::{Act, Gui, Screen, bright_bold, device, put, sel, vizwin};
 
+/// The strip drawn by egui in the GUI's own window (src/gui/chrome.rs).
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
+
 /// What the top bar's strip holds this frame, for either face to draw.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StripView {

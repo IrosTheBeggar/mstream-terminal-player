@@ -22,6 +22,10 @@ use rust_i18n::t;
 
 use super::{Act, bright_bold, put};
 
+/// The bar painted by egui in the GUI's own window (src/gui/chrome.rs).
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
+
 /// Rows the bar owns at the bottom of the screen: the seek line, three
 /// rows of tall frames, and a bottom row holding the volume, the note and
 /// the card's fourth line. The screen's tips line, when it shows, is the

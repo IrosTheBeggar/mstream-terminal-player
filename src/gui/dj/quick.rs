@@ -22,6 +22,10 @@ use crate::tui::app::{DjEdit, DjRow};
 use super::super::{Act, DJ_NAV, Gui, accent, bright_bold, put, sel};
 use super::{PickServer, Sheet, Tone};
 
+/// Quick config drawn by egui in the GUI's own window (src/gui/chrome.rs).
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
+
 /// Its cells across, and where it stands: its first column the rule
 /// between the button's halves.
 const QUICK_W: u16 = 42;

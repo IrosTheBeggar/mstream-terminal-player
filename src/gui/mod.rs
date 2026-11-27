@@ -20,6 +20,9 @@
 
 mod albums;
 mod bar;
+// The top strip, the bar and their popups drawn by egui in the window.
+#[cfg(feature = "window")]
+mod chrome;
 pub(crate) mod control;
 mod actions;
 mod admin;
@@ -554,6 +557,17 @@ fn fmt_blend(seconds: f32) -> String {
 
 // ── State ───────────────────────────────────────────────────────────────────
 
+/// Which of the chrome's parts egui draws this frame, in the GUI's own
+/// window (src/gui/chrome.rs): the strip (with its tooltips and the server
+/// menu), the bar, quick config. None in a terminal, and wherever a part's
+/// egui face cannot draw, when the cells draw it as they always have.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Faces {
+    pub strip: bool,
+    pub bar: bool,
+    pub quick: bool,
+}
+
 pub(crate) struct Gui {
     /// The shared player state machine — the same App the TUI drives.
     app: App,
@@ -607,6 +621,11 @@ pub(crate) struct Gui {
     /// (window/panel.rs). The Stats screen is its first tenant.
     #[cfg(feature = "window")]
     panel: Option<std::sync::Arc<window::panel::Panel>>,
+    /// Which of the chrome's parts egui draws this frame.
+    faces: Faces,
+    /// The chrome's egui face's state between frames (src/gui/chrome.rs).
+    #[cfg(feature = "window")]
+    chrome: chrome::ChromeUi,
     /// The Admin screen: its hallway, the room it hosts and the log.
     admin: admin::AdminUi,
     /// The MP3 Player screen's firmware page, while the screen is up.
@@ -725,6 +744,9 @@ impl Gui {
             stats: stats::StatsUi::default(),
             #[cfg(feature = "window")]
             panel: None,
+            faces: Faces::default(),
+            #[cfg(feature = "window")]
+            chrome: chrome::ChromeUi::default(),
             admin: admin::AdminUi::new(),
             device: device::DeviceUi::default(),
             vizwin: vizwin::VizWindow::new(),
@@ -1741,6 +1763,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
 
 fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
+    gui.faces = Faces::default();
+    #[cfg(feature = "window")]
+    gui.chrome.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
     gui.stats.drawn = false; // and the Stats screen's says it drew
     // A Discover modal — or Keep a copy and the Copies list, over any room
@@ -1796,8 +1821,20 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // The size the hit zones outside a draw reason from — a drawable one.
     gui.last_width = area.width;
     gui.last_height = area.height;
+    // In the GUI's own window egui draws the chrome's parts whose faces are
+    // ready, at the frame's end (src/gui/chrome.rs); where it does, the
+    // cells mark the part's slot in their draw order instead of drawing it.
+    #[cfg(feature = "window")]
+    {
+        gui.faces = chrome::faces(gui);
+    }
 
-    strip::draw(frame, gui, area);
+    if gui.faces.strip {
+        #[cfg(feature = "window")]
+        chrome::strip_mark(gui);
+    } else {
+        strip::draw(frame, gui, area);
+    }
 
     // An armed pick is a mode, and it shows where the picking happens: a
     // banner row above the room (or the stage), the room one row lower for
@@ -1892,6 +1929,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // words); the keyboard tips, when shown, take the very last row. The
     // Now Playing screen has no bar and draws its note on its own row.
     if matches!(gui.screen, Screen::Library | Screen::Admin)
+        && !gui.faces.bar
         && let Some((text, style)) = gui.note_words()
     {
         let note = bar::note_rect(area, gui.footer());
@@ -2007,8 +2045,18 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
         let now = gui.bar_now();
         let view = bar_view(gui, now.as_ref());
         let has_art = view.has_art;
-        bar::draw(frame, &mut gui.ui, area, &view);
-        if has_art {
+        // Drawn and registered in cells whichever face shows it: the bar's
+        // presses, right press and hand are the cells registry's. Where
+        // egui paints it, its cells are blanked and its layout kept for the
+        // paint, and the cover is egui's.
+        #[cfg(feature = "window")]
+        let (before, pointer) = (gui.ui.mark(), gui.ui.pointer.is_some());
+        let layout = bar::draw(frame, &mut gui.ui, area, &view);
+        if gui.faces.bar {
+            crate::kit::blank(frame, layout.rect);
+            #[cfg(feature = "window")]
+            chrome::bar_mark(gui, before, pointer, layout);
+        } else if has_art {
             let cover = bar::cover_rect(area, gui.footer());
             // The mosaic where an overlay stood last frame — the rule every
             // other cover follows, since a picture's cells are skipped.
@@ -2030,7 +2078,12 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     keep_doors::draw_window(frame, gui, area);
     torrent::draw_modals(frame, gui, area);
     ytdl::draw_modals(frame, gui, area);
-    servers::draw_dropdown(frame, gui, area);
+    if gui.faces.strip {
+        #[cfg(feature = "window")]
+        chrome::menu_mark(gui);
+    } else {
+        servers::draw_dropdown(frame, gui, area);
+    }
     servers::draw_modals(frame, gui, area);
     dj::draw_modals(frame, gui, area);
     actions::draw_modals(frame, gui, area);
@@ -2048,6 +2101,11 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
         let footprint = crate::kit::draw_tooltip(frame, area, target, text);
         gui.ui.overlay(footprint);
     }
+
+    // The chrome's egui pass, once everything the cells stack over it has
+    // registered (src/gui/chrome.rs).
+    #[cfg(feature = "window")]
+    chrome::host(frame, gui);
 
     // The Peer recs room says what this frame showed of it: Shown, Covered
     // or Away (peer-recs contract §1.8).
@@ -3624,6 +3682,13 @@ where
             gui.hot = true;
         }
     }
+    // The presses the window's chrome took, which the input half never
+    // heard: each runs the cells' press preamble, then its act, as a press
+    // on the cells does (src/gui/chrome.rs).
+    #[cfg(feature = "window")]
+    if chrome::after_draw(gui) {
+        ctx.dirty = true;
+    }
 
     // The Stats screen's page pumps its worker and its controls here too,
     // and the Admin screen its room and its log.
@@ -3639,6 +3704,8 @@ where
     // Settings changed a moment ago, now resting: written.
     gui.save_rested();
     let over = over_control(gui) || page.over || admin_over || device.over;
+    #[cfg(feature = "window")]
+    let over = chrome::hand(gui, over);
     if over != ctx.hand {
         ctx.hand = over;
         host.pointer(ctx.hand);
@@ -3680,6 +3747,11 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
     match event {
         TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
             gui.ui.dismiss_tooltip();
+            // The chrome's tooltips likewise keep away for the dwell.
+            #[cfg(feature = "window")]
+            {
+                gui.chrome.key_at = Some(Instant::now());
+            }
             gui.ui.caret_touch();
             if handle_key(gui, key) {
                 // A quit by a key during a sync asks first; Ctrl+C stops at
@@ -4667,7 +4739,12 @@ impl window::face::Face for GuiFace {
         finish(&mut self.gui, &self.ctx);
     }
 
+    /// What the last frame registered at `at`: the chrome's item there
+    /// where egui's chrome claims the cell, else the cells registry's.
     fn hit_debug(&self, at: Position) -> Option<String> {
+        if let Some(act) = chrome::hit_debug(&self.gui, at) {
+            return act.map(|act| format!("{act:?}"));
+        }
         self.gui.ui.hit(at).map(|act| format!("{act:?}"))
     }
 
