@@ -175,8 +175,14 @@ fn a_board_up_to_date_draws_its_fill_meter_its_figures_and_no_primary() {
     let out = probe.settle(&mut page);
     assert_drew(&out, &["Up to date · v0.8.0", "21.4 of 59.6 GB used · 1,284 tracks", "38.2 GB free"]);
     assert!(!drew(&out, "UPDATE"), "nothing to do: no primary");
+    // The free figure on the used figures' baseline, at the column's end
+    // clear of them. Both stand on whole pixels from the row's top, so on
+    // the same one: within a tenth of a point, where centred on the row by
+    // the face's own measures it stood a point over them in Segoe UI and
+    // nearly a point and a half in Ubuntu Light.
     let (used, free) = (find(&out, "21.4 of 59.6 GB used · 1,284 tracks"), find(&out, "38.2 GB free"));
-    assert!((used.center().y - free.center().y).abs() < 2.0 && free.min.x > used.max.x + 16.0, "the free figure at the column's end");
+    let (on, at) = (baseline(&out, "21.4 of 59.6 GB used · 1,284 tracks"), baseline(&out, "38.2 GB free"));
+    assert!((on - at).abs() < 0.1 && free.min.x > used.max.x + 16.0, "the free figure at the column's end, on {on}: {at}, {free:?} after {used:?}");
     // The meter: the share's segments lit in the accent across the value
     // column, the rest unlit.
     let pal = Pal::now();

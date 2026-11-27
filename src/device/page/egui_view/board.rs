@@ -17,7 +17,7 @@
 //! failure's log, the format's scan in the SD card row. [`Paint`] is the
 //! grammar, for a card's view too (card.rs).
 
-use egui::{Align2, Color32, Id, Rect, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Align2, Color32, Id, Rect, Ui, UiBuilder, pos2, vec2};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
@@ -99,6 +99,16 @@ impl Grid {
         studio::small_caps(ui, pos2(self.x, mid), label, pal.dim, room, Align2::LEFT_CENTER);
     }
 
+    /// A block's label on `on`, the baseline its value's first line stands
+    /// on ([`words_baseline`]), as the boards set a label beside its value:
+    /// centred on the row's middle, it stood off the value's words as far
+    /// as the face's ascent and egui's rounding of it left it, a point
+    /// over them in Segoe UI and from half a point to a point and a half
+    /// under them in other faces.
+    pub(super) fn label_on(&self, ui: &Ui, label: &str, on: f32, pal: &Pal) {
+        self.label(ui, label, studio::mid_on(ui, on, studio::LABEL_SIZE), pal);
+    }
+
     /// The cells' █░ bar on a meter's row from `top`, as the kit's LED row
     /// across the value column, lit for `permille` in `lit` as the cells
     /// fill it.
@@ -106,6 +116,16 @@ impl Grid {
         let track = Rect::from_min_size(pos2(self.value_x(), top + (METER_ROW - METER_H) / 2.0), vec2(self.value_w(), METER_H));
         studio::led_fill(ui, track, permille, lit, pal.unlit);
     }
+}
+
+/// Where a value's words, `runs` at `size` on rows `line_h` tall, stand
+/// their first line's baseline under their row's top, as their paragraph
+/// lays them out ([`Para::baseline`]); for a row of no words, where a line
+/// of the UI face at `size` would. What stands beside them — their LED,
+/// their scan's share, their right-hand words — stands on it.
+pub(super) fn words_baseline(ui: &Ui, runs: &[Run], size: f32, line_h: f32) -> f32 {
+    let para = if runs.iter().any(|(s, ..)| !s.is_empty()) { Para::runs(runs) } else { Para::new("x", body(size), Color32::WHITE) };
+    para.spaced(line_h).baseline(ui)
 }
 
 /// The board in view, its card in the column's `room` (cells.rs's `card`):
@@ -801,22 +821,26 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         };
         let Some(top) = self.room(gap, line_h) else { return };
         let mid = top + line_h / 2.0;
-        self.label(label, mid);
         let (from, end) = if value { (self.grid.value_x(), self.grid.right()) } else { (self.grid.x, self.grid.right()) };
         let mut x = from;
+        let runs = lined.runs(size, face);
+        // Its label, what leads the words and what stands at their right
+        // stand on their baseline, as the cells' one line sets them: the
+        // words are a paragraph from the row's top, so what is centred on
+        // the row's middle would stand off it by as much as the face's
+        // ascent and egui's rounding of it leave.
+        let on = top + words_baseline(self.ui, &runs, size, line_h);
+        if let Some(label) = label {
+            self.grid.label_on(self.ui, label, on, face.pal);
+        }
         if let Some(lamp) = lined.lamp {
             let face_m = studio::metrics(self.ui, &body(size));
-            studio::led(self.ui, pos2(x + 3.0, top + face_m.ascent - face_m.small / 2.0), lamp);
+            studio::led(self.ui, pos2(x + 3.0, on - face_m.small / 2.0), lamp);
             x += studio::STATE_INDENT;
         }
         if let Some((lit, share)) = &lined.meter {
-            // Its share on its words' baseline, as the cells' one line sets
-            // the two: the words are a paragraph from the row's top, so a
-            // share centred on the row's middle would stand under them.
-            let on = studio::para_mid(self.ui, top, size);
             x = studio::scan_lead(self.ui, pos2(x, mid), *lit, share.as_deref(), on, end, face.pal);
         }
-        let runs = lined.runs(size, face);
         let height = if runs.is_empty() {
             line_h
         } else {
@@ -825,17 +849,17 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
         };
         if let Some(right) = right {
             let left_w = x - from + studio::runs_width(self.ui, &runs);
-            let mid = studio::para_mid(self.ui, top, size);
-            self.right_words(right, mid, from, end, left_w, height <= line_h + 0.5);
+            self.right_words(right, on, from, end, left_w, height <= line_h + 0.5);
         }
         self.end(top + height);
         self.last = Some(Kind::Line);
     }
 
     /// A row's right-hand words at `end` (the free figure, gold with its
-    /// LED on a card nearly full), only on a one-line row whose left words,
-    /// `left_w` from `from`, they clear by 16 points.
-    fn right_words(&self, right: &Line, mid: f32, from: f32, end: f32, left_w: f32, one_line: bool) {
+    /// LED on a card nearly full) on `on`, the left words' baseline, only
+    /// on a one-line row whose left words, `left_w` from `from`, they clear
+    /// by 16 points.
+    fn right_words(&self, right: &Line, on: f32, from: f32, end: f32, left_w: f32, one_line: bool) {
         let face = self.face;
         let lined = Lined::of(right, face);
         let runs = lined.runs(PLAIN.0, face);
@@ -845,9 +869,10 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             return;
         }
         if let Some(lamp) = lined.lamp {
-            studio::led(self.ui, pos2(end - w + 3.0, studio::led_mid(self.ui, mid, &body(PLAIN.0), false)), lamp);
+            let small = studio::metrics(self.ui, &body(PLAIN.0)).small;
+            studio::led(self.ui, pos2(end - w + 3.0, on - small / 2.0), lamp);
         }
-        studio::runs(self.ui, pos2(end, mid), &runs, w + 1.0, Align2::RIGHT_CENTER);
+        studio::runs_on(self.ui, end, on, &runs, w + 1.0, Align::Max);
     }
 
     /// Where the next row starts, `bottom` or the floor where a
@@ -929,7 +954,8 @@ impl<'u, 'f, 'a> Paint<'u, 'f, 'a> {
             return;
         }
         let mid = if beside {
-            studio::para_mid(self.ui, top, size)
+            // On the line's baseline, as the right-hand words stand.
+            studio::mid_on(self.ui, top + words_baseline(self.ui, &runs, size, line_h), studio::TEXT_BUTTON_SIZE)
         } else {
             let Some(under) = self.room(0.0, TEXT_BUTTON_H) else { return };
             self.y = under + TEXT_BUTTON_H;

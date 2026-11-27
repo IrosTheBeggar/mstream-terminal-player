@@ -43,7 +43,7 @@ const TRACK: f32 = 0.12;
 /// The small labels' wider tracking (field labels, table headings, chips).
 const LABEL_TRACK: f32 = 0.14;
 /// The small labels' size.
-const LABEL_SIZE: f32 = 10.5;
+pub(crate) const LABEL_SIZE: f32 = 10.5;
 /// The scrim a modal lays over its room: the canvas's rgba(9, 10, 15, .62).
 pub(crate) const SCRIM: Color32 = Color32::from_rgba_premultiplied(6, 6, 9, 158);
 /// A control's click target, square: the canvas's 28-point buttons.
@@ -460,6 +460,14 @@ pub(crate) fn runs(ui: &Ui, pos: Pos2, parts: &[Run], max_w: f32, align: Align2)
     rect
 }
 
+/// [`runs`] standing on `baseline` rather than centred on a middle:
+/// anchored at `x` by `align`, its first line's baseline on `baseline`
+/// ([`mid_on`]), the prose's beside it. Returns where it was drawn.
+pub(crate) fn runs_on(ui: &Ui, x: f32, baseline: f32, parts: &[Run], max_w: f32, align: Align) -> Rect {
+    let size = parts.iter().find(|(s, ..)| !s.is_empty()).map_or(13.0, |(_, font, _)| font.size);
+    runs(ui, pos2(x, mid_on(ui, baseline, size)), parts, max_w, Align2([align, Align::Center]))
+}
+
 /// `s` as runs in `font` and `color`, each of `figures` found in it, in
 /// order, set in `figure` instead: a path, a count or a time in the grid's
 /// monospace inside a room's sentence, as the canvas sets its figures. A
@@ -607,15 +615,43 @@ impl Para {
         self.paint_lines(ui, at, w).0
     }
 
+    /// Where its first line stands its baseline under its top, as
+    /// [`Para::paint`] lays it out: the deepest ascent among its runs, on
+    /// the pixel egui rounds it to, whichever of them that line holds. What
+    /// stands beside the line — words centred on its row ([`mid_on`]), a
+    /// scan's share, an LED leading it — stands on this. A paragraph of no
+    /// words has none, and stands it at its top.
+    pub(crate) fn baseline(&self, ui: &Ui) -> f32 {
+        let Some((_, font, _)) = self.parts.first() else { return 0.0 };
+        let (job, _) = self.job(ui, font, font.size * self.line);
+        first_baseline(&ui.painter().layout_job(job)).unwrap_or(0.0)
+    }
+
+    /// Its words as one job, lines `line_h` apart, every run of a line on
+    /// one baseline ([`shared_baseline`]), and the line height the lead's
+    /// mark takes in `font`, the first run's face. Its first line is a
+    /// whole line tall, as the lead's is, so it stands on the deepest
+    /// ascent among the runs even where the run that has it wraps to the
+    /// next line.
+    fn job(&self, ui: &Ui, font: &FontId, line_h: f32) -> (LayoutJob, f32) {
+        let parts: Vec<&Run> = self.parts.iter().filter(|(s, ..)| !s.is_empty()).collect();
+        let mut fonts: Vec<&FontId> = parts.iter().map(|(_, font, _)| font).collect();
+        fonts.push(font);
+        let mut heights = shared_baseline(ui, &fonts, Some(line_h));
+        let lead_h = heights.pop().unwrap_or(line_h);
+        let mut job = LayoutJob::default();
+        for ((s, font, color), h) in parts.into_iter().zip(heights) {
+            job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, line_height: Some(h), ..Default::default() });
+        }
+        job.first_row_min_height = line_h;
+        (job, lead_h)
+    }
+
     /// [`Para::paint`], and where each of its lines stands, top to foot.
     fn paint_lines(self, ui: &Ui, at: Pos2, w: f32) -> (Rect, Vec<Rangef>) {
         let Some((_, font, color)) = self.parts.first().cloned() else { return (Rect::from_min_size(at, Vec2::ZERO), Vec::new()) };
         let line_h = font.size * self.line;
-        let parts: Vec<&Run> = self.parts.iter().filter(|(s, ..)| !s.is_empty()).collect();
-        let mut fonts: Vec<&FontId> = parts.iter().map(|(_, font, _)| font).collect();
-        fonts.push(&font);
-        let mut heights = shared_baseline(ui, &fonts, Some(line_h));
-        let lead_h = heights.pop().unwrap_or(line_h);
+        let (mut job, lead_h) = self.job(ui, &font, line_h);
         let indent = match &self.lead {
             Some(mark) => {
                 let format = TextFormat { font_id: font.clone(), color, line_height: Some(lead_h), ..Default::default() };
@@ -631,10 +667,6 @@ impl Para {
             }
             None => 0.0,
         };
-        let mut job = LayoutJob::default();
-        for ((s, font, color), h) in parts.into_iter().zip(heights) {
-            job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, line_height: Some(h), ..Default::default() });
-        }
         job.wrap = TextWrapping { max_width: (w - indent).max(1.0), max_rows: self.rows, break_anywhere: self.anywhere, overflow_character: Some('…') };
         let galley = ui.painter().layout_job(job);
         let origin = at + vec2(indent, 0.0);
@@ -3550,7 +3582,7 @@ pub(crate) enum Lead {
 /// A [`text_button`]'s height, its words' size, and the room its lead
 /// takes: the mark's 8 points and the 8 after it.
 pub(crate) const TEXT_BUTTON_H: f32 = HIT;
-const TEXT_BUTTON_SIZE: f32 = 13.5;
+pub(crate) const TEXT_BUTTON_SIZE: f32 = 13.5;
 const LEAD_W: f32 = 16.0;
 
 /// How wide [`text_button`] draws `words` led by `lead`, in the semibold it
@@ -4210,16 +4242,16 @@ pub(crate) fn dim_line(ui: &Ui, at: Pos2, w: f32, words: &str, also: &[&str], pa
 /// The cells' scan widget leading a line, in the desk's look: ten
 /// [`meter`] segments 5 by 10 points, 2 apart, `lit` of them in the ok
 /// green, from `at`, the line's left middle; and after them its `share` (a
-/// percentage) dim in the monospace, centred on `share_mid` — where a line
-/// centred there stands on its words' baseline ([`para_mid`]) — and no
-/// further than `end`. Where the line's words start: 10 points after the
-/// last of them.
+/// percentage) dim in the monospace, standing on `share_on`, its words'
+/// baseline ([`Para::baseline`]), and no further than `end`. Where the
+/// line's words start: 10 points after the last of them.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn scan_lead(ui: &Ui, at: Pos2, lit: usize, share: Option<&str>, share_mid: f32, end: f32, pal: &Pal) -> f32 {
+pub(crate) fn scan_lead(ui: &Ui, at: Pos2, lit: usize, share: Option<&str>, share_on: f32, end: f32, pal: &Pal) -> f32 {
     let bar = meter(ui, at, 10, lit, vec2(5.0, 10.0), 2.0, pal.ok, pal);
     let mut x = bar.max.x + 10.0;
     if let Some(share) = share {
-        x = text(ui, pos2(x, share_mid), share, mono(12.5), pal.dim, (end - x).max(1.0), Align2::LEFT_CENTER).max.x + 10.0;
+        let mid = mid_on(ui, share_on, 12.5);
+        x = text(ui, pos2(x, mid), share, mono(12.5), pal.dim, (end - x).max(1.0), Align2::LEFT_CENTER).max.x + 10.0;
     }
     x
 }
@@ -4234,15 +4266,16 @@ impl Para {
     }
 }
 
-/// Where a line set centred on its middle ([`text`], [`runs`]) stands that
-/// middle to share the baseline of a [`Para`]'s first line drawn from `top`
-/// in the UI face at `size`: a paragraph stands its baseline its words'
-/// ascent under its top, a centred line on the UI face's baseline at its
-/// middle, so words at a row's right stand on the baseline of the prose at
-/// its left.
-pub(crate) fn para_mid(ui: &Ui, top: f32, size: f32) -> f32 {
-    let m = metrics(ui, &body(size));
-    top + m.ascent - m.baseline + m.row / 2.0
+/// Where a line set centred on its middle ([`text`], [`runs`], a
+/// [`text_button`]'s words) whose first run is `size` points stands that
+/// middle for its baseline to fall on `baseline`: a centred line stands on
+/// the UI face's baseline at its size, under its middle, so words at a
+/// row's right, a scan's share or a button beside a line stand on the
+/// baseline of the prose at its left ([`Para::baseline`]) — the pixel egui
+/// rounds the prose's to, whatever the face's ascent and whichever faces
+/// the two are set in.
+pub(crate) fn mid_on(ui: &Ui, baseline: f32, size: f32) -> f32 {
+    baseline - centred_baseline(ui, size)
 }
 
 #[cfg(test)]
@@ -6647,5 +6680,50 @@ mod tests {
         let pal = Pal::now();
         assert_eq!(ink(&pass(&ctx, size, Vec::new(), &mut run)), Some(pal.accent), "the keyboard's");
         assert_eq!(ink(&pass(&ctx, size, vec![egui::Event::PointerMoved(at + vec2(10.0, 0.0))], &mut run)), Some(pal.text), "the pointer's");
+    }
+
+    /// What stands beside a paragraph on its baseline ([`Para::baseline`])
+    /// — a line of the UI face or of the monospace centred on the middle
+    /// [`mid_on`] gives, runs led by a figure set by [`runs_on`] — stands
+    /// on it: on the pixel egui rounds the paragraph's first line to,
+    /// whether its words are the UI face's alone or led by a figure, its
+    /// top on a whole point or between, within a hundredth of a point.
+    /// Centred by the face's ascent, as the MP3 tab once set its free
+    /// figure and its scan's share, they stood up to a point off it in
+    /// Segoe UI, more in a face whose ascent egui rounds the other way.
+    #[test]
+    fn what_stands_beside_a_paragraph_stands_on_its_baseline() {
+        let ctx = context();
+        let white = Color32::WHITE;
+        let mut placed = Vec::new();
+        let out = pass(&ctx, vec2(900.0, 1200.0), Vec::new(), &mut |ui| {
+            let mut y = 20.0;
+            for size in [12.5, 13.0, 13.5, 14.0] {
+                for nudge in [0.0, 0.3, 0.6] {
+                    for led in [false, true] {
+                        let k = placed.len();
+                        let words = format!("Para{k}");
+                        let parts = if led { vec![(format!("12.{k}"), mono(12.5), white), (format!(" {words}"), body(size), white)] } else { vec![(words, body(size), white)] };
+                        let para = Para::runs(&parts).spaced(20.0);
+                        let top = y + nudge;
+                        let on = top + para.baseline(ui);
+                        let whole: String = parts.iter().map(|(s, ..)| s.as_str()).collect();
+                        let _ = para.paint(ui, pos2(10.0, top), 300.0);
+                        let _ = text(ui, pos2(320.0, mid_on(ui, on, size)), &format!("Text{k}"), body(size), white, 200.0, Align2::LEFT_CENTER);
+                        let _ = text(ui, pos2(440.0, mid_on(ui, on, 12.5)), &format!("Mono{k}"), mono(12.5), white, 200.0, Align2::LEFT_CENTER);
+                        let _ = runs_on(ui, 880.0, on, &[(format!("38.{k}"), mono(12.5), white), (format!(" free{k}"), body(13.5), white)], 300.0, Align::Max);
+                        placed.push((whole, [format!("Text{k}"), format!("Mono{k}"), format!("38.{k} free{k}")]));
+                        y += 24.0;
+                    }
+                }
+            }
+        });
+        let lines = baselines(&out);
+        let on = |s: &str| lines.iter().find(|(t, _)| t == s).unwrap_or_else(|| panic!("{s:?} drawn")).1[0].1;
+        for (para, beside) in &placed {
+            for b in beside {
+                assert!((on(b) - on(para)).abs() < 0.01, "{b:?} on {para:?}'s baseline: {} and {}", on(b), on(para));
+            }
+        }
     }
 }

@@ -43,7 +43,7 @@ use ratatui::text::Line;
 use super::super::card::{CardGate, GateKind, plan_of, span};
 use super::super::cells::{self, Row};
 use super::super::*;
-use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, Order, PLAIN, Paint, SCAN, WIDE, Want, clipped, headline, keep, lead_of};
+use super::board::{APART, CLEAR, DIM, FACT_H, FIGURE, FIRST as VERDICT, Grid, LINE_GAP, Lined, METER_GAP, METER_ROW, Order, PLAIN, Paint, SCAN, WIDE, Want, clipped, headline, keep, lead_of, words_baseline};
 use super::{Drawn, Face, tone, unled};
 use crate::device::card::worker::CardView;
 use crate::gui::window::studio::{self, Para, Run, TALL_H, TEXT_BUTTON_H, body, mono, strong};
@@ -443,14 +443,19 @@ impl Values<'_, '_> {
             if top + NOW.1 > self.floor + 0.01 {
                 return None;
             }
-            self.label(label, top + NOW.1 / 2.0);
             // On the baseline of the plain values' words, as its label and
-            // every other row stand: a paragraph stands its first line its
-            // face's ascent under its top, and the monospace's is the
-            // lesser, so the path is set that much lower.
-            let ascent = |font: FontId| studio::metrics(self.ui, &font).ascent;
-            let drop = (ascent(body(PLAIN.0)) - ascent(mono(NOW.0))).max(0.0);
+            // every other row stand: a paragraph stands its first line on
+            // its face's ascent under its top, as egui rounds it, and the
+            // monospace's differs from the words' face's (the lesser beside
+            // Segoe UI or San Francisco, the greater beside a face as short
+            // over its baseline as Calibri), so the path is set that much
+            // lower, or higher.
             let para = Para::new(&left.to_string(), mono(NOW.0), face.pal.text).spaced(NOW.1).anywhere().floor(self.floor);
+            let on = words_baseline(self.ui, &[], PLAIN.0, PLAIN.1);
+            if let Some(label) = label {
+                self.grid.label_on(self.ui, label, top + on, face.pal);
+            }
+            let drop = on - para.baseline(self.ui);
             let h = drop + para.paint(self.ui, pos2(x, top + drop), (end - x).max(1.0)).height().max(NOW.1 - drop);
             return Some(self.ended(top + h));
         }
@@ -466,24 +471,26 @@ impl Values<'_, '_> {
             return None;
         }
         let mid = top + line_h / 2.0;
-        self.label(label, mid);
         let mut from = x;
+        let figures = label.is_none_or(|l| l != t!("dev.card.label_converts"));
+        let runs = read.runs(size, figures, face, self.drive);
+        // Its label, its LED, its scan's share and its right-hand words on
+        // its words' baseline, as the board card sets them.
+        let on = top + words_baseline(self.ui, &runs, size, line_h);
+        if let Some(label) = label {
+            self.grid.label_on(self.ui, label, on, face.pal);
+        }
         match read.kind {
             Kind::Verdict(lamp) => {
                 let m = studio::metrics(self.ui, &body(size));
-                studio::led(self.ui, pos2(from + 3.0, top + m.ascent - m.small / 2.0), lamp);
+                studio::led(self.ui, pos2(from + 3.0, on - m.small / 2.0), lamp);
                 from += studio::STATE_INDENT;
             }
             Kind::Scan(lit) => {
-                // Its share on its words' baseline, as the board card sets
-                // a scan's.
-                let on = studio::para_mid(self.ui, top, size);
                 from = studio::scan_lead(self.ui, pos2(from, mid), lit, read.share(), on, end, face.pal);
             }
             Kind::Plain | Kind::Dim => {}
         }
-        let figures = label.is_none_or(|l| l != t!("dev.card.label_converts"));
-        let runs = read.runs(size, figures, face, self.drive);
         let height = if runs.is_empty() {
             line_h
         } else {
@@ -494,7 +501,7 @@ impl Values<'_, '_> {
             && height <= line_h + 0.5
         {
             let left_w = from - x + studio::runs_width(self.ui, &runs);
-            self.right_words(right, studio::para_mid(self.ui, top, size), x + left_w, end);
+            self.right_words(right, on, x + left_w, end);
         }
         let (bottom, _, whole) = self.ended(top + height);
         Some((bottom, Was::Line, whole))
@@ -507,9 +514,10 @@ impl Values<'_, '_> {
     }
 
     /// A row's right-hand words at `end` (the free figure, gold with its
-    /// LED on a card nearly full; a sync's time left) where they clear the
-    /// left's words, ending at `left_end`, by 16 points.
-    fn right_words(&self, right: &Line, mid: f32, left_end: f32, end: f32) {
+    /// LED on a card nearly full; a sync's time left) on `on`, the left
+    /// words' baseline, where they clear the left's words, ending at
+    /// `left_end`, by 16 points.
+    fn right_words(&self, right: &Line, on: f32, left_end: f32, end: f32) {
         let face = self.face;
         let read = Read::of(right, face);
         let runs = read.runs(PLAIN.0, true, face, self.drive);
@@ -523,9 +531,10 @@ impl Values<'_, '_> {
             return;
         }
         if let Some(lamp) = lamp {
-            studio::led(self.ui, pos2(end - w + 3.0, studio::led_mid(self.ui, mid, &body(PLAIN.0), false)), lamp);
+            let small = studio::metrics(self.ui, &body(PLAIN.0)).small;
+            studio::led(self.ui, pos2(end - w + 3.0, on - small / 2.0), lamp);
         }
-        studio::runs(self.ui, pos2(end, mid), &runs, w + 1.0, Align2::RIGHT_CENTER);
+        studio::runs_on(self.ui, end, on, &runs, w + 1.0, egui::Align::Max);
     }
 }
 
@@ -949,6 +958,17 @@ mod tests {
         galley(out, words).job.sections.iter().map(|s| s.format.font_id.clone()).collect()
     }
 
+    /// Where `words`' first letter stands on its baseline.
+    fn baseline(out: &FullOutput, words: &str) -> f32 {
+        let found = out.shapes.iter().find_map(|c| match &c.shape {
+            Shape::Text(t) if t.galley.text() == words => Some((t.pos, t.galley.clone())),
+            _ => None,
+        });
+        let (pos, galley) = found.unwrap_or_else(|| panic!("{words:?} drawn"));
+        let row = &galley.rows[0];
+        pos.y + row.pos.y + row.row.glyphs[0].pos.y
+    }
+
     fn now() -> u64 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
     }
@@ -1024,11 +1044,23 @@ mod tests {
         assert_eq!(fonts_of(&out, "Rock, Jazz from Home"), [body(13.5)]);
         assert!(fonts_of(&out, "3 days ago").contains(&mono(12.5)), "{:?}", fonts_of(&out, "3 days ago"));
         assert_eq!(fonts_of(&out, "only what the player can't play, to Opus 192k"), [body(13.5)]);
-        // Each label on its value's first line, the labelled rows a block's
-        // 18 points apart: Space's meter, 6, its figures, 18, Last sync.
-        let mid = |words: &str| find(&out, words).center().y;
-        assert!((mid("HOLDS") - mid("Rock, Jazz from Home")).abs() < 2.0, "{} {}", mid("HOLDS"), mid("Rock, Jazz from Home"));
-        assert!((mid("LAST SYNC") - mid("SPACE") - (20.0 + 6.0 + 20.0 + 18.0)).abs() < 1.0, "{} {}", mid("SPACE"), mid("LAST SYNC"));
+        // Each label on its value's first line, on its baseline, and the
+        // labelled rows a block's 18 points apart: Space's meter, 6, its
+        // figures, 18, Last sync — each row from where its words' paragraph
+        // stands, the meter's from its segments, centred on its row.
+        let (holds, rock) = (baseline(&out, "HOLDS"), baseline(&out, "Rock, Jazz from Home"));
+        assert!((holds - rock).abs() < 0.1, "Holds on its value's baseline: {holds} {rock}");
+        let segment = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Rect(r) if r.fill == Pal::now().accent && (r.rect.height() - 10.0).abs() < 0.01 => Some(r.rect),
+                _ => None,
+            })
+            .expect("the meter's segments");
+        let meter = segment.min.y - (METER_ROW - segment.height()) / 2.0;
+        let (figures, last) = (find(&out, "41.2 of 63.8 GB used · 4,812 tracks").min.y, find(&out, "3 days ago").min.y);
+        assert!((figures - meter - (20.0 + 6.0)).abs() < 0.5 && (last - figures - (20.0 + 18.0)).abs() < 0.5, "{meter} {figures} {last}");
         // The space used as the kit's LED row, the cells' share of it lit.
         let (lit, unlit) = segments(&out, Pal::now().accent);
         assert_eq!(lit, studio::fill_lit(645, lit + unlit), "41.2 of 63.8 GB: {lit} of {}", lit + unlit);
@@ -1189,23 +1221,17 @@ mod tests {
         let (mut page, _ends, _inbox, _fold) = with_cards(Ends::up_to_date, vec![cards::syncing("E:", now())]);
         page.act(Act::Card(0));
         let out = probe.settle(&mut page);
-        let baseline = |words: &str| {
-            let (pos, g) = out
-                .shapes
-                .iter()
-                .find_map(|c| match &c.shape {
-                    Shape::Text(t) if t.galley.text() == words => Some((t.pos, t.galley.clone())),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{words:?} drawn"));
-            let row = &g.rows[0];
-            pos.y + row.pos.y + row.row.glyphs[0].pos.y
-        };
-        // The path stands to its label as a plain value stands to its own,
-        // within a point of it.
+        let baseline = |words: &str| baseline(&out, words);
+        // The path on its label's baseline, as a plain value stands on its
+        // own: both on whole pixels from the row's top, so on the same one,
+        // within a tenth of a point. Centred on the row, a label stood a
+        // point over its value's baseline in Segoe UI and a point and a
+        // half under it in Calibri, and the path, set by the faces'
+        // ascents, half a point under the values in Arial and San
+        // Francisco and 2 in Calibri.
         let now = baseline("Orla Finch/Paper Boats/03 - Fold.flac") - baseline("NOW");
         let holds = baseline("Rock, Jazz from Home") - baseline("HOLDS");
-        assert!((now - holds).abs() < 0.25 && now.abs() < 1.25, "the path {now} under its label, a plain value {holds} under its own");
+        assert!(now.abs() < 0.1 && holds.abs() < 0.1, "the path {now} under its label, a plain value {holds} under its own");
     }
 
     #[test]
