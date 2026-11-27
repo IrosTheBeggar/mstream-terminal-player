@@ -1044,12 +1044,16 @@ mod tests {
         assert_eq!(fonts_of(&out, "Rock, Jazz from Home"), [body(13.5)]);
         assert!(fonts_of(&out, "3 days ago").contains(&mono(12.5)), "{:?}", fonts_of(&out, "3 days ago"));
         assert_eq!(fonts_of(&out, "only what the player can't play, to Opus 192k"), [body(13.5)]);
-        // Each label on its value's first line, on its baseline, and the
-        // labelled rows a block's 18 points apart: Space's meter, 6, its
-        // figures, 18, Last sync — each row from where its words' paragraph
-        // stands, the meter's from its segments, centred on its row.
-        let (holds, rock) = (baseline(&out, "HOLDS"), baseline(&out, "Rock, Jazz from Home"));
-        assert!((holds - rock).abs() < 0.1, "Holds on its value's baseline: {holds} {rock}");
+        // Each label on its value's first line, on its baseline — Space's,
+        // whose meter has no words to stand on, centred on its segments —
+        // and the labelled rows a block's 18 points apart: Space's meter,
+        // 6, its figures, 18, Last sync — each row from where its words'
+        // paragraph stands, the meter's from its segments, centred on its
+        // row.
+        for (label, value) in [("HOLDS", "Rock, Jazz from Home"), ("LAST SYNC", "3 days ago")] {
+            let (on, value_on) = (baseline(&out, label), baseline(&out, value));
+            assert!((on - value_on).abs() < 0.1, "{label} on its value's baseline: {on} {value_on}");
+        }
         let segment = out
             .shapes
             .iter()
@@ -1058,6 +1062,8 @@ mod tests {
                 _ => None,
             })
             .expect("the meter's segments");
+        let space = find(&out, "SPACE").center().y;
+        assert!((space - segment.center().y).abs() < 0.5, "Space centred on its meter: {space} {}", segment.center().y);
         let meter = segment.min.y - (METER_ROW - segment.height()) / 2.0;
         let (figures, last) = (find(&out, "41.2 of 63.8 GB used · 4,812 tracks").min.y, find(&out, "3 days ago").min.y);
         assert!((figures - meter - (20.0 + 6.0)).abs() < 0.5 && (last - figures - (20.0 + 18.0)).abs() < 0.5, "{meter} {figures} {last}");

@@ -184,11 +184,18 @@ fn a_board_up_to_date_draws_its_fill_meter_its_figures_and_no_primary() {
     let (on, at) = (baseline(&out, "21.4 of 59.6 GB used · 1,284 tracks"), baseline(&out, "38.2 GB free"));
     assert!((on - at).abs() < 0.1 && free.min.x > used.max.x + 16.0, "the free figure at the column's end, on {on}: {at}, {free:?} after {used:?}");
     // The meter: the share's segments lit in the accent across the value
-    // column, the rest unlit.
+    // column, the rest unlit, and the SD card's label, which has no words
+    // beside it to stand on, centred on them.
     let pal = Pal::now();
     let lit = out.shapes.iter().filter(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == pal.accent && r.rect.height() == 10.0)).count();
     let unlit = out.shapes.iter().filter(|c| matches!(&c.shape, Shape::Rect(r) if r.fill == pal.unlit && r.rect.height() == 10.0)).count();
     assert!(lit > 10 && unlit > lit, "about a third of the card lit: {lit} of {}", lit + unlit);
+    let segment = out.shapes.iter().find_map(|c| match &c.shape {
+        Shape::Rect(r) if r.fill == pal.accent && r.rect.height() == 10.0 => Some(r.rect),
+        _ => None,
+    });
+    let (label, meter) = (find(&out, "SD CARD").center().y, segment.expect("the meter's segments").center().y);
+    assert!((label - meter).abs() < 0.5, "the SD card's label centred on its meter: {label} {meter}");
 }
 
 #[test]
