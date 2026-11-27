@@ -1132,20 +1132,57 @@ mod tests {
         // A volume's long name (Linux, macOS) and a long path at the cells'
         // least width: the Drive fact keeps the most pieces that fit, each
         // whole, the serial first to go; the path is cut, never the count.
-        let drive = "MSTREAM_CAR_MUSIC_BACKUP";
+        // The value column's width there, from where the card sets its
+        // Drive fact (its room, as its clip says, less the padding its
+        // labels stand in on either side, from the fact's left): the name
+        // is as much of a long one as leaves the drive, its file system and
+        // its size whole in it in the face the page is set in, and the
+        // serial out (Segoe UI holds 24 of its letters, a face as wide as
+        // DejaVu Sans fewer).
+        let probe = Probe::new(vec2(NARROW.x, BOARD.y));
+        let (mut page, _inbox) = alone(cards::ready("E:", now()));
+        page.act(Act::Details);
+        let out = probe.settle(&mut page);
+        let room = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == "DRIVE" => Some(c.clip_rect.shrink(1.0)),
+                _ => None,
+            })
+            .expect("the Drive fact drawn");
+        let value_x = texts(&out).into_iter().find(|(t, _)| t.starts_with("E: · FAT32 on MBR")).expect("its value").1.min.x;
+        let column = room.max.x - (find(&out, "DRIVE").min.x - room.min.x) - value_x;
+        let width = |drive: &str, words: &str| {
+            let mut w = 0.0;
+            let mut out = probe.ctx.run_ui(Default::default(), |ui| {
+                w = studio::runs_width(ui, &figured(words, &[], drive, body(PLAIN.0), mono(FIGURE), Color32::WHITE));
+            });
+            out.textures_delta.clear();
+            w
+        };
+        let pieces_of = |drive: &str| format!("{drive} · FAT32 on MBR · 63.8 GB · 32 KB clusters · 1A2B-3C4D");
+        let name = "MSTREAM_CAR_MUSIC_BACKUP_2024_SDXC";
+        let drive = (8..=name.len())
+            .rev()
+            .map(|n| &name[..n])
+            .find(|d| width(d, &pieces_of(d).rsplitn(3, " · ").last().expect("its head")) <= column)
+            .expect("a name the column holds with its file system and its size");
+        let whole = pieces_of(drive);
+        let pieces: Vec<&str> = whole.split(" · ").collect();
+        let kept = (3..=5).rev().find(|&k| width(drive, &pieces[..k].join(" · ")) <= column).expect("the head fits");
+        assert!(kept < 5, "{drive}: the column has room for every piece, so none gives way");
         let long = "Velvet Static/Harbour Songs (Deluxe Edition)/04 - Low Tide (Extended Mix) [Remastered 2024].flac".to_string();
         let card = cards::with(cards::ready(drive, now()), |c| {
             if let Next::Plan(plan) = &mut c.next {
                 plan.removals = std::iter::once(long.clone()).chain(paths(1_234)).collect();
             }
         });
-        let whole = format!("{drive} · FAT32 on MBR · 63.8 GB · 32 KB clusters · 1A2B-3C4D");
-        let pieces: Vec<&str> = whole.split(" · ").collect();
-        let probe = Probe::new(vec2(NARROW.x, BOARD.y));
         let (mut page, _inbox) = alone(card);
         page.act(Act::Details);
         let out = probe.settle(&mut page);
-        let fact = (3..5).map(|k| pieces[..k].join(" · ")).find(|f| drew(&out, f)).unwrap_or_else(|| panic!("the Drive fact given way: {:?}", words_of(&out)));
+        let fact = pieces[..kept].join(" · ");
+        assert!(drew(&out, &fact), "the Drive fact given way to the {kept} pieces the column holds: {fact:?} in {:?}", words_of(&out));
         assert!(!galley(&out, &fact).elided, "each piece whole, never cut: {fact}");
         assert!(!fact.contains("1A2B-3C4D"), "the serial first: {fact}");
         assert!(!galley(&out, " and 1,234 more").elided, "the count never cut");
@@ -1557,16 +1594,39 @@ mod tests {
     #[test]
     fn a_chained_gate_opens_at_its_top_wherever_the_last_ones_body_was_scrolled_to() {
         let _en = english();
-        // A window short enough that both gates' bodies scroll.
-        let size = vec2(576.0, 260.0);
+        let chain = || {
+            alone(planned(|p| {
+                p.removals = paths(214);
+                p.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])];
+            }))
+        };
+        let why = t!("dev.card.gate_remove_why", server = "Home").to_string();
+        // A window short enough that both gates' bodies scroll, in the face
+        // the page is set in: each body as tall as a tall window lays it
+        // out, from its first words to its answers' foot, and the window's
+        // view (its height less the clearance, the padding, the title and
+        // the room under it) the remove gate's body less 48 points, so the
+        // wheel takes it to its foot, and the adopt gate's less 24, so its
+        // answers stand under the view; no taller than the 260 points that
+        // leaves in Segoe UI. A narrower face sets the adopt gate's
+        // sentences in fewer lines, which 260 points held whole.
+        let tall = Probe::new(vec2(576.0, 800.0));
+        let (mut page, _inbox) = chain();
+        page.act(Act::Primary);
+        let out = tall.settle(&mut page);
+        let remove_h = find(&out, "REMOVE 214 AND SYNC").max.y - find(&out, &why).min.y;
+        tall.click_on(&mut page, "REMOVE 214 AND SYNC");
+        let gate = page.card.gate.clone().expect("the adopt gate");
+        let out = tall.settle(&mut page);
+        let Some(Said::Words(first, _)) = said(&gate).into_iter().flatten().next() else { panic!("the adopt's words") };
+        let keep = keep_words(&cells::card::gate_buttons_of(&gate).0).to_uppercase();
+        let adopt_h = find(&out, &keep).max.y - find(&out, &first).min.y;
+        let chrome = 2.0 * (16.0 + MODAL_PAD) + TITLE_H + MODAL_GAP;
+        let size = vec2(576.0, 260.0_f32.min(chrome + remove_h - 48.0).min(chrome + adopt_h - 24.0));
         let probe = Probe::new(size);
-        let (mut page, inbox) = alone(planned(|p| {
-            p.removals = paths(214);
-            p.guards = vec![Guard::Adopt(vec!["a.flac".into(); 1_190])];
-        }));
+        let (mut page, inbox) = chain();
         page.act(Act::Primary);
         let out = probe.settle(&mut page);
-        let why = t!("dev.card.gate_remove_why", server = "Home").to_string();
         let top = find(&out, &why).min.y;
         // The wheel takes the body to its foot, where its go stands.
         let at = pos2(size.x / 2.0, size.y / 2.0);
@@ -1584,11 +1644,9 @@ mod tests {
         // body's place, and taller than its view, so that place would show.
         let out = probe.settle(&mut page);
         let title = find(&out, &cells::card::gate_title(&gate)).center().y;
-        let Some(Said::Words(first, _)) = said(&gate).into_iter().flatten().next() else { panic!("the adopt's words") };
         let body_top = title + TITLE_H / 2.0 + MODAL_GAP;
         assert!(find(&out, &first).min.y >= body_top - 1.0, "at its top: {} under {body_top}", find(&out, &first).min.y);
-        let keep = keep_words(&cells::card::gate_buttons_of(&gate).0).to_uppercase();
-        assert!(find(&out, &keep).min.y > size.y - 16.0 - MODAL_PAD, "its foot under its view");
+        assert!(find(&out, &keep).min.y > size.y - 16.0 - MODAL_PAD, "its foot under its view at {size:?}: {:?}", find(&out, &keep));
     }
 
     #[test]

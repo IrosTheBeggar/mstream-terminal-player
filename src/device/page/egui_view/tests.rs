@@ -479,7 +479,10 @@ fn at_the_guis_floor_the_card_tightens_and_keeps_its_bottom_row_whole() {
         e.boards(vec![chosen, fixtures::old("COM5", "v0.7.0")]);
     });
     let out = probe.settle(&mut page);
-    let row = find(&out, "COM3").center().y;
+    // The subjects row's middle, as its tab takes the row: its words stand
+    // on the face's baseline in it, as high over its middle as the face
+    // leaves room under its letters.
+    let row = probe.ctx.read_response(tab_id("COM3")).expect("COM3's tab").rect.center().y;
     assert!(row < ROOMY.top + ROW_H / 2.0 - 0.5 && row > TIGHT.top + ROW_H / 2.0 - 0.5, "closed up: the row nearer the top, never nearer than the tighter set's: {row}");
     // The primary whole in the card's room, as its clip says, over the
     // foot's padding (the tighter set's at the least); the room over the

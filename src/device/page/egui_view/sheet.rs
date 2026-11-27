@@ -1314,6 +1314,20 @@ mod tests {
         found.unwrap_or_else(|| panic!("{words:?} drawn: {:?}", all.iter().map(|(t, ..)| t).collect::<Vec<_>>()))
     }
 
+    /// Whether `at` stands beside the sheet's `words`, on their line:
+    /// within the height their ink spans, which a mark on the row over or
+    /// under them is not, whatever room the face leaves over and under its
+    /// letters (Calibri's line stands its words 3 points over the row's
+    /// middle, where the marks stand).
+    fn beside(out: &FullOutput, at: Pos2, words: &str) -> bool {
+        let line = find(out, words);
+        let ink = out.shapes.iter().find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == words && t.pos == line.min => Some(t.visual_bounding_rect()),
+            _ => None,
+        });
+        ink.unwrap_or_else(|| panic!("{words:?} drawn")).y_range().contains(at.y)
+    }
+
     fn assert_drew(out: &FullOutput, words: &[&str]) {
         for w in words {
             assert!(drew(out, w), "{w:?} drawn: {:?}", texts(out).into_iter().map(|(t, ..)| t).collect::<Vec<_>>());
@@ -1625,16 +1639,16 @@ mod tests {
         let pal = Pal::now();
         let out = probe.settle(&mut page);
         // On the Firmware group: its chosen mark in the accent, Flash
-        // mode's in the text colour.
+        // mode's in the text colour, each beside its words.
         let (accent, text) = (dots(&out, pal.accent, 3.0), dots(&out, pal.text, 3.0));
-        assert!(accent.len() == 1 && (accent[0].y - find(&out, "v0.8.0").center().y).abs() < 2.0, "{accent:?}");
-        assert!(text.len() == 1 && (text[0].y - find(&out, "QIO").center().y).abs() < 2.0, "{text:?}");
+        assert!(accent.len() == 1 && beside(&out, accent[0], "v0.8.0"), "{accent:?}");
+        assert!(text.len() == 1 && beside(&out, text[0], "QIO"), "{text:?}");
         // Tab: Flash mode has it, and the help speaks of it.
         press(&mut page, KeyCode::Tab);
         assert_eq!(sheet(&page).focus, Stop::Mode);
         let out = probe.settle(&mut page);
         let accent = dots(&out, pal.accent, 3.0);
-        assert!(accent.len() == 1 && (accent[0].y - find(&out, "QIO").center().y).abs() < 2.0, "{accent:?}");
+        assert!(accent.len() == 1 && beside(&out, accent[0], "QIO"), "{accent:?}");
         assert_drew(&out, &["QIO reads the flash on 4 lines: lists, the dance and MP3 decoding are faster. Most Core2s run it."]);
         // Erase: the keyboard's look round its line.
         press(&mut page, KeyCode::Tab);
