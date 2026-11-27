@@ -2023,9 +2023,14 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
     let font = if input.mono { mono(12.5) } else { body(14.0) };
     let (line, caret_at, composing) = field_line(input);
     let clip = ui.painter().with_clip_rect(view.intersect(ui.clip_rect()));
+    // A line's first letter may reach left of where it stands (a "V", a
+    // "W" or a quote in some faces, Tahoma's among them): where the line
+    // starts at the view's edge, the clip leaves it half the box's padding,
+    // so its ink is never cut there.
+    let reach = ui.painter().with_clip_rect(view.with_min_x(view.min.x - FIELD_PAD / 2.0).intersect(ui.clip_rect()));
     if line.is_empty() && !input.placeholder.is_empty() {
         let galley = ui.painter().layout_no_wrap(input.placeholder.to_string(), font.clone(), pal.dim);
-        clip.galley(pos2(view.min.x, rect.center().y - galley.size().y / 2.0), galley, pal.dim);
+        reach.galley(pos2(view.min.x, rect.center().y - galley.size().y / 2.0), galley, pal.dim);
     }
     let mut job = field_job(&line, composing, font.clone(), ink);
     if !focused {
@@ -2048,8 +2053,12 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
     let origin = pos2(view.min.x - offset, rect.center().y - galley.size().y / 2.0);
     // A letter scrolled partly off the view's left edge is left out whole,
     // as the cells' field scrolls by whole letters: none shows torn.
-    let from = view.min.x + whole_glyph(&galley, offset) - offset;
-    clip.with_clip_rect(clip.clip_rect().with_min_x(from.max(clip.clip_rect().min.x))).galley(origin, galley, ink);
+    if offset > 0.0 {
+        let from = view.min.x + whole_glyph(&galley, offset) - offset;
+        clip.with_clip_rect(clip.clip_rect().with_min_x(from.max(clip.clip_rect().min.x))).galley(origin, galley, ink);
+    } else {
+        reach.galley(origin, galley, ink);
+    }
 
     let caret = focused.then(|| {
         let x = (origin.x + caret_x).round();
