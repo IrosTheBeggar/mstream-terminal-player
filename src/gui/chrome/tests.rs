@@ -281,6 +281,109 @@ fn the_pass_reports_a_press_once_with_its_act_and_its_parts() {
     assert!(out.spots.iter().any(|(_, act)| *act == Act::Screen(Screen::Stats)));
 }
 
+/// The pass's parts stand in the cells' own footprint at the window's
+/// opening size, at the floor with the tips row and without it, and wide:
+/// the strip in row 0, the bar in its five rows from `bar::top`, the tips
+/// row under it left to the cells. The popups are not held to either: the
+/// menu hangs from the strip's foot, and quick config rises over the room
+/// from the bar's top.
+#[test]
+fn the_parts_stand_in_the_cells_footprint_and_the_popups_hang_outside_it() {
+    let _en = crate::setup::tests::in_locale("en");
+    for (w, h, hints) in [(100, 30, false), (100, 24, true), (100, 24, false), (160, 50, false)] {
+        let mut gui = forced_gui();
+        gui.config.gui.key_hints = hints;
+        gui.ui.key_hints = hints;
+        let grid = Rect::new(0, 0, w, h);
+        let cells = Cells { points: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(f32::from(w) * 8.0, f32::from(h) * 16.0)), grid, ppp: 1.0 };
+        let ctx = egui::Context::default();
+        crate::gui::window::panel::fonts(&ctx);
+        let parts = |gui: &mut Gui| -> Vec<Part> {
+            draw_at(gui, w, h);
+            let now = gui.bar_now();
+            let views = views(gui, grid, now.as_ref(), live(gui, grid), None, holes(gui, grid));
+            let mut out = Out::default();
+            let input = egui::RawInput { screen_rect: Some(cells.points), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| super::draw(ui, cells, &views, &mut out));
+            output.textures_delta.clear();
+            out.parts
+        };
+        let at_rest = parts(&mut gui);
+        let strip = cells.rect(Rect { x: 0, y: 0, width: w, height: 1 });
+        let bar_cells = Rect { x: 0, y: bar::top(grid, hints), width: w, height: bar::BAR_ROWS };
+        let bar = cells.rect(bar_cells);
+        assert_eq!(gui.chrome.bar.as_ref().map(|mark| mark.layout.rect), Some(bar_cells), "{w}×{h}: the bar's rows as the cells lay them");
+        assert_eq!(bar_cells.bottom(), h - u16::from(hints), "{w}×{h}: the tips row under the bar stays the cells'");
+        let rects: Vec<egui::Rect> = at_rest.iter().map(|part| part.rect).collect();
+        assert_eq!(rects, [strip, bar], "{w}×{h}: the strip in row 0, the bar in its rows, nothing else at rest");
+
+        gui.servers.drop_open = true;
+        let menu = parts(&mut gui).into_iter().map(|part| part.rect).find(|rect| *rect != strip && *rect != bar).expect("the menu's part");
+        assert!(menu.max.y > strip.max.y && !strip.contains_rect(menu) && !bar.contains_rect(menu), "{w}×{h}: the menu hangs below the strip: {menu:?}");
+        gui.servers.drop_open = false;
+        gui.act(Act::DjQuick(crate::gui::dj::QuickAct::Toggle));
+        let quick = parts(&mut gui).into_iter().map(|part| part.rect).find(|rect| *rect != strip && *rect != bar).expect("quick config's part");
+        assert!(quick.min.y < bar.min.y && !bar.contains_rect(quick), "{w}×{h}: quick config rises over the room: {quick:?}");
+    }
+}
+
+/// The hand over a popup's catcher, as over the cells' (a press there puts
+/// the popup away): off the menu while it is up, off quick config while it
+/// is, and none on quick config's frame off its rows, the cells' Guard.
+#[test]
+fn the_hand_shows_over_a_popups_catcher_as_over_the_cells() {
+    let _en = crate::setup::tests::in_locale("en");
+    let mut gui = forced_gui();
+    let cells = Cells { points: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 480.0)), grid: grid(), ppp: 1.0 };
+    let ctx = egui::Context::default();
+    crate::gui::window::panel::fonts(&ctx);
+    // The pointer brought to `cell`, then passes enough for egui to hover
+    // what it laid out in the pass before (an area's first is unseen).
+    let cursor_at = |gui: &mut Gui, cell: Position| -> egui::CursorIcon {
+        draw(gui);
+        let now = gui.bar_now();
+        let views = views(gui, grid(), now.as_ref(), live(gui, grid()), None, holes(gui, grid()));
+        let at = cells.rect(Rect { x: cell.x, y: cell.y, width: 1, height: 1 }).center();
+        let mut icon = egui::CursorIcon::Default;
+        for events in [vec![egui::Event::PointerMoved(at)], Vec::new(), Vec::new()] {
+            let input = egui::RawInput { screen_rect: Some(cells.points), events, ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| super::draw(ui, cells, &views, &mut Out::default()));
+            output.textures_delta.clear();
+            icon = output.platform_output.cursor_icon;
+        }
+        icon
+    };
+    gui.servers.drop_open = true;
+    assert_eq!(cursor_at(&mut gui, Position { x: 10, y: 10 }), egui::CursorIcon::PointingHand, "off the menu: its catcher");
+    gui.servers.drop_open = false;
+    gui.act(Act::DjQuick(crate::gui::dj::QuickAct::Toggle));
+    draw(&mut gui);
+    let frame = quick::view(&gui, grid()).expect("quick config up").rect;
+    assert_eq!(cursor_at(&mut gui, Position { x: 90, y: 3 }), egui::CursorIcon::PointingHand, "off quick config: its catcher");
+    assert_eq!(cursor_at(&mut gui, Position { x: frame.x, y: frame.y }), egui::CursorIcon::Default, "on its frame off its rows: the Guard's");
+}
+
+/// A frame drawn as the mini player runs no pass and claims nothing: the
+/// open menu's claims of the frame before go with it, so the hand over the
+/// mini player's own controls is the cells' and the script's dumps name
+/// what the cells registered.
+#[test]
+fn a_frame_drawn_as_the_mini_player_claims_nothing() {
+    let _en = crate::setup::tests::in_locale("en");
+    let mut gui = forced_gui();
+    gui.servers.drop_open = true;
+    draw(&mut gui);
+    let at = Position { x: 50, y: 10 };
+    gui.ui.pointer = Some(at);
+    assert!(gui.chrome.claims.popup && gui.chrome.claims.holds(at), "the menu holds the grid");
+    assert!(!hand(&gui, true), "the cells' hand gives way to the chrome's on the menu's cells");
+    assert_eq!(hit_debug(&gui, at), Some(None), "and the chrome answers the dumps there");
+    draw_at(&mut gui, 90, 20);
+    assert_eq!(gui.chrome.claims, Claims::default(), "the mini player: nothing claimed");
+    assert!(hand(&gui, true), "the cells' hand is the cells'");
+    assert_eq!(hit_debug(&gui, at), None, "the cells answer the dumps");
+}
+
 /// Nothing panics at the floor with the tips row under the bar, nor wide,
 /// popups up and every face forced, the pass run in a context of its own.
 #[test]

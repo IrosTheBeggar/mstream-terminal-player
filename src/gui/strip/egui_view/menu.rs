@@ -69,8 +69,9 @@ pub(crate) fn menu(ui: &mut Ui, view: &MenuView, cx: &MenuCtx) -> MenuOut {
     let ctx = ui.ctx().clone();
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(screen.min).constrain(false).fade_in(false);
     area.show(&ctx, |ui| {
-        // The catcher first, under the rows: a press off them closes it.
-        let catcher = ui.interact(screen, id.with("catcher"), Sense::click());
+        // The catcher first, under the rows: a press off them closes it,
+        // and the hand shows over it, as over the cells' catcher.
+        let catcher = studio::hand(ui.interact(screen, id.with("catcher"), Sense::click()));
         out.items.push((screen, Act::SrvCloseDrop));
         let pressed_at = ui.input(|i| i.pointer.press_origin());
         if studio::pressed(&catcher) && pressed_at.is_some_and(live) {

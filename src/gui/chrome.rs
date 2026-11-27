@@ -86,8 +86,11 @@ pub(super) struct BarMark {
 }
 
 impl ChromeUi {
-    /// A frame begins to draw: the last one's marks, items and hand are
-    /// gone. The presses wait for the frame's duties.
+    /// A frame begins to draw: the last one's marks, items, claims, lit
+    /// control and hand are gone, so a frame that draws no chrome (the mini
+    /// player, which returns before the host) claims nothing of the pointer
+    /// and leaves the hand and the script's dumps to the cells. The presses
+    /// wait for the frame's duties.
     pub(super) fn begin_frame(&mut self) {
         self.strip = None;
         self.bar = None;
@@ -95,6 +98,8 @@ impl ChromeUi {
         self.quick = None;
         self.spots.clear();
         self.hand = false;
+        self.claims = Claims::default();
+        self.hot = None;
     }
 }
 

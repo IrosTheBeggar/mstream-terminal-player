@@ -63,7 +63,9 @@ pub(crate) fn show(ui: &mut Ui, view: &BarView, layout: &BarLayout, cx: &BarCtx)
     words(ui, layout.dj.word, " auto-dj", if hot(&Act::AutoDj) { pal.text } else { dj });
     let chevron = at(layout.dj.chevron).center();
     studio::chevron(ui, chevron, if view.quick_open { pal.text } else { pal.dim }, !view.quick_open);
-    let marks = [Mark::Repeat, Mark::Prev, if view.paused || view.now.is_none() { Mark::Play } else { Mark::Pause }, Mark::Next, Mark::Shuffle];
+    // The play slot's mark as the cells' glyph (`play_glyphs`): the pause
+    // whenever the bar is not paused, idle included (ruling R14, open).
+    let marks = [Mark::Repeat, Mark::Prev, if view.paused { Mark::Play } else { Mark::Pause }, Mark::Next, Mark::Shuffle];
     for ((rect, act), mark) in layout.group.iter().zip(marks) {
         let (frame, weight) = match act {
             Act::PlayPause => (pal.gold, 2.0),

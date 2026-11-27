@@ -64,7 +64,9 @@ pub(crate) fn show(ui: &mut Ui, view: &QuickView, cx: &QuickCtx) -> QuickOut {
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(screen.min).constrain(false).fade_in(false);
     area.show(&ctx, |ui| {
         let close = Act::DjQuick(QuickAct::Close);
-        let catcher = ui.interact(screen, id.with("catcher"), Sense::click());
+        // The hand over the catcher, as over the cells' (a press there puts
+        // it away), and none over the frame, the cells' Guard.
+        let catcher = studio::hand(ui.interact(screen, id.with("catcher"), Sense::click()));
         // Over the catcher: a press on the frame off the rows is the
         // frame's, and nothing.
         let _ = ui.interact(frame, id.with("frame"), Sense::click());

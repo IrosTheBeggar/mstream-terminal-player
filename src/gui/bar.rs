@@ -740,7 +740,7 @@ mod tests {
     /// volume's ends and cells, the seek line's cells (its two times take no
     /// press), the card whole, and the card's right press while something
     /// is up on it — at the window's opening size, at the floor with the
-    /// tips row under the bar, and wide; playing and idle.
+    /// tips row under the bar and without it, and wide; playing and idle.
     #[test]
     fn the_layout_is_where_the_cells_register_every_act() {
         use ratatui::layout::Position;
@@ -757,7 +757,7 @@ mod tests {
             key: Some("8A".into()),
             bpm: Some(120),
         };
-        for (w, h, footer) in [(100, 30, false), (100, 24, true), (160, 50, false)] {
+        for (w, h, footer) in [(100, 30, false), (100, 24, true), (100, 24, false), (160, 50, false)] {
             for playing in [true, false] {
                 let v = BarView {
                     now: playing.then_some(&now),
