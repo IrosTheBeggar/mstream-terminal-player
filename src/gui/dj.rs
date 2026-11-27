@@ -37,7 +37,8 @@ use crate::tui::worker::DjNote;
 
 use super::{Act, DJ_NAV, Gui, Screen, accent, bright_bold, put, sel, text_button};
 
-mod quick;
+// Quick config's view is the window's chrome's too (src/gui/chrome.rs).
+pub(crate) mod quick;
 mod seeds;
 mod sheets;
 
@@ -872,6 +873,7 @@ fn draw_row(frame: &mut Frame, gui: &mut Gui, rect: Rect, row: Row) {
 /// queue's list, quick config, a sheet, the Seeds sheet, the opening
 /// question.
 pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    quick::settle_screen(gui);
     draw_first_list(frame, gui, area);
     draw_recent_list(frame, gui, area);
     quick::draw(frame, gui, area);

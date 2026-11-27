@@ -1722,6 +1722,62 @@ fn the_bars_button_splits_and_its_chevron_opens_quick_config() {
     assert!(gui.dj.quick.is_none());
 }
 
+/// Quick config's view says, line for line, what its cells draw: the
+/// head and the servers, the switch and its value, the match bar and the
+/// way to the Seeds while it is on, Smart filters and the way to the room,
+/// the groups a blank row apart; where the cells set the popover; none
+/// while it is down, or where no bar stands.
+#[test]
+fn quick_configs_view_lists_what_its_cells_draw() {
+    use super::quick::{QStop, QuickLine, view};
+    let _en = english();
+    let mut gui = session_gui();
+    two_servers(&mut gui);
+    let area = ratatui::layout::Rect::new(0, 0, 100, 30);
+    assert_eq!(view(&gui, area), None, "down");
+    gui.act(Act::DjQuick(QuickAct::Toggle));
+    probed(&mut gui, info("6.33.1"));
+    let rows = draw(&mut gui);
+    let shown = view(&gui, area).expect("up");
+    let (px, py) = find(&rows, "╭────────────────────────────────────────╮").expect("the popover");
+    assert_eq!((shown.rect.x, shown.rect.y, shown.rect.width), (px, py, 42), "where the cells set it");
+    assert_eq!(shown.rect.bottom(), shown.bar_top, "its foot on the row over the seek line");
+    assert_eq!(shown.hand, None, "the keyboard's hand stowed");
+    let kinds: Vec<&str> = shown
+        .lines
+        .iter()
+        .map(|line| match line {
+            QuickLine::Head(words) => words.as_str(),
+            QuickLine::Server { words, .. } => words.as_str(),
+            QuickLine::PlayFrom { .. } => "play from",
+            QuickLine::Gap => "",
+            QuickLine::Sonic { label, .. } | QuickLine::Seeds { label, .. } | QuickLine::Smart { label, .. } | QuickLine::All { label, .. } => label.as_str(),
+            QuickLine::Bar(_) => "bar",
+        })
+        .collect();
+    assert_eq!(kinds, ["PLAY FROM", "host:3000", "attic:3000", "", "Sonic similarity", "bar", "Seeds", "", "Smart filters", "", "All Auto DJ settings"]);
+    for (i, line) in shown.lines.iter().enumerate() {
+        let row = &rows[usize::from(shown.rect.y) + 1 + i];
+        match line {
+            QuickLine::Head(words) | QuickLine::Server { words, .. } => assert!(row.contains(words.as_str()), "{row}"),
+            QuickLine::Sonic { label, value, .. } => assert!(row.contains(label.as_str()) && row.contains(value.as_str()), "{row}"),
+            QuickLine::Seeds { label, .. } | QuickLine::Smart { label, .. } | QuickLine::All { label, .. } => {
+                assert!(row.contains(label.as_str()), "{row}")
+            }
+            QuickLine::Bar(bar) => assert_eq!(row.matches('▰').count(), usize::from(bar.filled), "{row}"),
+            _ => {}
+        }
+    }
+    let QuickLine::Server { stop, current, .. } = &shown.lines[1] else { panic!("a server") };
+    assert_eq!((*stop, *current), (QStop::Server(0), true), "the session's server is the current one");
+    let QuickLine::Bar(bar) = shown.lines[5] else { panic!("the bar") };
+    let (x, y) = find(&rows, "▰").expect("the bar's first cell");
+    assert_eq!(gui.ui.hit(Position { x, y }), Some(Act::DjQuick(QuickAct::Set(bar.first))), "cell 0 sets the first");
+    assert_eq!(gui.ui.hit(Position { x: x + 3, y }), Some(Act::DjQuick(QuickAct::Set(bar.first + 3 * bar.per))));
+    gui.act(Act::Screen(Screen::Stats));
+    assert_eq!(view(&gui, area), None, "no bar, no quick config");
+}
+
 /// A server other than the session's answers its probe.
 fn probed_as(gui: &mut Gui, identity: &str, info: DjServerInfo) {
     let effects = gui.app.apply_event(Event::DjProbed { identity: identity.into(), info: Some(info) });

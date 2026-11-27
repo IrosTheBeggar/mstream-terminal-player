@@ -1455,54 +1455,98 @@ pub(crate) fn draw_disconnected(frame: &mut Frame, gui: &mut Gui, content: Rect,
     }
 }
 
-/// The dropdown under the header label: every saved server, then the add
-/// row. Drawn (and registered) after everything else so its rows win the
-/// pointer — with a whole-screen guard underneath so a stray click only
-/// closes it.
-pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    if !gui.servers.drop_open {
-        return;
-    }
-    gui.ui.click(area, Act::SrvCloseDrop);
+/// The server menu while it is open, for either face to draw: the servers
+/// that can be picked, grouped — a peer under the server it is reached
+/// through — then the add row.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MenuView {
+    pub rows: Vec<MenuRow>,
+    /// The add row's words; the cells set "+ " before them.
+    pub add: String,
+    /// The first row shown, which the wheel moves (`wheel_dropdown`).
+    pub scroll: usize,
+}
 
-    // Grouped — a peer under the server it is reached through, with its
-    // "via" — and only what can be picked (contract clause 12).
-    let branch = if legacy_conhost() { "+" } else { "└" };
-    let entries: Vec<(usize, String, bool, bool)> = order(gui)
+/// A server's row: `Act::SrvSwitch(index)` on a press. `current` is the
+/// session's server, answering or not — the choice stands; `default` the
+/// one the player starts on.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MenuRow {
+    pub index: usize,
+    /// A server's display name, or a peer's own name.
+    pub name: String,
+    pub peer: Option<MenuPeer>,
+    pub current: bool,
+    pub default: bool,
+}
+
+/// A peer's tail after its name: "direct" while its own tunnel is up
+/// (contract clause 27), then the server it is reached through.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MenuPeer {
+    pub direct: Option<String>,
+    pub via: String,
+}
+
+impl MenuRow {
+    /// The row's words as the cells set them: a peer's behind `branch`,
+    /// its "direct" mark first, so a clipped row still shows it.
+    fn label(&self, branch: &str) -> String {
+        match &self.peer {
+            Some(peer) => {
+                let direct = peer.direct.as_ref().map(|d| format!("{d} · ")).unwrap_or_default();
+                format!("{branch} {} · {direct}{}", self.name, peer.via)
+            }
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// The menu as the Gui stands, or None while it is closed. Only what can
+/// be picked (contract clause 12), in the room's order.
+pub(crate) fn menu_view(gui: &Gui) -> Option<MenuView> {
+    if !gui.servers.drop_open {
+        return None;
+    }
+    let rows = order(gui)
         .into_iter()
         .filter_map(|i| {
             let s = gui.config.servers.get(i)?;
             if !config::selectable(s) {
                 return None;
             }
-            // The session's server, answering or not — the choice stands.
             let current = config::same_server(&gui.app.session.server_id, &s.url);
             let default = gui
                 .config
                 .default_server
                 .as_deref()
                 .is_some_and(|d| config::same_server(d, &s.url));
-            let label = match &s.peer {
+            let (name, peer) = match &s.peer {
                 Some(peer) => {
-                    // Reached over a tunnel of its own (contract clause 27):
-                    // the mark comes first, so a clipped row still shows it.
-                    let direct = if peer_is_direct(gui, &s.url) {
-                        format!("{} · ", t!("gui.srv.direct"))
-                    } else {
-                        String::new()
-                    };
-                    format!(
-                        "{branch} {} · {direct}{}",
-                        peer.name,
-                        t!("gui.srv.via", parent = parent_label(gui, &peer.parent))
-                    )
+                    let direct = peer_is_direct(gui, &s.url).then(|| t!("gui.srv.direct").to_string());
+                    let via = t!("gui.srv.via", parent = parent_label(gui, &peer.parent)).to_string();
+                    (peer.name.clone(), Some(MenuPeer { direct, via }))
                 }
-                None => config::display_name(s),
+                None => (config::display_name(s), None),
             };
-            Some((i, label, current, default))
+            Some(MenuRow { index: i, name, peer, current, default })
         })
         .collect();
-    let add_label = format!("+ {}", t!("gui.srv.add"));
+    Some(MenuView { rows, add: t!("gui.srv.add").to_string(), scroll: gui.servers.drop_scroll })
+}
+
+/// The dropdown under the header label: every saved server, then the add
+/// row. Drawn (and registered) after everything else so its rows win the
+/// pointer — with a whole-screen guard underneath so a stray click only
+/// closes it.
+pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    let Some(view) = menu_view(gui) else { return };
+    gui.ui.click(area, Act::SrvCloseDrop);
+
+    let branch = if legacy_conhost() { "+" } else { "└" };
+    let entries: Vec<(usize, String, bool, bool)> =
+        view.rows.iter().map(|row| (row.index, row.label(branch), row.current, row.default)).collect();
+    let add_label = format!("+ {}", view.add);
     let widest = entries
         .iter()
         .map(|(_, label, _, _)| label.chars().count() + 4)
@@ -2410,6 +2454,35 @@ mod tests {
         lone.app.connected = true;
         let rows = draw(&mut lone);
         assert!(!rows[0].contains(&format!("attic.local:3000{chevron}")));
+    }
+
+    /// The menu's view lists the rows its cells draw, in their order, the
+    /// session's server current, the default one marked, the add row's
+    /// words and the wheel's scroll; none while it is closed.
+    #[test]
+    fn the_menus_view_lists_the_rows_its_cells_draw() {
+        let _en = english();
+        let mut gui = two_server_gui();
+        gui.config.default_server = Some("http://office.local:3000".into());
+        assert_eq!(menu_view(&gui), None, "closed");
+        gui.act(Act::SrvMenu);
+        let view = menu_view(&gui).expect("open");
+        let rows = draw(&mut gui);
+        let names: Vec<&str> = view.rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        // The frame from row 1, its rows inside it.
+        for (row, shown) in view.rows.iter().zip(2..) {
+            assert!(rows[shown].contains(&row.name), "{:?} on its row:\n{}", row.name, rows.join("\n"));
+            let at = rows[shown].find(&row.name).unwrap();
+            let x = rows[shown][..at].chars().count() as u16;
+            assert_eq!(gui.ui.hit(ratatui::layout::Position { x, y: shown as u16 }), Some(Act::SrvSwitch(row.index)));
+            assert!(row.peer.is_none());
+        }
+        assert!(view.rows[0].current && !view.rows[1].current, "the session's server");
+        assert!(!view.rows[0].default && view.rows[1].default, "the default one");
+        assert_eq!(view.add, t!("gui.srv.add"));
+        assert!(rows[4].contains(&format!("+ {}", view.add)), "the add row last:\n{}", rows.join("\n"));
+        assert_eq!(view.scroll, 0);
     }
 
     #[test]

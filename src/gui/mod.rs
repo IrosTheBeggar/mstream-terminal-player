@@ -1490,24 +1490,30 @@ impl Gui {
         }
     }
 
-    /// The note to show and its colour: the shell's own first (DIM, or
-    /// Yellow for an error), else the App's words in their kind's — busy
-    /// LightBlue and a landing Green among them (the kit's Status line;
-    /// discovery-page clause 118).
-    fn note_words(&self) -> Option<(String, Style)> {
+    /// The note to show and its tone: the shell's own first (dim, or the
+    /// gold for an error), else the App's words in their kind's — busy in
+    /// the accent and a landing in the ok green among them (the kit's
+    /// Status line; discovery-page clause 118).
+    fn note(&self) -> Option<(String, bar::NoteTone)> {
+        use bar::NoteTone;
         if let Some((text, is_err)) = self.note.clone() {
-            return Some((text, if is_err { Style::default().fg(th().gold) } else { dim() }));
+            return Some((text, if is_err { NoteTone::Error } else { NoteTone::Dim }));
         }
         self.app.message.as_ref().map(|m| {
-            let style = match m.kind {
-                MessageKind::Error => Style::default().fg(th().gold),
-                MessageKind::Info => dim(),
-                MessageKind::Busy => accent(),
-                MessageKind::Success => Style::default().fg(th().ok),
-                MessageKind::Plain => Style::default(),
+            let tone = match m.kind {
+                MessageKind::Error => NoteTone::Error,
+                MessageKind::Info => NoteTone::Dim,
+                MessageKind::Busy => NoteTone::Busy,
+                MessageKind::Success => NoteTone::Success,
+                MessageKind::Plain => NoteTone::Plain,
             };
-            (m.text.clone(), style)
+            (m.text.clone(), tone)
         })
+    }
+
+    /// [`Gui::note`] in its colour, as the cells draw it.
+    fn note_words(&self) -> Option<(String, Style)> {
+        self.note().map(|(text, tone)| (text, tone.style()))
     }
 
     fn bar_paused(&self) -> bool {
@@ -1998,20 +2004,9 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // carries its own scrubber and transport, and the Stats page takes the
     // whole height.
     if matches!(gui.screen, Screen::Library | Screen::Admin) {
-        let has_art = playing_cover_ready(&gui.app);
         let now = gui.bar_now();
-        let view = BarView {
-            now: now.as_ref(),
-            paused: gui.bar_paused(),
-            volume: gui.app.volume,
-            shuffle: gui.app.queue.shuffle,
-            repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
-            autodj: gui.app.dj_armed(),
-            quick_open: gui.dj.quick.is_some(),
-            queue_open: gui.queue_open,
-            has_art,
-            footer: gui.footer(),
-        };
+        let view = bar_view(gui, now.as_ref());
+        let has_art = view.has_art;
         bar::draw(frame, &mut gui.ui, area, &view);
         if has_art {
             let cover = bar::cover_rect(area, gui.footer());
@@ -2069,11 +2064,37 @@ fn over_control(gui: &Gui) -> bool {
 
 /// Whether the playing track's cover is decoded and waiting in the cache.
 fn playing_cover_ready(app: &App) -> bool {
+    playing_art(app).is_some()
+}
+
+/// The playing track's cover, once it is decoded.
+fn playing_art(app: &App) -> Option<&crate::tui::art::Art> {
     app.now_playing
         .as_ref()
         .and_then(|track| track.metadata.album_art.as_deref())
         .and_then(|file| app.art.get(file))
-        .is_some_and(|art| art.is_some())
+        .and_then(|art| art.as_ref())
+}
+
+/// The bar's view of the Gui, with `now` what the bar shows playing
+/// ([`Gui::bar_now`]). It holds no borrow of the Gui, so the cells draw it
+/// on the Gui's own surface; the cover is left out (`art`), which a face
+/// that draws the picture itself puts in ([`playing_art`]).
+fn bar_view<'a>(gui: &Gui, now: Option<&'a Now>) -> BarView<'a> {
+    BarView {
+        now,
+        paused: gui.bar_paused(),
+        volume: gui.app.volume,
+        shuffle: gui.app.queue.shuffle,
+        repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
+        autodj: gui.app.dj_armed(),
+        quick_open: gui.dj.quick.is_some(),
+        queue_open: gui.queue_open,
+        has_art: playing_cover_ready(&gui.app),
+        footer: gui.footer(),
+        note: gui.note(),
+        art: None,
+    }
 }
 
 /// The card's album art: real pixels through the graphics probe where the
@@ -3708,17 +3729,9 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             // dragged thumb lost the same way lets go too, untold, as a
             // release would have.
             admin::let_go_unseen(gui);
-            if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                if gui.ui.gripping()
-                    && let Some(act) = gui.ui.release_at(at)
-                    && gui.act(act)
-                {
-                    ctx.saver.flush(&gui.app);
-                    return Flow::Quit;
-                }
-                if gui.ui.holding_bar() {
-                    gui.ui.release();
-                }
+            if matches!(mouse.kind, MouseEventKind::Down(_)) && gui.press_lets_go(at) {
+                ctx.saver.flush(&gui.app);
+                return Flow::Quit;
             }
             // A press-drag on a drag region (the Admin log's lines), and
             // a press on one of the GUI's own scroll bars (the Admin
@@ -3756,19 +3769,8 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             }
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    gui.ui.caret_touch();
-                    if !gui.ui.begin_press(at) {
+                    if !gui.press_begins(at) {
                         return Flow::Continue;
-                    }
-                    // A click in the content column hands the keys
-                    // back from the queue (track-actions contract,
-                    // clause 19).
-                    if gui.app.focus == crate::tui::app::Focus::Queue
-                        && !actions::modal_open(gui)
-                        && !(gui.queue_open && at.x >= gui.queue_panel_x())
-                    {
-                        gui.app.focus = crate::tui::app::Focus::Browser;
-                        gui.queue_view.stow();
                     }
                     if let Some(act) = gui.ui.hit(at)
                         && gui.act(act)
@@ -3956,6 +3958,56 @@ fn moving(gui: &mut Gui) -> bool {
 }
 
 impl Gui {
+    /// A press of any button at `at`, before any page owner takes it: a
+    /// grip whose release was lost (a terminal that drops the Up when the
+    /// focus leaves mid-drag) ends at the press's cell, and a held arrow or
+    /// a dragged thumb lost the same way lets go, untold, as a release
+    /// would have. True when the grip's end quit.
+    fn press_lets_go(&mut self, at: Position) -> bool {
+        if self.ui.gripping()
+            && let Some(act) = self.ui.release_at(at)
+            && self.act(act)
+        {
+            return true;
+        }
+        if self.ui.holding_bar() {
+            self.ui.release();
+        }
+        false
+    }
+
+    /// A left press at `at`, once no page took it, before its hit: the
+    /// caret shows solid, the surface begins the press (false where it
+    /// swallows a terminal's phantom re-click, which goes no further), and
+    /// a press outside the open queue panel's columns hands the keys back
+    /// from the queue (track-actions contract, clause 19).
+    fn press_begins(&mut self, at: Position) -> bool {
+        self.ui.caret_touch();
+        if !self.ui.begin_press(at) {
+            return false;
+        }
+        if self.app.focus == crate::tui::app::Focus::Queue
+            && !actions::modal_open(self)
+            && !(self.queue_open && at.x >= self.queue_panel_x())
+        {
+            self.app.focus = crate::tui::app::Focus::Browser;
+            self.queue_view.stow();
+        }
+        true
+    }
+
+    /// What a left press in cells does before its hit, for a press the
+    /// window's chrome took (src/gui/chrome.rs), which the input half never
+    /// hears: everything [`input`] does there, in its order. False where the
+    /// press goes no further. No act quits at this commit, so the grip's end
+    /// cannot either.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(super) fn press_preamble(&mut self, at: Position) -> bool {
+        admin::let_go_unseen(self);
+        let _ = self.press_lets_go(at);
+        self.press_begins(at)
+    }
+
     /// Where the queue panel begins, matched to `draw_queue`'s separator
     /// on the last drawn frame — the wheel's queue-vs-content split.
     pub(crate) fn queue_panel_x(&self) -> u16 {
@@ -5902,6 +5954,33 @@ mod tests {
         // A press on the bar's row was never the page's, and nor is its release.
         assert!(!stats::pointer(&mut gui, at(MouseEventKind::Down(left), 30, 0)));
         assert!(!stats::pointer(&mut gui, at(MouseEventKind::Up(left), 30, 0)));
+    }
+
+    /// A press the window's chrome takes runs the cells' preamble, as a
+    /// press the input half hears does: one on a tab hands the keys back
+    /// from the queue, its cursor stowed, and one inside the open queue
+    /// panel's columns leaves them there. The input half's own press does
+    /// the same through the same code.
+    #[test]
+    fn a_press_the_chrome_takes_hands_the_keys_back_from_the_queue_as_a_cells_press_does() {
+        use crate::tui::app::Focus;
+        let mut gui = browsing_gui();
+        draw(&mut gui);
+        let inside = Position { x: gui.queue_panel_x() + 2, y: 6 };
+        let tab = Position { x: 3, y: 0 };
+        let hold = |gui: &mut Gui| {
+            gui.app.focus = Focus::Queue;
+            gui.queue_view.held = true;
+        };
+        hold(&mut gui);
+        assert!(gui.press_preamble(inside));
+        assert_eq!((gui.app.focus, gui.queue_view.held), (Focus::Queue, true), "inside the queue's columns the keys stay");
+        assert!(gui.press_preamble(tab));
+        assert_eq!((gui.app.focus, gui.queue_view.held), (Focus::Browser, false), "a press on a tab gives them back");
+        hold(&mut gui);
+        press_at(&mut gui, tab.x, tab.y);
+        release_at(&mut gui, tab.x, tab.y);
+        assert_eq!((gui.app.focus, gui.queue_view.held), (Focus::Browser, false), "as a press in cells does");
     }
 
     #[test]

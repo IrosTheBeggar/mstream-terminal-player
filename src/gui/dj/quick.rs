@@ -133,13 +133,62 @@ fn bar_stands(gui: &Gui) -> bool {
     matches!(gui.screen, super::super::Screen::Library | super::super::Screen::Admin)
 }
 
-/// The popover, drawn and registered over the room: a click anywhere else
-/// puts it away (the bar's chevron among them).
-pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let Some(quick) = gui.dj.quick else { return };
+/// Quick config while it is up, line by line, for either face to draw.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct QuickView {
+    /// Where the cells set it: from [`QUICK_X`], [`QUICK_W`] wide, its foot
+    /// on the row above the bar's seek line.
+    pub rect: Rect,
+    /// The seek line's row, which nothing of it covers.
+    pub bar_top: u16,
+    /// The keyboard's hand, while it shows.
+    pub hand: Option<QStop>,
+    pub lines: Vec<QuickLine>,
+}
+
+/// A line of quick config: what it says, and the stop a press on it
+/// presses (`Act::DjQuick(QuickAct::Press(stop))`), where it has one.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum QuickLine {
+    /// Play from's head, in capitals as the cells set it.
+    Head(String),
+    /// One of Play from's servers, a peer behind a branch.
+    Server { stop: QStop, words: String, peer: bool, current: bool },
+    /// Play from's row, past the servers it lists inline.
+    PlayFrom { stop: QStop, label: String, value: String },
+    /// A blank row between groups.
+    Gap,
+    /// Sonic similarity's switch: gated, its reason and no stop; else on or
+    /// off, with its value in its tone (the floor, or "! why" where a
+    /// running session had to drop it).
+    Sonic { label: String, gate: Option<String>, on: bool, value: String, tone: Tone },
+    /// Its match bar.
+    Bar(QuickBar),
+    /// The way to the Seeds sheet.
+    Seeds { stop: QStop, label: String },
+    /// Smart filters: gated, its reason and no stop; else its value.
+    Smart { label: String, gate: Option<String>, value: String, tone: Tone },
+    /// The way to the room, its words (the cells set ▸ after them).
+    All { stop: QStop, label: String },
+}
+
+/// The match bar: `cells` cells, `filled` of them lit. A press on cell `k`
+/// is `Act::DjQuick(QuickAct::Set(first + k * per))`, on its ends
+/// `Step(-1)` and `Step(1)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QuickBar {
+    pub cells: u16,
+    pub filled: u16,
+    pub first: u32,
+    pub per: u32,
+}
+
+/// Quick config as the Gui stands, in `area`, the frame's; None while it
+/// is down or the screen has no bar.
+pub(crate) fn view(gui: &Gui, area: Rect) -> Option<QuickView> {
+    let quick = gui.dj.quick?;
     if !bar_stands(gui) {
-        gui.dj.quick = None;
-        return;
+        return None;
     }
     let servers = super::pickable_servers(gui);
     let lines = lines(gui, &servers);
@@ -147,95 +196,131 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let h = (lines.len() as u16 + 2).min(bottom.saturating_sub(1));
     let w = QUICK_W.min(area.width.saturating_sub(2));
     let rect = Rect { x: QUICK_X.min(area.width.saturating_sub(w)), y: bottom.saturating_sub(h), width: w, height: h };
+    let lines = lines
+        .iter()
+        .filter_map(|line| {
+            Some(match line {
+                Line::Gap => QuickLine::Gap,
+                Line::Head => QuickLine::Head(t!("gui.dj.play_from").to_uppercase()),
+                Line::Server(n) => {
+                    let server = servers.get(*n)?;
+                    QuickLine::Server { stop: QStop::Server(*n), words: server.label.clone(), peer: server.peer, current: server.current }
+                }
+                Line::PlayFrom => QuickLine::PlayFrom { stop: QStop::PlayFrom, label: t!("gui.dj.play_from").to_string(), value: super::target_name(gui) },
+                Line::Sonic => {
+                    let label = t!("gui.dj.sonic").to_string();
+                    let s = &gui.app.dj;
+                    match gui.app.dj_sonic_gate() {
+                        Some(gate) => QuickLine::Sonic { label, gate: Some(super::gate_words(gate)), on: s.sonic, value: String::new(), tone: Tone::Neutral },
+                        None => {
+                            let (on, pct) = (s.sonic, (s.sonic_min_similarity * 100.0).round() as u32);
+                            let (value, tone) = match super::sonic_drop(gui) {
+                                Some(why) => (format!("! {why}"), Tone::Warning),
+                                None if on => super::sonic_value(on, pct),
+                                None => (String::new(), Tone::Neutral),
+                            };
+                            QuickLine::Sonic { label, gate: None, on, value, tone }
+                        }
+                    }
+                }
+                Line::Bar => QuickLine::Bar(super::sheets::sonic_bar(floor_of(gui)).quick()),
+                Line::Seeds => QuickLine::Seeds { stop: QStop::Seeds, label: t!("gui.dj.seeds").to_string() },
+                Line::Smart => {
+                    let label = t!("gui.dj.smart").to_string();
+                    match gui.app.dj_mood_gate() {
+                        Some(gate) => QuickLine::Smart { label, gate: Some(super::gate_words(gate)), value: String::new(), tone: Tone::Neutral },
+                        None => {
+                            let (value, tone) = super::moods_value(gui.app.dj.moods);
+                            QuickLine::Smart { label, gate: None, value, tone }
+                        }
+                    }
+                }
+                Line::All => QuickLine::All { stop: QStop::All, label: t!("gui.dj.all_settings").to_string() },
+            })
+        })
+        .collect();
+    Some(QuickView { rect, bar_top: bottom, hand: quick.shown.then_some(quick.hand), lines })
+}
+
+/// Quick config rises from the bar, and a screen without one puts it down:
+/// run on every frame, before the layers draw, whichever face draws it.
+pub(crate) fn settle_screen(gui: &mut Gui) {
+    if gui.dj.quick.is_some() && !bar_stands(gui) {
+        gui.dj.quick = None;
+    }
+}
+
+/// The popover, drawn and registered over the room: a click anywhere else
+/// puts it away (the bar's chevron among them).
+pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    let Some(view) = view(gui, area) else { return };
+    let rect = view.rect;
     gui.ui.click(area, Act::DjQuick(QuickAct::Close));
     gui.ui.overlay(rect);
     let inner = crate::kit::frame_at(frame, rect, th().accent);
     gui.ui.click(rect, Act::Guard);
     let (x0, text_w) = (inner.x + 1, inner.width.saturating_sub(2));
     let right = x0 + text_w;
-    let hand = |stop: QStop| quick.shown && quick.hand == stop;
+    let hand = |stop: QStop| view.hand == Some(stop);
     let (check_on, check_off) = super::super::check_glyphs();
     let (radio_on, radio_off) = if legacy_conhost() { ("(*)", "( )") } else { ("(•)", "( )") };
     let forward = super::super::forward_glyph();
     let branch = if legacy_conhost() { "+" } else { "└" };
-    for (i, line) in lines.iter().enumerate() {
+    for (i, line) in view.lines.iter().enumerate() {
         let y = inner.y + i as u16;
         if y >= inner.bottom() {
             break;
         }
         let row = Rect { x: x0, y, width: text_w, height: 1 };
         match line {
-            Line::Gap => {}
-            Line::Head => put(frame, x0, y, &t!("gui.dj.play_from").to_uppercase(), dim()),
-            Line::Server(n) => {
-                let Some(server) = servers.get(*n) else { continue };
-                let stop = QStop::Server(*n);
-                let word = if server.peer { format!("{branch} {}", server.label) } else { server.label.clone() };
+            QuickLine::Gap => {}
+            QuickLine::Head(words) => put(frame, x0, y, words, dim()),
+            QuickLine::Server { stop, words, peer, current } => {
+                let word = if *peer { format!("{branch} {words}") } else { words.clone() };
                 let word = super::super::bar::clip(&word, text_w.saturating_sub(4) as usize).into_owned();
-                choice(frame, gui, row, (radio_on, radio_off), server.current, accent(), &word, hand(stop), stop);
+                choice(frame, gui, row, (radio_on, radio_off), *current, accent(), &word, hand(*stop), *stop);
             }
-            Line::PlayFrom => {
-                let stop = QStop::PlayFrom;
-                value_row(frame, gui, row, &t!("gui.dj.play_from"), (super::target_name(gui), Tone::Neutral), hand(stop), Some(stop));
+            QuickLine::PlayFrom { stop, label, value } => {
+                value_row(frame, gui, row, label, (value.clone(), Tone::Neutral), hand(*stop), Some(*stop));
             }
-            Line::Sonic => {
-                let label = t!("gui.dj.sonic").to_string();
-                match gui.app.dj_sonic_gate() {
-                    Some(gate) => {
-                        // The reason whole; the name gives way to it.
-                        let why = super::gate_words(gate);
-                        let room = (text_w as usize).saturating_sub(4 + width(&why) + 2);
-                        put(frame, x0, y, check_off, dim());
-                        put(frame, x0 + 4, y, &super::super::bar::clip(&label, room), dim());
-                        put(frame, right.saturating_sub(width(&why) as u16), y, &why, dim());
-                    }
-                    None => {
-                        let stop = QStop::Sonic;
-                        let s = &gui.app.dj;
-                        let (on, pct) = (s.sonic, (s.sonic_min_similarity * 100.0).round() as u32);
-                        let (value, tone) = match super::sonic_drop(gui) {
-                            Some(why) => (format!("! {why}"), Tone::Warning),
-                            None if on => super::sonic_value(on, pct),
-                            None => (String::new(), Tone::Neutral),
-                        };
-                        let ok = Style::default().fg(th().ok);
-                        choice(frame, gui, row, (check_on, check_off), on, ok, &label, hand(stop), stop);
-                        put(frame, right.saturating_sub(width(&value) as u16), y, &value, tone.style());
-                    }
-                }
+            QuickLine::Sonic { label, gate: Some(why), .. } => {
+                // The reason whole; the name gives way to it.
+                let room = (text_w as usize).saturating_sub(4 + width(why) + 2);
+                put(frame, x0, y, check_off, dim());
+                put(frame, x0 + 4, y, &super::super::bar::clip(label, room), dim());
+                put(frame, right.saturating_sub(width(why) as u16), y, why, dim());
+            }
+            QuickLine::Sonic { label, gate: None, on, value, tone } => {
+                let stop = QStop::Sonic;
+                let ok = Style::default().fg(th().ok);
+                choice(frame, gui, row, (check_on, check_off), *on, ok, label, hand(stop), stop);
+                put(frame, right.saturating_sub(width(value) as u16), y, value, tone.style());
             }
             // Under the switch's name: `-`, the cells, `+` — the value is
             // the line above's.
-            Line::Bar => {
+            QuickLine::Bar(_) => {
                 let spec = super::sheets::sonic_bar(floor_of(gui));
                 let step = |delta: i32| Act::DjQuick(QuickAct::Step(delta));
                 let set = |value: u32| Act::DjQuick(QuickAct::Set(value));
                 super::sheets::draw_bar(frame, gui, x0 + 4, y, &spec, hand(QStop::Bar), true, step, set, false);
             }
             // Under the switch's name too: the way to the Seeds sheet.
-            Line::Seeds => {
-                let stop = QStop::Seeds;
+            QuickLine::Seeds { stop, label } => {
                 let row = Rect { x: x0 + 4, width: text_w.saturating_sub(4), ..row };
-                value_row(frame, gui, row, &t!("gui.dj.seeds"), (String::new(), Tone::Neutral), hand(stop), Some(stop));
+                value_row(frame, gui, row, label, (String::new(), Tone::Neutral), hand(*stop), Some(*stop));
             }
-            Line::Smart => {
-                let label = t!("gui.dj.smart").to_string();
-                match gui.app.dj_mood_gate() {
-                    Some(gate) => {
-                        let why = super::gate_words(gate);
-                        let room = (text_w as usize).saturating_sub(width(&why) + 4);
-                        put(frame, x0, y, &super::super::bar::clip(&label, room), dim());
-                        put(frame, right.saturating_sub(width(&why) as u16 + 2), y, &why, dim());
-                    }
-                    None => {
-                        let stop = QStop::Smart;
-                        value_row(frame, gui, row, &label, super::moods_value(gui.app.dj.moods), hand(stop), Some(stop));
-                    }
-                }
+            QuickLine::Smart { label, gate: Some(why), .. } => {
+                let room = (text_w as usize).saturating_sub(width(why) + 4);
+                put(frame, x0, y, &super::super::bar::clip(label, room), dim());
+                put(frame, right.saturating_sub(width(why) as u16 + 2), y, why, dim());
             }
-            Line::All => {
-                let stop = QStop::All;
-                let label = format!("{} {forward}", t!("gui.dj.all_settings"));
+            QuickLine::Smart { label, gate: None, value, tone } => {
+                let stop = QStop::Smart;
+                value_row(frame, gui, row, label, (value.clone(), *tone), hand(stop), Some(stop));
+            }
+            QuickLine::All { stop, label } => {
+                let stop = *stop;
+                let label = format!("{label} {forward}");
                 let cells = Rect { x: x0, y, width: width(&label) as u16, height: 1 };
                 let style = match (hand(stop), gui.ui.hovers(cells)) {
                     (true, _) => sel().add_modifier(Modifier::BOLD),
