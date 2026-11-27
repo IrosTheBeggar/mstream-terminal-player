@@ -18,13 +18,14 @@
 //! Built only with the window: the terminal build has no panel to draw in.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use egui::emath::GuiRounding;
 use egui::epaint::{CornerRadius, Shadow, Shape, StrokeKind};
 use egui::text::{CCursor, LayoutJob, TextFormat, TextWrapping};
 use egui::{
-    Align, Align2, Color32, CursorIcon, FontFamily, FontId, Id, Layout, Pos2, Rangef, Rect, Response, ScrollArea, Sense,
-    Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
+    Align, Align2, Color32, CursorIcon, FontFamily, FontId, Galley, Id, Layout, Pos2, Rangef, Rect, Response, ScrollArea,
+    Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use ratatui::style::Color;
 use unicode_segmentation::UnicodeSegmentation;
@@ -42,9 +43,9 @@ const TRACK: f32 = 0.12;
 /// The small labels' wider tracking (field labels, table headings, chips).
 const LABEL_TRACK: f32 = 0.14;
 /// The small labels' size.
-const LABEL_SIZE: f32 = 10.5;
+pub(crate) const LABEL_SIZE: f32 = 10.5;
 /// The scrim a modal lays over its room: the canvas's rgba(9, 10, 15, .62).
-const SCRIM: Color32 = Color32::from_rgba_premultiplied(6, 6, 9, 158);
+pub(crate) const SCRIM: Color32 = Color32::from_rgba_premultiplied(6, 6, 9, 158);
 /// A control's click target, square: the canvas's 28-point buttons.
 pub(crate) const HIT: f32 = 28.0;
 
@@ -276,7 +277,7 @@ fn first_baseline(galley: &egui::Galley) -> Option<f32> {
 /// at `size` centred there. Every line the kit centres stands on it,
 /// whatever its face, so a figure in the monospace sits on the baseline of
 /// the words beside it rather than half its smaller descent higher.
-fn centred_baseline(ui: &Ui, size: f32) -> f32 {
+pub(crate) fn centred_baseline(ui: &Ui, size: f32) -> f32 {
     let face = metrics(ui, &body(size));
     face.baseline - face.row / 2.0
 }
@@ -288,6 +289,13 @@ fn centred_baseline(ui: &Ui, size: f32) -> f32 {
 /// drawn.
 #[allow(clippy::too_many_arguments)]
 fn spaced(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, spacing: f32, max_w: f32, align: Align2) -> Rect {
+    spaced_inked(ui, pos, s, font, color, spacing, max_w, align).0
+}
+
+/// [`spaced`], and where its ink fell: the span its glyphs cover, not the
+/// room its line leaves over and under them (nothing for no glyph).
+#[allow(clippy::too_many_arguments)]
+fn spaced_inked(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, spacing: f32, max_w: f32, align: Align2) -> (Rect, Rect) {
     let restand = font.family != FontFamily::Proportional && align.y() == Align::Center;
     let size = font.size;
     let format = TextFormat { font_id: font, color, extra_letter_spacing: spacing, ..Default::default() };
@@ -298,13 +306,19 @@ fn spaced(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, spacing: f3
     if restand && let Some(baseline) = first_baseline(&galley) {
         rect = rect.translate(vec2(0.0, centred_baseline(ui, size) - (baseline - galley.size().y / 2.0)));
     }
+    let ink = galley.mesh_bounds.translate(rect.min.to_vec2());
     ui.painter().galley(rect.min, galley, color);
-    rect
+    (rect, ink)
 }
 
 /// `s` in one line, as [`spaced`] with no extra room between letters.
 pub(crate) fn text(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, max_w: f32, align: Align2) -> Rect {
     spaced(ui, pos, s, font, color, 0.0, max_w, align)
+}
+
+/// [`text`], and where its ink fell ([`spaced_inked`]).
+fn text_inked(ui: &Ui, pos: Pos2, s: &str, font: FontId, color: Color32, max_w: f32, align: Align2) -> (Rect, Rect) {
+    spaced_inked(ui, pos, s, font, color, 0.0, max_w, align)
 }
 
 /// A label in the desk's spaced capitals.
@@ -320,7 +334,12 @@ pub(crate) fn caps_width(ui: &Ui, s: &str, size: f32) -> f32 {
 /// The small label over a field, a table's heading, a chip's word: the
 /// semibold face at [`LABEL_SIZE`] in capitals tracked wider than [`caps`].
 pub(crate) fn small_caps(ui: &Ui, pos: Pos2, s: &str, color: Color32, max_w: f32, align: Align2) -> Rect {
-    spaced(ui, pos, &s.to_uppercase(), strong(LABEL_SIZE), color, LABEL_SIZE * LABEL_TRACK, max_w, align)
+    small_caps_inked(ui, pos, s, color, max_w, align).0
+}
+
+/// [`small_caps`], and where its ink fell ([`spaced_inked`]).
+fn small_caps_inked(ui: &Ui, pos: Pos2, s: &str, color: Color32, max_w: f32, align: Align2) -> (Rect, Rect) {
+    spaced_inked(ui, pos, &s.to_uppercase(), strong(LABEL_SIZE), color, LABEL_SIZE * LABEL_TRACK, max_w, align)
 }
 
 /// How wide [`small_caps`] draws `s`.
@@ -441,6 +460,14 @@ pub(crate) fn runs(ui: &Ui, pos: Pos2, parts: &[Run], max_w: f32, align: Align2)
     rect
 }
 
+/// [`runs`] standing on `baseline` rather than centred on a middle:
+/// anchored at `x` by `align`, its first line's baseline on `baseline`
+/// ([`mid_on`]), the prose's beside it. Returns where it was drawn.
+pub(crate) fn runs_on(ui: &Ui, x: f32, baseline: f32, parts: &[Run], max_w: f32, align: Align) -> Rect {
+    let size = parts.iter().find(|(s, ..)| !s.is_empty()).map_or(13.0, |(_, font, _)| font.size);
+    runs(ui, pos2(x, mid_on(ui, baseline, size)), parts, max_w, Align2([align, Align::Center]))
+}
+
 /// `s` as runs in `font` and `color`, each of `figures` found in it, in
 /// order, set in `figure` instead: a path, a count or a time in the grid's
 /// monospace inside a room's sentence, as the canvas sets its figures. A
@@ -465,6 +492,7 @@ pub(crate) fn with_figures(s: &str, figures: &[&str], font: FontId, figure: Font
 pub(crate) fn line(ui: &mut Ui, h: f32, s: &str, font: FontId, color: Color32) -> Rect {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    body_row(ui, row.min.y, row.max.y);
     text(ui, row.left_center(), s, font, color, w, Align2::LEFT_CENTER)
 }
 
@@ -483,19 +511,25 @@ pub(crate) fn label(ui: &mut Ui, s: &str, pal: &Pal) -> Rect {
 /// A label from `pos`, its left middle, no wider than `max_w`: its words
 /// up to the first "·" in dim small capitals, the rest — the hint, from
 /// its "·" — dim in the UI face a space after them (the canvas's
-/// "DESTINATION · another drive, …"), only where some of it fits. Returns
-/// where it was drawn.
+/// "DESTINATION · another drive, …"), only where some of it fits. In a
+/// [`Dialog`]'s body it is a row of its own ([`body_row`]) from the top of
+/// its ink to its foot — the capitals and the hint's letters, not the room
+/// over and under them — so the view ends between it and what is next to
+/// it, not over a label whose capitals it never reached. Returns where it
+/// was drawn.
 pub(crate) fn label_at(ui: &Ui, pos: Pos2, s: &str, max_w: f32, pal: &Pal) -> Rect {
     let (head, hint) = match s.find('·') {
         Some(at) => (s[..at].trim_end(), &s[at..]),
         None => (s, ""),
     };
-    let drawn = small_caps(ui, pos, head, pal.dim, max_w, Align2::LEFT_CENTER);
+    let (mut drawn, mut ink) = small_caps_inked(ui, pos, head, pal.dim, max_w, Align2::LEFT_CENTER);
     let (from, end) = (drawn.max.x + 6.0, pos.x + max_w);
-    if hint.is_empty() || end - from < 16.0 {
-        return drawn;
+    if !hint.is_empty() && end - from >= 16.0 {
+        let (words, words_ink) = text_inked(ui, pos2(from, pos.y), hint, body(13.0), pal.dim, end - from, Align2::LEFT_CENTER);
+        (drawn, ink) = (drawn.union(words), ink.union(words_ink));
     }
-    drawn.union(text(ui, pos2(from, pos.y), hint, body(13.0), pal.dim, end - from, Align2::LEFT_CENTER))
+    body_row(ui, ink.min.y, ink.max.y);
+    drawn
 }
 
 /// The canvas's prose: words wrapped to a width, in one face and colour or
@@ -554,13 +588,23 @@ impl Para {
         Para { anywhere: true, ..self }
     }
 
-    /// A row of the layout the column wide, as tall as its lines. Returns
-    /// where they were drawn.
+    /// A row of the layout the column wide, as tall as its lines, each
+    /// line a row of a Dialog's body ([`body_row`]). Returns where they
+    /// were drawn.
     pub(crate) fn show(self, ui: &mut Ui) -> Rect {
         let w = ui.available_width();
+        self.show_in(ui, w)
+    }
+
+    /// [`Para::show`] wrapped at `w`, a measure of its own (a room's pitch,
+    /// narrower than the column), the row no wider than the column.
+    pub(crate) fn show_in(self, ui: &mut Ui, w: f32) -> Rect {
         let at = ui.cursor().min;
-        let drawn = self.paint(ui, at, w);
-        let (rect, _) = ui.allocate_exact_size(vec2(w, drawn.height()), Sense::hover());
+        let (drawn, lines) = self.paint_lines(ui, at, w);
+        for line in lines {
+            body_row(ui, line.min, line.max);
+        }
+        let (rect, _) = ui.allocate_exact_size(vec2(w.min(ui.available_width()), drawn.height()), Sense::hover());
         rect
     }
 
@@ -568,13 +612,46 @@ impl Para {
     /// on one baseline ([`shared_baseline`]) — a figure in the monospace
     /// on its words' — the lead's too. Returns where.
     pub(crate) fn paint(self, ui: &Ui, at: Pos2, w: f32) -> Rect {
-        let Some((_, font, color)) = self.parts.first().cloned() else { return Rect::from_min_size(at, Vec2::ZERO) };
-        let line_h = font.size * self.line;
+        self.paint_lines(ui, at, w).0
+    }
+
+    /// Where its first line stands its baseline under its top, as
+    /// [`Para::paint`] lays it out: the deepest ascent among its runs, on
+    /// the pixel egui rounds it to, whichever of them that line holds. What
+    /// stands beside the line — words centred on its row ([`mid_on`]), a
+    /// scan's share, an LED leading it — stands on this. A paragraph of no
+    /// words has none, and stands it at its top.
+    pub(crate) fn baseline(&self, ui: &Ui) -> f32 {
+        let Some((_, font, _)) = self.parts.first() else { return 0.0 };
+        let (job, _) = self.job(ui, font, font.size * self.line);
+        first_baseline(&ui.painter().layout_job(job)).unwrap_or(0.0)
+    }
+
+    /// Its words as one job, lines `line_h` apart, every run of a line on
+    /// one baseline ([`shared_baseline`]), and the line height the lead's
+    /// mark takes in `font`, the first run's face. Its first line is a
+    /// whole line tall, as the lead's is, so it stands on the deepest
+    /// ascent among the runs even where the run that has it wraps to the
+    /// next line.
+    fn job(&self, ui: &Ui, font: &FontId, line_h: f32) -> (LayoutJob, f32) {
         let parts: Vec<&Run> = self.parts.iter().filter(|(s, ..)| !s.is_empty()).collect();
         let mut fonts: Vec<&FontId> = parts.iter().map(|(_, font, _)| font).collect();
-        fonts.push(&font);
+        fonts.push(font);
         let mut heights = shared_baseline(ui, &fonts, Some(line_h));
         let lead_h = heights.pop().unwrap_or(line_h);
+        let mut job = LayoutJob::default();
+        for ((s, font, color), h) in parts.into_iter().zip(heights) {
+            job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, line_height: Some(h), ..Default::default() });
+        }
+        job.first_row_min_height = line_h;
+        (job, lead_h)
+    }
+
+    /// [`Para::paint`], and where each of its lines stands, top to foot.
+    fn paint_lines(self, ui: &Ui, at: Pos2, w: f32) -> (Rect, Vec<Rangef>) {
+        let Some((_, font, color)) = self.parts.first().cloned() else { return (Rect::from_min_size(at, Vec2::ZERO), Vec::new()) };
+        let line_h = font.size * self.line;
+        let (mut job, lead_h) = self.job(ui, &font, line_h);
         let indent = match &self.lead {
             Some(mark) => {
                 let format = TextFormat { font_id: font.clone(), color, line_height: Some(lead_h), ..Default::default() };
@@ -590,14 +667,11 @@ impl Para {
             }
             None => 0.0,
         };
-        let mut job = LayoutJob::default();
-        for ((s, font, color), h) in parts.into_iter().zip(heights) {
-            job.append(s, 0.0, TextFormat { font_id: font.clone(), color: *color, line_height: Some(h), ..Default::default() });
-        }
         job.wrap = TextWrapping { max_width: (w - indent).max(1.0), max_rows: self.rows, break_anywhere: self.anywhere, overflow_character: Some('…') };
         let galley = ui.painter().layout_job(job);
         let origin = at + vec2(indent, 0.0);
         let rect = Rect::from_min_size(at, vec2(w, galley.size().y));
+        let lines = galley.rows.iter().map(|row| Rangef::new(origin.y + row.rect().min.y, origin.y + row.rect().max.y)).collect();
         // The lines that end at or above the floor, whole.
         let fits = galley.rows.iter().map(|row| origin.y + row.rect().max.y).filter(|foot| *foot <= self.floor + 0.01).fold(origin.y, f32::max);
         if fits >= rect.max.y - 0.01 {
@@ -605,7 +679,7 @@ impl Para {
         } else if fits > origin.y {
             ui.painter().with_clip_rect(rect.with_max_y(fits).intersect(ui.clip_rect())).galley(origin, galley, color);
         }
-        rect
+        (rect, lines)
     }
 }
 
@@ -619,14 +693,22 @@ pub(crate) fn sentence(ui: &mut Ui, head: &str, tail: &str, pal: &Pal) {
 
 /// A room's foot, one line across `rect`: what it is busy with in the
 /// accent wins, else its note — an error in gold, any other note dim —
-/// cut with an ellipsis where it runs long. Nothing at all draws nothing.
+/// cut with an ellipsis where it runs long, its figures ([`figured`]: a
+/// version, a count, a time) in the monospace a point under its words, as
+/// the canvases set a figure in a note. Nothing at all draws nothing.
 pub(crate) fn note_line(ui: &Ui, rect: Rect, busy: Option<&str>, note: Option<&(String, bool)>, pal: &Pal) {
+    note_line_naming(ui, rect, busy, note, &[], pal);
+}
+
+/// A [`note_line`] whose figures take in `also` too: the names no rule can
+/// tell from a word (the MP3 tab's ports).
+pub(crate) fn note_line_naming(ui: &Ui, rect: Rect, busy: Option<&str>, note: Option<&(String, bool)>, also: &[&str], pal: &Pal) {
     let (words, color) = match (busy, note) {
         (Some(busy), _) => (busy, pal.accent),
         (None, Some((note, is_err))) => (note.as_str(), if *is_err { pal.gold } else { pal.dim }),
         (None, None) => return,
     };
-    text(ui, rect.left_center(), words, body(13.0), color, rect.width(), Align2::LEFT_CENTER);
+    runs(ui, rect.left_center(), &figured(words, also, body(13.0), mono(12.0), color), rect.width(), Align2::LEFT_CENTER);
 }
 
 /// A room's foot as [`note_line`] draws it and, with nothing busy and no
@@ -671,12 +753,16 @@ pub(crate) fn state_line(ui: &Ui, row: Rect, lamp: Color32, parts: &[Run], right
 /// their "−" as a short rule (`false`), 6 points in, in `tone` — the words
 /// wrapped beside it in up to two lines of 13.5-point `tone`, `figures` in
 /// them (a version, a number) in the monospace. With no mark the words
-/// start at `at`. Returns where it was drawn.
+/// start at `at`. Each of its lines is a row of a [`Dialog`]'s body, as a
+/// paragraph's is ([`Para::show`]). Returns where it was drawn.
 pub(crate) fn verdict(ui: &Ui, at: Pos2, w: f32, words: &str, figures: &[&str], tone: Color32, mark: Option<bool>) -> Rect {
     // The canvas's 12-point mark and the 8 points after it.
     let indent = if mark.is_some() { 20.0 } else { 0.0 };
     let parts = with_figures(words, figures, body(13.5), mono(12.5), tone);
-    let drawn = Para::runs(&parts).rows(2).paint(ui, at + vec2(indent, 0.0), w - indent);
+    let (drawn, lines) = Para::runs(&parts).rows(2).paint_lines(ui, at + vec2(indent, 0.0), w - indent);
+    for line in lines {
+        body_row(ui, line.min, line.max);
+    }
     // On the middle of the first line's small letters, over the baseline
     // its words and figures share (the words' ascent, the taller).
     let face = metrics(ui, &body(13.5));
@@ -789,6 +875,13 @@ pub(crate) fn check(ui: &Ui, at: Pos2, color: Color32) {
     ui.painter().add(Shape::line(points, Stroke::new(1.7, color)));
 }
 
+/// The canvas's cross in its 12-point box, centred on `at`: the cells' "✗"
+/// as a mark beside words (a failed write's tab), which the panel's faces
+/// have no glyph for.
+pub(crate) fn cross(ui: &Ui, at: Pos2, color: Color32) {
+    draw_icon(ui, at, Icon::Close, color);
+}
+
 /// A small solid triangle pointing right, centred on `at`: the cells' "▸"
 /// before a folder in a list, and before the keyboard's pick.
 pub(crate) fn pointer(ui: &Ui, at: Pos2, color: Color32) {
@@ -848,10 +941,17 @@ pub(crate) fn led_column(ui: &Ui, cx: f32, base: f32, width: f32, lit: usize, co
     }
 }
 
+/// How many segments a horizontal LED meter `width` points long holds:
+/// each [`LED`] less a point wide, [`LED_GAP`] less a point apart.
+fn led_count(width: f32) -> usize {
+    let step = LED + LED_GAP - 1.0;
+    ((width + LED_GAP - 1.0) / step).floor().max(1.0) as usize
+}
+
 /// A horizontal LED meter across `track`: `share` of its segments lit.
 pub(crate) fn led_row(ui: &Ui, track: Rect, share: f32, lit_color: Color32, unlit: Color32) {
     let step = LED + LED_GAP - 1.0;
-    let count = ((track.width() + LED_GAP - 1.0) / step).floor().max(1.0) as usize;
+    let count = led_count(track.width());
     let lit = if share > 0.0 { ((share * count as f32).round() as usize).clamp(1, count) } else { 0 };
     for k in 0..count {
         let x = track.min.x + k as f32 * step;
@@ -900,9 +1000,26 @@ pub(crate) fn meter(ui: &Ui, at: Pos2, n: usize, lit: usize, seg: Vec2, gap: f32
 pub(crate) fn searching(ui: &mut Ui, words: &str, pal: &Pal) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-    let bar = meter(ui, row.left_center(), 10, 0, vec2(5.0, 10.0), 2.0, pal.accent, pal);
+    searching_at(ui, row.left_center(), words, w, pal);
+}
+
+/// The searching shape's segments and the room after them.
+const SEARCHING_LEAD: f32 = 10.0 * 5.0 + 9.0 * 2.0 + 10.0;
+
+/// [`searching`] on a line of a page's own, its left middle at `at`, no
+/// wider than `max_w` (the MP3 tab's scans that wait on an answer: the
+/// port watch starting, GitHub asked, a fit asked). Returns where it was
+/// drawn.
+pub(crate) fn searching_at(ui: &Ui, at: Pos2, words: &str, max_w: f32, pal: &Pal) -> Rect {
+    let bar = meter(ui, at, 10, 0, vec2(5.0, 10.0), 2.0, pal.accent, pal);
     let x = bar.max.x + 10.0;
-    text(ui, pos2(x, row.center().y), words, body(13.0), pal.accent, (row.max.x - x).max(1.0), Align2::LEFT_CENTER);
+    let room = (at.x + max_w - x).max(1.0);
+    bar.union(text(ui, pos2(x, at.y), words, body(13.0), pal.accent, room, Align2::LEFT_CENTER))
+}
+
+/// How wide [`searching_at`] draws `words` whole.
+pub(crate) fn searching_width(ui: &Ui, words: &str) -> f32 {
+    SEARCHING_LEAD + width_of(ui, words, body(13.0))
 }
 
 // ── Controls ──────────────────────────────────────────────────────────────
@@ -1143,7 +1260,7 @@ pub(crate) fn tick_mark(ui: &Ui, at: Pos2, on: bool, tone: Color32, pal: &Pal) -
 
 /// The keyboard's look on a control of a form: the raised fill and the
 /// accent's ring round `rect`.
-fn cursor_look(ui: &Ui, rect: Rect, pal: &Pal) {
+pub(crate) fn cursor_look(ui: &Ui, rect: Rect, pal: &Pal) {
     ui.painter().rect_filled(rect, square(), pal.raised);
     ring(ui, rect, pal);
 }
@@ -1155,13 +1272,32 @@ fn cursor_look(ui: &Ui, rect: Rect, pal: &Pal) {
 /// accent ring, the label semibold — and the pointer raises it; the whole
 /// row takes the click (the canvas's FederationMint).
 pub(crate) fn tick_row(ui: &Ui, id: Id, rect: Rect, on: bool, label: &str, focused: bool, pal: &Pal) -> Response {
+    tick_row_drawn(ui, id, rect, on, label, focused, pal).0
+}
+
+/// [`tick_row`], and what of its rect it drew on: its box and its words'
+/// ink, or the whole rect where it wears the keyboard's look.
+fn tick_row_drawn(ui: &Ui, id: Id, rect: Rect, on: bool, label: &str, focused: bool, pal: &Pal) -> (Response, Rect) {
     let response = list_row_at(ui, id, rect, focused, pal);
     let mark = Rect::from_min_size(pos2(rect.min.x + 8.0, rect.center().y - BOX / 2.0), Vec2::splat(BOX));
     tick_box(ui, mark, on, response.hovered(), pal.panel, pal);
     let x = mark.max.x + 10.0;
     let font = if focused { strong(14.0) } else { body(14.0) };
-    text(ui, pos2(x, rect.center().y), label, font, pal.text, (rect.max.x - x - 8.0).max(1.0), Align2::LEFT_CENTER);
-    response
+    let (_, ink) = text_inked(ui, pos2(x, rect.center().y), label, font, pal.text, (rect.max.x - x - 8.0).max(1.0), Align2::LEFT_CENTER);
+    (response, if focused { rect } else { mark.union(ink) })
+}
+
+/// Each line of a form's ticks a row of a [`Dialog`]'s body ([`body_row`])
+/// over what its ticks drew (`drawn`, each tick's on its `line`): their
+/// boxes and their words, not the room over and under them, so the view
+/// never ends above a line whose ticks it shows whole; a line that has the
+/// keyboard's tick, its look, whole.
+fn tick_lines(ui: &Ui, drawn: &[(usize, Rect)]) {
+    let lines = drawn.iter().map(|(line, _)| line + 1).max().unwrap_or(0);
+    for line in 0..lines {
+        let span = drawn.iter().filter(|(l, _)| *l == line).fold(Rect::NOTHING, |a, (_, r)| a.union(*r));
+        body_row(ui, span.min.y, span.max.y);
+    }
 }
 
 /// A form's tick's height where no board sets one — a control's [`HIT`],
@@ -1204,15 +1340,19 @@ pub(crate) fn tick_grid(ui: &mut Ui, id: Id, items: &[(String, bool)], focus: Op
     let h = (lines as f32 * (tick_h + TICK_GAP) - TICK_GAP).max(0.0);
     let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let mut ticks = Ticks { clicked: None, rects: Vec::new() };
+    let mut drawn = Vec::new();
     for (i, (label, on)) in items.iter().enumerate() {
         let (line, col) = (i / n, i % n);
         let x = area.min.x + cols[..col].iter().sum::<f32>() + col as f32 * TICK_COL_GAP;
         let rect = Rect::from_min_size(pos2(x, area.min.y + line as f32 * (tick_h + TICK_GAP)), vec2(cols[col], tick_h));
-        if tick_row(ui, id.with(i), rect, *on, label, focus == Some(i), pal).clicked() {
+        let (response, span) = tick_row_drawn(ui, id.with(i), rect, *on, label, focus == Some(i), pal);
+        if response.clicked() {
             ticks.clicked = Some(i);
         }
+        drawn.push((line, span));
         ticks.rects.push(rect);
     }
+    tick_lines(ui, &drawn);
     ticks
 }
 
@@ -1254,13 +1394,17 @@ pub(crate) fn tick_flow(ui: &mut Ui, id: Id, items: &[(String, bool)], focus: Op
     let h = (lines as f32 * (TICK_H + TICK_GAP) - TICK_GAP).max(0.0);
     let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let mut ticks = Ticks { clicked: None, rects: Vec::new() };
+    let mut drawn = Vec::new();
     for (i, ((label, on), (line, x, tw))) in items.iter().zip(placed).enumerate() {
         let rect = Rect::from_min_size(pos2(area.min.x - 8.0 + x, area.min.y + line as f32 * (TICK_H + TICK_GAP)), vec2(tw, TICK_H));
-        if tick_row(ui, id.with(i), rect, *on, label, focus == Some(i), pal).clicked() {
+        let (response, span) = tick_row_drawn(ui, id.with(i), rect, *on, label, focus == Some(i), pal);
+        if response.clicked() {
             ticks.clicked = Some(i);
         }
+        drawn.push((line, span));
         ticks.rects.push(rect);
     }
+    tick_lines(ui, &drawn);
     ticks
 }
 
@@ -1284,13 +1428,33 @@ fn flow(wants: &[f32], room: f32, gap: f32) -> Vec<(usize, f32, f32)> {
         .collect()
 }
 
+/// How tall a line of words a row stands on its middle inks: a 16-point
+/// mark or a line of words up to 14 points, and a point over and under.
+pub(crate) const WORDS_BAND: f32 = BOX + 2.0;
+
+/// A line of words (or a 16-point mark) standing on `mid`, a row of a
+/// [`Dialog`]'s body ([`body_row`]): the [`WORDS_BAND`] it inks, not the
+/// room its row leaves over and under it, so the view never ends above a
+/// line it shows whole. A room's own rows of words say so with it (a
+/// sheet's facts, a list's last word).
+pub(crate) fn words_row(ui: &Ui, mid: f32) {
+    body_row(ui, mid - WORDS_BAND / 2.0, mid + WORDS_BAND / 2.0);
+}
+
 /// A row of a list in a modal, `h` points of the layout the column wide,
 /// that takes the click: raised under the pointer, the keyboard's look
 /// when `on` (its cursor), the hand over it. The page paints its words in
-/// the rect; whether the pointer is on it is the response's.
+/// the rect, on its middle; whether the pointer is on it is the
+/// response's. In a [`Dialog`]'s body its row is the line its words stand
+/// on ([`words_row`]), the cursor's its whole rect, its look whole.
 pub(crate) fn list_row(ui: &mut Ui, id: Id, h: f32, on: bool, pal: &Pal) -> (Rect, Response) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    if on || h <= WORDS_BAND {
+        body_row(ui, rect.min.y, rect.max.y);
+    } else {
+        words_row(ui, rect.center().y);
+    }
     let response = list_row_at(ui, id, rect, on, pal);
     (rect, response)
 }
@@ -1330,10 +1494,32 @@ pub(crate) fn checkbox(ui: &Ui, id: Id, at: Pos2, on: bool, pal: &Pal) -> Respon
 /// after it (so it carries its own separator, " — …"). The box and its
 /// words take the click, not the row's empty end; while `focused` (the
 /// form's keyboard on it) they wear the keyboard's look, reaching 6 points
-/// past them either side, the label semibold.
+/// past them either side, the label semibold. In a [`Dialog`]'s body it is
+/// a row ([`body_row`]) from its box's and its words' top to their foot,
+/// not the room over and under them, so the view never ends above a line
+/// it shows whole; the keyboard's line, its look, whole.
 pub(crate) fn check_line(ui: &mut Ui, id: Id, on: bool, label: &str, detail: &str, focused: bool, pal: &Pal) -> Response {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, HIT), Sense::hover());
+    let (response, ink) = check_line_drawn(ui, id, row, on, label, detail, focused, pal);
+    let span = if focused { row } else { ink };
+    body_row(ui, span.min.y, span.max.y);
+    response
+}
+
+/// [`check_line`] across `row`, a page's own row of a height its form
+/// sets (the MP3 tab's Advanced sheet's erase line, its board gate's): the
+/// box at the row's left on its middle, the detail left out where the label
+/// leaves it no room.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_line_at(ui: &Ui, id: Id, row: Rect, on: bool, label: &str, detail: &str, focused: bool, pal: &Pal) -> Response {
+    check_line_drawn(ui, id, row, on, label, detail, focused, pal).0
+}
+
+/// [`check_line_at`], and where its box and its words' ink fell.
+#[allow(clippy::too_many_arguments)]
+fn check_line_drawn(ui: &Ui, id: Id, row: Rect, on: bool, label: &str, detail: &str, focused: bool, pal: &Pal) -> (Response, Rect) {
+    let w = row.width();
     let font = if focused { strong(14.0) } else { body(14.0) };
     let words = width_of(ui, label, font.clone()) + if detail.is_empty() { 0.0 } else { width_of(ui, detail, body(14.0)) };
     let hit = Rect::from_min_size(row.min, vec2((BOX + 10.0 + words).min(w), row.height()));
@@ -1344,33 +1530,49 @@ pub(crate) fn check_line(ui: &mut Ui, id: Id, on: bool, label: &str, detail: &st
     let mark = Rect::from_min_size(pos2(row.min.x, row.center().y - BOX / 2.0), Vec2::splat(BOX));
     tick_box(ui, mark, on, response.hovered(), pal.ground, pal);
     let x = mark.max.x + 10.0;
-    let drawn = text(ui, pos2(x, row.center().y), label, font, pal.text, row.max.x - x, Align2::LEFT_CENTER);
-    if !detail.is_empty() {
-        text(ui, pos2(drawn.max.x, row.center().y), detail, body(14.0), pal.dim, row.max.x - drawn.max.x, Align2::LEFT_CENTER);
+    let (drawn, mut ink) = text_inked(ui, pos2(x, row.center().y), label, font, pal.text, (row.max.x - x).max(1.0), Align2::LEFT_CENTER);
+    if !detail.is_empty() && drawn.max.x + 1.0 < row.max.x {
+        let (_, more) = text_inked(ui, pos2(drawn.max.x, row.center().y), detail, body(14.0), pal.dim, row.max.x - drawn.max.x, Align2::LEFT_CENTER);
+        ink = ink.union(more);
     }
-    response
+    (response, mark.union(ink))
 }
 
-/// One choice of a group, a 30-point row of the layout: a 14-point round
-/// mark (the accent's ring and dot when `on`, the strong edge's ring when
-/// not), `label` (semibold when on) and `detail` dim after it, cut to the
-/// row. The whole row takes the click and is raised under the pointer.
+/// Where a choice's words start in its row: past its 14-point mark and the
+/// 10 after it. And how far its row's look reaches past the column either
+/// side, as the canvas's does.
+pub(crate) const RADIO_IN: f32 = 24.0;
+pub(crate) const RADIO_REACH: f32 = 8.0;
+
+/// A choice's round mark, centred on `at`, as every group of choices draws
+/// it: 14 points on the ground's fill, the strong edge's ring when not
+/// `on`; when on, a ring and a 6-point dot in `lit` — the accent in the
+/// group that has the keyboard, the text colour in any other, as the
+/// cells' focus colours their chosen mark.
+pub(crate) fn radio_mark(ui: &Ui, at: Pos2, on: bool, lit: Color32, pal: &Pal) {
+    ui.painter().circle_filled(at, 7.0, pal.ground);
+    ui.painter().circle_stroke(at, 6.5, Stroke::new(1.0, if on { lit } else { pal.edge_strong }));
+    if on {
+        ui.painter().circle_filled(at, 3.0, lit);
+    }
+}
+
+/// One choice of a group, a 30-point row of the layout: its
+/// [`radio_mark`] in the accent, `label` (semibold when on) and `detail`
+/// dim after it, cut to the row. The whole row takes the click and is
+/// raised under the pointer.
 pub(crate) fn radio(ui: &mut Ui, id: Id, on: bool, label: &str, detail: &str, pal: &Pal) -> Response {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
+    body_row(ui, row.min.y, row.max.y);
     // The canvas's row reaches 8 points past the column either side.
-    let hit = row.expand2(vec2(8.0, 0.0));
+    let hit = row.expand2(vec2(RADIO_REACH, 0.0));
     let response = hand(ui.interact(hit, id, Sense::click()));
     if response.hovered() {
         ui.painter().rect_filled(hit, square(), pal.raised);
     }
-    let centre = pos2(row.min.x + 7.0, row.center().y);
-    ui.painter().circle_filled(centre, 7.0, pal.ground);
-    ui.painter().circle_stroke(centre, 6.5, Stroke::new(1.0, if on { pal.accent } else { pal.edge_strong }));
-    if on {
-        ui.painter().circle_filled(centre, 3.0, pal.accent);
-    }
-    let x = row.min.x + 24.0;
+    radio_mark(ui, pos2(row.min.x + 7.0, row.center().y), on, pal.accent, pal);
+    let x = row.min.x + RADIO_IN;
     let font = if on { strong(13.5) } else { body(13.5) };
     let drawn = text(ui, pos2(x, row.center().y), label, font, pal.text, row.max.x - x, Align2::LEFT_CENTER);
     if !detail.is_empty() {
@@ -1529,13 +1731,34 @@ pub(crate) fn tick_card(ui: &mut Ui, id: Id, on: bool, label: &str, hint: &str, 
 /// The room between a foot's buttons, beside one another and a row apart.
 const FOOT_GAP: f32 = 10.0;
 
-/// A modal's foot, a row of the layout the column wide and as tall as its
-/// rows ([`foot_at`]). The button clicked, counting `start` first.
+/// A form's foot, a row of the layout the column wide and as tall as its
+/// rows ([`foot_at`]), each row of its buttons a row of a [`Dialog`]'s
+/// body down to their words ([`foot_rows`]). The button clicked, counting
+/// `start` first.
 pub(crate) fn foot(ui: &mut Ui, id: Id, start: &[(&str, bool)], end: &[(&str, bool)], note: Option<&str>, pal: &Pal) -> Option<usize> {
     let w = ui.available_width();
-    let (_, h) = foot_rects(ui, start, end, w);
+    let (laid, h) = foot_rects(ui, start, end, w);
     let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    foot_rows(ui, row.min, &laid);
     foot_at(ui, id, row, start, end, note, pal)
+}
+
+/// Each row of a form's foot, its buttons `laid` from its top left at
+/// `at`, a row of a [`Dialog`]'s body ([`body_row`]) from the buttons' top
+/// to the foot of the line of words on their middle (their capitals, and a
+/// refusal beside them; [`WORDS_BAND`]): the view ends over a button whose
+/// words it would cut, never on a sliver of it, and lets one whose words
+/// it shows whole stand, its foot under the view's until the body is
+/// scrolled — a button that can be read and clicked is never hidden for
+/// its edge.
+fn foot_rows(ui: &Ui, at: Pos2, laid: &[Rect]) {
+    let words = FORM_BUTTON_H / 2.0 + WORDS_BAND / 2.0;
+    let mut tops: Vec<f32> = laid.iter().filter(|r| r.is_positive()).map(|r| r.min.y).collect();
+    tops.sort_by(f32::total_cmp);
+    tops.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    for top in tops {
+        body_row(ui, at.y + top, at.y + top + words);
+    }
 }
 
 /// A modal's foot in `area`, its rows from its top as [`foot_rects`] lays
@@ -1650,11 +1873,15 @@ pub(crate) struct Input<'a> {
     pub placeholder: &'a str,
     /// A filter's box: the canvas's magnifier 10 points in, the line 30.
     pub search: bool,
+    /// The value in the accent while focused, as the caret is: a line a
+    /// sheet opens in a row's place to edit it (the MP3 tab's Name and path
+    /// fields), which the cells set in the accent.
+    pub lit: bool,
 }
 
 impl<'a> Input<'a> {
     pub(crate) fn new(value: &'a str, caret: usize) -> Self {
-        Input { value, caret, focused: false, composition: "", masked: false, mono: false, enabled: true, placeholder: "", search: false }
+        Input { value, caret, focused: false, composition: "", masked: false, mono: false, enabled: true, placeholder: "", search: false, lit: false }
     }
 
     /// One of a page's own inputs: its value and its caret.
@@ -1689,6 +1916,10 @@ impl<'a> Input<'a> {
     pub(crate) fn search(self) -> Self {
         Input { search: true, ..self }
     }
+
+    pub(crate) fn lit(self) -> Self {
+        Input { lit: true, ..self }
+    }
 }
 
 /// What a field's pass gives back.
@@ -1712,10 +1943,14 @@ pub(crate) fn field(ui: &mut Ui, id: Id, label: &str, input: &Input, pal: &Pal) 
 }
 
 /// [`field`] in `slot`, a [`FIELD_ROW_H`] rect: a form's fields side by
-/// side.
+/// side. In a [`Dialog`]'s body its label and its box are two rows
+/// ([`body_row`]), as [`field_beside`]'s are: a view whose top cuts the
+/// label leaves the box standing whole under it, its caret in sight,
+/// rather than taking the box away with the label.
 pub(crate) fn field_at(ui: &Ui, id: Id, slot: Rect, label: &str, input: &Input, pal: &Pal) -> Typed {
     label_at(ui, pos2(slot.min.x, slot.min.y + LABEL_H / 2.0), label, slot.width(), pal);
     let rect = Rect::from_min_size(pos2(slot.min.x, slot.max.y - FIELD_H), vec2(slot.width(), FIELD_H));
+    body_row(ui, rect.min.y, rect.max.y);
     field_box(ui, id, rect, input, pal)
 }
 
@@ -1729,6 +1964,7 @@ pub(crate) fn field_beside(ui: &mut Ui, id: Id, label: &str, input: &Input, box_
     ui.add_space(6.0);
     let box_w = box_w.min(w);
     let (row, _) = ui.allocate_exact_size(vec2(w, FIELD_H), Sense::hover());
+    body_row(ui, row.min.y, row.max.y);
     let typed = field_box(ui, id, Rect::from_min_size(row.min, vec2(box_w, FIELD_H)), input, pal);
     if !note.is_empty() {
         let note_w = width_of(ui, note, body(13.0));
@@ -1745,10 +1981,11 @@ pub(crate) fn field_beside(ui: &mut Ui, id: Id, label: &str, input: &Input, box_
 
 /// A field's box at `rect`: the ground's fill in a strong-edged hairline,
 /// the accent's while focused and a brighter one under the pointer (the
-/// pointer wins); the value in the UI face (or the monospace), bullets for
-/// a masked one, a composition underlined before the caret, and a steady
-/// 1-point caret while focused. The line is windowed so the caret stays in
-/// view, the window kept from pass to pass under `id` as a text field's is.
+/// pointer wins); the value in the UI face (or the monospace), in the
+/// accent while a lit field is focused, bullets for a masked one, a
+/// composition underlined before the caret, and a steady 1-point caret
+/// while focused. The line is windowed so the caret stays in view, the
+/// window kept from pass to pass under `id` as a text field's is.
 pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -> Typed {
     let sense = if input.enabled { Sense::click() } else { Sense::hover() };
     let mut response = ui.interact(rect, id, sense);
@@ -1765,7 +2002,7 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
         } else {
             pal.edge_strong
         };
-        (pal.ground, edge, pal.text)
+        (pal.ground, edge, if focused && input.lit { pal.accent } else { pal.text })
     } else {
         (pal.panel, pal.edge, pal.dim)
     };
@@ -1786,9 +2023,14 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
     let font = if input.mono { mono(12.5) } else { body(14.0) };
     let (line, caret_at, composing) = field_line(input);
     let clip = ui.painter().with_clip_rect(view.intersect(ui.clip_rect()));
+    // A line's first letter may reach left of where it stands (a "V", a
+    // "W" or a quote in some faces, Tahoma's among them): where the line
+    // starts at the view's edge, the clip leaves it half the box's padding,
+    // so its ink is never cut there.
+    let reach = ui.painter().with_clip_rect(view.with_min_x(view.min.x - FIELD_PAD / 2.0).intersect(ui.clip_rect()));
     if line.is_empty() && !input.placeholder.is_empty() {
         let galley = ui.painter().layout_no_wrap(input.placeholder.to_string(), font.clone(), pal.dim);
-        clip.galley(pos2(view.min.x, rect.center().y - galley.size().y / 2.0), galley, pal.dim);
+        reach.galley(pos2(view.min.x, rect.center().y - galley.size().y / 2.0), galley, pal.dim);
     }
     let mut job = field_job(&line, composing, font.clone(), ink);
     if !focused {
@@ -1811,8 +2053,12 @@ pub(crate) fn field_box(ui: &Ui, id: Id, rect: Rect, input: &Input, pal: &Pal) -
     let origin = pos2(view.min.x - offset, rect.center().y - galley.size().y / 2.0);
     // A letter scrolled partly off the view's left edge is left out whole,
     // as the cells' field scrolls by whole letters: none shows torn.
-    let from = view.min.x + whole_glyph(&galley, offset) - offset;
-    clip.with_clip_rect(clip.clip_rect().with_min_x(from.max(clip.clip_rect().min.x))).galley(origin, galley, ink);
+    if offset > 0.0 {
+        let from = view.min.x + whole_glyph(&galley, offset) - offset;
+        clip.with_clip_rect(clip.clip_rect().with_min_x(from.max(clip.clip_rect().min.x))).galley(origin, galley, ink);
+    } else {
+        reach.galley(origin, galley, ink);
+    }
 
     let caret = focused.then(|| {
         let x = (origin.x + caret_x).round();
@@ -2466,13 +2712,92 @@ pub(crate) struct ModalShown<R> {
 }
 
 /// Where a modal's body stood on this pass, for [`reveal`]: the top of its
-/// content and its view, in the screen's points, and whether the modal
-/// came up on this pass.
+/// content and its view as it ends between rows, in the screen's points,
+/// how tall its whole view is, and whether the modal came up on this pass.
 #[derive(Clone, Copy)]
 struct BodyView {
     origin: f32,
     view: Rect,
+    full: f32,
     opened: bool,
+}
+
+/// The body a [`Dialog`] is laying out now, for [`body_row`]: the modal's
+/// id, the top of its body's content and its view's clip, in the screen's
+/// points.
+#[derive(Clone, Copy)]
+struct Laying {
+    id: Id,
+    origin: f32,
+    clip: Rect,
+}
+
+/// Where the body being laid out is kept while its closure runs.
+fn laying_key() -> Id {
+    Id::new("studio-dialog-laying")
+}
+
+/// A row of the body a [`Dialog`] is laying out, from `top` to `bottom` in
+/// the screen's points: a place the body's view never ends through at rest
+/// (the Dialog ends it over the row's top instead, between rows). The
+/// kit's own rows say so themselves (a field's label and its box, a check
+/// line, a choice, a line, a label, a paragraph, a row of ticks or of a
+/// list, a form's buttons down to their words) — a label, a check line and
+/// a row of ticks or of a list by what they draw, not the empty room over
+/// and under it, so a view that reaches only that room shows them still;
+/// a body that sets its rows at places of its own says so for each
+/// ([`words_row`] for a line of words). A gate's answers say none
+/// ([`gate`]). A row laid out anywhere else — outside a Dialog's body, or
+/// in a scrolled list of the body's own, whose view is its own — is let
+/// be.
+pub(crate) fn body_row(ui: &Ui, top: f32, bottom: f32) {
+    let ctx = ui.ctx();
+    let Some(laying) = ctx.data(|d| d.get_temp::<Laying>(laying_key())) else { return };
+    if ui.clip_rect() != laying.clip || bottom <= top {
+        return;
+    }
+    let row = Rangef::new(top - laying.origin, bottom - laying.origin);
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<Rangef>>(laying.id.with("rows-now")).push(row));
+}
+
+/// Where a view `h` tall scrolled `offset` down its content ends over the
+/// body's `rows` (each from its top to its bottom in the content's points):
+/// its own end, or where that falls inside a row the row's top, and so on
+/// up; its own end still where the rows would leave it nothing to show.
+fn row_end(rows: &[Rangef], offset: f32, h: f32) -> f32 {
+    let mut end = offset + h;
+    loop {
+        let cut = rows.iter().filter(|r| inside(r, end)).map(|r| r.min).fold(f32::INFINITY, f32::min);
+        if !cut.is_finite() {
+            break;
+        }
+        end = cut;
+    }
+    if end <= offset + 0.01 { offset + h } else { end }
+}
+
+/// Where a view scrolled `offset` down its content and ending at `end`
+/// starts over the body's `rows`: its own top, or where that falls inside a
+/// row the row's foot, and so on down — the body scrolled as far as it
+/// goes, its last row on the view's foot, can leave a row torn over its
+/// top; its own top still where the rows would leave it nothing to show.
+fn row_start(rows: &[Rangef], offset: f32, end: f32) -> f32 {
+    let mut start = offset;
+    loop {
+        let cut = rows.iter().filter(|r| inside(r, start)).map(|r| r.max).fold(f32::NEG_INFINITY, f32::max);
+        if !cut.is_finite() {
+            break;
+        }
+        start = cut;
+    }
+    if start >= end - 0.01 { offset } else { start }
+}
+
+/// Whether an edge at `y` cuts `row`: more than half a point inside it at
+/// either end, so the scrolled view's rounding to the pixel never reads as a
+/// cut.
+fn inside(row: &Rangef, y: f32) -> bool {
+    row.min + 0.5 < y && y < row.max - 0.5
 }
 
 /// A modal over `over` only — the room's area, never the window's — as the
@@ -2493,6 +2818,15 @@ struct BodyView {
 /// the scrim is inert. A modal comes up with its body at its top, as the
 /// cells draw a modal afresh each time, wherever it was scrolled to when it
 /// was last up.
+///
+/// A scrolled body's view ends between its rows ([`body_row`]), never
+/// through one: where its foot would cut a row, it ends over that row's
+/// top, the room under it left blank, and the row comes in whole as the
+/// body scrolls to it; where its top would (the body scrolled to its end),
+/// it starts under that row's foot. It stands so wherever it stands — at
+/// its top, where the keys or [`reveal`] took it, under the wheel — by the
+/// rows the last pass laid out, the pass run again where they moved, so
+/// the body never shows a row torn and the window never moves for it.
 pub(crate) struct Dialog<'a> {
     id: Id,
     over: Rect,
@@ -2501,18 +2835,52 @@ pub(crate) struct Dialog<'a> {
     tone: Option<Color32>,
     close: bool,
     hold: Option<f32>,
+    afresh: Option<&'a str>,
+    head: f32,
+    foot: f32,
+}
+
+/// What a [`Dialog`] measures over its room before it is drawn: its
+/// window's width, its body's, its title set, what its padding, its title
+/// and the room under the title take together, its window's most height,
+/// and the height its body is given.
+struct Measured {
+    width: f32,
+    inner_w: f32,
+    title: Title,
+    fixed: f32,
+    max_h: f32,
+    budget: f32,
 }
 
 impl<'a> Dialog<'a> {
     pub(crate) fn new(id: Id, over: Rect, width: f32, title: &'a str) -> Self {
-        Dialog { id, over, width, title, tone: None, close: true, hold: None }
+        Dialog { id, over, width, title, tone: None, close: true, hold: None, afresh: None, head: 0.0, foot: 0.0 }
+    }
+
+    /// A head `h` points tall, the room under it with it, pinned under the
+    /// title over the body's view rather than scrolled with the body: a
+    /// sheet's tabs and what they say of it stand whole in view at every
+    /// size, so the open tab can always be read, and the body scrolls under
+    /// them where it runs long. [`Dialog::show_pinned`] draws it.
+    pub(crate) fn head(self, h: f32) -> Self {
+        Dialog { head: h.max(0.0), ..self }
+    }
+
+    /// A foot `h` points tall, the room over it with it, pinned under the
+    /// body's view rather than scrolled with the body: a form's buttons
+    /// stand whole in view at every size, as the cells keep a sheet's
+    /// buttons and cut its rows over them, and the body scrolls above them
+    /// where it runs long. [`Dialog::show_footed`] draws it.
+    pub(crate) fn foot(self, h: f32) -> Self {
+        Dialog { foot: h.max(0.0), ..self }
     }
 
     /// A warning gate, as the cells draw every one: its title and frame in
     /// the warning's gold, and no close, since a gate is answered — Esc and
     /// the safe button keep — never dismissed. A room draws its gates with
-    /// [`gate`], which wears this.
-    fn gate(self, pal: &Pal) -> Self {
+    /// [`gate`] or [`gate_with`], which wear this.
+    pub(crate) fn gate(self, pal: &Pal) -> Self {
         Dialog { tone: Some(pal.gold), close: false, ..self }
     }
 
@@ -2524,25 +2892,78 @@ impl<'a> Dialog<'a> {
         Dialog { hold: Some(body_h), ..self }
     }
 
-    pub(crate) fn show<R>(self, ui: &Ui, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> ModalShown<R> {
-        let Dialog { id, over, width, title, tone, close, hold } = self;
-        let ctx = ui.ctx().clone();
-        let width = width.min(over.width() - 32.0).max(over.width().min(160.0));
+    /// The body brought back to its top on any pass whose `key` is not the
+    /// last pass's, as on the pass the modal comes up: another of its kind
+    /// drawn in its place under the same id (a gate a chained answer
+    /// opened, which the cells draw afresh) never opens where the last one
+    /// was scrolled to.
+    pub(crate) fn afresh(self, key: &'a str) -> Self {
+        Dialog { afresh: Some(key), ..self }
+    }
+
+    /// The window and its body measured over `over`, the title set in
+    /// `color`.
+    fn measure(&self, ui: &Ui, color: Color32) -> Measured {
+        let over = self.over;
+        let width = self.width.min(over.width() - 32.0).max(over.width().min(160.0));
         let inner_w = (width - 2.0 * MODAL_PAD).max(1.0);
         // The title wrapped where it runs long, its first line standing
         // where a one-line title does.
-        let title_color = tone.unwrap_or(pal.text);
-        let title_w = (inner_w - if close { CLOSE_ROOM } else { 0.0 }).max(1.0);
-        let format = TextFormat { font_id: strong(16.0), color: title_color, ..Default::default() };
-        let mut job = LayoutJob::single_section(title.to_string(), format);
-        job.wrap = TextWrapping { max_width: title_w, max_rows: 3, break_anywhere: false, overflow_character: Some('…') };
-        let galley = ui.painter().layout_job(job);
-        let lines = galley.rows.len().max(1);
-        let line_h = galley.size().y / lines as f32;
-        let title_h = TITLE_H + (lines - 1) as f32 * line_h;
-        let fixed = 2.0 * MODAL_PAD + title_h + MODAL_GAP;
-
+        let title_w = (inner_w - if self.close { CLOSE_ROOM } else { 0.0 }).max(1.0);
+        let title = modal_title(ui, self.title, title_w, color);
+        let fixed = 2.0 * MODAL_PAD + title.h + MODAL_GAP;
         let max_h = (over.height() - 32.0).max(fixed);
+        // The body's view is a whole number of 32nds of a point tall
+        // (egui's grid), so it is as tall on every pass, wherever the
+        // height the window last took has moved it. The floor has a
+        // 1024th's grace: `over`'s height is a difference of two of its
+        // edges, so a room a whole number of 32nds tall can come to at most
+        // a few ten-thousandths of a point under it, and the floor would
+        // take a whole 32nd from the body for that. A view up to a 1024th
+        // taller than the room costs nothing: the window it asks for is
+        // held to `max_h`. A pinned head's and foot's room is the body's no
+        // more.
+        let budget = ((max_h - fixed - self.head - self.foot).max(0.0) + 1.0 / 1024.0).floor_ui();
+        Measured { width, inner_w, title, fixed, max_h, budget }
+    }
+
+    /// The room the window gives its body over its room, known before it
+    /// is drawn: the body's width, and its height to the 32nd of a point
+    /// (a pinned head's and foot's room aside), as [`Dialog::show`] hands
+    /// them to it —
+    /// what a body that chooses its own measures for its room (the MP3
+    /// tab's Advanced and Settings sheets) chooses them by.
+    pub(crate) fn body_room(&self, ui: &Ui) -> Vec2 {
+        let measured = self.measure(ui, Color32::WHITE);
+        vec2(measured.inner_w, measured.budget)
+    }
+
+    pub(crate) fn show<R>(self, ui: &Ui, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> ModalShown<R> {
+        self.show_footed(ui, pal, body, |_, _| {})
+    }
+
+    /// [`Dialog::show`] with its pinned [`Dialog::foot`]: `foot` lays it
+    /// out top-down in its room right under the body's view, the window
+    /// wide, handed what the body returned to add to.
+    pub(crate) fn show_footed<R>(self, ui: &Ui, pal: &Pal, body: impl FnOnce(&mut Ui) -> R, foot: impl FnOnce(&mut Ui, &mut R)) -> ModalShown<R> {
+        self.show_pinned(ui, pal, |_| {}, body, foot)
+    }
+
+    /// [`Dialog::show_footed`] with its pinned [`Dialog::head`] too: `head`
+    /// lays it out top-down in its room right under the title, the body's
+    /// width, and the body's view stands under it.
+    pub(crate) fn show_pinned<R>(
+        self,
+        ui: &Ui,
+        pal: &Pal,
+        head: impl FnOnce(&mut Ui),
+        body: impl FnOnce(&mut Ui) -> R,
+        foot: impl FnOnce(&mut Ui, &mut R),
+    ) -> ModalShown<R> {
+        let title_color = self.tone.unwrap_or(pal.text);
+        let Measured { width, title, fixed, max_h, budget, .. } = self.measure(ui, title_color);
+        let Dialog { id, over, tone, close, hold, afresh, head: head_h, foot: foot_h, .. } = self;
+        let ctx = ui.ctx().clone();
         let size_key = id.with("height");
         let known: Option<f32> = ctx.data(|d| d.get_temp(size_key));
         let h = known.unwrap_or(max_h).min(max_h);
@@ -2553,23 +2974,36 @@ impl<'a> Dialog<'a> {
             }
             None => Rect::from_center_size(over.center(), vec2(width, h)),
         };
-        // Up on this pass when it was not drawn on the last.
+        // Up on this pass when it was not drawn on the last, or another of
+        // its kind took its place there.
         let now = ctx.cumulative_pass_nr();
         let drawn_key = id.with("drawn");
-        let opened = ctx.data(|d| d.get_temp::<u64>(drawn_key)).is_none_or(|last| last + 1 != now);
+        let mut opened = ctx.data(|d| d.get_temp::<u64>(drawn_key)).is_none_or(|last| last + 1 != now);
         ctx.data_mut(|d| d.insert_temp(drawn_key, now));
-        let reveal_to: Option<f32> = ctx.data_mut(|d| d.remove_temp(id.with("reveal-to")));
+        if let Some(key) = afresh {
+            let key_at = id.with("afresh");
+            let was: Option<String> = ctx.data(|d| d.get_temp(key_at));
+            opened |= was.as_deref() != Some(key);
+            ctx.data_mut(|d| d.insert_temp(key_at, key.to_string()));
+        }
+        // The body's rows as the last pass laid them out, in its content's
+        // points, and a control the keys moved to, which comes in with the
+        // view's top on a row's.
+        let rows: Vec<Rangef> = ctx.data(|d| d.get_temp(id.with("rows"))).unwrap_or_default();
+        let reveal_to: Option<(f32, f32, bool)> = ctx.data_mut(|d| d.remove_temp(id.with("reveal-to")));
+        let reveal_to = reveal_to.map(|(top, bottom, down)| {
+            // The control's own rows whole: from the top of the row its top
+            // falls in to the foot of the row its foot does.
+            let top = rows.iter().filter(|r| inside(r, top)).map(|r| r.min).fold(top, f32::min);
+            let bottom = rows.iter().filter(|r| inside(r, bottom)).map(|r| r.max).fold(bottom, f32::max);
+            if down { row_top(&rows, bottom - budget, top) } else { top }
+        });
 
         // Up at once, as the canvas's and the cells' modals are: egui fades an
         // area in by default, over frames the panel would have to run for it.
         let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(over.min).constrain(false).fade_in(false);
         let shown = area.show(&ctx, |ui| {
-            let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
-            ui.painter().rect_filled(over, 0.0, SCRIM);
-            let shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
-            ui.painter().add(shadow.as_shape(window, square()));
-            ui.painter().rect_filled(window, square(), pal.panel);
-            ui.painter().rect_stroke(window, square(), Stroke::new(1.0, tone.unwrap_or(pal.edge_strong)), StrokeKind::Inside);
+            modal_window(ui, over, window, tone.unwrap_or(pal.edge_strong), pal);
             let inner = window.shrink(MODAL_PAD);
             let title_row = Rect::from_min_size(inner.min, vec2(inner.width(), TITLE_H));
             // The canvas pulls the close button 6 points past the padding.
@@ -2577,19 +3011,18 @@ impl<'a> Dialog<'a> {
                 let at = pos2(inner.max.x - 8.0, title_row.center().y);
                 icon_button(ui, id.with("close"), at, Icon::Close, pal.dim, pal).clicked()
             };
-            ui.painter().galley(pos2(inner.min.x, title_row.center().y - line_h / 2.0), galley, title_color);
+            let title_h = title.h;
+            title.paint(ui, inner.min);
+            // The pinned head right under the title, the body's width.
+            let head_top = (inner.min.y + title_h + MODAL_GAP).round_to_pixels(ui.pixels_per_point()).round_ui();
+            if head_h > 0.0 {
+                let room = Rect::from_min_size(pos2(inner.min.x, head_top), vec2(inner.width(), head_h));
+                let mut child = ui.new_child(UiBuilder::new().id_salt(id.with("head")).max_rect(room).layout(Layout::top_down(Align::Min)));
+                head(&mut child);
+            }
             // The body's view starts where its content does, on the pixel
-            // egui puts that on, and is a whole number of 32nds of a point
-            // tall (egui's grid), so it is as tall on every pass, wherever
-            // the height the window last took has moved it. The floor
-            // has a 1024th's grace: `over`'s height is a difference of
-            // two of its edges, so a room a whole number of 32nds tall can
-            // come to at most a few ten-thousandths of a point under it,
-            // and the floor would take a whole 32nd from the body for that.
-            // A view up to a 1024th taller than the room costs nothing: the
-            // window it asks for is held to `max_h`.
-            let budget = ((max_h - fixed).max(0.0) + 1.0 / 1024.0).floor_ui();
-            let top = (inner.min.y + title_h + MODAL_GAP).round_to_pixels(ui.pixels_per_point()).round_ui();
+            // egui puts that on, and is `budget` tall on every pass.
+            let top = (head_top + head_h).round_to_pixels(ui.pixels_per_point()).round_ui();
             // The scrolled area reaches into the window's padding, where its
             // thumb stands 8 points in from the window's edge, clear of the
             // body, which keeps the inner width.
@@ -2600,30 +3033,91 @@ impl<'a> Dialog<'a> {
             if opened {
                 scroll = scroll.vertical_scroll_offset(0.0);
             } else if let Some(to) = reveal_to {
-                scroll = scroll.vertical_scroll_offset(to);
+                scroll = scroll.vertical_scroll_offset(to.max(0.0));
             }
             let out = scroll.show(&mut child, |ui| {
                 ui.set_max_width(inner.width());
-                let view = BodyView { origin: ui.max_rect().min.y, view: ui.clip_rect(), opened };
-                ui.ctx().data_mut(|d| d.insert_temp(id.with("view"), view));
+                // The view ends between the rows the last pass laid out,
+                // over the top of a row its foot would cut, and starts
+                // between them, under the foot of one its top would.
+                let origin = ui.max_rect().min.y;
+                let full = ui.clip_rect();
+                let offset = full.min.y - origin;
+                let end = row_end(&rows, offset, full.height());
+                let start = row_start(&rows, offset, end);
+                let view = Rect::from_min_max(pos2(full.min.x, (origin + start).max(full.min.y)), pos2(full.max.x, (origin + end).min(full.max.y)));
+                ui.set_clip_rect(view);
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(id.with("view"), BodyView { origin, view, full: full.height(), opened });
+                    d.insert_temp(laying_key(), Laying { id, origin, clip: view });
+                    d.remove_temp::<Vec<Rangef>>(id.with("rows-now"));
+                });
                 // The body laid out in a room exactly as tall as its view.
                 // egui rounds the scrolled rect it hands the body to pixels
                 // at its top and its bottom apart, so that rect's height
                 // moves by up to a pixel with where the window stands and
                 // how far the body is scrolled.
                 let room = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), budget));
-                ui.scope_builder(UiBuilder::new().max_rect(room), body).inner
+                let said = ui.scope_builder(UiBuilder::new().max_rect(room), body).inner;
+                ui.ctx().data_mut(|d| d.remove::<Laying>(laying_key()));
+                (said, offset, full.height(), (start, end))
             });
-            let wanted = fixed + out.content_size.y.min(budget);
-            (closed, out.inner, wanted.min(max_h))
+            // The pinned foot right under the body's view, the body's width.
+            let shown_h = out.content_size.y.min(budget);
+            let (mut said, offset, full_h, ends) = out.inner;
+            if foot_h > 0.0 {
+                let room = Rect::from_min_size(pos2(inner.min.x, top + shown_h), vec2(inner.width(), foot_h));
+                let mut child = ui.new_child(UiBuilder::new().id_salt(id.with("pinned")).max_rect(room).layout(Layout::top_down(Align::Min)));
+                foot(&mut child, &mut said);
+            }
+            // How low a list that hangs over the body may reach: over a
+            // pinned foot, else inside the window's padding.
+            let floor = if foot_h > 0.0 { top + shown_h } else { inner.max.y };
+            ui.ctx().data_mut(|d| d.insert_temp(id.with("hang-floor"), floor));
+            let wanted = fixed + head_h + shown_h + foot_h;
+            (closed, said, wanted.min(max_h), (offset, full_h, ends))
         });
-        let (closed, inner, wanted) = shown.inner;
+        let (closed, inner, wanted, (offset, full_h, (start, end))) = shown.inner;
+        // The rows this pass laid out: where the view would start or end
+        // elsewhere over them than it did over the last pass's, the pass
+        // runs again.
+        let laid: Vec<Rangef> = ctx.data_mut(|d| d.remove_temp(id.with("rows-now"))).unwrap_or_default();
+        let laid_end = row_end(&laid, offset, full_h);
+        let moved = (laid_end - end).abs() > 0.01 || (row_start(&laid, offset, laid_end) - start).abs() > 0.01;
+        ctx.data_mut(|d| d.insert_temp(id.with("rows"), laid));
+        if moved {
+            ctx.request_discard("a modal's view ends between its body's rows");
+            if !ctx.will_discard() {
+                ctx.request_repaint();
+            }
+        }
         if known.is_none_or(|h| (h - wanted).abs() > 0.5) {
             ctx.data_mut(|d| d.insert_temp(size_key, wanted));
             ctx.request_discard("a modal took its body's height");
         }
         ModalShown { closed, inner, window }
     }
+}
+
+/// Where a body's view scrolled down to show a control from `top` to its
+/// foot starts, its view's top at least at `low` (where the control's foot
+/// meets the view's): the highest top of the body's `rows` from there that
+/// still shows the control whole — so no row is torn over it — else, where
+/// the body says of no row there (rows it sets at places of its own, the
+/// Users room's grant), `low` itself, the control's foot on the view's, so
+/// the view moves just as far as it must and never a page at a step; and
+/// the control's own top where it is taller than the view.
+fn row_top(rows: &[Rangef], low: f32, top: f32) -> f32 {
+    let t = rows.iter().map(|r| r.min).filter(|t| *t >= low - 0.01 && *t <= top + 0.01).fold(f32::INFINITY, f32::min);
+    if t.is_finite() { t } else { low.min(top) }
+}
+
+/// How low a list that hangs over the modal `modal`'s body may reach, as
+/// the modal stood when it was last shown (this pass, for a list drawn
+/// after it): over its pinned foot, else inside its window's padding
+/// ([`hung_over`] holds its list to it). None before it was ever shown.
+pub(crate) fn hung_floor(ui: &Ui, modal: Id) -> Option<f32> {
+    ui.ctx().data(|d| d.get_temp(modal.with("hang-floor")))
 }
 
 /// How wide a [`Dialog`] wants to be to hold a body `body_w` points wide
@@ -2634,8 +3128,11 @@ pub(crate) fn dialog_width(ui: &Ui, title: &str, body_w: f32) -> f32 {
 }
 
 /// A warning gate's window, every room's: room for the longest of their
-/// sentences to break into whole lines.
-const GATE_W: f32 = 600.0;
+/// sentences to break into whole lines. Then the room between its
+/// sentences, and over its answers.
+pub(crate) const GATE_W: f32 = 600.0;
+pub(crate) const GATE_APART: f32 = 6.0;
+pub(crate) const GATE_OVER_FOOT: f32 = 20.0;
 
 /// A warning gate over `over`, as the cells draw every one and every room
 /// draws it alike: a [`Dialog`] in the warning's gold with no close,
@@ -2645,19 +3142,26 @@ const GATE_W: f32 = 600.0;
 /// buttons 0 and 1 of `id.with("foot")`, side by side at its right, or,
 /// where the two will not fit, the one that goes through on a row of its
 /// own above the safe one, as the cells move their confirmation up
-/// ([`foot`]). Esc keeps, as the room's keys have it. How a click answered
-/// it, its `inner`: `Some(true)` goes through, `Some(false)` keeps.
+/// ([`foot`]). Its answers say no row of the body's, as the MP3 tab's
+/// gates' ([`answers`]): a gate is there to be answered, so the view never
+/// ends over them and hides them. Esc keeps, as the room's keys have it.
+/// How a click answered it, its `inner`: `Some(true)` goes through,
+/// `Some(false)` keeps.
 pub(crate) fn gate(ui: &Ui, id: Id, over: Rect, title: &str, sentences: Vec<Para>, answers: [&str; 2], pal: &Pal) -> ModalShown<Option<bool>> {
     let shown = Dialog::new(id, over, GATE_W, title).gate(pal).show(ui, pal, |ui| {
         for (k, sentence) in sentences.into_iter().enumerate() {
             if k > 0 {
-                ui.add_space(6.0);
+                ui.add_space(GATE_APART);
             }
             sentence.show(ui);
         }
-        ui.add_space(20.0);
+        ui.add_space(GATE_OVER_FOOT);
         let [keep, go] = answers;
-        foot(ui, id.with("foot"), &[], &[(keep, true), (go, false)], None, pal)
+        let buttons = [(keep, true), (go, false)];
+        let w = ui.available_width();
+        let (_, h) = foot_rects(ui, &[], &buttons, w);
+        let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        foot_at(ui, id.with("foot"), row, &[], &buttons, None, pal)
     });
     ModalShown { closed: shown.closed, inner: shown.inner.map(|k| k == 1), window: shown.window }
 }
@@ -2668,11 +3172,15 @@ pub(crate) fn gate(ui: &Ui, id: Id, over: Rect, title: &str, sentences: Vec<Para
 /// cursor) or the modal came up or changed height — never after, so the
 /// wheel keeps the body where it puts it. The move lands within the frame:
 /// the pass runs again with the body where it goes, or where egui runs no
-/// more passes this frame, the next frame is asked for.
+/// more passes this frame, the next frame is asked for. A control under
+/// the view comes in with the view's top on a row's top, its foot ending
+/// between rows ([`Dialog`]), so the move tears no row at either end; in a
+/// body that says of no row there ([`body_row`]), with its foot on the
+/// view's foot.
 pub(crate) fn reveal(ui: &Ui, modal: Id, at: usize, rect: Rect) {
     let ctx = ui.ctx();
     let Some(body) = ctx.data(|d| d.get_temp::<BodyView>(modal.with("view"))) else { return };
-    let h = body.view.height();
+    let h = body.full;
     let key = modal.with("revealed");
     let last: Option<(usize, f32)> = ctx.data(|d| d.get_temp(key));
     ctx.data_mut(|d| d.insert_temp(key, (at, h)));
@@ -2680,19 +3188,33 @@ pub(crate) fn reveal(ui: &Ui, modal: Id, at: usize, rect: Rect) {
         return;
     }
     let offset = body.view.min.y - body.origin;
+    // In view is over where the view ends between rows, not its full foot.
+    let end = body.view.max.y - body.origin;
     let (top, bottom) = (rect.min.y - body.origin, rect.max.y - body.origin);
-    let to = if top < offset {
-        top
-    } else if bottom > offset + h {
-        (bottom - h).min(top)
+    let down = if top < offset {
+        false
+    } else if bottom > end + 0.01 {
+        true
     } else {
         return;
     };
-    ctx.data_mut(|d| d.insert_temp(modal.with("reveal-to"), to.max(0.0)));
+    ctx.data_mut(|d| d.insert_temp(modal.with("reveal-to"), (top, bottom, down)));
     ctx.request_discard("a modal brought its keyboard's control into view");
     if !ctx.will_discard() {
         ctx.request_repaint();
     }
+}
+
+/// The keyboard's control in the modal `modal` that stands outside its
+/// body's view, always in sight (a button of its pinned foot), by
+/// [`reveal`]'s number for it, `at`: nothing is brought into view, but the
+/// keyboard is noted there as [`reveal`] notes it, so the control in the
+/// body the keys go to next is a move and comes into view, wherever the
+/// wheel left the body meanwhile.
+pub(crate) fn reveal_pinned(ui: &Ui, modal: Id, at: usize) {
+    let ctx = ui.ctx();
+    let Some(body) = ctx.data(|d| d.get_temp::<BodyView>(modal.with("view"))) else { return };
+    ctx.data_mut(|d| d.insert_temp(modal.with("revealed"), (at, body.full)));
 }
 
 // ── Pictures, steps and a button at rest ─────────────────────────────────
@@ -2978,6 +3500,791 @@ pub(crate) fn halved(image: &egui::ColorImage) -> egui::ColorImage {
         }
     }
     egui::ColorImage::new([hw, hh], pixels)
+}
+
+// ── Figures, text buttons, the tall primary and a share's meter ──────────
+//
+// What the MP3 Player tab's egui frame needed first (src/device/page/
+// egui_view.rs) and nothing of which is the tab's own: a sentence's
+// figures found and set in the monospace, a button that is only its words
+// with the mark a door wears, the page's one tall act, and an LED row lit
+// for a share the way the cells fill their bar.
+
+/// Where the figure in `word` runs, if it holds one: from its first letter
+/// or digit (or a `/`), the letters and digits and the marks that join a
+/// figure's parts (`.,:-+_/`), less the marks it ends on (a sentence's
+/// full stop) — when that run starts with a digit (`21.4`, `1,284`,
+/// `14:03`, a serial, and a percentage with its sign, `62%`), is a version
+/// (`v0.14.0`, `v0.14.0-5-g4e94418`), is a hex string of six or more with
+/// a digit in it (an ELF), or is one of `also` (a port's name or a file's,
+/// which no rule can tell from a word), matched whole. Any other run that
+/// starts with a digit ends before a point a letter follows: a file named
+/// for its number keeps its extension in the words' face (`12.flac`'s
+/// figure is its `12`), unless `also` names it.
+fn figure_span(word: &str, also: &[&str]) -> Option<Range<usize>> {
+    let start = word.find(|c: char| c.is_ascii_alphanumeric() || c == '/')?;
+    let joins = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | ',' | ':' | '-' | '+' | '_' | '/');
+    let len = word[start..].find(|c: char| !joins(c)).unwrap_or(word.len() - start);
+    let whole = word[start..start + len].trim_end_matches(['.', ',', ':', '-']);
+    if !whole.is_empty() && also.contains(&whole) {
+        return Some(start..start + whole.len());
+    }
+    let mut core = whole;
+    if core.starts_with(|c: char| c.is_ascii_digit())
+        && let Some(at) = core.as_bytes().windows(2).position(|pair| pair[0] == b'.' && pair[1].is_ascii_alphabetic())
+    {
+        core = &core[..at];
+    }
+    let mut chars = core.chars();
+    let first = chars.next()?;
+    let digit = first.is_ascii_digit();
+    let version = first == 'v' && chars.next().is_some_and(|c| c.is_ascii_digit());
+    let hex = core.len() >= 6 && core.chars().all(|c| c.is_ascii_hexdigit()) && core.chars().any(|c| c.is_ascii_digit());
+    let end = start + core.len();
+    let end = if digit && word[end..].starts_with('%') { end + 1 } else { end };
+    (digit || version || hex).then(|| start..end)
+}
+
+/// `s` as runs in `font` and `color`, each figure in it ([`figure_span`]:
+/// a size, a version, a count, a time, a serial, a port or a file named in
+/// `also`) set in `figure` instead, as the canvas sets a page's figures in
+/// the grid's monospace inside its sentences. The words between keep their
+/// spaces, so the line says what the cells say.
+pub(crate) fn figured(s: &str, also: &[&str], font: FontId, figure: FontId, color: Color32) -> Vec<Run> {
+    let mut parts: Vec<Run> = Vec::new();
+    let mut plain = String::new();
+    let mut rest = s;
+    while !rest.is_empty() {
+        let lead = rest.len() - rest.trim_start().len();
+        plain.push_str(&rest[..lead]);
+        rest = &rest[lead..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..end];
+        match figure_span(word, also) {
+            Some(span) => {
+                plain.push_str(&word[..span.start]);
+                if !plain.is_empty() {
+                    parts.push((std::mem::take(&mut plain), font.clone(), color));
+                }
+                parts.push((word[span.clone()].to_string(), figure.clone(), color));
+                plain.push_str(&word[span.end..]);
+            }
+            None => plain.push_str(word),
+        }
+        rest = &rest[end..];
+    }
+    if !plain.is_empty() {
+        parts.push((plain, font, color));
+    }
+    parts
+}
+
+/// What leads a [`text_button`]'s words, 8 points before them: the kit's
+/// [`pointer`] (the cells' ▸, a door shut) or its [`arrow`] down (their ▾,
+/// the door open).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lead {
+    Shut,
+    Open,
+}
+
+/// A [`text_button`]'s height, its words' size, and the room its lead
+/// takes: the mark's 8 points and the 8 after it.
+pub(crate) const TEXT_BUTTON_H: f32 = HIT;
+pub(crate) const TEXT_BUTTON_SIZE: f32 = 13.5;
+const LEAD_W: f32 = 16.0;
+
+/// How wide [`text_button`] draws `words` led by `lead`, in the semibold it
+/// wears under the pointer, the widest it gets.
+pub(crate) fn text_button_width(ui: &Ui, words: &str, lead: Option<Lead>, also: &[&str]) -> f32 {
+    text_button_width_sized(ui, words, lead, also, TEXT_BUTTON_SIZE)
+}
+
+/// How wide [`text_button_sized`] draws `words` at `size`.
+pub(crate) fn text_button_width_sized(ui: &Ui, words: &str, lead: Option<Lead>, also: &[&str], size: f32) -> f32 {
+    let lead_w = if lead.is_some() { LEAD_W } else { 0.0 };
+    lead_w + runs_width(ui, &figured(words, also, strong(size), mono(12.5), Color32::WHITE))
+}
+
+/// A button that is only its words, the canvas's TEXT BUTTON (a door, a
+/// link that acts), its left middle at `at`: `words` dim with no frame and
+/// no fill, their figures in the monospace ([`figured`], `also` among
+/// them), led by `lead`; in the text colour and the semibold under the
+/// pointer, with the hand. Its target is as wide as it draws, no wider
+/// than `max_w`, where its words are cut with an ellipsis, and
+/// [`TEXT_BUTTON_H`] tall. Not `live`, it is drawn at rest and senses the
+/// pointer for nothing but a hover no look answers: something lies over
+/// it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_button(
+    ui: &Ui,
+    id: Id,
+    at: Pos2,
+    words: &str,
+    lead: Option<Lead>,
+    also: &[&str],
+    max_w: f32,
+    live: bool,
+    pal: &Pal,
+) -> Response {
+    text_button_sized(ui, id, at, words, lead, also, max_w, live, pal, TEXT_BUTTON_SIZE)
+}
+
+/// A [`text_button`] whose words are `size` points rather than the card's
+/// 13.5 (its figures stay the card's 12.5): one that shares a slot with
+/// plain words of that size, as Update all shares the MP3 tab's row's right
+/// edge with its counts at 13.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_button_sized(
+    ui: &Ui,
+    id: Id,
+    at: Pos2,
+    words: &str,
+    lead: Option<Lead>,
+    also: &[&str],
+    max_w: f32,
+    live: bool,
+    pal: &Pal,
+    size: f32,
+) -> Response {
+    text_button_in(ui, id, at, words, lead, also, max_w, live, false, pal, size)
+}
+
+/// A [`text_button`] that wears the keyboard's look while `focused` (the
+/// chooser the keys are on, the MP3 tab's Advanced sheet's, as the cells
+/// light it): its words in the accent and the semibold, the pointer's look
+/// winning over it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_button_keyed(ui: &Ui, id: Id, at: Pos2, words: &str, also: &[&str], max_w: f32, focused: bool, pal: &Pal) -> Response {
+    text_button_in(ui, id, at, words, None, also, max_w, true, focused, pal, TEXT_BUTTON_SIZE)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn text_button_in(
+    ui: &Ui,
+    id: Id,
+    at: Pos2,
+    words: &str,
+    lead: Option<Lead>,
+    also: &[&str],
+    max_w: f32,
+    live: bool,
+    focused: bool,
+    pal: &Pal,
+    size: f32,
+) -> Response {
+    let w = text_button_width_sized(ui, words, lead, also, size).min(max_w).max(8.0);
+    let rect = Rect::from_min_size(pos2(at.x, at.y - TEXT_BUTTON_H / 2.0), vec2(w, TEXT_BUTTON_H));
+    let response = if live { hand(ui.interact(rect, id, Sense::click())) } else { ui.interact(rect, id, Sense::hover()) };
+    let hot = live && response.hovered();
+    let ink = match (hot, focused) {
+        (true, _) => pal.text,
+        (false, true) => pal.accent,
+        (false, false) => pal.dim,
+    };
+    let font = if hot || focused { strong(size) } else { body(size) };
+    let mut x = at.x;
+    match lead {
+        // The pointer's 6 points and the arrow's 8 each stand at the lead's
+        // left, its middle on the words' small letters.
+        Some(Lead::Shut) => pointer(ui, pos2(x + 2.5, led_mid(ui, at.y, &font, false)), ink),
+        Some(Lead::Open) => arrow(ui, pos2(x + 4.0, led_mid(ui, at.y, &font, false)), ink, true),
+        None => {}
+    }
+    if lead.is_some() {
+        x += LEAD_W;
+    }
+    let room = (at.x + max_w - x).max(1.0);
+    runs(ui, pos2(x, at.y), &figured(words, also, font, mono(12.5), ink), room, Align2::LEFT_CENTER);
+    response
+}
+
+/// The tall primary's height, its capitals' size, the room either side of
+/// its words, and the pointer's room after them: its 6 points and the 10
+/// before it.
+pub(crate) const TALL_H: f32 = 44.0;
+const TALL_SIZE: f32 = 12.5;
+const TALL_PAD: f32 = 22.0;
+const TALL_MARK: f32 = 16.0;
+
+/// How wide [`tall_button`] wants to be for `label`, with its pointer
+/// while `enabled`.
+pub(crate) fn tall_button_width(ui: &Ui, label: &str, enabled: bool) -> f32 {
+    caps_width(ui, bare(label), TALL_SIZE) + 2.0 * TALL_PAD + if enabled { TALL_MARK } else { 0.0 }
+}
+
+/// A page's one act at `rect`, the canvas's TALL PRIMARY: a 1-point accent
+/// frame with no fill, `label` [`bare`] in accent capitals and the kit's
+/// [`pointer`] after them, the frame, the words and the pointer heating to
+/// the hot accent under the pointer, with the hand. Not `enabled` (its act
+/// waits on another): the frame and the words dim, no pointer, no hand and
+/// no click — its response senses the pointer only for the tooltip that
+/// says why. Not `live`, it is drawn at rest and takes nothing: something
+/// lies over it.
+pub(crate) fn tall_button(ui: &Ui, id: Id, rect: Rect, label: &str, enabled: bool, live: bool, pal: &Pal) -> Response {
+    let acts = enabled && live;
+    let response = ui.interact(rect, id, if acts { Sense::click() } else { Sense::hover() });
+    let response = if acts { hand(response) } else { response };
+    let ink = match (enabled, acts && response.hovered()) {
+        (false, _) => pal.dim,
+        (true, true) => pal.accent_hot,
+        (true, false) => pal.accent,
+    };
+    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, ink), StrokeKind::Inside);
+    let label = bare(label);
+    let words = caps_width(ui, label, TALL_SIZE);
+    let mark = if enabled { TALL_MARK } else { 0.0 };
+    let left = (rect.center().x - (words + mark) / 2.0).max(rect.min.x + 1.0);
+    let room = (rect.max.x - left - mark).max(1.0);
+    let drawn = caps(ui, pos2(left, rect.center().y), label, TALL_SIZE, ink, room, Align2::LEFT_CENTER);
+    if enabled {
+        pointer(ui, pos2(drawn.max.x + 10.0 + 2.5, led_mid(ui, rect.center().y, &strong(TALL_SIZE), true)), ink);
+    }
+    response
+}
+
+/// How many of a meter's `count` segments `permille` lights, as the cells
+/// fill their bar: the nearest whole segments, one at least for a sliver,
+/// and never the last before the whole — a card 99.6% full shows one
+/// segment unlit.
+pub(crate) fn fill_lit(permille: u32, count: usize) -> usize {
+    let count = count as u64;
+    let mut lit = (count * u64::from(permille.min(1000)) + 500) / 1000;
+    if permille > 0 {
+        lit = lit.max(1);
+    }
+    if permille < 1000 {
+        lit = lit.min(count.saturating_sub(1));
+    }
+    lit as usize
+}
+
+/// An LED row across `track` ([`led_row`]'s segments) lit for `permille` of
+/// it as [`fill_lit`] counts, in `lit` and `unlit`: the cells' bar in the
+/// desk's look.
+pub(crate) fn led_fill(ui: &Ui, track: Rect, permille: u32, lit: Color32, unlit: Color32) {
+    let count = led_count(track.width());
+    led_row(ui, track, fill_lit(permille, count) as f32 / count as f32, lit, unlit);
+}
+
+// ── Gates' answers, lists that hang, and a card's frame ──────────────────
+//
+// What the MP3 Player tab's gates, sheets and cards share (src/device/page/
+// egui_view/), and nothing of which is the tab's own: a modal's title and
+// its window for a gate that lays its own body out, the keep led back with
+// its figures in their own case and a gate's two answers with the go that
+// waits on a box, the gate whose body is the page's own, the keyboard's
+// ring round a foot's button, a closed list's box and the list that hangs
+// from it inside a modal, a list's thumb the wheel moves, a card's
+// hairline frame and its head, and prose spaced by its line's height.
+
+/// A modal's title as every modal sets it, set once and drawn where its
+/// window says ([`modal_title`]).
+pub(crate) struct Title {
+    galley: Arc<Galley>,
+    line: f32,
+    color: Color32,
+    /// How tall its rows stand: the title's row, and a line more for each
+    /// line it wraps to.
+    pub h: f32,
+}
+
+/// `title` as a modal's ([`Dialog`]'s, and a gate's that lays its own
+/// window out, the MP3 tab's board gate): the 16-point semibold in
+/// `color`, wrapped at `w` where it runs long, never cut short of its
+/// question but past three lines, its first line standing where a one-line
+/// title does.
+pub(crate) fn modal_title(ui: &Ui, title: &str, w: f32, color: Color32) -> Title {
+    let format = TextFormat { font_id: strong(16.0), color, ..Default::default() };
+    let mut job = LayoutJob::single_section(title.to_string(), format);
+    job.wrap = TextWrapping { max_width: w.max(1.0), max_rows: 3, break_anywhere: false, overflow_character: Some('…') };
+    let galley = ui.painter().layout_job(job);
+    let lines = galley.rows.len().max(1);
+    let line = galley.size().y / lines as f32;
+    Title { galley, line, color, h: TITLE_H + (lines - 1) as f32 * line }
+}
+
+impl Title {
+    /// Drawn from `at`, its row's top left, its first line centred on the
+    /// title's row.
+    pub(crate) fn paint(self, ui: &Ui, at: Pos2) {
+        ui.painter().galley(pos2(at.x, at.y + TITLE_H / 2.0 - self.line / 2.0), self.galley, self.color);
+    }
+}
+
+/// A modal's window at `window` over `over`, as [`Dialog`] draws every
+/// one: the scrim across `over`, taking every press there outside the
+/// window (what is under it is inert), and the window on the panel's fill
+/// in an `edge` hairline (the strong edge, a gate's gold) with the
+/// canvas's shadow. For a gate that lays its own body out in it.
+pub(crate) fn modal_window(ui: &mut Ui, over: Rect, window: Rect, edge: Color32, pal: &Pal) {
+    let _scrim = ui.allocate_rect(over, Sense::click_and_drag());
+    ui.painter().rect_filled(over, 0.0, SCRIM);
+    ui.painter().add(lifted().as_shape(window, square()));
+    ui.painter().rect_filled(window, square(), pal.panel);
+    ui.painter().rect_stroke(window, square(), Stroke::new(1.0, edge), StrokeKind::Inside);
+}
+
+/// The canvas's shadow under what floats over a page: a modal's window, a
+/// list that hangs.
+fn lifted() -> Shadow {
+    Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) }
+}
+
+/// The kit's [`pointer`] turned back, centred on `at`: the cells' "◂"
+/// before a keep, the way back to what stays.
+pub(crate) fn back_pointer(ui: &Ui, at: Pos2, color: Color32) {
+    let points = vec![at + vec2(-3.5, 0.0), at + vec2(2.5, -4.0), at + vec2(2.5, 4.0)];
+    ui.painter().add(Shape::convex_polygon(points, color, Stroke::NONE));
+}
+
+/// The room either side of a form button's words, and a keep's lead: the
+/// back pointer's 6 points and the 8 after it.
+const FORM_PAD: f32 = 18.0;
+const KEEP_LEAD: f32 = 14.0;
+
+/// A keep's words as runs, each with whether it is a figure: the words in
+/// the form buttons' spaced capitals, a figure among them (a version, a
+/// port in `also`) in the monospace in its own case.
+fn keep_runs(words: &str, also: &[&str]) -> Vec<(String, bool)> {
+    let font = strong(FORM_BUTTON_SIZE);
+    figured(words, also, font.clone(), mono(FORM_BUTTON_SIZE), Color32::WHITE).into_iter().map(|(s, f, _)| (s, f != font)).collect()
+}
+
+/// How wide a keep's words draw ([`keep_runs`]).
+fn keep_words_width(ui: &Ui, words: &str, also: &[&str]) -> f32 {
+    let run_w = |(s, figure): &(String, bool)| if *figure { width_of(ui, s, mono(FORM_BUTTON_SIZE)) } else { caps_width(ui, s, FORM_BUTTON_SIZE) };
+    keep_runs(words, also).iter().map(run_w).sum()
+}
+
+/// How wide [`keep_button`] wants to be for `words`, led back or not.
+pub(crate) fn keep_button_width(ui: &Ui, words: &str, lead: bool, also: &[&str]) -> f32 {
+    2.0 * FORM_PAD + if lead { KEEP_LEAD } else { 0.0 } + keep_words_width(ui, words, also)
+}
+
+/// A gate's safe answer at `rect`, the modal's one lit act, as the MP3
+/// tab's boards draw it (KEEP v0.13.0): a form button's accent fill, the
+/// hot accent under the pointer, with the hand; on it in the ink on the
+/// accent, where `lead` (the cells lead it with "◂"), the [`back_pointer`]
+/// 8 points before its words, the words in the form buttons' spaced
+/// capitals and their figures in the monospace in their own case, cut at
+/// the button's padding. `words` come bare of the cells' arrow.
+pub(crate) fn keep_button(ui: &Ui, id: Id, rect: Rect, words: &str, lead: bool, also: &[&str], pal: &Pal) -> Response {
+    let response = hand(ui.interact(rect, id, Sense::click()));
+    ui.painter().rect_filled(rect, square(), if response.hovered() { pal.accent_hot } else { pal.accent });
+    let ink = pal.on_accent;
+    let lead_w = if lead { KEEP_LEAD } else { 0.0 };
+    let want = lead_w + keep_words_width(ui, words, also);
+    let mid = rect.center().y;
+    let end = rect.max.x - FORM_PAD;
+    let mut x = (rect.center().x - want / 2.0).max(rect.min.x + FORM_PAD);
+    if lead {
+        // Its point at the lead's left, its middle on the capitals'.
+        back_pointer(ui, pos2(x + 3.5, led_mid(ui, mid, &strong(FORM_BUTTON_SIZE), true)), ink);
+        x += lead_w;
+    }
+    for (s, figure) in keep_runs(words, also) {
+        let room = end - x;
+        if room < 1.0 {
+            break;
+        }
+        let drawn = if figure {
+            text(ui, pos2(x, mid), &s, mono(FORM_BUTTON_SIZE), ink, room, Align2::LEFT_CENTER)
+        } else {
+            caps(ui, pos2(x, mid), &s, FORM_BUTTON_SIZE, ink, room, Align2::LEFT_CENTER)
+        };
+        x = drawn.max.x;
+    }
+    response
+}
+
+/// A gate's two answers as the cells give them: the safe one, `keep`, its
+/// words bare of the cells' "◂" and led back where they had it (`lead`),
+/// and the one that goes through, `go` — none while it waits (the stronger
+/// gate's, on its box) — the figures among them (`also`: the ports) in the
+/// monospace.
+#[derive(Clone, Copy)]
+pub(crate) struct Answers<'a> {
+    pub keep: &'a str,
+    pub lead: bool,
+    pub go: Option<&'a str>,
+    pub also: &'a [&'a str],
+}
+
+/// Where a foot `w` wide lays a gate's answers, from its top left, as
+/// [`foot_layout`] lays a gate's two: side by side at its end, the go last
+/// as the kit's gate has it; where the two will not fit, the go keeps the
+/// first row and the keep comes under it, as the cells move their
+/// confirmation up. Each answer's rect, the keep's first, and the foot's
+/// height.
+pub(crate) fn answers_rects(ui: &Ui, a: &Answers, w: f32) -> (Vec<Rect>, f32) {
+    let mut wants = vec![keep_button_width(ui, a.keep, a.lead, a.also)];
+    wants.extend(a.go.map(|go| form_button_width(ui, go)));
+    foot_layout(&[], &wants, w)
+}
+
+/// A gate's answers in a foot from `at`, its top left, `w` wide, as
+/// [`answers_rects`] lays them: the keep lit ([`keep_button`]) as
+/// `id.with(0usize)` and the go as the hairline ([`form_button`]) as
+/// `id.with(1usize)`. How a click answered: `Some(true)` goes through,
+/// `Some(false)` keeps.
+pub(crate) fn answers_at(ui: &Ui, id: Id, at: Pos2, a: &Answers, w: f32, pal: &Pal) -> Option<bool> {
+    let (laid, _) = answers_rects(ui, a, w);
+    let mut answer = None;
+    if keep_button(ui, id.with(0usize), laid[0].translate(at.to_vec2()), a.keep, a.lead, a.also, pal).clicked() {
+        answer = Some(false);
+    }
+    if let (Some(go), Some(rect)) = (a.go, laid.get(1))
+        && form_button(ui, id.with(1usize), rect.translate(at.to_vec2()), go, false, pal).clicked()
+    {
+        answer = Some(true);
+    }
+    answer
+}
+
+/// [`answers_at`] as a row of the layout the column wide. Like the kit's
+/// [`gate`]'s, its answers say no row of the body's: a gate is there to be
+/// answered, so the view never ends over them and hides them.
+pub(crate) fn answers(ui: &mut Ui, id: Id, a: &Answers, pal: &Pal) -> Option<bool> {
+    let w = ui.available_width();
+    let (_, h) = answers_rects(ui, a, w);
+    let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    answers_at(ui, id, row.min, a, w, pal)
+}
+
+/// A warning gate whose body is the page's own — the stronger gate's,
+/// whose box among its sentences ([`check_line`]) the go waits on, as much
+/// as any other — over `over`: a [`Dialog`] in the gate's look, [`GATE_W`]
+/// wide, asking `title`, its body back at its top whenever another gate
+/// takes its place ([`Dialog::afresh`], by its title); `body` laid out
+/// top-down, then [`GATE_OVER_FOOT`] under it the gate's answers `a`
+/// ([`answers`], under `id.with("foot")`), the body scrolled where it is
+/// taller than `over` allows. Its `inner`: how a click answered
+/// (`Some(true)` goes through, `Some(false)` keeps), and what `body`
+/// returned.
+pub(crate) fn gate_with<R>(ui: &Ui, id: Id, over: Rect, title: &str, a: &Answers, pal: &Pal, body: impl FnOnce(&mut Ui) -> R) -> ModalShown<(Option<bool>, R)> {
+    Dialog::new(id, over, GATE_W, title).gate(pal).afresh(title).show(ui, pal, |ui| {
+        let inner = body(ui);
+        ui.add_space(GATE_OVER_FOOT);
+        (answers(ui, id.with("foot"), a, pal), inner)
+    })
+}
+
+/// How far out of a foot's button the keyboard's ring stands.
+const RING_OUT: f32 = 3.0;
+
+/// The keyboard on a foot's button at `rect` (a sheet's Apply, its Use
+/// defaults): the accent's ring 3 points out of it, as the cells put the
+/// keyboard's button on their slab.
+pub(crate) fn button_ring(ui: &Ui, rect: Rect, pal: &Pal) {
+    ring(ui, rect.expand(RING_OUT), pal);
+}
+
+/// A closed list's box: its least width (the Settings board's, so it keeps
+/// its width from its first words to a short pick), the room either side
+/// of its words and before its chevron, and the chevron's.
+pub(crate) const SELECT_LEAST: f32 = 120.0;
+const SELECT_PAD: f32 = 10.0;
+const SELECT_CHEVRON: f32 = 12.0;
+
+/// How wide [`select_box`] draws `words` at `size`, whole in the semibold
+/// the keyboard's look wears: [`SELECT_LEAST`] at least.
+pub(crate) fn select_box_width(ui: &Ui, words: &str, also: &[&str], size: f32) -> f32 {
+    let words_w = runs_width(ui, &figured(words, also, strong(size), mono(12.5), Color32::WHITE));
+    (3.0 * SELECT_PAD + SELECT_CHEVRON + words_w).max(SELECT_LEAST)
+}
+
+/// A closed list's box at `rect`, as the canvas's Settings board draws its
+/// dropdown and every closed list on the MP3 tab wears it (From's server,
+/// Into's codec, the Advanced sheet's release): the ground's fill in a
+/// strong-edged hairline, raised while `hovered`; `words` at `size` 10
+/// points in, their figures in the monospace — in the accent's semibold
+/// while `lit` (the keyboard's), the semibold under the pointer — and the
+/// kit's chevron at its end, dim, in the text colour under the pointer.
+/// It takes nothing itself: [`select_button`] is one that takes the click.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_box(ui: &Ui, rect: Rect, words: &str, also: &[&str], size: f32, lit: bool, hovered: bool, pal: &Pal) {
+    ui.painter().rect_filled(rect, square(), if hovered { pal.raised } else { pal.ground });
+    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
+    let (font, ink) = match (lit, hovered) {
+        (true, _) => (strong(size), pal.accent),
+        (false, true) => (strong(size), pal.text),
+        (false, false) => (body(size), pal.text),
+    };
+    let mid = rect.center().y;
+    let room = (rect.width() - 3.0 * SELECT_PAD - SELECT_CHEVRON).max(1.0);
+    runs(ui, pos2(rect.min.x + SELECT_PAD, mid), &figured(words, also, font, mono(12.5), ink), room, Align2::LEFT_CENTER);
+    let chevron_ink = if hovered { pal.text } else { pal.dim };
+    chevron(ui, pos2(rect.max.x - SELECT_PAD - SELECT_CHEVRON / 2.0, mid), chevron_ink, false);
+}
+
+/// A [`select_box`] at `rect` that takes the click itself, with the hand,
+/// raised under the pointer: a closed list that is a control of its own in
+/// its row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_button(ui: &Ui, id: Id, rect: Rect, words: &str, also: &[&str], size: f32, lit: bool, pal: &Pal) -> Response {
+    let response = hand(ui.interact(rect, id, Sense::click()));
+    select_box(ui, rect, words, also, size, lit, response.hovered(), pal);
+    response
+}
+
+/// An entry of a list that hangs, and the room at either side of its
+/// words; then the frame's room round its entries, its hairline and a
+/// point.
+pub(crate) const HUNG_ROW_H: f32 = 28.0;
+pub(crate) const HUNG_PAD: f32 = 10.0;
+const HUNG_IN: f32 = 2.0;
+
+/// How many whole entries a list hanging from `top` holds over `bottom`.
+pub(crate) fn hung_fits(top: f32, bottom: f32) -> usize {
+    ((bottom - top - 2.0 * HUNG_IN) / HUNG_ROW_H).floor().max(0.0) as usize
+}
+
+/// The frame of a list hanging from `at`, its top left, `w` wide with `n`
+/// entries.
+pub(crate) fn hung_frame(at: Pos2, w: f32, n: usize) -> Rect {
+    Rect::from_min_size(at, vec2(w, n as f32 * HUNG_ROW_H + 2.0 * HUNG_IN))
+}
+
+/// The gutter a list that hangs keeps at its right for its thumb while it
+/// holds fewer entries than it has: the thumb and 2 points either side.
+pub(crate) const HUNG_GUTTER: f32 = THUMB_W + 4.0;
+
+/// The gutter a list that hangs keeps for its thumb, holding `n` of its
+/// `len` entries: [`HUNG_GUTTER`] where it holds fewer, none where it
+/// holds them all.
+fn hung_gutter(n: usize, len: usize) -> f32 {
+    if n < len { HUNG_GUTTER } else { 0.0 }
+}
+
+/// How wide a list that hangs is for entries whose words are `words_w`
+/// wide at most, holding `n` of its `len`: the words, their padding, the
+/// thumb's gutter while it holds fewer than its all, and the frame's room.
+pub(crate) fn hung_width(words_w: f32, n: usize, len: usize) -> f32 {
+    words_w + 2.0 * HUNG_PAD + hung_gutter(n, len) + 2.0 * HUNG_IN
+}
+
+/// Where a list that hangs from a closed list's box whose left is
+/// `box_left` stands its left, for its entries' words to stand under the
+/// box's: the box's padding, less the frame's room and an entry's padding.
+pub(crate) fn hung_left(box_left: f32) -> f32 {
+    box_left + SELECT_PAD - HUNG_IN - HUNG_PAD
+}
+
+/// The first of `len` entries a list that hangs shows when it holds `n` of
+/// them: from its top, as far down as keeps the keyboard's `cursor` in
+/// sight.
+pub(crate) fn hung_first(cursor: Option<usize>, n: usize, len: usize) -> usize {
+    (cursor.unwrap_or(0) + 1).saturating_sub(n).min(len.saturating_sub(n))
+}
+
+/// The list that hangs open from a closed list's box inside a modal, as
+/// the MP3 tab's two sheets hang theirs, in `frame` ([`hung_frame`]): the
+/// panel's fill in the accent's hairline with the canvas's shadow, `n`
+/// entries [`HUNG_ROW_H`] tall 2 points in, from entry `first` of the
+/// list's `len`; the keyboard's `cursor` filled in the accent, another
+/// raised under the pointer, with the hand, where `id_of` gives the entry
+/// an id — none takes nothing, a line that picks nothing. Holding fewer
+/// than its all, it shows the kit's thumb at rest at its right, where it
+/// stands among them ([`list_thumb`]), in a gutter of its own the entries
+/// and their cursor stop short of ([`HUNG_GUTTER`]).
+/// `words(ui, k, room, on)` paints entry `k`'s words in `room`, the entry
+/// less its padding, `on` while it is the cursor's, which wears the ink on
+/// the accent. The list is the page's keys', as egui's own popup is not (it
+/// closes on a click outside it and takes keys of its own); the page says
+/// what a click off its entries does. The entry a click landed on.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hung_list(
+    ui: &Ui,
+    frame: Rect,
+    first: usize,
+    n: usize,
+    len: usize,
+    cursor: Option<usize>,
+    id_of: impl Fn(usize) -> Option<Id>,
+    pal: &Pal,
+    mut words: impl FnMut(&Ui, usize, Rect, bool),
+) -> Option<usize> {
+    ui.painter().add(lifted().as_shape(frame, square()));
+    ui.painter().rect_filled(frame, square(), pal.panel);
+    ui.painter().rect_stroke(frame, square(), Stroke::new(1.0, pal.accent), StrokeKind::Inside);
+    let gutter = hung_gutter(n, len);
+    let mut picked = None;
+    for k in first..first + n {
+        let top = frame.min.y + HUNG_IN + (k - first) as f32 * HUNG_ROW_H;
+        let row = Rect::from_min_size(pos2(frame.min.x + HUNG_IN, top), vec2((frame.width() - 2.0 * HUNG_IN - gutter).max(1.0), HUNG_ROW_H));
+        let response = id_of(k).map(|id| hand(ui.interact(row, id, Sense::click())));
+        let on = cursor == Some(k);
+        if on {
+            ui.painter().rect_filled(row, CornerRadius::same(2), pal.accent);
+        } else if response.as_ref().is_some_and(Response::hovered) {
+            ui.painter().rect_filled(row, CornerRadius::same(2), pal.raised);
+        }
+        words(ui, k, row.shrink2(vec2(HUNG_PAD, 0.0)), on);
+        if response.is_some_and(|r| r.clicked()) {
+            picked = Some(k);
+        }
+    }
+    if n < len {
+        // The thumb in the middle of its gutter, as far in from the frame's
+        // top and foot as from its sides.
+        let pane = frame.shrink(HUNG_IN + (gutter - THUMB_W) / 2.0);
+        list_thumb(ui, pane, n, len, first, pal);
+    }
+    picked
+}
+
+/// [`hung_list`] on a layer of its own over the modal `parent`'s, so it
+/// hangs over the modal's lower rows past its body's view, over the window
+/// whichever of the two was last pressed (egui raises an area pressed on to
+/// the top of its order): what the list takes is its own, a press beside it
+/// the modal's. Its whole frame is its own too: a press on its thumb, on
+/// the gutter the thumb stands in or on the frame's edge, off its entries,
+/// takes nothing and never reaches the modal's row hidden under it. It
+/// shows `n` of its `len` entries from the one that keeps the `cursor` in
+/// sight ([`hung_first`]), and never more than stand whole inside the
+/// modal's frame, over its pinned foot ([`hung_floor`]): an entry that
+/// would reach past them is left out, as a list's frame drawn over the
+/// window's edge or its buttons would hide them. Size the list with
+/// [`hung_floor`] so its width keeps the thumb's gutter it then needs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hung_over(
+    ui: &Ui,
+    id: Id,
+    parent: Id,
+    frame: Rect,
+    cursor: Option<usize>,
+    n: usize,
+    len: usize,
+    id_of: impl Fn(usize) -> Option<Id>,
+    pal: &Pal,
+    words: impl FnMut(&Ui, usize, Rect, bool),
+) -> Option<usize> {
+    let ctx = ui.ctx().clone();
+    let n = hung_floor(ui, parent).map_or(n, |floor| n.min(hung_fits(frame.min.y, floor)));
+    if n == 0 {
+        return None;
+    }
+    let frame = hung_frame(frame.min, frame.width(), n);
+    let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(frame.min).constrain(false).fade_in(false);
+    let first = hung_first(cursor, n, len);
+    let shown = area.show(&ctx, |ui| {
+        // Made before its entries, which so take their own presses over it:
+        // egui gives a press to the topmost layer with a control under it,
+        // and with nothing of the list's there that was the modal's row
+        // beneath, whose setting it turned unseen.
+        let _ = ui.interact(frame, id.with("frame"), Sense::click());
+        hung_list(ui, frame, first, n, len, cursor, id_of, pal, words)
+    });
+    ctx.set_sublayer(egui::LayerId::new(egui::Order::Foreground, parent), egui::LayerId::new(egui::Order::Foreground, id));
+    shown.inner
+}
+
+/// A list's thumb at `pane`'s right that the wheel moves and that takes
+/// nothing itself (the MP3 tab's logs): the kit's thumb at rest,
+/// [`THUMB_W`] wide, as long as the share of its `len` lines its `rows`
+/// show and no shorter than [`THUMB_MIN`], standing where the view does,
+/// `first` the line at its top.
+pub(crate) fn list_thumb(ui: &Ui, pane: Rect, rows: usize, len: usize, first: usize, pal: &Pal) {
+    let h = (pane.height() * rows as f32 / len.max(1) as f32).max(THUMB_MIN).min(pane.height());
+    let travel = pane.height() - h;
+    let top = pane.min.y + travel * first as f32 / len.saturating_sub(rows).max(1) as f32;
+    let rect = Rect::from_min_size(pos2(pane.max.x - THUMB_W, top), vec2(THUMB_W, h));
+    ui.painter().rect_filled(rect, CornerRadius::same((THUMB_W / 2.0) as u8), pal.dim.gamma_multiply(THUMB_REST));
+}
+
+/// A card's frame as the MP3 tab's boards draw every card: a 1-point
+/// hairline in the edge colour round `rect`, never filled and never
+/// changing.
+pub(crate) fn hairline(ui: &Ui, rect: Rect, pal: &Pal) {
+    ui.painter().rect_stroke(rect, square(), Stroke::new(1.0, pal.edge), StrokeKind::Inside);
+}
+
+/// A card's head's row: the name's 16 points on 22, and the least room
+/// between the name and what stands at its right.
+pub(crate) const HEAD_H: f32 = 22.0;
+const HEAD_CLEAR: f32 = 16.0;
+
+/// A card's head, a [`HEAD_H`] row from `at`, its top left, `w` wide:
+/// `name` in the 16-point semibold at its left and, dim in the monospace at
+/// its right on the name's baseline, `right` (a port, a serial, a drive and
+/// its size), left out whole where it would come within 16 points of the
+/// name. Returns where the next row starts.
+pub(crate) fn card_head(ui: &Ui, at: Pos2, w: f32, name: &str, right: &str, pal: &Pal) -> f32 {
+    let mid = at.y + HEAD_H / 2.0;
+    let right_w = width_of(ui, right, mono(12.5));
+    let name_w = width_of(ui, name, strong(16.0));
+    let keep = !right.is_empty() && name_w + HEAD_CLEAR + right_w <= w;
+    let room = if keep { w - right_w - HEAD_CLEAR } else { w };
+    text(ui, pos2(at.x, mid), name, strong(16.0), pal.text, room, Align2::LEFT_CENTER);
+    if keep {
+        // A line centred on a point stands on the UI face's baseline at its
+        // own size there, the smaller the higher: the figure is centred as
+        // far under the name's middle as stands it on the name's.
+        let at = pos2(at.x + w, mid + centred_baseline(ui, 16.0) - centred_baseline(ui, 12.5));
+        text(ui, at, right, mono(12.5), pal.dim, right_w + 1.0, Align2::RIGHT_CENTER);
+    }
+    at.y + HEAD_H
+}
+
+/// A rule across a card or a sheet from `left` to `right` (a card's
+/// Details, a sheet's help): a hairline in the edge colour, on the pixel
+/// row from `top`.
+pub(crate) fn rule(ui: &Ui, left: f32, right: f32, top: f32, pal: &Pal) {
+    ui.painter().hline(left..=right, top + 0.5, Stroke::new(1.0, pal.edge));
+}
+
+/// A dim line's row: an explanation that never wraps, a choice's facts.
+pub(crate) const DIM_LINE_H: f32 = 18.0;
+
+/// One dim line from `at`, its row's top left, `w` wide, as the MP3 tab
+/// sets every explanation that never wraps (the board's identity under
+/// its head, the Advanced sheet's facts and notes): 13 points on
+/// [`DIM_LINE_H`], its figures in the monospace (`also` among them), cut
+/// with an ellipsis. Returns where the next row starts.
+pub(crate) fn dim_line(ui: &Ui, at: Pos2, w: f32, words: &str, also: &[&str], pal: &Pal) -> f32 {
+    let parts = figured(words, also, body(13.0), mono(12.5), pal.dim);
+    runs(ui, pos2(at.x, at.y + DIM_LINE_H / 2.0), &parts, w.max(1.0), Align2::LEFT_CENTER);
+    at.y + DIM_LINE_H
+}
+
+/// The cells' scan widget leading a line, in the desk's look: ten
+/// [`meter`] segments 5 by 10 points, 2 apart, `lit` of them in the ok
+/// green, from `at`, the line's left middle; and after them its `share` (a
+/// percentage) dim in the monospace, standing on `share_on`, its words'
+/// baseline ([`Para::baseline`]), and no further than `end`. Where the
+/// line's words start: 10 points after the last of them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scan_lead(ui: &Ui, at: Pos2, lit: usize, share: Option<&str>, share_on: f32, end: f32, pal: &Pal) -> f32 {
+    let bar = meter(ui, at, 10, lit, vec2(5.0, 10.0), 2.0, pal.ok, pal);
+    let mut x = bar.max.x + 10.0;
+    if let Some(share) = share {
+        let mid = mid_on(ui, share_on, 12.5);
+        x = text(ui, pos2(x, mid), share, mono(12.5), pal.dim, (end - x).max(1.0), Align2::LEFT_CENTER).max.x + 10.0;
+    }
+    x
+}
+
+impl Para {
+    /// Lines `h` points apart whatever the first run's size: a sentence that
+    /// opens on a figure ("21.4 of 59.6 GB used", a port) keeps its words'
+    /// leading rather than the monospace's smaller one.
+    pub(crate) fn spaced(self, h: f32) -> Para {
+        let first = self.parts.first().map_or(h, |(_, font, _)| font.size);
+        Para { line: h / first.max(1.0), ..self }
+    }
+}
+
+/// Where a line set centred on its middle ([`text`], [`runs`], a
+/// [`text_button`]'s words) whose first run is `size` points stands that
+/// middle for its baseline to fall on `baseline`: a centred line stands on
+/// the UI face's baseline at its size, under its middle, so words at a
+/// row's right, a scan's share or a button beside a line stand on the
+/// baseline of the prose at its left ([`Para::baseline`]) — the pixel egui
+/// rounds the prose's to, whatever the face's ascent and whichever faces
+/// the two are set in.
+pub(crate) fn mid_on(ui: &Ui, baseline: f32, size: f32) -> f32 {
+    baseline - centred_baseline(ui, size)
 }
 
 #[cfg(test)]
@@ -3437,6 +4744,478 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_foot_stands_whole_under_the_bodys_view_while_a_long_body_scrolls_over_it() {
+        let ctx = context();
+        let id = Id::new("probe-footed");
+        for (h, rows) in [(500.0, 3), (300.0, 30)] {
+            let size = vec2(600.0, h);
+            let over = Rect::from_min_size(Pos2::ZERO, size);
+            let mut run = |ui: &mut Ui| {
+                let pal = Pal::now();
+                let dialog = Dialog::new(id, over, 400.0, "Sheet").foot(54.0);
+                let room = dialog.body_room(ui);
+                assert!(room.y <= h - 32.0 - 2.0 * MODAL_PAD - TITLE_H - MODAL_GAP - 54.0 + 0.01, "the foot's room is the body's no more: {room:?}");
+                let _ = dialog.show_footed(
+                    ui,
+                    &pal,
+                    |ui| {
+                        for k in 0..rows {
+                            line(ui, 24.0, &format!("row {k:02}"), body(14.0), pal.text);
+                        }
+                    },
+                    |ui, _| {
+                        ui.add_space(20.0);
+                        line(ui, 34.0, "FOOT", body(14.0), pal.text);
+                    },
+                );
+            };
+            let mut out = pass(&ctx, size, Vec::new(), &mut run);
+            for _ in 0..2 {
+                out = pass(&ctx, size, Vec::new(), &mut run);
+            }
+            let clipped = |words: &str| {
+                out.shapes.iter().find_map(|c| match &c.shape {
+                    Shape::Text(t) if t.galley.text() == words => Some((Rect::from_min_size(t.pos, t.galley.size()), c.clip_rect)),
+                    _ => None,
+                })
+            };
+            let (foot, clip) = clipped("FOOT").expect("the foot drawn");
+            assert!(clip.contains_rect(foot) && foot.max.y <= h - 16.0 - MODAL_PAD + 0.5, "{h}: the foot whole in the window: {foot:?} in {clip:?}");
+            let (first, view) = clipped("row 00").expect("the body drawn");
+            assert!(first.min.y >= view.min.y - 0.5, "{h}: the body from its top");
+            if rows == 30 {
+                assert!(view.max.y <= foot.min.y - 20.0 + 0.5, "{h}: the scrolled body's view ends over the foot's room: {view:?} over {foot:?}");
+            } else {
+                // Row 00's middle 12 under the body's top; the foot's line
+                // 20 under the three rows, its middle 17 into it.
+                let want = first.center().y - 12.0 + 3.0 * 24.0 + 20.0 + 17.0;
+                assert!((foot.center().y - want).abs() < 1.0, "a short body: the foot right under it: {first:?} {foot:?}");
+            }
+        }
+    }
+
+    /// Every one-line text a pass drew with where it stands and what
+    /// clipped it.
+    fn clipped_texts(out: &egui::FullOutput) -> Vec<(String, Rect, Rect)> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.rows.len() == 1 => Some((t.galley.text().to_string(), Rect::from_min_size(t.pos, t.galley.size()), c.clip_rect)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one-line texts a pass drew torn by their clip's foot or its top:
+    /// in view in part, not whole.
+    fn torn(out: &egui::FullOutput) -> Vec<String> {
+        let cut = |r: Rect, edge: f32| edge > r.min.y + 0.5 && edge < r.max.y - 0.5;
+        clipped_texts(out).into_iter().filter(|(_, r, clip)| clip.intersects(*r) && (cut(*r, clip.max.y) || cut(*r, clip.min.y))).map(|(t, ..)| t).collect()
+    }
+
+    #[test]
+    fn a_pinned_head_stands_whole_over_the_bodys_view_wherever_the_body_is_scrolled() {
+        let ctx = context();
+        let id = Id::new("probe-headed");
+        let size = vec2(600.0, 340.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let at = Cell::new(0usize);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let dialog = Dialog::new(id, over, 400.0, "Sheet").head(44.0).foot(54.0);
+            let room = dialog.body_room(ui);
+            assert!(room.y <= size.y - 32.0 - 2.0 * MODAL_PAD - TITLE_H - MODAL_GAP - 44.0 - 54.0 + 0.01, "the head's room is the body's no more: {room:?}");
+            let _ = dialog.show_pinned(
+                ui,
+                &pal,
+                |ui| {
+                    line(ui, 30.0, "HEAD", body(14.0), pal.text);
+                },
+                |ui| {
+                    for k in 0..30 {
+                        let row = line(ui, 24.0, &format!("row {k:02}"), body(14.0), pal.text);
+                        if k == at.get() {
+                            reveal(ui, id, k, row);
+                        }
+                    }
+                },
+                |ui, _| {
+                    ui.add_space(20.0);
+                    line(ui, 34.0, "FOOT", body(14.0), pal.text);
+                },
+            );
+        };
+        let settle = |run: &mut dyn FnMut(&mut Ui)| {
+            let mut out = pass(&ctx, size, Vec::new(), run);
+            for _ in 0..2 {
+                out = pass(&ctx, size, Vec::new(), run);
+            }
+            out
+        };
+        let out = settle(&mut run);
+        let find = |out: &egui::FullOutput, words: &str| clipped_texts(out).into_iter().find(|(t, ..)| t == words).unwrap_or_else(|| panic!("{words:?} drawn"));
+        let (_, head, clip) = find(&out, "HEAD");
+        assert!(clip.contains_rect(head), "the head whole: {head:?} in {clip:?}");
+        let (_, first, view) = find(&out, "row 00");
+        assert!(first.min.y >= head.max.y && view.min.y >= head.max.y - 0.5, "the body under the head: {first:?} {view:?}");
+        // The keys at the last row: the body scrolls under the head, which
+        // stands where it stood, whole.
+        at.set(29);
+        let out = settle(&mut run);
+        let (_, moved, clip) = find(&out, "HEAD");
+        assert!((moved.min.y - head.min.y).abs() < 0.5 && clip.contains_rect(moved), "the head held whole: {moved:?} in {clip:?}");
+        let (_, last, view) = find(&out, "row 29");
+        assert!(view.contains_rect(last) && view.min.y >= moved.max.y - 0.5, "the last row whole under the head: {last:?} in {view:?}");
+        let (_, gone, view) = find(&out, "row 00");
+        assert!(!view.intersects(gone), "the first rows scrolled away under it");
+    }
+
+    #[test]
+    fn a_scrolled_bodys_view_ends_between_its_rows_and_the_keys_bring_a_row_in_tearing_none() {
+        let ctx = context();
+        let id = Id::new("probe-rows");
+        // A body 180 points tall for rows 28 points apart: its foot falls
+        // inside the seventh.
+        let size = vec2(600.0, 300.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let at = Cell::new(0usize);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let _ = Dialog::new(id, over, 400.0, "Rows").show(ui, &pal, |ui| {
+                for k in 0..30 {
+                    if k > 0 {
+                        ui.add_space(4.0);
+                    }
+                    let row = line(ui, 24.0, &format!("row {k:02}"), body(14.0), pal.text);
+                    if k == at.get() {
+                        reveal(ui, id, k, row);
+                    }
+                }
+            });
+        };
+        let settle = |run: &mut dyn FnMut(&mut Ui)| {
+            let mut out = pass(&ctx, size, Vec::new(), run);
+            for _ in 0..2 {
+                out = pass(&ctx, size, Vec::new(), run);
+            }
+            out
+        };
+        let out = settle(&mut run);
+        let view = |out: &egui::FullOutput| clipped_texts(out).into_iter().find(|(t, ..)| t == "row 00").map(|(.., clip)| clip).expect("the body drawn");
+        let shown = |out: &egui::FullOutput| clipped_texts(out).into_iter().filter(|(t, r, clip)| t.starts_with("row ") && clip.contains_rect(*r)).map(|(t, ..)| t).collect::<Vec<_>>();
+        assert!(torn(&out).is_empty(), "at its top, no row torn: {:?}", torn(&out));
+        assert_eq!(shown(&out).len(), 6, "six rows whole, the seventh under the view's foot: {:?}", shown(&out));
+        let full = size.y - 32.0 - 2.0 * MODAL_PAD - TITLE_H - MODAL_GAP;
+        assert!(view(&out).height() < full - 1.0, "the view ended over the row it would cut: {:?}", view(&out));
+        // The keys far down and back up: each row comes in whole, none torn
+        // at either end of the view.
+        for k in [20, 29, 3, 0] {
+            at.set(k);
+            let out = settle(&mut run);
+            let row = format!("row {k:02}");
+            assert!(shown(&out).contains(&row), "{row} in view: {:?}", shown(&out));
+            assert!(torn(&out).is_empty(), "at {row}, no row torn: {:?}", torn(&out));
+        }
+        // At rest the pass asks for no other: no repaint loop.
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+        assert_eq!(delay, Some(std::time::Duration::MAX), "a body at rest asks for no pass of its own");
+    }
+
+    #[test]
+    fn a_body_whose_rows_say_nothing_scrolls_a_row_at_a_time_as_the_keys_step_past_its_foot() {
+        let ctx = context();
+        let id = Id::new("probe-silent-rows");
+        let size = vec2(600.0, 300.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let at = Cell::new(0usize);
+        let (first, cursor) = (Cell::new(Rect::NOTHING), Cell::new(Rect::NOTHING));
+        // Rows set at places of the body's own, as the Users room's grant
+        // sets its libraries: none says where it is.
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let _ = Dialog::new(id, over, 400.0, "Rows").show(ui, &pal, |ui| {
+                let w = ui.available_width();
+                for k in 0..30 {
+                    let (_, rect) = ui.allocate_space(vec2(w, 30.0));
+                    if k == 0 {
+                        first.set(rect);
+                    }
+                    if k == at.get() {
+                        cursor.set(rect);
+                        reveal(ui, id, k, rect);
+                    }
+                }
+            });
+        };
+        let settle = |run: &mut dyn FnMut(&mut Ui)| {
+            for _ in 0..3 {
+                let _ = pass(&ctx, size, Vec::new(), run);
+            }
+        };
+        settle(&mut run);
+        let home = first.get().min.y;
+        let foot = ctx.data(|d| d.get_temp::<BodyView>(id.with("view"))).expect("the body's view").view.max.y;
+        let mut was = 0.0;
+        let mut moved = 0;
+        for k in 1..16 {
+            at.set(k);
+            settle(&mut run);
+            let scrolled = home - first.get().min.y;
+            assert!(cursor.get().max.y <= foot + 0.5, "row {k} whole in view: {:?} over {foot}", cursor.get());
+            assert!(scrolled - was <= 30.0 + 0.5, "a step down moves the body a row at most, not a page: {was} then {scrolled} at row {k}");
+            if scrolled > was + 0.5 {
+                moved += 1;
+            }
+            was = scrolled;
+        }
+        assert!(moved >= 8, "the body followed the keys down: {moved} steps moved it");
+    }
+
+    /// The ink of the text `words` a pass drew, and what clipped it.
+    fn ink_of(out: &egui::FullOutput, words: &str) -> (Rect, Rect) {
+        out.shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == words => Some((t.visual_bounding_rect(), c.clip_rect)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{words:?} drawn: {:?}", texts(out)))
+    }
+
+    /// A modal's body wheeled as far down as it goes, and the passes egui
+    /// eases the wheel over.
+    fn wheel_to_end(ctx: &egui::Context, size: Vec2, run: &mut dyn FnMut(&mut Ui)) -> egui::FullOutput {
+        let turn = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -5000.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::default() };
+        let _ = pass(ctx, size, vec![egui::Event::PointerMoved(pos2(size.x / 2.0, size.y / 2.0)), turn], run);
+        for _ in 0..60 {
+            let _ = pass(ctx, size, Vec::new(), run);
+        }
+        pass(ctx, size, vec![egui::Event::PointerGone], run)
+    }
+
+    #[test]
+    fn a_fields_box_stands_whole_under_a_view_whose_top_cuts_only_its_label() {
+        // The Torrents room's entries at the GUI's floor: the body scrolls
+        // only a few points, its view's top through the field's label. The
+        // label goes; its box, with the caret, stays in sight.
+        let ctx = context();
+        let id = Id::new("probe-field-cut");
+        let size = vec2(600.0, 300.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let (boxed, caret) = (Cell::new(Rect::NOTHING), Cell::new(None));
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let dialog = Dialog::new(id, over, 400.0, "Map vinyl");
+            // Half a label more than the view holds: the body at its end has
+            // its view's top through the label's capitals.
+            let room = dialog.body_room(ui).y;
+            let _ = dialog.show(ui, &pal, |ui| {
+                let typed = field(ui, Id::new("probe-path"), "PATH AS SEEN", &Input::new("/srv", 4).focused(true, ""), &pal);
+                boxed.set(typed.response.rect);
+                caret.set(typed.caret);
+                ui.add_space(room - FIELD_ROW_H + LABEL_H / 2.0);
+            });
+        };
+        for _ in 0..3 {
+            let _ = pass(&ctx, size, Vec::new(), &mut run);
+        }
+        let out = wheel_to_end(&ctx, size, &mut run);
+        let view = ctx.data(|d| d.get_temp::<BodyView>(id.with("view"))).expect("the body's view").view;
+        let (label, _) = ink_of(&out, "PATH AS SEEN");
+        assert!(label.min.y < view.min.y, "the body scrolled into its label: {label:?} over {view:?}");
+        assert!(view.min.y >= label.max.y - 0.5, "the label left out whole, none of its capitals torn: {label:?} under {view:?}");
+        let boxed = boxed.get();
+        assert!(view.expand(0.5).contains_rect(boxed), "the box whole in view: {boxed:?} in {view:?}");
+        let caret = caret.get().expect("the focused field's caret");
+        assert!(view.contains(caret - vec2(0.0, 1.0)), "its caret in sight, where the candidates float: {caret:?} in {view:?}");
+    }
+
+    #[test]
+    fn a_line_shows_whole_where_the_views_foot_cuts_only_the_empty_room_under_its_words() {
+        // The Federation mint at the GUI's default size: the view's foot
+        // reached a line of ticks' room under its boxes, never its boxes or
+        // its words, and the line went. A label, a check line, a line of
+        // ticks and a list's row each say where their words are, not their
+        // row's room, so each stands whole there; the keyboard's check
+        // line, its look as tall as its row, goes whole instead.
+        let ctx = context();
+        let size = vec2(600.0, 300.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        for (k, (piece, row_h)) in [("label", LABEL_H), ("check", HIT), ("ticks", 32.0), ("list", 34.0), ("focused", HIT)].into_iter().enumerate() {
+            let id = Id::new("probe-room-under").with(k);
+            let mut run = |ui: &mut Ui| {
+                let pal = Pal::now();
+                let dialog = Dialog::new(id, over, 400.0, "Rows");
+                let room = dialog.body_room(ui).y;
+                let _ = dialog.show(ui, &pal, |ui| {
+                    // The row's foot 2 points under the view's.
+                    ui.add_space(room - row_h + 2.0);
+                    match piece {
+                        "label" => {
+                            label(ui, "LIBRARIES", &pal);
+                        }
+                        "check" | "focused" => {
+                            let _ = check_line(ui, Id::new("probe-check"), true, "server audio", "", piece == "focused", &pal);
+                        }
+                        "ticks" => {
+                            let items = [("kids".to_string(), false), ("radio-archive".to_string(), true)];
+                            let _ = tick_grid(ui, Id::new("probe-ticks"), &items, None, 3, row_h, &pal);
+                        }
+                        _ => {
+                            let (rect, _) = list_row(ui, Id::new("probe-list"), row_h, false, &pal);
+                            text(ui, pos2(rect.min.x + 12.0, rect.center().y), "b11c0d0e0b", mono(12.5), pal.text, rect.width(), Align2::LEFT_CENTER);
+                        }
+                    }
+                    ui.add_space(60.0);
+                });
+            };
+            let mut out = pass(&ctx, size, Vec::new(), &mut run);
+            for _ in 0..2 {
+                out = pass(&ctx, size, Vec::new(), &mut run);
+            }
+            let words = match piece {
+                "label" => "LIBRARIES",
+                "check" | "focused" => "server audio",
+                "ticks" => "radio-archive",
+                _ => "b11c0d0e0b",
+            };
+            let (ink, clip) = ink_of(&out, words);
+            if piece == "focused" {
+                assert!(clip.max.y <= ink.min.y + 0.5, "the keyboard's line goes whole, its look never torn: {ink:?} under {clip:?}");
+            } else {
+                assert!(clip.expand(0.5).contains_rect(ink), "{piece}: its words whole in view: {ink:?} in {clip:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_views_foot_ends_over_a_forms_button_whose_words_it_would_cut_and_never_hides_a_gates() {
+        // Federation's new ticket at the GUI's default size: the view's foot
+        // ran a few points into its buttons, a sliver of them under the
+        // ticket. A form's buttons are a row down to their words: a view
+        // whose foot would cut the words ends over the buttons; one whose
+        // foot falls under the words lets them stand, read and clicked; a
+        // gate's answers are never hidden for the view's foot.
+        let ctx = context();
+        let size = vec2(600.0, 300.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        for (k, (gate_foot, shown)) in [(false, 6.0), (false, 28.0), (true, 6.0)].into_iter().enumerate() {
+            let id = Id::new("probe-foot-cut").with(k);
+            let button = Cell::new(Rect::NOTHING);
+            let mut run = |ui: &mut Ui| {
+                let pal = Pal::now();
+                let dialog = Dialog::new(id, over, 400.0, "Ticket");
+                let room = dialog.body_room(ui).y;
+                let _ = dialog.show(ui, &pal, |ui| {
+                    // The buttons' top `shown` points over the view's foot.
+                    ui.add_space(room - shown);
+                    button.set(Rect::from_min_size(ui.cursor().min, vec2(1.0, FORM_BUTTON_H)));
+                    if gate_foot {
+                        let _ = answers(ui, Id::new("probe-answers"), &Answers { keep: "Keep", lead: false, go: Some("Remove"), also: &[] }, &pal);
+                    } else {
+                        let _ = foot(ui, Id::new("probe-foot"), &[], &[("Done", true)], None, &pal);
+                    }
+                    ui.add_space(60.0);
+                });
+            };
+            for _ in 0..3 {
+                let _ = pass(&ctx, size, Vec::new(), &mut run);
+            }
+            let view = ctx.data(|d| d.get_temp::<BodyView>(id.with("view"))).expect("the body's view").view;
+            let top = button.get().min.y;
+            if k == 0 {
+                assert!(view.max.y <= top + 0.5, "no sliver of the button: the view ends over it: {view:?} over {top}");
+            } else {
+                let why = if gate_foot { "a gate's answers" } else { "the words whole" };
+                assert!(view.max.y >= top + shown - 0.5, "{why}: the buttons stand under the view's foot: {view:?} over {top}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_hung_over_a_modal_stops_inside_its_frame_over_its_pinned_foot() {
+        let ctx = context();
+        let size = vec2(600.0, 400.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        for footed in [true, false] {
+            let id = Id::new("probe-hung-over").with(footed);
+            let (window, floor, foot) = (Cell::new(Rect::NOTHING), Cell::new(0.0), Cell::new(Rect::NOTHING));
+            let mut run = |ui: &mut Ui| {
+                let pal = Pal::now();
+                let dialog = Dialog::new(id, over, 400.0, "Sheet").foot(if footed { 54.0 } else { 0.0 });
+                let shown = dialog.show_footed(
+                    ui,
+                    &pal,
+                    |ui| {
+                        for k in 0..6 {
+                            line(ui, 24.0, &format!("row {k}"), body(14.0), pal.text);
+                        }
+                    },
+                    |ui, _| {
+                        ui.add_space(20.0);
+                        foot.set(line(ui, 34.0, "FOOT", body(14.0), pal.text));
+                    },
+                );
+                window.set(shown.window);
+                floor.set(hung_floor(ui, id).expect("the modal's floor"));
+                // Ten entries hung from under the body's first row: more
+                // than stand over the foot or inside the frame.
+                let top = shown.window.min.y + MODAL_PAD + TITLE_H + MODAL_GAP + 24.0;
+                let frame = hung_frame(pos2(shown.window.min.x + 120.0, top), 160.0, 10);
+                let words = |ui: &Ui, k: usize, room: Rect, _on: bool| {
+                    text(ui, room.left_center(), &format!("entry {k}"), body(14.0), pal.text, room.width(), Align2::LEFT_CENTER);
+                };
+                let _ = hung_over(ui, id.with("list"), id, frame, Some(0), 10, 10, |_| None, &pal, words);
+            };
+            let mut out = pass(&ctx, size, Vec::new(), &mut run);
+            for _ in 0..2 {
+                out = pass(&ctx, size, Vec::new(), &mut run);
+            }
+            let entries: Vec<Rect> = clipped_texts(&out).into_iter().filter(|(t, ..)| t.starts_with("entry ")).map(|(_, r, _)| r).collect();
+            assert!(!entries.is_empty() && entries.len() < 10, "{footed}: some entries, not all: {}", entries.len());
+            let lowest = entries.iter().map(|r| r.max.y).fold(0.0, f32::max);
+            assert!(lowest <= floor.get() && floor.get() <= window.get().max.y - MODAL_PAD + 0.5, "{footed}: inside the frame: {lowest} over {} in {:?}", floor.get(), window.get());
+            if footed {
+                assert!(floor.get() <= foot.get().min.y - 20.0 + 0.5, "over the pinned foot's room: {} over {:?}", floor.get(), foot.get());
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_that_hangs_shows_the_entries_that_keep_its_cursor_in_sight() {
+        assert_eq!(hung_first(None, 5, 8), 0);
+        assert_eq!(hung_first(Some(2), 5, 8), 0, "the cursor in the first five: from the top");
+        assert_eq!(hung_first(Some(5), 5, 8), 1, "the cursor just past them: the list a step down");
+        assert_eq!(hung_first(Some(7), 5, 8), 3, "on the last: the last five");
+        assert_eq!(hung_first(Some(7), 10, 8), 0, "room for all: from the top");
+    }
+
+    #[test]
+    fn a_lit_field_inks_its_words_in_the_accent_only_while_it_has_the_keyboard() {
+        let ctx = context();
+        let size = vec2(400.0, 200.0);
+        let pal = Pal::now();
+        for (focused, lit, ink) in [(true, true, pal.accent), (false, true, pal.text), (true, false, pal.text)] {
+            let mut run = |ui: &mut Ui| {
+                let input = Input::new("Car music", 9).focused(focused, "");
+                let input = if lit { input.lit() } else { input };
+                let _ = field_box(ui, Id::new("probe-lit"), Rect::from_min_size(pos2(20.0, 20.0), vec2(300.0, FIELD_H)), &input, &Pal::now());
+            };
+            let out = pass(&ctx, size, Vec::new(), &mut run);
+            let colors: Vec<Color32> = out
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    Shape::Text(t) if t.galley.text() == "Car music" => Some(t.galley.job.sections.iter().map(|s| s.format.color).collect()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            assert!(!colors.is_empty() && colors.iter().all(|c| *c == ink), "focused {focused}, lit {lit}: {colors:?}");
+        }
+    }
+
+    #[test]
     fn an_empty_table_says_so_on_its_first_rows_line_and_takes_no_more_room() {
         let ctx = context();
         let size = vec2(600.0, 400.0);
@@ -3758,9 +5537,30 @@ mod tests {
         let (words, figure) = (all("words"), all("4096"));
         let (b_words, b_figure) = (words[0].1, figure[0].1);
         assert!((b_words - b_figure).abs() <= 1.0, "a monospace line centred beside words sits on their baseline: {b_words} {b_figure}");
-        // The LED: under the line's middle, over the baseline, and higher
-        // on capitals than on small letters.
-        assert!(leds[0] > 200.0 + 2.0 && leds[0] < b_words - 5.0, "on the small letters' middle: {leds:?}, baseline {b_words}");
+        // The LED: on the middle of the small letters' ink, as "words" drew
+        // them ("w", "o", "r" and "s"; the "d" reaches higher), within a
+        // point, the band's edges and the baseline each landing on a pixel —
+        // not on the line's middle, which the room a face leaves for accents
+        // over them puts several points higher in Segoe UI, and the room
+        // Calibri leaves under them 4 lower; and higher on capitals than on
+        // small letters.
+        let small = out
+            .shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == "words" => {
+                    let row = &t.galley.rows[0];
+                    let ink = row.row.glyphs.iter().filter(|g| g.chr != 'd').map(|g| {
+                        let top = t.pos.y + row.pos.y + g.pos.y + g.uv_rect.offset.y;
+                        (top, top + g.uv_rect.size.y)
+                    });
+                    Some(ink.fold((f32::MAX, f32::MIN), |(a, b), (top, foot)| (a.min(top), b.max(foot))))
+                }
+                _ => None,
+            })
+            .expect("\"words\" drawn");
+        let middle = (small.0 + small.1) / 2.0;
+        assert!((leds[0] - middle).abs() <= 1.0, "on the small letters' middle: {leds:?}, their ink {small:?}, baseline {b_words}");
         assert!(leds[1] < leds[0], "a capital's middle is higher: {leds:?}");
     }
 
@@ -4497,5 +6297,463 @@ mod tests {
             _ => None,
         });
         assert_eq!(galley.expect("the title").rows.len(), 1, "one line beside the close");
+    }
+
+    /// The runs of `s` [`figured`] sets in the figure face.
+    fn figures_in(s: &str, also: &[&str]) -> Vec<String> {
+        let figure = mono(12.5);
+        let parts = figured(s, also, body(13.5), figure.clone(), Color32::WHITE);
+        let whole: String = parts.iter().map(|(s, ..)| s.as_str()).collect();
+        assert_eq!(whole, s, "the words kept whole, spaces and all");
+        parts.into_iter().filter(|(_, font, _)| *font == figure).map(|(s, ..)| s).collect()
+    }
+
+    #[test]
+    fn a_sentences_figures_are_set_in_the_monospace_and_its_words_are_not() {
+        assert_eq!(figures_in("21.4 of 59.6 GB used · 1,284 tracks", &[]), ["21.4", "59.6", "1,284"]);
+        assert_eq!(figures_in("Update available · v0.13.0 → v0.14.0", &[]), ["v0.13.0", "v0.14.0"]);
+        assert_eq!(figures_in("v0.14.0-5-g4e94418 (dev build)", &[]), ["v0.14.0-5-g4e94418"], "a dev build whole");
+        let port = "COM3 · CH9102 · serial 5B1F007751 · 921600 baud";
+        assert_eq!(figures_in(port, &["COM3"]), ["COM3", "5B1F007751", "921600"], "a port only by name; a chip is a word");
+        assert_eq!(figures_in("mstream-mp3-player v0.14.0 · QIO · ELF fa4e0000.", &[]), ["v0.14.0", "fa4e0000"], "the full stop left out");
+        assert!(figures_in("M5Stack Core2 · FAT32 · a decade", &[]).is_empty(), "names and words with a digit in them stay words");
+        assert_eq!(figures_in("64 % battery · set at 14:03 (it was 3.2 s off)", &[]), ["64", "14:03", "3.2"]);
+        assert_eq!(figures_in("writing v0.14.0… 62% · about 15 s left", &[]), ["v0.14.0", "62%", "15"], "a percentage with its sign");
+        assert_eq!(figures_in("v0.8.0に更新しました", &[]), ["v0.8.0"], "a figure ends where its script does");
+        // A note's path: the file named for its number keeps its extension
+        // in the words' face, so a cut falls in the words, not in a figure.
+        let note = "EACCES: permission denied, open '/srv/music/2024/07 Track 12.flac' (errno -13)";
+        assert_eq!(figures_in(note, &[]), ["12", "13"], "a path and a file's extension stay words");
+        assert_eq!(figures_in("ELF 11c35a4a.bin · 2026.11.25.log · 1.5e3", &[]), ["11c35a4a", "2026.11.25", "1.5e3"], "a point a letter follows ends a figure, any other joins it");
+        // A name the caller names a figure is one whole, its extension and
+        // all, whatever it starts with; one it does not name keeps the cut.
+        let build = "4MB-merged.bin · v0.8.0 · 1,048,576 B";
+        assert_eq!(figures_in(build, &["4MB-merged.bin"]), ["4MB-merged.bin", "v0.8.0", "1,048,576"], "a file named in `also` whole");
+        assert_eq!(figures_in("0.8.1-rc1.bin, read", &["0.8.1-rc1.bin"]), ["0.8.1-rc1.bin"], "and less the mark it ends on");
+        assert_eq!(figures_in(build, &["firmware.bin"]), ["4MB-merged", "v0.8.0", "1,048,576"], "another file's extension stays a word");
+    }
+
+    #[test]
+    fn a_share_lights_whole_segments_a_sliver_one_and_the_last_only_when_whole() {
+        assert_eq!(fill_lit(0, 114), 0);
+        assert_eq!(fill_lit(1, 114), 1, "a sliver still shows a segment");
+        assert_eq!(fill_lit(359, 114), 41, "the canvas's 21.4 of 59.6 GB");
+        assert_eq!(fill_lit(996, 114), 113, "not quite full never shows full");
+        assert_eq!(fill_lit(1000, 114), 114);
+        assert_eq!(fill_lit(2000, 10), 10, "past the whole is whole, no more");
+    }
+
+    #[test]
+    fn a_text_button_is_its_words_and_answers_the_pointer_only_while_live() {
+        let ctx = context();
+        let size = vec2(500.0, 200.0);
+        let clicked = Cell::new(0);
+        let live = Cell::new(true);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let at = pos2(20.0, 50.0);
+            if text_button(ui, Id::new("probe-text"), at, "Write v0.14.0 again", Some(Lead::Shut), &[], 400.0, live.get(), &pal).clicked() {
+                clicked.set(clicked.get() + 1);
+            }
+        };
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let drawn = texts(&out);
+        let words = drawn.iter().find(|(t, _)| t == "Write v0.14.0 again").expect("its words, the figure's run among them");
+        assert!(words.1.min.x >= 20.0 + LEAD_W - 0.5, "after its lead: {:?}", words.1);
+        let rect = ctx.read_response(Id::new("probe-text")).expect("its target").rect;
+        assert_eq!(rect.height(), TEXT_BUTTON_H);
+        for events in click_events(rect.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(clicked.get(), 1, "a click");
+        let out = pass(&ctx, size, vec![egui::Event::PointerMoved(rect.center())], &mut run);
+        assert_eq!(out.platform_output.cursor_icon, CursorIcon::PointingHand, "the hand over it");
+        live.set(false);
+        for events in click_events(rect.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(clicked.get(), 1, "at rest under something, it takes no click");
+    }
+
+    #[test]
+    fn the_tall_primary_acts_when_enabled_and_says_why_not_otherwise() {
+        let ctx = context();
+        let size = vec2(500.0, 200.0);
+        let rect = Rect::from_min_size(pos2(200.0, 40.0), vec2(180.0, TALL_H));
+        let clicked = Cell::new(0);
+        let enabled = Cell::new(true);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let response = tall_button(ui, Id::new("probe-tall"), rect, "Update ▸", enabled.get(), true, &pal);
+            // The caller's why, while it waits.
+            let response = if enabled.get() { response } else { response.on_hover_text("one board at a time") };
+            if response.clicked() {
+                clicked.set(clicked.get() + 1);
+            }
+        };
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(texts(&out).iter().any(|(t, _)| t == "UPDATE"), "the cells' arrow off, in capitals: {:?}", texts(&out));
+        assert!(tall_button_width_probe(&ctx, "Update ▸", true) > tall_button_width_probe(&ctx, "Update ▸", false), "the pointer's room");
+        for events in click_events(rect.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(clicked.get(), 1);
+        enabled.set(false);
+        for events in click_events(rect.center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(clicked.get(), 1, "disabled: no click");
+        let out = pass(&ctx, size, vec![egui::Event::PointerMoved(rect.center())], &mut run);
+        assert_ne!(out.platform_output.cursor_icon, CursorIcon::PointingHand, "and no hand");
+        // But it still senses the pointer, so the caller's tooltip says why
+        // (in a context of its own: egui shows none where the pointer
+        // rests after a click).
+        let ctx = context();
+        let _ = pass(&ctx, size, vec![egui::Event::PointerMoved(rect.center())], &mut run);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(ctx.read_response(Id::new("probe-tall")).is_some_and(|r| r.hovered()), "the waiting primary under the pointer");
+        assert!(texts(&out).iter().any(|(t, _)| t == "one board at a time"), "its why in the tooltip: {:?}", texts(&out));
+    }
+
+    fn tall_button_width_probe(ctx: &egui::Context, label: &str, enabled: bool) -> f32 {
+        let w = Cell::new(0.0);
+        let _ = pass(ctx, vec2(400.0, 100.0), Vec::new(), &mut |ui| w.set(tall_button_width(ui, label, enabled)));
+        w.get()
+    }
+
+    /// What `measure` gives back of a pass over a room of `size`.
+    fn measured<T: Default>(ctx: &egui::Context, size: Vec2, measure: impl Fn(&Ui) -> T) -> T {
+        let got = std::cell::RefCell::new(T::default());
+        let _ = pass(ctx, size, Vec::new(), &mut |ui| *got.borrow_mut() = measure(ui));
+        got.into_inner()
+    }
+
+    #[test]
+    fn a_gates_answers_stand_side_by_side_or_stack_and_its_go_waits() {
+        let ctx = context();
+        let size = vec2(800.0, 300.0);
+        let laid = |w: f32, go: Option<&'static str>| {
+            measured(&ctx, size, |ui| answers_rects(ui, &Answers { keep: "Keep v0.13.0", lead: true, go, also: &[] }, w))
+        };
+        // Room for both: side by side at the foot's end, the go last.
+        let (both, h) = laid(500.0, Some("Update"));
+        assert_eq!(h, FORM_BUTTON_H);
+        let (keep, go) = (both[0], both[1]);
+        assert!((go.max.x - 500.0).abs() < 0.01 && (go.min.x - keep.max.x - FOOT_GAP).abs() < 0.01 && keep.min.y == go.min.y, "{both:?}");
+        // Short of that: the go keeps the first row, the keep under it, both
+        // ending at the foot's end.
+        let (stacked, h) = laid(keep.width() + go.width(), Some("Update"));
+        assert_eq!(h, 2.0 * FORM_BUTTON_H + FOOT_GAP);
+        assert!(stacked[1].min.y == 0.0 && stacked[0].min.y == FORM_BUTTON_H + FOOT_GAP, "{stacked:?}");
+        assert!((stacked[0].max.x - stacked[1].max.x).abs() < 0.01, "{stacked:?}");
+        // While the go waits on the gate's box: the keep alone at the end.
+        let (alone, h) = laid(500.0, None);
+        assert_eq!((alone.len(), h), (1, FORM_BUTTON_H));
+        assert!((alone[0].max.x - 500.0).abs() < 0.01 && (alone[0].width() - keep.width()).abs() < 0.01);
+        // The keep's lead takes its pointer's 6 points and the 8 after it.
+        let led = measured(&ctx, size, |ui| keep_button_width(ui, "Keep v0.13.0", true, &[]) - keep_button_width(ui, "Keep v0.13.0", false, &[]));
+        assert!((led - KEEP_LEAD).abs() < 0.01, "{led}");
+    }
+
+    #[test]
+    fn a_gate_of_the_pages_own_answers_with_its_keep_led_back_and_its_go_only_once_offered() {
+        let ctx = context();
+        let size = vec2(800.0, 400.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let id = Id::new("probe-gate-with");
+        let go = Cell::new(false);
+        let answered = Cell::new(None);
+        let ticked = Cell::new(0);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let a = Answers { keep: "Not now", lead: true, go: go.get().then_some("Remove 214 and sync"), also: &[] };
+            let shown = gate_with(ui, id, over, "Remove 214 files from the card?", &a, &pal, |ui| {
+                Para::new("They are gone from the server.", body(14.0), pal.text).show(ui);
+                check_line(ui, id.with("box"), go.get(), "Remove them anyway", "", false, &pal).clicked()
+            });
+            if let Some(went) = shown.inner.0 {
+                answered.set(Some(went));
+            }
+            if shown.inner.1 {
+                ticked.set(ticked.get() + 1);
+            }
+        };
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let pal = Pal::now();
+        assert!(texts(&out).iter().any(|(t, _)| t == "NOT NOW"), "the keep's words in capitals: {:?}", texts(&out));
+        let lead = out.shapes.iter().any(|c| matches!(&c.shape, Shape::Path(p) if p.fill == pal.on_accent && p.points.len() == 3));
+        assert!(lead, "led by the pointer turned back");
+        assert!(ctx.read_response(id.with("foot").with(1usize)).is_none(), "no go while it waits");
+        let rect = |id: Id| ctx.read_response(id).unwrap_or_else(|| panic!("{id:?} drawn")).rect;
+        for events in click_events(rect(id.with("box")).center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(ticked.get(), 1, "the box's click is the page's");
+        go.set(true);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        for events in click_events(rect(id.with("foot").with(1usize)).center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(answered.take(), Some(true), "the go, once offered, goes through");
+        for events in click_events(rect(id.with("foot").with(0usize)).center()) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(answered.take(), Some(false), "the keep keeps");
+    }
+
+    #[test]
+    fn a_modal_drawn_afresh_for_another_key_comes_back_to_its_top() {
+        let ctx = context();
+        let size = vec2(600.0, 300.0);
+        let over = Rect::from_min_size(Pos2::ZERO, size);
+        let id = Id::new("probe-afresh");
+        let key = std::cell::RefCell::new("the first".to_string());
+        let at = Cell::new(0usize);
+        let first = Cell::new(Rect::NOTHING);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let key = key.borrow().clone();
+            let _ = Dialog::new(id, over, 400.0, "Rows").gate(&pal).afresh(&key).show(ui, &pal, |ui| {
+                for i in 0..30 {
+                    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+                    if i == 0 {
+                        first.set(rect);
+                    }
+                    if i == at.get() {
+                        reveal(ui, id, i, rect);
+                    }
+                }
+            });
+        };
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let home = first.get().min.y;
+        at.set(29);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(first.get().min.y < home - 100.0, "the body scrolled: {:?}", first.get());
+        // The same one again, nothing brought into view: it stays.
+        at.set(usize::MAX);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(first.get().min.y < home - 100.0, "and stays: {:?}", first.get());
+        // Another in its place, under the same id: at its top.
+        *key.borrow_mut() = "the next".to_string();
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        assert!((first.get().min.y - home).abs() < 0.5, "afresh at its top: {:?} for {home}", first.get());
+    }
+
+    #[test]
+    fn a_dialogs_body_room_is_the_room_it_hands_its_body() {
+        let ctx = context();
+        let size = vec2(560.0, 333.3);
+        let over = Rect::from_min_max(pos2(0.0, 0.7), size.to_pos2());
+        let title = "A sheet's title long enough to wrap beside its close in a narrow window";
+        let (known, handed) = (Cell::new(Vec2::ZERO), Cell::new(Vec2::ZERO));
+        let mut run = |ui: &mut Ui| {
+            let dialog = Dialog::new(Id::new("probe-room"), over, 640.0, title);
+            known.set(dialog.body_room(ui));
+            let _ = dialog.show(ui, &Pal::now(), |ui| {
+                handed.set(ui.max_rect().size());
+                ui.add_space(900.0);
+            });
+        };
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        let _ = pass(&ctx, size, Vec::new(), &mut run);
+        assert!((known.get() - handed.get()).length() < 0.01, "known {:?}, handed {:?}", known.get(), handed.get());
+    }
+
+    #[test]
+    fn a_list_that_hangs_holds_whole_entries_lights_its_cursor_and_takes_a_click_only_on_an_entry_with_an_id() {
+        assert_eq!(hung_fits(100.0, 100.0 + 2.0 * HUNG_IN + 3.0 * HUNG_ROW_H), 3);
+        assert_eq!(hung_fits(100.0, 100.0 + 2.0 * HUNG_IN + 3.0 * HUNG_ROW_H - 0.5), 2, "part of an entry is no room");
+        assert_eq!(hung_fits(100.0, 90.0), 0);
+        assert_eq!(hung_width(100.0, 3, 3), 100.0 + 2.0 * HUNG_PAD + 2.0 * HUNG_IN);
+        assert_eq!(hung_width(100.0, 3, 8), 100.0 + 2.0 * HUNG_PAD + HUNG_GUTTER + 2.0 * HUNG_IN, "the thumb's gutter while it holds fewer");
+        assert_eq!(hung_left(50.0) + HUNG_IN + HUNG_PAD, 50.0 + SELECT_PAD, "its words under the box's");
+        let frame = hung_frame(pos2(40.0, 60.0), 200.0, 3);
+        assert_eq!(frame.height(), 3.0 * HUNG_ROW_H + 2.0 * HUNG_IN);
+        let ctx = context();
+        let size = vec2(400.0, 300.0);
+        let picked = Cell::new(None);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let id_of = |k: usize| (k != 1).then(|| Id::new("probe-hung").with(k));
+            let words = |ui: &Ui, k: usize, room: Rect, on: bool| {
+                let ink = if on { pal.on_accent } else { pal.text };
+                text(ui, room.left_center(), &format!("entry {k}"), body(14.0), ink, room.width(), Align2::LEFT_CENTER);
+            };
+            if let Some(k) = hung_list(ui, frame, 0, 3, 3, Some(2), id_of, &pal, words) {
+                picked.set(Some(k));
+            }
+        };
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let pal = Pal::now();
+        let at = |words: &str| texts(&out).into_iter().find(|(t, _)| t == words).unwrap_or_else(|| panic!("{words:?} drawn")).1;
+        let lit = |r: Rect| out.shapes.iter().any(|c| matches!(&c.shape, Shape::Rect(s) if s.fill == pal.accent && s.rect.contains(r.center())));
+        assert!(lit(at("entry 2")) && !lit(at("entry 0")), "the cursor's entry lit");
+        assert!((at("entry 0").min.x - (frame.min.x + HUNG_IN + HUNG_PAD)).abs() < 0.5, "its words padded in");
+        let (zero, one) = (at("entry 0").center(), at("entry 1").center());
+        for events in click_events(one) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(picked.get(), None, "an entry with no id takes nothing");
+        for events in click_events(zero) {
+            let _ = pass(&ctx, size, events, &mut run);
+        }
+        assert_eq!(picked.get(), Some(0));
+    }
+
+    #[test]
+    fn a_hung_lists_thumb_stands_in_a_gutter_of_its_own_its_cursor_stopping_short_of_it() {
+        let ctx = context();
+        let size = vec2(400.0, 300.0);
+        let frame = hung_frame(pos2(40.0, 60.0), hung_width(120.0, 3, 8), 3);
+        let room = Cell::new(Rect::NOTHING);
+        let mut run = |ui: &mut Ui| {
+            let pal = Pal::now();
+            let words = |_: &Ui, k: usize, r: Rect, _: bool| {
+                if k == 0 {
+                    room.set(r);
+                }
+            };
+            let _ = hung_list(ui, frame, 0, 3, 8, Some(0), |_| None, &pal, words);
+        };
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        let pal = Pal::now();
+        let fills = |c: Color32| out.shapes.iter().filter_map(|s| match &s.shape { Shape::Rect(r) if r.fill == c => Some(r.rect), _ => None }).collect::<Vec<_>>();
+        let (cursor, thumb) = (fills(pal.accent), fills(pal.dim.gamma_multiply(THUMB_REST)));
+        assert_eq!((cursor.len(), thumb.len()), (1, 1), "the cursor lit and the thumb drawn");
+        assert!(cursor[0].max.x + 1.0 <= thumb[0].min.x, "the cursor stops short of the thumb: {:?} {:?}", cursor[0], thumb[0]);
+        assert!(thumb[0].max.x <= frame.max.x - HUNG_IN, "the thumb inside the frame: {:?}", thumb[0]);
+        assert!((room.get().width() - 120.0).abs() < 0.01, "the entry's words keep their room beside the gutter: {:?}", room.get());
+    }
+
+    #[test]
+    fn a_closed_lists_box_keeps_its_least_width_and_grows_with_its_words() {
+        let ctx = context();
+        let size = vec2(600.0, 100.0);
+        assert_eq!(measured(&ctx, size, |ui| select_box_width(ui, "—", &[], 14.0)), SELECT_LEAST);
+        let words = "A server with a rather long name";
+        let (long, want) = measured(&ctx, size, |ui| (select_box_width(ui, words, &[], 14.0), 3.0 * SELECT_PAD + SELECT_CHEVRON + width_of(ui, words, strong(14.0))));
+        assert!(long > SELECT_LEAST && (long - want).abs() < 0.01, "{long} for {want}");
+    }
+
+    #[test]
+    fn spaced_prose_keeps_its_words_leading_where_it_opens_on_a_figure() {
+        let ctx = context();
+        let tail = " and a tail of words long enough to wrap onto a second line here";
+        let pitch = |s: &str| {
+            measured(&ctx, vec2(600.0, 300.0), |ui| {
+                let parts = figured(s, &[], body(13.5), mono(12.5), Color32::WHITE);
+                let galley = Para::runs(&parts).spaced(20.0).paint(ui, Pos2::ZERO, 220.0);
+                galley.height()
+            })
+        };
+        let (figure, words) = (pitch(&format!("41.2 of 63.8 GB used{tail}")), pitch(&format!("Used, 41.2 of 63.8 GB{tail}")));
+        assert!(figure > 30.0 && (figure - words).abs() < 0.01, "both wrap 20 points apart: {figure} and {words}");
+    }
+
+    #[test]
+    fn a_cards_head_stands_its_right_figure_on_the_names_baseline_or_leaves_it_out() {
+        let ctx = context();
+        let size = vec2(600.0, 100.0);
+        let (name, right) = ("M5Stack Core2", "COM3");
+        let w = Cell::new(400.0);
+        let next = Cell::new(0.0);
+        let mut run = |ui: &mut Ui| next.set(card_head(ui, pos2(20.0, 30.0), w.get(), name, right, &Pal::now()));
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        assert_eq!(next.get(), 30.0 + HEAD_H);
+        let lines = baselines(&out);
+        let baseline = |s: &str| lines.iter().find(|(t, _)| t == s).and_then(|(_, g)| g.first().map(|(_, y)| *y)).unwrap_or_else(|| panic!("{s:?} drawn"));
+        assert!((baseline(name) - baseline(right)).abs() < 0.5, "on the name's baseline");
+        let at = texts(&out).into_iter().find(|(t, _)| t == right).map(|(_, r)| r).expect("the figure");
+        assert!((at.max.x - 420.0).abs() < 1.0, "at the head's end: {at:?}");
+        let (name_w, right_w) = measured(&ctx, size, |ui| (width_of(ui, name, strong(16.0)), width_of(ui, right, mono(12.5))));
+        w.set(name_w + HEAD_CLEAR + right_w - 1.0);
+        let out = pass(&ctx, size, Vec::new(), &mut run);
+        assert!(!texts(&out).iter().any(|(t, _)| t == right), "within 16 points of the name: left out");
+    }
+
+    #[test]
+    fn a_lists_thumb_is_as_long_as_its_share_and_stands_where_its_view_does() {
+        let ctx = context();
+        let pane = Rect::from_min_size(pos2(10.0, 20.0), vec2(300.0, 180.0));
+        let thumb = |first: usize| {
+            let out = pass(&ctx, vec2(400.0, 300.0), Vec::new(), &mut |ui| list_thumb(ui, pane, 10, 40, first, &Pal::now()));
+            out.shapes.iter().find_map(|c| match &c.shape {
+                Shape::Rect(r) if r.rect.width() == THUMB_W => Some(r.rect),
+                _ => None,
+            })
+        };
+        let top = thumb(0).expect("a thumb");
+        assert_eq!((top.min.y, top.height(), top.max.x), (pane.min.y, 45.0, pane.max.x), "a quarter of the pane at its top");
+        let foot = thumb(30).expect("a thumb");
+        assert!((foot.max.y - pane.max.y).abs() < 0.01, "the newest lines: at its foot");
+    }
+
+    #[test]
+    fn a_keyed_text_button_wears_the_accent_and_the_pointer_wins_over_it() {
+        let ctx = context();
+        let size = vec2(500.0, 200.0);
+        let at = pos2(20.0, 50.0);
+        let ink = |out: &egui::FullOutput| {
+            out.shapes.iter().find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == "Choose a file…" => Some(t.galley.job.sections[0].format.color),
+                _ => None,
+            })
+        };
+        let mut run = |ui: &mut Ui| {
+            let _ = text_button_keyed(ui, Id::new("probe-keyed"), at, "Choose a file…", &[], 300.0, true, &Pal::now());
+        };
+        let pal = Pal::now();
+        assert_eq!(ink(&pass(&ctx, size, Vec::new(), &mut run)), Some(pal.accent), "the keyboard's");
+        assert_eq!(ink(&pass(&ctx, size, vec![egui::Event::PointerMoved(at + vec2(10.0, 0.0))], &mut run)), Some(pal.text), "the pointer's");
+    }
+
+    /// What stands beside a paragraph on its baseline ([`Para::baseline`])
+    /// — a line of the UI face or of the monospace centred on the middle
+    /// [`mid_on`] gives, runs led by a figure set by [`runs_on`] — stands
+    /// on it: on the pixel egui rounds the paragraph's first line to,
+    /// whether its words are the UI face's alone or led by a figure, its
+    /// top on a whole point or between, within a hundredth of a point.
+    /// Centred by the face's ascent, as the MP3 tab once set its free
+    /// figure and its scan's share, they stood up to a point off it in
+    /// Segoe UI, more in a face whose ascent egui rounds the other way.
+    #[test]
+    fn what_stands_beside_a_paragraph_stands_on_its_baseline() {
+        let ctx = context();
+        let white = Color32::WHITE;
+        let mut placed = Vec::new();
+        let out = pass(&ctx, vec2(900.0, 1200.0), Vec::new(), &mut |ui| {
+            let mut y = 20.0;
+            for size in [12.5, 13.0, 13.5, 14.0] {
+                for nudge in [0.0, 0.3, 0.6] {
+                    for led in [false, true] {
+                        let k = placed.len();
+                        let words = format!("Para{k}");
+                        let parts = if led { vec![(format!("12.{k}"), mono(12.5), white), (format!(" {words}"), body(size), white)] } else { vec![(words, body(size), white)] };
+                        let para = Para::runs(&parts).spaced(20.0);
+                        let top = y + nudge;
+                        let on = top + para.baseline(ui);
+                        let whole: String = parts.iter().map(|(s, ..)| s.as_str()).collect();
+                        let _ = para.paint(ui, pos2(10.0, top), 300.0);
+                        let _ = text(ui, pos2(320.0, mid_on(ui, on, size)), &format!("Text{k}"), body(size), white, 200.0, Align2::LEFT_CENTER);
+                        let _ = text(ui, pos2(440.0, mid_on(ui, on, 12.5)), &format!("Mono{k}"), mono(12.5), white, 200.0, Align2::LEFT_CENTER);
+                        let _ = runs_on(ui, 880.0, on, &[(format!("38.{k}"), mono(12.5), white), (format!(" free{k}"), body(13.5), white)], 300.0, Align::Max);
+                        placed.push((whole, [format!("Text{k}"), format!("Mono{k}"), format!("38.{k} free{k}")]));
+                        y += 24.0;
+                    }
+                }
+            }
+        });
+        let lines = baselines(&out);
+        let on = |s: &str| lines.iter().find(|(t, _)| t == s).unwrap_or_else(|| panic!("{s:?} drawn")).1[0].1;
+        for (para, beside) in &placed {
+            for b in beside {
+                assert!((on(b) - on(para)).abs() < 0.01, "{b:?} on {para:?}'s baseline: {} and {}", on(b), on(para));
+            }
+        }
     }
 }

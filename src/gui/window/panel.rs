@@ -641,10 +641,18 @@ mod tests {
     /// window's, at a scale of 2, within the pixel and a half that each
     /// ink's edges and the baseline landing on it leaves), where they stood
     /// 3 points off with the share every face was given; in the monospace,
-    /// which takes the UI face's share, within a tenth of the size. A
-    /// system with no CJK face has nothing to check.
+    /// which takes the UI face's share, as far off Hack's capitals as the
+    /// two faces' capitals stand off their lines' middles, read off their
+    /// own outlines and metrics, within the same quarter of a point — about
+    /// a twelfth of the size under them in Segoe UI, a seventh over them in
+    /// a face as short over its baseline as Calibri. A system with no CJK
+    /// face has nothing to check.
     #[test]
     fn a_cjk_name_stands_centred_on_the_capitals_beside_it() {
+        let words = system_ui_faces().0.into_iter().find_map(|path| readable(&path, 0));
+        let words = words.unwrap_or_else(|| FontData::from_static(epaint_default_fonts::UBUNTU_LIGHT));
+        let hack = FontData::from_static(epaint_default_fonts::HACK_REGULAR);
+        let share = ink_under_middle(&words, "H").expect("the UI face's capitals") - ink_under_middle(&hack, "H").expect("Hack's capitals");
         for lang in ["ja", "zh"] {
             if !crate::viz_window::overlay::cjk_faces(lang).into_iter().any(|(path, index)| readable(&path, index).is_some()) {
                 continue;
@@ -660,8 +668,8 @@ mod tests {
                         let off = off(font.clone());
                         assert!(off.abs() <= 0.25, "{lang} {font:?}: the ideographs' middle {off} under the capitals'");
                     }
-                    let off = off(egui::FontId::monospace(size));
-                    assert!(off.abs() <= 0.1 * size, "{lang} the monospace at {size}: the ideographs' middle {off} under the capitals'");
+                    let (off, want) = (off(egui::FontId::monospace(size)), share * size);
+                    assert!((off - want).abs() <= 0.25, "{lang} the monospace at {size}: the ideographs' middle {off} under the capitals', not the UI face's {want}");
                 }
             });
             out.textures_delta.clear();

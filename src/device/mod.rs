@@ -65,6 +65,9 @@ use self::firmware::{Cached, Image, Images, Release, Supply, Target};
 #[cfg(not(test))]
 pub(crate) use self::page::hosted;
 pub(crate) use self::page::{LET_GO, Page, Transfer, Wants, draw_waiting};
+// The same line drawn by egui, in the desktop window's panel.
+#[cfg(feature = "window")]
+pub(crate) use self::page::draw_waiting_egui;
 // The SD card transfer's worker, which the GUI starts and owns (the MP3
 // Player contract's clause 55).
 pub(crate) use self::card::worker;

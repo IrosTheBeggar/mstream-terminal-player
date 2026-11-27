@@ -602,14 +602,24 @@ mod tests {
     /// floor and on pages 464 by 400 and 600 by 360, in two rows or three
     /// as wide as the face sets their labels, where the list once kept room
     /// for one row of the foot and the buttons under it were cut by the
-    /// view. Where one row of the list still leaves the foot short (three
-    /// rows of it at the floor, in a face as wide as DejaVu Sans), the gaps
-    /// over and under the list close up as far as that takes. The list
-    /// keeps a row or more, the keys' cursor whole in it.
+    /// view. A face narrow enough to set the four in one row 600 points
+    /// wide (Calibri, Source Sans) takes the last page as much narrower as
+    /// stacks them: a point short of their row — their widths and the gaps
+    /// between them, as a wide page lays them out — and of the margin the
+    /// browser stands in at the floor. Where one row of the list still
+    /// leaves the foot short (three rows of it at the floor, in a face as
+    /// wide as DejaVu Sans), the gaps over and under the list close up as
+    /// far as that takes. The list keeps a row or more, the keys' cursor
+    /// whole in it.
     #[test]
     fn in_a_short_narrow_window_the_list_gives_way_to_the_whole_stacked_foot() {
         let Some(_) = in_own_process(&["de"]) else { return };
-        for size in [FLOOR, vec2(464.0, 400.0), vec2(600.0, 360.0)] {
+        let (_, wide) = browsing_short(vec2(1440.0, 360.0));
+        assert!(wide[1].min.y == wide[0].min.y, "a wide page sets the first two on one row: {wide:?}");
+        let row = wide.iter().map(Rect::width).sum::<f32>() + 3.0 * (wide[1].min.x - wide[0].max.x);
+        let margin = browsing_short(FLOOR).1[0].min.x;
+        let narrow = 600.0_f32.min(row + 2.0 * margin - 1.0);
+        for size in [FLOOR, vec2(464.0, 400.0), vec2(narrow, 360.0)] {
             let (probe, buttons) = browsing_short(size);
             assert!(buttons[3].min.y > buttons[0].max.y, "at {size:?} the foot stacks: {buttons:?}");
             whole_foot_and_cursor(&probe, size, &buttons);
