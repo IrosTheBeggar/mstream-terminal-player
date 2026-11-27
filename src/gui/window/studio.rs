@@ -708,6 +708,19 @@ pub(crate) fn note_line_naming(ui: &Ui, rect: Rect, busy: Option<&str>, note: Op
         (None, Some((note, is_err))) => (note.as_str(), if *is_err { pal.gold } else { pal.dim }),
         (None, None) => return,
     };
+    note_in_naming(ui, rect, words, also, color);
+}
+
+/// A note's one line in `rect`, in `color`: its words at 13 points, its
+/// figures in the monospace a point under them, cut with an ellipsis, as
+/// [`note_line`] sets a page's note (the transport bar's note slot, whose
+/// tones are the GUI's own).
+pub(crate) fn note_in(ui: &Ui, rect: Rect, words: &str, color: Color32) {
+    note_in_naming(ui, rect, words, &[], color);
+}
+
+/// [`note_in`] with the names in `also` set as figures too.
+fn note_in_naming(ui: &Ui, rect: Rect, words: &str, also: &[&str], color: Color32) {
     runs(ui, rect.left_center(), &figured(words, also, body(13.0), mono(12.0), color), rect.width(), Align2::LEFT_CENTER);
 }
 
@@ -900,6 +913,8 @@ pub(crate) enum Icon {
     Copy,
     /// A download: an arrow down onto a line.
     Download,
+    /// An add: the plus, the top bar's [+].
+    Add,
 }
 
 /// `icon` in `color`, centred on `at`.
@@ -925,6 +940,11 @@ fn draw_icon(ui: &Ui, at: Pos2, icon: Icon, color: Color32) {
             painter.line_segment([p(6.0, 1.5), p(6.0, 8.0)], thin);
             painter.add(Shape::line(vec![p(3.2, 5.4), p(6.0, 8.2), p(8.8, 5.4)], thin));
             painter.line_segment([p(1.5, 10.5), p(10.5, 10.5)], thin);
+        }
+        // M6 1.5v9M1.5 6h9.
+        Icon::Add => {
+            painter.line_segment([p(6.0, 1.5), p(6.0, 10.5)], stroke);
+            painter.line_segment([p(1.5, 6.0), p(10.5, 6.0)], stroke);
         }
     }
 }
@@ -4103,6 +4123,24 @@ pub(crate) fn hung_list(
     cursor: Option<usize>,
     id_of: impl Fn(usize) -> Option<Id>,
     pal: &Pal,
+    words: impl FnMut(&Ui, usize, Rect, bool),
+) -> Option<usize> {
+    hung_list_by(ui, frame, first, n, len, cursor, id_of, Pick::Click, pal, words)
+}
+
+/// [`hung_list`] picking its entry on the click or, as the cells' lists
+/// pick theirs, on the press ([`Pick`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hung_list_by(
+    ui: &Ui,
+    frame: Rect,
+    first: usize,
+    n: usize,
+    len: usize,
+    cursor: Option<usize>,
+    id_of: impl Fn(usize) -> Option<Id>,
+    pick: Pick,
+    pal: &Pal,
     mut words: impl FnMut(&Ui, usize, Rect, bool),
 ) -> Option<usize> {
     ui.painter().add(lifted().as_shape(frame, square()));
@@ -4121,7 +4159,11 @@ pub(crate) fn hung_list(
             ui.painter().rect_filled(row, CornerRadius::same(2), pal.raised);
         }
         words(ui, k, row.shrink2(vec2(HUNG_PAD, 0.0)), on);
-        if response.is_some_and(|r| r.clicked()) {
+        let took = |r: &Response| match pick {
+            Pick::Click => r.clicked(),
+            Pick::Press => pressed(r),
+        };
+        if response.is_some_and(|r| took(&r)) {
             picked = Some(k);
         }
     }
@@ -4285,6 +4327,230 @@ impl Para {
 /// the two are set in.
 pub(crate) fn mid_on(ui: &Ui, baseline: f32, size: f32) -> f32 {
     baseline - centred_baseline(ui, size)
+}
+
+// ── The chrome's pieces: presses, tips, transport marks, a seek track ─────
+//
+// What the GUI's own top strip and transport bar drawn by egui need that no
+// page did (src/gui/chrome.rs and the faces it hosts): a control that acts
+// on the press, as the cells' controls do, and a list that picks so; the
+// cells' tooltip dwell on any context, and a tooltip that says where it
+// stood; the transport's marks, the frame they stand in and the seek line's
+// track; a picture with its corners rounded. Nothing here knows the chrome.
+
+/// How a list picks its entry: on the click, egui's way, or on the press,
+/// the cells' way (the top bar's menu, whose cells act on the press).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pick {
+    Click,
+    Press,
+}
+
+/// Whether the primary button went down on `response`'s control in this
+/// pass: the press the cells act on, not egui's click, which waits for the
+/// release. The control senses clicks and was the topmost under the pointer
+/// as the press came; a press and its release landing in the same pass are
+/// a press too. A pass egui runs again hears no press, so a press counts
+/// once.
+pub(crate) fn pressed(response: &Response) -> bool {
+    response.ctx.input(|i| i.pointer.primary_pressed()) && (response.is_pointer_button_down_on() || response.clicked())
+}
+
+/// The cells' tooltip dwell, set once on `ctx` after [`style_once`] (whose
+/// tooltip shows at once): [`crate::kit::TIP_DELAY`] at rest on a target,
+/// anew on each target as the cells' dwell restarts on each, and counted
+/// from the pointer's last move however it moves after (egui's own wait for
+/// a still pointer asks for a pass on every move, which a host that runs
+/// passes only for news never gives it).
+pub(crate) fn dwell(ctx: &egui::Context) {
+    let id = Id::new("studio-dwell");
+    if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
+        return;
+    }
+    ctx.all_styles_mut(|style| {
+        style.interaction.tooltip_delay = crate::kit::TIP_DELAY.as_secs_f32();
+        style.interaction.tooltip_grace_time = 0.0;
+        style.interaction.show_tooltips_only_when_still = false;
+    });
+    ctx.data_mut(|d| d.insert_temp(id, true));
+}
+
+/// How far under its target a tooltip hangs, and the widest it grows.
+pub(crate) const TIP_UNDER: f32 = 4.0;
+pub(crate) const TIP_W: f32 = 300.0;
+/// A tooltip's room round its words: the canvas's 6 by 10.
+const TIP_PAD: Vec2 = vec2(10.0, 6.0);
+
+/// The cells' tooltip for `response`, under [`dwell`]: `words` in Studio's
+/// box ([`style_once`]'s: raised, on a strong-edged hairline) [`TIP_UNDER`]
+/// points under the target's middle, pulled in at the screen's edge, in the
+/// cells' lines (wrapped at their 40 cells, `kit::wrap_tip`) and no wider
+/// than [`TIP_W`], once the pointer has rested on the target for the dwell,
+/// and never in the dwell after a key (`since_key`, the time since the last
+/// one), which hides it as it hides the cells'; the pass is asked for when
+/// that dwell ends. Painted on the tooltips' layer, clipped to its own box,
+/// which it returns while it shows: a host that cuts its paint around what
+/// stands over it finds the tooltip's by it.
+pub(crate) fn tip_under(response: &Response, words: &str, since_key: Option<std::time::Duration>, pal: &Pal) -> Option<Rect> {
+    let ctx = &response.ctx;
+    if let Some(since) = since_key.filter(|since| *since < crate::kit::TIP_DELAY) {
+        ctx.request_repaint_after(crate::kit::TIP_DELAY - since);
+        return None;
+    }
+    if words.is_empty() || !egui::Tooltip::should_show_tooltip(response, false) {
+        return None;
+    }
+    let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Tooltip::tooltip_id(response.id, 0));
+    let painter = ctx.layer_painter(layer);
+    let lines = crate::kit::wrap_tip(words).join("\n");
+    let galley = painter.layout(lines, body(12.5), pal.text, TIP_W - 2.0 * TIP_PAD.x);
+    let size = galley.size() + 2.0 * TIP_PAD;
+    let screen = ctx.content_rect();
+    let target = response.interact_rect;
+    let left = (target.center().x - size.x / 2.0).min(screen.max.x - size.x).max(screen.min.x);
+    let tip = Rect::from_min_size(pos2(left, target.max.y + TIP_UNDER), size).round_to_pixels(ctx.pixels_per_point());
+    let painter = painter.with_clip_rect(tip);
+    painter.rect_filled(tip, square(), pal.raised);
+    painter.rect_stroke(tip, square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
+    painter.galley(tip.min + TIP_PAD, galley, pal.text);
+    Some(tip)
+}
+
+/// `icon` in `color`, centred on `at`, with no button round it: an icon in
+/// a slot too short for [`icon_button`]'s (the top bar's [+] in its row).
+pub(crate) fn icon(ui: &Ui, at: Pos2, icon: Icon, color: Color32) {
+    draw_icon(ui, at, icon, color);
+}
+
+/// The transport's marks, drawn in 14 points from the canvas's 16-unit
+/// paths (Main.dc.html's TRANSPORT GROUP).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mark {
+    Prev,
+    Next,
+    Play,
+    Pause,
+    Repeat,
+    Shuffle,
+}
+
+/// `mark` in `color`, centred on `at`: the solid ones filled, repeat's and
+/// shuffle's arrows in 1.6-point strokes.
+pub(crate) fn mark(ui: &Ui, at: Pos2, mark: Mark, color: Color32) {
+    let k = 14.0 / 16.0;
+    let o = at - vec2(7.0, 7.0);
+    let p = |x: f32, y: f32| o + vec2(x, y) * k;
+    let painter = ui.painter();
+    let solid = |points: Vec<Pos2>| {
+        painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
+    };
+    let bar = |x: f32, w: f32| painter.rect_filled(Rect::from_min_max(p(x, 3.0), p(x + w, 13.0)), CornerRadius::ZERO, color);
+    let stroke = Stroke::new(1.6, color);
+    let path = |points: Vec<Pos2>| {
+        painter.add(Shape::line(points, stroke));
+    };
+    // A quarter turn of radius 2 from `from` about `centre`, a few points.
+    let arc = |centre: (f32, f32), from: f32, to: f32| -> Vec<Pos2> {
+        (0..=4).map(|i| {
+            let a = from + (to - from) * i as f32 / 4.0;
+            p(centre.0 + 2.0 * a.cos(), centre.1 + 2.0 * a.sin())
+        }).collect()
+    };
+    use std::f32::consts::{FRAC_PI_2, PI};
+    match mark {
+        // rect 3,3 2x10 and M13 3L6 8l7 5z.
+        Mark::Prev => {
+            bar(3.0, 2.0);
+            solid(vec![p(13.0, 3.0), p(6.0, 8.0), p(13.0, 13.0)]);
+        }
+        Mark::Next => {
+            bar(11.0, 2.0);
+            solid(vec![p(3.0, 3.0), p(10.0, 8.0), p(3.0, 13.0)]);
+        }
+        // rects 4,3 and 9,3, 3x10.
+        Mark::Pause => {
+            bar(4.0, 3.0);
+            bar(9.0, 3.0);
+        }
+        // The paused ▸, its ink's middle on the box's.
+        Mark::Play => solid(vec![p(5.0, 3.0), p(13.0, 8.0), p(5.0, 13.0)]),
+        // M3 7V6a2 2 0 0 1 2-2h7 M10 2l2 2-2 2 M13 9v1a2 2 0 0 1-2 2H4 M6 14l-2-2 2-2.
+        Mark::Repeat => {
+            let mut top = vec![p(3.0, 7.0)];
+            top.extend(arc((5.0, 6.0), PI, PI + FRAC_PI_2));
+            top.push(p(12.0, 4.0));
+            path(top);
+            path(vec![p(10.0, 2.0), p(12.0, 4.0), p(10.0, 6.0)]);
+            let mut foot = vec![p(13.0, 9.0)];
+            foot.extend(arc((11.0, 10.0), 0.0, FRAC_PI_2));
+            foot.push(p(4.0, 12.0));
+            path(foot);
+            path(vec![p(6.0, 14.0), p(4.0, 12.0), p(6.0, 10.0)]);
+        }
+        // M2 4h3l6 8h3 M2 12h3l1.6-2.1 M9.4 6.1L11 4h3 M12 2l2 2-2 2 M12 10l2 2-2 2.
+        Mark::Shuffle => {
+            path(vec![p(2.0, 4.0), p(5.0, 4.0), p(11.0, 12.0), p(14.0, 12.0)]);
+            path(vec![p(2.0, 12.0), p(5.0, 12.0), p(6.6, 9.9)]);
+            path(vec![p(9.4, 6.1), p(11.0, 4.0), p(14.0, 4.0)]);
+            path(vec![p(12.0, 2.0), p(14.0, 4.0), p(12.0, 6.0)]);
+            path(vec![p(12.0, 10.0), p(14.0, 12.0), p(12.0, 14.0)]);
+        }
+    }
+}
+
+/// A transport button's look in `rect`, paint only (the cells take its
+/// press): a `weight`-point frame in `frame` with the desk's corners and
+/// `mark` in `ink` at its middle; while `hot`, the raised fill under it and
+/// the frame a step brighter.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn frame_button(ui: &Ui, rect: Rect, mark: Mark, frame: Color32, ink: Color32, weight: f32, hot: bool, pal: &Pal) {
+    let painter = ui.painter();
+    let edge = if hot {
+        painter.rect_filled(rect, square(), pal.raised);
+        lift(frame, 40)
+    } else {
+        frame
+    };
+    painter.rect_stroke(rect, square(), Stroke::new(weight, edge), StrokeKind::Inside);
+    self::mark(ui, rect.center(), mark, ink);
+}
+
+/// The seek line's track across `track`, paint only: a 2-point line at its
+/// middle, gold over the `played` share and the strong edge after it, the
+/// gold thumb ([`THUMB_W`] by 12, its corners softened by one) at the
+/// playhead, and where the pointer would land a press (`ghost`, a share
+/// too) the thumb's outline in the text colour. Shares are held to the
+/// track.
+pub(crate) fn seek_track(ui: &Ui, track: Rect, played: f32, ghost: Option<f32>, pal: &Pal) {
+    let painter = ui.painter();
+    let mid = track.center().y;
+    let x = |share: f32| track.min.x + share.clamp(0.0, 1.0) * track.width();
+    let thumb = |share: f32| {
+        let centre = x(share).clamp(track.min.x + THUMB_W / 2.0, (track.max.x - THUMB_W / 2.0).max(track.min.x + THUMB_W / 2.0));
+        Rect::from_center_size(pos2(centre, mid), vec2(THUMB_W, 12.0))
+    };
+    painter.line_segment([pos2(track.min.x, mid), pos2(track.max.x, mid)], Stroke::new(2.0, pal.edge_strong));
+    painter.line_segment([pos2(track.min.x, mid), pos2(x(played), mid)], Stroke::new(2.0, pal.gold));
+    painter.rect_filled(thumb(played), CornerRadius::same(1), pal.gold);
+    if let Some(ghost) = ghost {
+        painter.rect_stroke(thumb(ghost), CornerRadius::same(1), Stroke::new(1.0, pal.text), StrokeKind::Inside);
+    }
+}
+
+/// [`picture`] with its corners rounded by `radius`: drawn whole in `rect`,
+/// its shape kept, centred, never cropped or stretched. Returns where it
+/// was drawn.
+pub(crate) fn picture_in(ui: &Ui, rect: Rect, texture: &egui::TextureHandle, radius: u8) -> Rect {
+    let size = texture.size_vec2();
+    if size.x <= 0.0 || size.y <= 0.0 || !rect.is_positive() {
+        return Rect::from_center_size(rect.center(), Vec2::ZERO);
+    }
+    let k = (rect.width() / size.x).min(rect.height() / size.y);
+    let at = Rect::from_center_size(rect.center(), size * k);
+    let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+    let shape = egui::epaint::RectShape::filled(at, CornerRadius::same(radius), Color32::WHITE).with_texture(texture.id(), uv);
+    ui.painter().add(shape);
+    at
 }
 
 #[cfg(test)]
@@ -6755,5 +7021,174 @@ mod tests {
                 assert!((on(b) - on(para)).abs() < 0.01, "{b:?} on {para:?}'s baseline: {} and {}", on(b), on(para));
             }
         }
+    }
+}
+/// The chrome's pieces, each held to what it promises.
+#[cfg(test)]
+mod chrome_pieces {
+    use super::*;
+
+    fn context() -> egui::Context {
+        let ctx = egui::Context::default();
+        super::super::panel::fonts(&ctx);
+        style_once(&ctx, &Pal::now());
+        dwell(&ctx);
+        ctx
+    }
+
+    const SCREEN: Vec2 = vec2(400.0, 200.0);
+
+    /// One pass at `time` seconds with `events`; its shapes.
+    fn pass(ctx: &egui::Context, time: f64, events: Vec<egui::Event>, run: &mut dyn FnMut(&mut Ui)) -> Vec<egui::epaint::ClippedShape> {
+        let screen = Rect::from_min_size(Pos2::ZERO, SCREEN);
+        let input = egui::RawInput { screen_rect: Some(screen), time: Some(time), events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| run(ui));
+        out.textures_delta.clear();
+        out.shapes
+    }
+
+    fn moved(at: Pos2) -> egui::Event {
+        egui::Event::PointerMoved(at)
+    }
+
+    fn button(at: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() }
+    }
+
+    /// A control acts on the press, as the cells' do: once, on the pass the
+    /// press came in, not on hover nor on the release; a press and its
+    /// release in one pass are a press too; and a pass egui runs again
+    /// hears none of it.
+    #[test]
+    fn a_control_is_pressed_on_the_press_once() {
+        let ctx = context();
+        let control = Rect::from_min_size(pos2(40.0, 20.0), vec2(60.0, 20.0));
+        let on = control.center();
+        let presses = std::cell::Cell::new(0);
+        let run = |ui: &mut Ui| {
+            if pressed(&ui.interact(control, Id::new("probe"), Sense::click())) {
+                presses.set(presses.get() + 1);
+            }
+        };
+        pass(&ctx, 0.0, vec![moved(on)], &mut |ui| run(ui));
+        pass(&ctx, 0.1, Vec::new(), &mut |ui| run(ui));
+        assert_eq!(presses.get(), 0, "hover is no press");
+        pass(&ctx, 0.2, vec![button(on, true)], &mut |ui| run(ui));
+        assert_eq!(presses.get(), 1, "the press");
+        pass(&ctx, 0.3, Vec::new(), &mut |ui| run(ui));
+        pass(&ctx, 0.4, vec![button(on, false)], &mut |ui| run(ui));
+        assert_eq!(presses.get(), 1, "held and released: nothing more");
+        pass(&ctx, 0.9, vec![button(on, true), button(on, false)], &mut |ui| run(ui));
+        assert_eq!(presses.get(), 2, "a tap inside one pass");
+        pass(&ctx, 1.5, vec![button(on, true)], &mut |ui| {
+            run(ui);
+            ui.ctx().request_discard("a second run");
+        });
+        assert_eq!(presses.get(), 3, "once, though egui ran the pass again");
+        pass(&ctx, 1.6, vec![button(on, false)], &mut |ui| run(ui));
+        let off = pos2(300.0, 150.0);
+        pass(&ctx, 2.0, vec![moved(off), button(off, true)], &mut |ui| run(ui));
+        assert_eq!(presses.get(), 3, "a press off it is not its");
+    }
+
+    /// A list that picks on the press picks its entry as the button goes
+    /// down; one that picks on the click waits for the release.
+    #[test]
+    fn a_hung_list_picks_on_the_press_or_on_the_click() {
+        let ctx = context();
+        let pal = Pal::now();
+        let frame = hung_frame(pos2(20.0, 20.0), 160.0, 3);
+        let second = pos2(60.0, frame.min.y + 2.0 + HUNG_ROW_H * 1.5);
+        for (round, (pick, on_press)) in [(Pick::Press, Some(1)), (Pick::Click, None)].into_iter().enumerate() {
+            let mut picked = Vec::new();
+            let mut run = |ui: &mut Ui| {
+                let id_of = |k: usize| Some(Id::new(("probe-row", k)));
+                picked.push(hung_list_by(ui, frame, 0, 3, 3, None, id_of, pick, &pal, |_, _, _, _| {}));
+            };
+            // egui's clock runs on from one round to the next.
+            let t = 10.0 * round as f64;
+            pass(&ctx, t, vec![moved(second)], &mut run);
+            pass(&ctx, t + 0.1, Vec::new(), &mut run);
+            pass(&ctx, t + 0.2, vec![button(second, true)], &mut run);
+            pass(&ctx, t + 0.3, vec![button(second, false)], &mut run);
+            pass(&ctx, t + 1.0, vec![moved(pos2(390.0, 190.0))], &mut run);
+            let released = if on_press.is_some() { None } else { Some(1) };
+            assert_eq!((picked[2], picked[3]), (on_press, released), "{pick:?}: on the press, then on the release");
+        }
+    }
+
+    /// The tooltip waits out the cells' dwell on its target, then hangs
+    /// under its middle, inside the screen, its shapes clipped to the box
+    /// it returns; none in the dwell after a key.
+    #[test]
+    fn a_tooltip_hangs_under_its_target_after_the_dwell() {
+        let ctx = context();
+        let pal = Pal::now();
+        let target = Rect::from_min_size(pos2(340.0, 0.0), vec2(40.0, 16.0));
+        let shown = std::cell::Cell::new(None);
+        let run = |ui: &mut Ui, since_key: Option<std::time::Duration>| {
+            let response = ui.interact(target, Id::new("probe-tip"), Sense::click());
+            shown.set(tip_under(&response, "Add a server", since_key, &pal));
+        };
+        pass(&ctx, 0.0, vec![moved(target.center())], &mut |ui| run(ui, None));
+        pass(&ctx, 0.2, Vec::new(), &mut |ui| run(ui, None));
+        assert_eq!(shown.get(), None, "not before the dwell");
+        let shapes = pass(&ctx, 0.8, Vec::new(), &mut |ui| run(ui, None));
+        let tip = shown.get().expect("after it");
+        assert!((tip.min.y - (target.max.y + TIP_UNDER)).abs() <= 1.0, "{TIP_UNDER} points under the target: {tip:?}");
+        assert!(tip.max.x <= SCREEN.x && tip.min.x >= 0.0, "pulled in at the edge: {tip:?}");
+        assert!(tip.width() <= TIP_W, "{tip:?}");
+        assert!(tip.center().x < target.center().x + 0.5, "it would have passed the edge centred: {tip:?}");
+        let boxed = shapes.iter().filter(|shape| shape.clip_rect == tip).count();
+        assert!(boxed >= 3, "the fill, the hairline and the words, clipped to the box: {boxed} of {}", shapes.len());
+        pass(&ctx, 0.9, Vec::new(), &mut |ui| run(ui, Some(std::time::Duration::from_millis(100))));
+        assert_eq!(shown.get(), None, "none in the dwell after a key");
+    }
+
+    /// The transport's paint: the frame's fill only while hot, each mark
+    /// in its 14 points at its middle; the seek track's thumb at the played
+    /// share, the ghost's outline where a press would land; a picture
+    /// fitted whole with its corners rounded.
+    #[test]
+    fn the_transports_pieces_paint_where_they_say() {
+        let ctx = context();
+        let pal = Pal::now();
+        let button = Rect::from_min_size(pos2(10.0, 10.0), vec2(40.0, 44.0));
+        let fills = |shapes: &[egui::epaint::ClippedShape]| {
+            shapes.iter().filter(|s| matches!(&s.shape, Shape::Rect(r) if r.fill == pal.raised)).count()
+        };
+        let rest = pass(&ctx, 0.0, Vec::new(), &mut |ui| frame_button(ui, button, Mark::Play, pal.gold, pal.gold, 2.0, false, &pal));
+        let hot = pass(&ctx, 0.1, Vec::new(), &mut |ui| frame_button(ui, button, Mark::Play, pal.gold, pal.gold, 2.0, true, &pal));
+        assert_eq!((fills(&rest), fills(&hot)), (0, 1), "the raised fill while hot only");
+        for mark in [Mark::Prev, Mark::Next, Mark::Play, Mark::Pause, Mark::Repeat, Mark::Shuffle] {
+            let shapes = pass(&ctx, 0.2, Vec::new(), &mut |ui| self::mark(ui, button.center(), mark, pal.text));
+            let ink = shapes.iter().map(|s| s.shape.visual_bounding_rect()).fold(Rect::NOTHING, |a, b| a.union(b));
+            assert!(ink.width() <= 16.0 && ink.height() <= 16.0, "{mark:?} in its 14 points: {ink:?}");
+            assert!((ink.center() - button.center()).length() < 1.5, "{mark:?} at the middle: {ink:?}");
+        }
+        let track = Rect::from_min_size(pos2(20.0, 100.0), vec2(200.0, 16.0));
+        let shapes = pass(&ctx, 0.3, Vec::new(), &mut |ui| seek_track(ui, track, 0.25, Some(0.75), &pal));
+        let thumbs: Vec<Rect> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Rect(r) if r.rect.width() == THUMB_W => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thumbs.len(), 2, "the thumb and the ghost: {thumbs:?}");
+        assert!((thumbs[0].center().x - (track.min.x + 50.0)).abs() < 0.5, "the thumb at a quarter: {thumbs:?}");
+        assert!((thumbs[1].center().x - (track.min.x + 150.0)).abs() < 0.5, "the ghost at three quarters: {thumbs:?}");
+        assert!((thumbs[0].center().y - track.center().y).abs() < 0.5);
+        let image = egui::ColorImage::new([8, 4], vec![Color32::RED; 32]);
+        let texture = ctx.load_texture("probe-picture", image, egui::TextureOptions::LINEAR);
+        let slot = Rect::from_min_size(pos2(100.0, 100.0), vec2(64.0, 64.0));
+        let mut at = Rect::NOTHING;
+        let shapes = pass(&ctx, 0.4, Vec::new(), &mut |ui| at = picture_in(ui, slot, &texture, 3));
+        assert_eq!(at, Rect::from_center_size(slot.center(), vec2(64.0, 32.0)), "whole, its shape kept");
+        let textured = shapes.iter().any(|s| match &s.shape {
+            Shape::Rect(r) => r.rect == at && r.corner_radius == CornerRadius::same(3) && r.fill_texture_id() == texture.id(),
+            _ => false,
+        });
+        assert!(textured, "a textured rect with its corners rounded");
     }
 }

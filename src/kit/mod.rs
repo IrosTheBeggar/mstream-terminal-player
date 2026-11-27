@@ -363,6 +363,22 @@ pub struct Surface<A> {
     /// its own UI and sends the commit as keys — so it stays empty, and
     /// changes nothing, everywhere else (see [`input_display_composing`]).
     composition: String,
+    /// How many times a layer dropped the registries this frame
+    /// ([`Self::clear_registries`]), for the frame's [`Mark`]s.
+    cleared: u32,
+}
+
+/// Where the registries stood at a moment of a frame: how many times a
+/// layer had dropped them so far, and how many clicks and overlays there
+/// were. A click's index from before a drop names some other layer's click
+/// after it, so what was registered is asked of the surface by a mark,
+/// never by a bare index (the GUI window's chrome, which egui draws after
+/// the cells have registered what would stand over it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mark {
+    cleared: u32,
+    clicks: usize,
+    overlays: usize,
 }
 
 impl<A> Default for Surface<A> {
@@ -391,6 +407,7 @@ impl<A> Default for Surface<A> {
             drawn_at: None,
             caret_at: None,
             composition: String::new(),
+            cleared: 0,
         }
     }
 }
@@ -405,7 +422,51 @@ impl<A: Clone> Surface<A> {
     pub fn begin_frame(&mut self) {
         self.covered = std::mem::take(&mut self.overlays);
         self.clear_registries();
+        self.cleared = 0;
         self.drawn_at = Some(Instant::now());
+    }
+
+    /// Where the registries stand now ([`Mark`]).
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn mark(&self) -> Mark {
+        Mark { cleared: self.cleared, clicks: self.clicks.len(), overlays: self.overlays.len() }
+    }
+
+    /// No layer dropped the registries since `mark`: what was registered
+    /// before it still stands.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn kept(&self, mark: Mark) -> bool {
+        self.cleared == mark.cleared
+    }
+
+    /// The clicks registered after `mark`, in their order — every click
+    /// there is, where a layer dropped the registries since.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn clicks_since(&self, mark: Mark) -> &[(Rect, A)] {
+        if !self.kept(mark) {
+            return &self.clicks;
+        }
+        self.clicks.get(mark.clicks..).unwrap_or_default()
+    }
+
+    /// The overlays registered after `mark`. Overlays are never dropped
+    /// ([`Self::overlay`]), so a drop in between changes nothing here.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn overlays_since(&self, mark: Mark) -> &[Rect] {
+        self.overlays.get(mark.overlays..).unwrap_or_default()
+    }
+
+    /// The click a press at `at` hits, the last registered there, when it
+    /// was registered between `from` and `to` and nothing dropped the
+    /// registries since `from`: what a press there would work of what drew
+    /// between the two marks, with nothing drawn after over it.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub fn hit_between(&self, at: Position, from: Mark, to: Mark) -> Option<(Rect, A)> {
+        if !self.kept(from) || to.cleared != from.cleared {
+            return None;
+        }
+        let i = self.clicks.iter().rposition(|(rect, _)| rect.contains(at))?;
+        (from.clicks..to.clicks).contains(&i).then(|| self.clicks[i].clone())
     }
 
     /// Whether the last frame is out of date on time alone, with nothing
@@ -490,6 +551,7 @@ impl<A: Clone> Surface<A> {
     /// clears the base layer's registries before drawing the layer on
     /// top, so only the top layer's controls exist.
     pub fn clear_registries(&mut self) {
+        self.cleared = self.cleared.wrapping_add(1);
         self.clicks.clear();
         self.tips.clear();
         self.bars.clear();
@@ -2683,6 +2745,49 @@ mod tests {
         let short = Rect { x: 17, y: 1, width: 83, height: 17 };
         let r = modal_rect(short, 84, 22, 22);
         assert_eq!(r, Rect { x: 19, y: 2, width: 79, height: 15 }, "a form taller and wider than the area clamps inside it");
+    }
+
+    /// A mark survives nothing: a layer that drops the registries after it
+    /// leaves it not kept, every click there is then counts as after it,
+    /// and nothing registered before it hits between it and a later mark;
+    /// the overlays are counted across the drop, since they are never
+    /// dropped. A new frame starts the count again.
+    #[test]
+    fn a_mark_counts_what_came_after_it_across_a_layer_that_drops_the_registries() {
+        let mut s: Surface<u8> = Surface::new();
+        s.begin_frame();
+        let cell = |x| Rect { x, y: 0, width: 1, height: 1 };
+        s.click(cell(0), 1);
+        let first = s.mark();
+        s.click(cell(1), 2);
+        s.click(cell(2), 3);
+        let second = s.mark();
+        s.click(cell(1), 4);
+        assert!(s.kept(first));
+        assert_eq!(s.clicks_since(first), [(cell(1), 2), (cell(2), 3), (cell(1), 4)]);
+        assert_eq!(s.clicks_since(second), [(cell(1), 4)]);
+        let at = |x| Position { x, y: 0 };
+        assert_eq!(s.hit_between(at(2), first, second), Some((cell(2), 3)), "registered between the two");
+        assert_eq!(s.hit_between(at(1), first, second), None, "covered by a click after them");
+        assert_eq!(s.hit_between(at(0), first, second), None, "registered before them");
+
+        s.overlay(cell(5));
+        let before = s.mark();
+        s.overlay(cell(6));
+        s.clear_registries();
+        s.click(cell(7), 9);
+        s.overlay(cell(8));
+        assert!(!s.kept(first) && !s.kept(before), "a drop after a mark leaves it not kept");
+        assert_eq!(s.clicks_since(first), [(cell(7), 9)], "every click there is: no stale index into the layer's");
+        assert_eq!(s.clicks_since(second), [(cell(7), 9)], "and no slice past their end");
+        assert_eq!(s.hit_between(at(7), first, second), None);
+        assert_eq!(s.overlays_since(before), [cell(6), cell(8)], "the overlays across the drop");
+        assert_eq!(s.overlays_since(Mark::default()), [cell(5), cell(6), cell(8)]);
+        let after = s.mark();
+        assert!(s.kept(after));
+        assert!(s.clicks_since(after).is_empty());
+        s.begin_frame();
+        assert_eq!(s.mark(), Mark::default(), "a frame starts with nothing registered and nothing dropped");
     }
 
     #[test]
