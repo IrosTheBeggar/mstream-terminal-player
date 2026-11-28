@@ -41,13 +41,19 @@ fn row0() -> Rect {
     Rect { x: 0, y: 0, width: 100, height: 1 }
 }
 
+/// The shell's own note, which rides the bar's bottom row.
+const NOTE: &str = "Queue saved";
+
 /// Where egui draws the strip and the bar, the cells leave their rows
 /// blank and register nothing on row 0; the bar is still registered, every
-/// act at its layout's box; and row 0 is the chrome's to take whole.
+/// act at its layout's box; row 0 is the chrome's to take whole; and the
+/// card's words and the note are egui's, the note handed to the bar's face
+/// in its tone.
 #[test]
 fn where_egui_draws_the_chrome_the_cells_leave_its_rows_and_keep_the_bars_acts() {
     let _en = crate::setup::tests::in_locale("en");
     let mut gui = forced_gui();
+    gui.note = Some((NOTE.into(), false));
     let rows = draw(&mut gui);
     let layout = gui.chrome.bar.as_ref().expect("the bar's mark").layout.clone();
     assert!(rows[0].trim().is_empty(), "row 0 is egui's: {:?}", rows[0]);
@@ -63,25 +69,26 @@ fn where_egui_draws_the_chrome_the_cells_leave_its_rows_and_keep_the_bars_acts()
     assert_eq!(gui.ui.hit(Position { x: layout.dj.word.x + 2, y: layout.dj.word.y + 1 }), Some(Act::AutoDj));
     assert_eq!(gui.ui.hit_context(Position { x: layout.card.rect.x + 1, y: layout.card.rect.y }), Some(Act::NowMore), "the card's right press, the demo seat's too");
     assert_eq!(gui.chrome.claims, Claims { live: vec![row0()], popup: false });
-    assert!(chrome_free_of_cells_text(&rows), "the note is egui's too");
-}
-
-/// The note is egui's where egui paints the bar: no cells words on the
-/// bar's bottom row.
-fn chrome_free_of_cells_text(rows: &[String]) -> bool {
-    !rows.iter().any(|row| row.contains("Cassini"))
+    assert!(!rows.iter().any(|row| row.contains("Cassini") || row.contains(NOTE)), "no cells words of the card's nor the note's:\n{}", rows.join("\n"));
+    let now = gui.bar_now();
+    let views = views(&gui, grid(), now.as_ref(), live(&gui, grid()), None, holes(&gui, grid()));
+    let note = views.bar.as_ref().and_then(|(view, _)| view.note.clone());
+    assert_eq!(note, Some((NOTE.to_string(), bar::NoteTone::Dim)), "the bar's face draws the note");
 }
 
 /// The cells chrome stays wherever egui does not draw it: no faces, no
-/// claims, the strip and the bar in cells as ever.
+/// claims, the strip and the bar in cells as ever, the note among them.
 #[test]
 fn without_the_faces_the_cells_draw_the_chrome_as_ever() {
     let _en = crate::setup::tests::in_locale("en");
     let mut gui = forced_gui();
     gui.chrome.forced = Some(Faces::default());
+    gui.note = Some((NOTE.into(), false));
     let rows = draw(&mut gui);
     assert!(rows[0].contains(" Library ") && rows[0].contains("[+]"), "{:?}", rows[0]);
     assert!(rows.iter().any(|row| row.contains("Cassini IV")), "the card in cells");
+    let note = bar::note_rect(grid(), gui.footer());
+    assert!(rows[usize::from(note.y)].contains(NOTE), "the note on the bar's bottom row: {:?}", rows[usize::from(note.y)]);
     assert_eq!(gui.chrome.claims, Claims::default());
     assert!(gui.chrome.bar.is_none() && gui.chrome.strip.is_none());
 }
@@ -212,21 +219,30 @@ fn a_part_is_cut_round_only_what_the_cells_stack_over_it() {
 }
 
 /// The frame's duties run each press the chrome took, in order, through
-/// the cells' preamble then its act: a press on a tab gives the keys back
-/// from the queue and opens its screen; a press that pressed nothing runs
-/// the preamble alone. Once: the presses are gone after.
+/// the cells' preamble then its act: a press that pressed nothing runs the
+/// preamble alone, which gives the keys back from the queue; a press on a
+/// tab does so too and opens its screen. Once: the presses are gone after.
 #[test]
 fn the_frames_duties_run_the_chromes_presses_once_preamble_first() {
     let mut gui = forced_gui();
     draw(&mut gui);
-    gui.app.focus = Focus::Queue;
-    gui.queue_view.held = true;
-    gui.chrome.presses = vec![(Position { x: 99, y: 0 }, None), (Position { x: 10, y: 0 }, Some(Act::Screen(Screen::Stats)))];
+    let hold = |gui: &mut Gui| {
+        gui.app.focus = Focus::Queue;
+        gui.queue_view.held = true;
+    };
+    hold(&mut gui);
+    gui.chrome.presses = vec![(Position { x: 10, y: 0 }, None)];
     gui.hot = false;
+    assert!(after_draw(&mut gui));
+    assert_eq!(gui.screen, Screen::Library, "a press on nothing acts nothing");
+    assert_eq!((gui.app.focus, gui.queue_view.held), (Focus::Browser, false), "its preamble gives the keys back from the queue");
+    assert!(gui.hot, "the next frame comes briskly");
+
+    hold(&mut gui);
+    gui.chrome.presses = vec![(Position { x: 99, y: 0 }, None), (Position { x: 10, y: 0 }, Some(Act::Screen(Screen::Stats)))];
     assert!(after_draw(&mut gui));
     assert_eq!(gui.screen, Screen::Stats);
     assert_eq!((gui.app.focus, gui.queue_view.held), (Focus::Browser, false), "the keys back from the queue");
-    assert!(gui.hot, "the next frame comes briskly");
     assert!(gui.chrome.presses.is_empty());
     assert!(!after_draw(&mut gui), "nothing more");
 }
@@ -247,11 +263,11 @@ fn the_pass_reports_a_press_once_with_its_act_and_its_parts() {
     let now = gui.bar_now();
     // One pass, its runs' presses added up, the screen's facts its last
     // run's, as the host keeps them.
-    let pass = |events: Vec<egui::Event>, again: bool| -> Out {
+    let pass = |events: Vec<egui::Event>, again: bool| -> (Out, usize) {
         let input = egui::RawInput { screen_rect: Some(cells.points), events, ..Default::default() };
         let live = live(&gui, grid());
         let views = views(&gui, grid(), now.as_ref(), live, None, holes(&gui, grid()));
-        let mut asked = false;
+        let mut runs = 0;
         let mut out = Out::default();
         let mut output = ctx.run_ui(input, |ui| {
             let mut run = Out::default();
@@ -259,18 +275,19 @@ fn the_pass_reports_a_press_once_with_its_act_and_its_parts() {
             out.presses.extend(run.presses);
             out.parts = run.parts;
             out.spots = run.spots;
-            if again && !asked {
-                asked = true;
+            runs += 1;
+            if again && runs == 1 {
                 ui.ctx().request_discard("a second run");
             }
         });
         output.textures_delta.clear();
-        out
+        (out, runs)
     };
-    assert!(pass(vec![egui::Event::PointerMoved(at)], false).presses.is_empty());
-    assert!(pass(Vec::new(), false).presses.is_empty());
+    assert!(pass(vec![egui::Event::PointerMoved(at)], false).0.presses.is_empty());
+    assert!(pass(Vec::new(), false).0.presses.is_empty());
     let press = egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::default() };
-    let out = pass(vec![press], true);
+    let (out, runs) = pass(vec![press], true);
+    assert_eq!(runs, 2, "egui ran the pass again");
     assert_eq!(out.presses.len(), 1, "once: {:?}", out.presses);
     assert_eq!(out.presses[0].1, Some(Act::Screen(Screen::Stats)));
     assert_eq!(cells.under(out.presses[0].0), Position { x: stats.x + stats.width / 2, y: 0 });

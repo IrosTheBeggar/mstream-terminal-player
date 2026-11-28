@@ -7080,10 +7080,13 @@ mod chrome_pieces {
         assert_eq!(presses.get(), 1, "held and released: nothing more");
         pass(&ctx, 0.9, vec![button(on, true), button(on, false)], &mut |ui| run(ui));
         assert_eq!(presses.get(), 2, "a tap inside one pass");
+        let runs = std::cell::Cell::new(0);
         pass(&ctx, 1.5, vec![button(on, true)], &mut |ui| {
             run(ui);
+            runs.set(runs.get() + 1);
             ui.ctx().request_discard("a second run");
         });
+        assert_eq!(runs.get(), 2, "egui ran the pass again");
         assert_eq!(presses.get(), 3, "once, though egui ran the pass again");
         pass(&ctx, 1.6, vec![button(on, false)], &mut |ui| run(ui));
         let off = pos2(300.0, 150.0);
