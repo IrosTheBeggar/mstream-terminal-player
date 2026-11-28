@@ -711,8 +711,6 @@ additions to drawn idioms. Revisit if discussion disagrees.
     `▾`, measured in points in the face in use.
   - **Presses on the press, once** (D23), a tap's included; the keys and
     the wheel the cells' unchanged.
-  - **The picker floats over an egui page** (D25): the page stays drawn,
-    where the cells' dropdown stands an egui page down while it is up.
 
   Left for the owner, drawn as the code behaves (the plan's rulings):
   "via {parent}" stands after the peer's name on its row, not beneath it
@@ -720,4 +718,12 @@ additions to drawn idioms. Revisit if discussion disagrees.
   label has no sign of a server that does not answer (R6); the open
   dropdown's edge stands a cell in from the window's while [+] ends two
   cells in (R11); "{peer} via {parent}" and "quick connect · {id}" are
-  English in every locale (R7).
+  English in every locale (R7); the picker floats over an egui page,
+  which stays drawn beneath it, where the cells' dropdown stands an egui
+  page down while it is up (R10, built as the plan's D25 recommends,
+  pending the ruling); and whether the chrome goes wholly inert under
+  every modal and the open menu (R4): the label lights, shows the hand
+  and takes its press only where the cells' registry leaves row 0 to the
+  strip, and under the open menu a press on it is the catcher's
+  (mp3-player-screen.md's deviation of 2026-11-28 has the strip's whole
+  answer).

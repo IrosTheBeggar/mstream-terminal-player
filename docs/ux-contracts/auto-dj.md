@@ -2535,8 +2535,11 @@ where this player differs, the build settled it so:
   chosen server's mark in the accent where the kit's choices are the ok
   green; Play from hidden for one server with several libraries; Smart
   filters a press that does nothing until the probe answers; Sonic off
-  showing no "Off"; and the split's chevron pointing closed/open rather
-  than toward the popover (R18).
+  showing no "Off"; the split's chevron pointing closed/open rather
+  than toward the popover (R18); and the popover floating over the Admin
+  screen's egui room, which stays drawn beneath it, where the cells'
+  popover stands it down (R10, built as the plan's D25 recommends,
+  pending the ruling).
 - **2026-11-28, later — The Library rests under the DJ's layers** (clause
   58): quick config, a sheet, the Seeds sheet and the First song question
   join the modals under which the Library draws without the pointer, in

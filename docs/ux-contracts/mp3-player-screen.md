@@ -1791,9 +1791,10 @@ comes from the cache, or a download, beside them.
     `MSTREAM_WINDOW_CELLS=1` (no panel), a terminal, the standalone `device
     flash` (clause 31) and the frames before the window exists keep the
     whole tab in cells, as clauses 1–67 tell it. A GUI overlay in cells
-    over the region — a GUI modal, and with the chrome in cells the server
-    menu and a GUI tooltip — stands it down while it is up, as on the other
-    egui pages. The chrome's own server menu and the strip's tooltips float
+    over the region — a GUI modal, a cells tooltip such as the pick
+    banner's [X], and with the chrome in cells the server menu and the
+    strip's tooltips — stands it down while it is up, as on the other egui
+    pages. The chrome's own server menu and the strip's tooltips float
     over the page instead, which stays drawn beneath them; while the menu
     is up the page hears none of the pointer.
 69. **The model stays the model.** Keys never reach egui: the page's
@@ -1938,7 +1939,11 @@ comes from the cache, or a download, beside them.
     thumb, its gutter, the frame's edge) taking nothing and never the row
     they hide. The keyboard's button in a foot wears the accent's ring
     3 points out of it; an Apply with no whole image is drawn dim and takes
-    nothing.
+    nothing. The Settings sheet's Peer budget is the volume widget here
+    too, in the bar's egui look (transport-bar.md clause 18): the kit's
+    quiet − and + in the row's ink, between them ten of the kit's level
+    segments lit in the accent one for every 300 MB and unlit beyond, then
+    its words.
 
 ## Wording
 
@@ -3620,6 +3625,35 @@ setting no locale, prints in English.
   Left for the owner, drawn as the code behaves: whether the promise that
   `http://localhost:3000 ▾` stands whole at 100 columns holds during a
   sync, which the cells break in es at any percentage and in fr and pl at
-  100 % (R1; the face measures its own points); and the up tab's press,
+  100 % (R1; the face measures its own points); the up tab's press,
   which does nothing but still shows the hand, while T, M and K on their
-  own tab go back to the Library (R2).
+  own tab go back to the Library (R2); whether the chrome goes wholly
+  inert, no hover, tooltip, press or hand, under every modal and the open
+  menu (R4), which the strip answers only as the cells' registry does:
+  under a GUI modal's guard it takes no press and shows no hand, hover or
+  tooltip; under the open menu its items neither light nor ripen a
+  tooltip, and a press there is the menu's catcher's, which shows the
+  hand, as the cells' catcher does; under a layer that leaves row 0
+  uncovered, and under the quit's gate, which registers no guard, it
+  still takes presses and shows the hand, as the cells let a tab's, the
+  Visualizer's and [+]'s clicks through the gate (the bar's part is
+  transport-bar.md's open question 14); and whether the
+  chrome's own popups float over this tab's egui page, which stays drawn
+  beneath them (clause 68), where the cells' server menu and tooltips
+  stand it down (R10, built as the plan's D25 recommends, pending the
+  ruling).
+- **2026-11-28, later — The strip's tooltips keep the cells' dwell
+  (clause 16; visualizer-window.md entry point 1).** egui's own tooltip
+  counted its 500 ms from the pointer's last move: a move of a point on
+  the Visualizer item or [+] hid a tooltip shown, a slow sweep never
+  ripened one, and the pass that heard the pointer come to rest lost the
+  dwell's wake in egui's ask for a pass at once, which the chrome's host
+  drops, so the tooltip waited for the next redraw, up to a second. The
+  kit's tooltip now keeps the cells' dwell per target, as
+  `Surface::dwell_tick` does, and says when it ends from that very pass,
+  so it shows on time.
+- **2026-11-28, later — The Settings sheet's Peer budget wears the kit's
+  level (clause 72).** Its − and + had strokes of their own, longer and
+  heavier than the kit's quiet steps, and its segments were the desk's
+  LED stacks; the cells draw the row as the volume widget, so egui now
+  draws it with the volume's pieces, one look for each thing.

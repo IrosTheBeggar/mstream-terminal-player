@@ -284,3 +284,9 @@ the phone.
   raises it (R9); and a failed open on the Stats or the MP3 Player tab
   shows its gold note nowhere until a screen with the bar's note comes up
   (R3).
+- **2026-11-28, later — The item's tooltip keeps the cells' dwell** (entry
+  point 1) on the item however the pointer moves on it, and shows on
+  time: egui's own dwell, counted from the pointer's last move, hid it at
+  a point's move, and its wake was lost in the pass the pointer came to
+  rest in, so it waited for the next redraw (mp3-player-screen.md's
+  deviation of the same day).

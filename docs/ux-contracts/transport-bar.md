@@ -229,8 +229,10 @@ song's words are the track's. The notes come from the App and the shell
 
 ## Open questions
 
-The canvas's board plan left these to the owner (its rulings R13–R24);
-the bar is built as the code behaves until each is ruled on:
+The canvas's board plan left these to the owner (its rulings R13–R24,
+and R4 for the chrome as a whole); the bar is built as the code behaves
+until each is ruled on, except the split's hover (R18), where egui lights
+each half on its own, as the plan's decision D13 drew it:
 
 1. **Gold for playback** (R13): the seek and the play frame stay gold,
    though Studio keeps gold for warnings.
@@ -258,6 +260,14 @@ the bar is built as the code behaves until each is ruled on:
     Q22) still lights while the room takes every press; decision D22 asks
     for no hover there. The fix belongs to the chrome's host
     (`chrome::bar_hot`).
+14. **The chrome under a modal and the open menu** (R4): whether it goes
+    wholly inert, no hover, tooltip, press or hand. The build answers part
+    of it already: the egui bar lights nothing under a GUI modal's guard
+    on any screen, nor while the server menu or quick config holds the
+    pointer (clause 15), where the cells' bar keeps its hover lit under the
+    Admin screen's modals (clause 12) and under the open menu. Its presses
+    and its hand stay the cells' registry's in both faces. The strip's
+    part is mp3-player-screen.md's deviation of 2026-11-28.
 
 ## Deviations log
 

@@ -486,9 +486,10 @@ not.
     them is nobody's. Keys never reach egui: they go where clause 13
     sends them, the log's to its keys (clause 16), whose steps and pages
     measure the rows egui last drew. The hand ORs in with the room's own.
-    A GUI overlay in cells that overlaps the region — a GUI modal, and
-    with the chrome in cells the server menu and a GUI tooltip — stands the
-    whole region down while it is up (window/panel.rs): nothing egui draws
+    A GUI overlay in cells that overlaps the region — a GUI modal, a cells
+    tooltip such as the pick banner's [X], and with the chrome in cells the
+    server menu and the strip's tooltips — stands the whole region down
+    while it is up (window/panel.rs): nothing egui draws
     shows then, room and log alike; under a GUI modal or the server menu
     there is no hand either. The chrome's own server menu and quick config
     float over the region instead, which stays drawn beneath them and
@@ -920,7 +921,14 @@ from every locale. The rooms' own strings (`admin.*`, `usr.*`, `bak.*`,
   egui as the GUI's chrome, on a layer of the panel's own over the whole
   window, so the menu and quick config no longer stand a room's face and
   the log down: they float over them, the region drawn and quiet beneath.
-  Left for the owner: under a room's own egui modal the bar still lights
-  where the pointer rests, while the room takes every press (the board
-  plan's D22 asks for no hover there; transport-bar.md's open question
-  13).
+  Left for the owner, drawn as the code behaves: under a room's own egui
+  modal the bar still lights where the pointer rests, while the room
+  takes every press (the board plan's D22 asks for no hover there;
+  transport-bar.md's open question 13); whether the chrome's popups float
+  over the region at all, which stays drawn beneath them, where the cells'
+  menu and quick config stand it down (the plan's R10, built as its D25
+  recommends, pending the ruling); and whether the chrome goes wholly
+  inert under every modal and the open menu (R4), which the build answers
+  in part: under a GUI modal here the egui bar lights nothing, where the
+  cells' bar keeps its hover lit (transport-bar.md clause 12, its open
+  question 14).
