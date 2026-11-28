@@ -90,8 +90,17 @@ struct Painted {
     out: FullOutput,
 }
 
+/// A pass's input over `screen`, at `ppp` pixels a point, as a window
+/// scaled so hands egui its own.
+fn input_at(screen: egui::Rect, ppp: f32) -> egui::RawInput {
+    let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+    input.viewports.entry(ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
+    input
+}
+
 /// `gui` drawn by the cells at `w`×`h`, then the face's pass over the bar's
-/// rows in `ctx`, the cells' edges rounded at `ppp` pixels a point.
+/// rows in `ctx` at `ppp` pixels a point, egui's layout and the cells' edges
+/// both rounded to them.
 fn paint_in(ctx: &egui::Context, gui: &mut Gui, w: u16, h: u16, ppp: f32) -> Painted {
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal.draw(|frame| render(frame, gui)).unwrap();
@@ -104,8 +113,7 @@ fn paint_in(ctx: &egui::Context, gui: &mut Gui, w: u16, h: u16, ppp: f32) -> Pai
     let layout = crate::gui::bar::layout(grid, &view);
     let pal = Pal::now();
     let cx = BarCtx { cells, hot: gui.chrome.hot.clone(), pal: &pal };
-    let input = egui::RawInput { screen_rect: Some(points), ..Default::default() };
-    let mut out = ctx.run_ui(input, |ui| {
+    let mut out = ctx.run_ui(input_at(points, ppp), |ui| {
         let rect = cells.rect(layout.rect);
         let mut part = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         part.set_clip_rect(rect);
@@ -353,11 +361,13 @@ fn the_auto_dj_word_stands_whole_in_its_half() {
     let _en = crate::setup::tests::in_locale("en");
     let pal = Pal::now();
     let ctx = context();
-    let mut whole = 0.0;
-    let mut out = ctx.run_ui(egui::RawInput::default(), |ui| whole = studio::caps_width(ui, "AUTO-DJ", WORD_SIZE));
-    // The context's first pass hands over the font atlas: let go of it.
-    out.textures_delta.clear();
     for (w, h, ppp) in [(100, 30, 1.0), (100, 24, 1.25), (160, 50, 2.0)] {
+        // The capitals' width at the board's size, at the pass's own scale.
+        let mut whole = 0.0;
+        let screen = egui::Rect::from_min_size(Pos2::ZERO, vec2(f32::from(w) * 8.0, f32::from(h) * 16.0));
+        let mut out = ctx.run_ui(input_at(screen, ppp), |ui| whole = studio::caps_width(ui, "AUTO-DJ", WORD_SIZE));
+        // A pass at a new scale hands over a font atlas: let go of it.
+        out.textures_delta.clear();
         let mut gui = bar_gui();
         let p = paint_in(&ctx, &mut gui, w, h, ppp);
         let frame = framed(rect_of(&p, p.layout.dj.frame));
