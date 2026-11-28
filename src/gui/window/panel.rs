@@ -654,7 +654,8 @@ struct Routed {
 ///    while a chrome popup holds the pointer; else the grid's.
 /// 4. A secondary or middle press and the wheel are never the chrome's.
 /// 5. A move reaches the chrome unless the page or the grid holds a button
-///    (the chrome heard the pointer go at that press), and the page as its
+///    (the chrome heard the pointer go at that press, and hears where it
+///    rests at the release that lets go of the hold), and the page as its
 ///    rules say unless a popup holds the pointer or the chrome holds a
 ///    button; the grid always hears it.
 /// 6. The pointer leaving the window lets go of every hold.
@@ -691,7 +692,7 @@ fn route_both(raw: &Raw, seat: Seat, holds: &mut Holds) -> Routed {
                     return out;
                 }
             }
-            let held = holds.page.is_some();
+            let held = holds.page.is_some() || holds.grid.is_some();
             (out.page, out.ours) = page(raw, holds);
             if *down {
                 if !out.ours {
@@ -702,8 +703,17 @@ fn route_both(raw: &Raw, seat: Seat, holds: &mut Holds) -> Routed {
                 if !held {
                     out.chrome = gone();
                 }
-            } else if !out.ours && holds.grid == Some(pressed) {
-                holds.grid = None;
+            } else {
+                if !out.ours && holds.grid == Some(pressed) {
+                    holds.grid = None;
+                }
+                // The press that held it is let go: the chrome hears where
+                // the pointer rests, which may be on what that press opened
+                // (quick config over the split's chevron), and lights it
+                // and shows the hand without waiting for a move.
+                if held && holds.page.is_none() && holds.grid.is_none() && seat.chrome_on {
+                    out.chrome = seat.at.map(egui::Event::PointerMoved).into_iter().collect();
+                }
             }
         }
         Raw::Move { .. } => {
@@ -1368,8 +1378,12 @@ mod tests {
     /// page's region the page's, outside it the grid's, which the chrome
     /// leaves alone until its release — though the release lands on a cell
     /// the chrome claims, and a press there meanwhile is not the chrome's.
+    /// The release gives the chrome back where the pointer rests, no button
+    /// with it: quick config, which the split's chevron opens on the grid's
+    /// press, showed no hand under a pointer that had not moved since.
     #[test]
     fn a_press_the_grid_took_is_the_grids_until_its_release() {
+        let rests = |events: &[egui::Event]| matches!(events, [egui::Event::PointerMoved(at)] if *at == pos2(40.0, 30.0));
         let mut holds = Holds::default();
         let page = route_both(&button(true), seat(true, false), &mut holds);
         assert!(page.ours && pressed_by(&page.page) && holds.page.is_some(), "{page:?}");
@@ -1377,14 +1391,19 @@ mod tests {
         let dragged = route_both(&Raw::Move { x: 1.0, y: 1.0 }, seat(false, true), &mut holds);
         assert!(dragged.chrome.is_empty() && !dragged.page.is_empty(), "a page's drag onto the strip is the page's: {dragged:?}");
         let release = route_both(&button(false), seat(false, true), &mut holds);
-        assert!(release.ours && release.chrome.is_empty(), "and so is its release: {release:?}");
+        assert!(release.ours && release.page.iter().any(|e| release_at(e).is_some()), "and so is its release: {release:?}");
+        assert!(rests(&release.chrome), "the chrome hears where the pointer rests: {release:?}");
 
         let grid = route_both(&button(true), seat(false, false), &mut holds);
         assert!(!grid.ours && grid.page.is_empty() && holds.grid == Some(egui::PointerButton::Primary), "{grid:?}");
         let moved = route_both(&Raw::Move { x: 1.0, y: 1.0 }, seat(false, true), &mut holds);
         assert!(moved.chrome.is_empty() && !moved.ours, "the chrome hears no move while the grid holds: {moved:?}");
+        let other = route_both(&right(true), seat(false, true), &mut holds);
+        assert!(other.chrome.is_empty() && !other.ours, "another button meanwhile is the grid's too: {other:?}");
+        let other = route_both(&right(false), seat(false, true), &mut holds);
+        assert!(other.chrome.is_empty(), "its release leaves the primary's hold: {other:?}");
         let up = route_both(&button(false), seat(false, true), &mut holds);
-        assert!(!up.ours && up.chrome.is_empty(), "the grid's release, on a claimed cell: {up:?}");
+        assert!(!up.ours && rests(&up.chrome), "the grid's release, on a claimed cell, the pointer back with no button: {up:?}");
         assert_eq!(holds, Holds::default());
         let next = route_both(&button(true), seat(false, true), &mut holds);
         assert!(next.ours && pressed_by(&next.chrome), "free again: {next:?}");
