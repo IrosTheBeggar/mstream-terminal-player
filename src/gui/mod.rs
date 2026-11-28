@@ -4073,10 +4073,23 @@ impl Gui {
     /// hears: everything [`input`] does there, in its order. False where the
     /// press goes no further. No act quits at this commit, so the grip's end
     /// cannot either.
+    ///
+    /// Of the page owners [`input`] asks before the GUI's surface, only the
+    /// MP3 Player tab's ever takes a press on the cells the chrome claims:
+    /// during a write it holds every press, the top bar's among them, and
+    /// lights nothing (`device::pointer`). The chrome claims nothing while a
+    /// write runs, but its claims are the last frame's: a press it took on
+    /// them after a key began a write comes here, and stops where a press
+    /// on the cells stops.
     #[cfg_attr(not(feature = "window"), allow(dead_code))]
     pub(super) fn press_preamble(&mut self, at: Position) -> bool {
         admin::let_go_unseen(self);
         let _ = self.press_lets_go(at);
+        let gripping = self.ui.gripping() || self.ui.holding_bar();
+        let press = event::MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: at.x, row: at.y, modifiers: KeyModifiers::NONE };
+        if !gripping && device::pointer(self, press) {
+            return false;
+        }
         self.press_begins(at)
     }
 
