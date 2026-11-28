@@ -2,9 +2,8 @@
 //! discovery-page.md; mStream's docs/discovery-page-plan.md §3.1–§3.3).
 //!
 //! The room keeps **its own row model** here, the sonic room's precedent:
-//! nothing in this file reads or writes the TUI's Discover tab (`App.discover`,
-//! its drill and seed), the Now Playing panel's neighbours (`App.now_discover`)
-//! or `Capture::Discover` — clause 67. The GUI draws from [`TasteState`] and
+//! nothing in this file reads or writes the Now Playing panel's neighbours
+//! (`App.now_discover`) — clause 67. The GUI draws from [`TasteState`] and
 //! calls the `taste_*` methods; every queue row they build is stamped here,
 //! the session's origin on a Library song and the peer's on a connected
 //! server's row.

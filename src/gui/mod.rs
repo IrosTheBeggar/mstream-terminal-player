@@ -1,15 +1,14 @@
 //! The GUI player — the mouse-first surface the Windows/macOS installers
-//! launch in the branded terminal window (`mstream-player gui`).
+//! launch (`mstream-player gui`), and what a bare `mstream-player` opens.
 //!
 //! Built the wizard's way: the kit's fixed palette and OSC 11 ground lease,
 //! a `Surface` per frame, every action clickable AND keyed. Underneath it is
-//! the SAME `App` and worker pair as the classic TUI — the GUI is a second
-//! front end on the proven state machine (the wasm shell and the replay
-//! harness are the other two), so queueing, crossfade announcements,
-//! track-end advance and session handling are shared, not re-implemented.
-//! Mouse clicks translate to the App's own actions (select the row, then
+//! the `App` state machine and its worker pair (`crate::tui`), written for
+//! the terminal player this one replaced: queueing, crossfade announcements,
+//! track-end advance and session handling live there, not here. Mouse
+//! clicks translate to the App's own actions (select the row, then
 //! `Activate`), which keeps `handle_action`'s follow-up work — waveform
-//! prefetch, the crossfade announcement — running exactly as the TUI's.
+//! prefetch, the crossfade announcement — running.
 //!
 //! The shell: the left nav's rooms (each a module of its own under this
 //! one), the live queue panel, both bottom bars against real playback, and
@@ -700,9 +699,6 @@ impl Gui {
         // The tests assert the modern glyphs whatever console runs them.
         #[cfg(test)]
         crate::kit::theme::pin_modern_terminal();
-        // No connect screen here: the servers surfaces are this shell's own,
-        // and the transport keeps working while a session is down.
-        app.connect_screen = false;
         // Play from is this shell's (the room's sheet, quick config): Start
         // goes to its home.
         app.dj_shows_play_from = true;
@@ -2776,10 +2772,9 @@ fn draw_marked_rows(
                 // Drill rows carry a dim right-hand column — a hit count,
                 // a closeness — the kit table's detail spot.
                 let detail = match other {
-                    Entry::Search { detail, .. }
-                    | Entry::Discover { detail, .. }
-                    | Entry::Setting { detail, .. }
-                    | Entry::Sonic { detail, .. } => Some(detail.as_str()),
+                    Entry::Search { detail, .. } | Entry::Sonic { detail, .. } => {
+                        Some(detail.as_str())
+                    }
                     _ => None,
                 };
                 if let Some(detail) = detail.filter(|d| !d.is_empty()) {

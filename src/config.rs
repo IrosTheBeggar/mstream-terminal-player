@@ -39,7 +39,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub type Keep = toml::Table;
 
 /// What a file with no `version` line is read as. The number exists to keep a
-/// *newer* player's file from being misread; someone hand-writing a `[theme]`
+/// *newer* player's file from being misread; someone hand-writing a `[cache]`
 /// section shouldn't have to know it, and refusing the whole file over the
 /// missing line is the opposite of "fixable in an editor". Saving adds it.
 fn current_version() -> u32 {
@@ -72,19 +72,6 @@ pub struct Config {
     /// Absent means off; MSTREAM_LOG and RUST_LOG outrank it.
     #[serde(default, skip_serializing_if = "LogPrefs::is_unset")]
     pub log: LogPrefs,
-    /// `[theme]` — the three colours the drawing code actually varies. Unset
-    /// means palette names, so the terminal's own scheme picks the hues.
-    #[serde(default, skip_serializing_if = "ThemePrefs::is_unset")]
-    pub theme: ThemePrefs,
-
-    /// `[display]` — how much of Unicode the terminal's font can be trusted
-    /// with.
-    #[serde(default, skip_serializing_if = "DisplayPrefs::is_default")]
-    pub display: DisplayPrefs,
-
-    /// `[mouse]` — the wheel and clicking the progress bar.
-    #[serde(default, skip_serializing_if = "MousePrefs::is_default")]
-    pub mouse: MousePrefs,
     /// `[gui]` — the GUI player surface's own choices (`mstream-player gui`).
     #[serde(default, skip_serializing_if = "GuiPrefs::is_default")]
     pub gui: GuiPrefs,
@@ -97,18 +84,16 @@ pub struct Config {
     /// panel left them.
     #[serde(default, skip_serializing_if = "VisualizerPrefs::is_default")]
     pub visualizer: VisualizerPrefs,
-    /// `[keys]` — action name to the keys that should fire it. Empty means
-    /// the built-in bindings, and only the actions named here are changed.
-    /// See `mstream-player keys` for the full list in this format.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub keys: std::collections::BTreeMap<String, Vec<String>>,
     /// Most recently used first, so the player knows where to reconnect
     /// without needing a timestamp or a "current" pointer.
     #[serde(default, rename = "server")]
     pub servers: Vec<ServerEntry>,
-    /// Sections and keys from a newer player. Last so that what it holds is
-    /// written after the fields above, which is also what TOML requires of
-    /// anything that turns out to be a table.
+    /// Sections and keys this player does not read: a newer player's, and
+    /// the `[keys]`, `[theme]`, `[display]` and `[mouse]` the terminal
+    /// player before the GUI read, which an older release sharing the
+    /// directory still does. Last so that what it holds is written after
+    /// the fields above, which is also what TOML requires of anything that
+    /// turns out to be a table.
     #[serde(flatten)]
     pub extra: Keep,
 }
@@ -121,13 +106,9 @@ impl Default for Config {
             player: PlayerPrefs::default(),
             cache: CachePrefs::default(),
             log: LogPrefs::default(),
-            theme: ThemePrefs::default(),
-            display: DisplayPrefs::default(),
-            mouse: MousePrefs::default(),
             gui: GuiPrefs::default(),
             torrent: TorrentPrefs::default(),
             visualizer: VisualizerPrefs::default(),
-            keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
             extra: Keep::new(),
         }
@@ -492,148 +473,16 @@ impl CachePrefs {
     }
 }
 
-/// `[theme]` — the colours the player varies.
-///
-/// Each takes either a palette name (`cyan`, `bright-blue`), which lets the
-/// terminal's own scheme decide the hue, or an exact `#rrggbb`, or a 0–255
-/// index into the 256-colour cube. Names are the default because a terminal
-/// app that hard-codes hues looks wrong in everyone else's colour scheme.
-///
-/// Red is not here on purpose: an error that isn't red is a trap.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ThemePrefs {
-    /// What is playing, what is selected, the progress bar.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub accent: Option<String>,
-    /// Labels, durations, rules, hints — everything secondary.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dim: Option<String>,
-    /// Directories and library nodes in the browser.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub folder: Option<String>,
-    #[serde(flatten)]
-    pub extra: Keep,
-}
-
-impl ThemePrefs {
-    fn is_unset(&self) -> bool {
-        self.accent.is_none()
-            && self.dim.is_none()
-            && self.folder.is_none()
-            && self.extra.is_empty()
-    }
-}
-
-/// `[display]`. Which glyphs the terminal's font can actually draw.
-///
-/// Not a taste setting — a font either has a character or it prints a box.
-/// The Windows 10 default console is conhost with Consolas, which covers the
-/// old CP437 shapes (`█ ░ ▓ ▄ ─ │`) and nothing later: no eighth-height
-/// blocks, no braille, no `▶`, no `★`. Windows Terminal ships Cascadia Mono,
-/// which has all of them, and every ordinary Linux and macOS terminal font
-/// does too.
-///
-/// `auto` reads `WT_SESSION` — Windows Terminal sets it, conhost does not —
-/// and assumes anything not Windows is fine. `full` and `legacy` pin it,
-/// for a Windows console someone has pointed at a better font, or a Linux
-/// one stuck on a bitmap font.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DisplayPrefs {
-    /// `auto`, `full` or `legacy`.
-    pub glyphs: String,
-    /// Rows the terminal needs before the browser screen's progress bar
-    /// spends a second one mirroring the waveform.
-    ///
-    /// The compact transport is two rows — what is playing, then the bar —
-    /// and on an 80x24 terminal that is already an eighth of the list. A
-    /// third row is worth it when there are rows to spare and not when there
-    /// aren't, which is a question only the terminal can answer. `0` always;
-    /// to turn it off, any height taller than a terminal — `9999` does it,
-    /// where a number over 65535 does not parse as a `u16` and costs you the
-    /// whole file. The full-screen view mirrors regardless: its body is a
-    /// facts column and a panel rather than a list to scroll.
-    pub mirror_min_height: u16,
-    /// How many listing columns the browser will show at once, the one you
-    /// are in included — the Miller columns.
-    ///
-    /// A ceiling, not a promise: the columns you came through are only drawn
-    /// where there is width for them, innermost first, so a narrow terminal
-    /// quietly shows fewer. The queue column is not one of these; it is the
-    /// end of the chain rather than a step along it.
-    pub miller_columns: usize,
-    #[serde(flatten)]
-    pub extra: Keep,
-}
-
-/// Rows below which the browser screen keeps its single-row bar.
-///
-/// Twenty-four rows leaves nineteen for the list; thirty leaves twenty-five,
-/// and giving one of those up costs nothing anyone notices.
-pub const DEFAULT_MIRROR_MIN_HEIGHT: u16 = 30;
-
-/// Listing columns the browser will show at once, the current one included.
-///
-/// Four fits an 88-column terminal and is about as far back as the context
-/// is still worth reading: artist, album, and the two you came through.
-pub const DEFAULT_MILLER_COLUMNS: usize = 4;
-
-impl Default for DisplayPrefs {
-    fn default() -> Self {
-        DisplayPrefs {
-            glyphs: "auto".to_string(),
-            mirror_min_height: DEFAULT_MIRROR_MIN_HEIGHT,
-            miller_columns: DEFAULT_MILLER_COLUMNS,
-            extra: Keep::new(),
-        }
-    }
-}
-
-impl DisplayPrefs {
-    fn is_default(&self) -> bool {
-        *self == DisplayPrefs::default()
-    }
-}
-
-/// `[mouse]`. On by default: a wheel that scrolls and a bar you can click at
-/// are what anyone expects of a pointer.
-///
-/// Worth being able to turn off, though. A terminal asked to report the mouse
-/// stops doing its own click-drag selection, so copying a path off the screen
-/// becomes shift-drag instead of drag. Anyone who copies more often than they
-/// scroll should be able to have that back.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MousePrefs {
-    pub enabled: bool,
-    #[serde(flatten)]
-    pub extra: Keep,
-}
-
-impl Default for MousePrefs {
-    fn default() -> Self {
-        MousePrefs { enabled: true, extra: Keep::new() }
-    }
-}
-
-impl MousePrefs {
-    fn is_default(&self) -> bool {
-        *self == MousePrefs::default()
-    }
-}
-
 /// `[gui]`. The GUI player surface (`mstream-player gui`) keeps its own
-/// choices here, apart from the classic TUI's — the two are different
-/// rooms. (The bottom-bar choice lived here until 2026-08-29, when the
-/// waveform bar was retired and the gold line became THE bar; a leftover
-/// `bar` key rides `extra` harmlessly.)
+/// choices here. (The bottom-bar choice lived here until 2026-08-29, when
+/// the waveform bar was retired and the gold line became THE bar; a
+/// leftover `bar` key rides `extra` harmlessly.)
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GuiPrefs {
     /// Show the keyboard's names: the footer line of keys, and the
     /// ` — key` tail on a tooltip. Off by default — this surface is the
-    /// pointer's, and the classic TUI is the keyboard's room.
+    /// pointer's.
     pub key_hints: bool,
     /// The Discover room's tab in front — `library` or `servers`
     /// (discovery-page contract, clause 40). The tab's old name `peers`
@@ -1382,8 +1231,9 @@ fn cache_root() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("MSTREAM_PLAYER_CACHE_DIR") {
         return Some(expand_home(PathBuf::from(dir)));
     }
-    // A broken config file must not decide where scratch files go — the TUI
-    // will surface the parse error on its own; here it just means "default".
+    // A broken config file must not decide where scratch files go — the
+    // player's start-up reports the parse error on its own; here it just
+    // means "default".
     if let Ok(config) = load() {
         if let Some(dir) = config.cache.dir {
             return Some(expand_home(dir));
@@ -2143,6 +1993,53 @@ mod tests {
     }
 
     #[test]
+    fn the_sections_the_terminal_player_before_the_gui_read_survive_a_save() {
+        let scratch = Scratch::new("retired-sections");
+        // A file from a release that still had the terminal player's own
+        // settings. This player reads none of them, and an older release
+        // sharing the directory still does: a save must leave them as they
+        // were written.
+        fs::write(
+            scratch.dir.join(CONFIG_FILE),
+            "version = 1\n\
+             \n\
+             [player]\n\
+             volume = 0.5\n\
+             \n\
+             [theme]\n\
+             accent = \"#ff8800\"\n\
+             \n\
+             [display]\n\
+             glyphs = \"legacy\"\n\
+             miller_columns = 3\n\
+             \n\
+             [mouse]\n\
+             enabled = false\n\
+             \n\
+             [keys]\n\
+             next-track = [\"b\"]\n\
+             clear-queue = []\n",
+        )
+        .unwrap();
+
+        let mut config = load().unwrap();
+        config.player.adopt(PlayerPrefs { volume: 0.8, ..PlayerPrefs::default() });
+        save(&config).unwrap();
+
+        let again = load().unwrap();
+        assert_eq!(again.player.volume, 0.8, "this player's own setting is the one it chose");
+        let section = |name: &str| again.extra.get(name).and_then(toml::Value::as_table).cloned().unwrap_or_default();
+        assert_eq!(section("theme").get("accent").and_then(toml::Value::as_str), Some("#ff8800"));
+        assert_eq!(section("display").get("glyphs").and_then(toml::Value::as_str), Some("legacy"));
+        assert_eq!(section("display").get("miller_columns").and_then(toml::Value::as_integer), Some(3));
+        assert_eq!(section("mouse").get("enabled").and_then(toml::Value::as_bool), Some(false));
+        let keys = section("keys");
+        let bound = |action: &str| keys.get(action).and_then(toml::Value::as_array).map(Vec::len);
+        assert_eq!(bound("next-track"), Some(1));
+        assert_eq!(bound("clear-queue"), Some(0), "an action with its keys taken away stays that way");
+    }
+
+    #[test]
     fn settings_this_player_has_never_heard_of_survive_its_save() {
         let scratch = Scratch::new("unknown-keys");
         // A file written by a newer player. The schema version is deliberately
@@ -2405,12 +2302,12 @@ mod tests {
         // later start fail over a line the docs never told them to add.
         fs::write(
             scratch.dir.join(CONFIG_FILE),
-            "[theme]\naccent = \"cyan\"\n\n[[server]]\nurl = \"http://host:3000\"\n",
+            "[player]\nvolume = 0.5\n\n[[server]]\nurl = \"http://host:3000\"\n",
         )
         .unwrap();
         let config = load().unwrap();
         assert_eq!(config.version, SCHEMA_VERSION, "read as the current schema");
-        assert_eq!(config.theme.accent.as_deref(), Some("cyan"));
+        assert_eq!(config.player.volume, 0.5);
         assert_eq!(config.servers.len(), 1, "the rest of the file survived");
 
         fs::write(

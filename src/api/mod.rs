@@ -1129,31 +1129,6 @@ impl Client {
         wait(self.similar_tracks_async(filepath, limit))
     }
 
-    /// Artists whose overall sound sits near this one's, each with up to two
-    /// tracks that lead in from where the listener already is.
-    ///
-    /// `None` means discovery is switched off, as with
-    /// [`Client::similar_tracks`].
-    pub async fn similar_artists_async(
-        &self,
-        artist: &str,
-        limit: u32,
-    ) -> Result<Option<SimilarArtistsResponse>, ApiError> {
-        let body = serde_json::json!({ "artist": artist, "limit": limit });
-        match self.post("api/v1/discovery/local/similar/artists", body).await {
-            Ok(response) => Ok(Some(response)),
-            Err(ApiError::Forbidden(_)) => Ok(None),
-            // The server treats an artist with nothing visible to this user
-            // as one that doesn't exist; an empty list says that better than
-            // an error does.
-            Err(ApiError::NotFound(_)) => Ok(Some(SimilarArtistsResponse::default())),
-            Err(e) => Err(e),
-        }
-    }
-
-    // No sync twin: its only callers (worker::discover) drive the async
-    // version through `wait` themselves. Same for `journey_async` below.
-
     // ── The Discover page (discovery-page contract) ─────────────────────────
     //
     // No sync twins: the worker's shared shapers drive these through `wait`.

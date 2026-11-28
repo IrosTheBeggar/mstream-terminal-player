@@ -3,11 +3,11 @@
 //!
 //! One rule keeps the two flavours one CLI: an explicit argv means the same
 //! thing in both (`gui` is the terminal GUI, `gui --window` the window), and
-//! only an EMPTY argv differs. The terminal flavour opens the TUI as it
-//! always has; the desktop flavour opens the GUI in its own window, under a
+//! only an EMPTY argv differs. The terminal flavour opens the GUI in the
+//! terminal; the desktop flavour opens it in its own window, under a
 //! default instance lock so a second double-click does not open a second
 //! player — unless no window can be expected (no display on a Linux box, a
-//! session over SSH at a terminal), where it is the TUI as before.
+//! session over SSH at a terminal), where it opens in the terminal too.
 //!
 //! Nothing here exists in the terminal flavour: main.rs reaches it only
 //! under `cfg(feature = "desktop")`.
@@ -49,7 +49,7 @@ pub fn launch_argv(mut args: Vec<OsString>) -> Vec<OsString> {
 /// player in that shell, not a window on a desktop they cannot see (or a
 /// forwarded X11 window crawling over the link). Under SSH with no terminal
 /// (a remote command, a script) the window is still tried: nobody is at a
-/// terminal to get the TUI either. Empty values count as unset, as winit
+/// terminal to get the player there either. Empty values count as unset, as winit
 /// reads them; `WAYLAND_SOCKET` is the Wayland session winit also accepts.
 pub fn window_expected(
     get: impl Fn(&str) -> Option<OsString>,
@@ -304,7 +304,7 @@ fn focus(_pid: u32) -> bool {
 /// its lifetime (it still flashes as the process starts; the launcher stub,
 /// src/bin/launch.rs, has none at all). Only a console this process alone
 /// is attached to: launched from cmd or PowerShell the list holds the shell
-/// too, and serve, setup and the TUI typed there keep their console. With
+/// too, and serve, setup and the player typed there keep their console. With
 /// no console (CREATE_NO_WINDOW, a detached start) the count is 0 and
 /// nothing happens.
 ///
@@ -367,7 +367,7 @@ mod tests {
         assert!(window_expected(env(&[("DISPLAY", ":0")]), true, true));
         assert!(window_expected(env(&[("WAYLAND_DISPLAY", "wayland-0")]), true, false));
         assert!(window_expected(env(&[("WAYLAND_SOCKET", "3")]), true, false));
-        // No display named, or one named empty: the TUI, as before.
+        // No display named, or one named empty: the player in the terminal.
         assert!(!window_expected(env(&[]), true, true));
         assert!(!window_expected(env(&[]), true, false));
         assert!(!window_expected(env(&[("DISPLAY", ""), ("WAYLAND_DISPLAY", "")]), true, false));
@@ -379,7 +379,7 @@ mod tests {
         for ssh in [("SSH_CONNECTION", "10.0.0.2 52000 10.0.0.1 22"), ("SSH_TTY", "/dev/pts/3")] {
             assert!(!window_expected(env(&[ssh]), false, true), "{ssh:?}");
             assert!(!window_expected(env(&[ssh, ("DISPLAY", "localhost:10.0")]), true, true));
-            // With no terminal on stdin nobody would see a TUI either.
+            // With no terminal on stdin nobody would see it there either.
             assert!(window_expected(env(&[ssh]), false, false), "{ssh:?}");
         }
         assert!(window_expected(env(&[("SSH_TTY", "")]), false, true), "empty is unset");

@@ -445,63 +445,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "beamterm-core"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0375f7f3df163a52a06807f2150bac9a5da1933864ed40d52dda7dcd7cfa193b"
-dependencies = [
- "beamterm-data",
- "beamterm-unicode",
- "bitflags 2.13.2",
- "compact_str",
- "glow",
- "lru 0.16.4",
- "rustc-hash 2.1.3",
- "thiserror 2.0.21",
- "unicode-width 0.2.3",
-]
-
-[[package]]
-name = "beamterm-data"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f21ff1fc630079352bae9b024f85519bf1f641cf7f326623f4c0b59f7ea834fd"
-dependencies = [
- "compact_str",
- "miniz_oxide 0.9.1",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "beamterm-renderer"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8db76d04d575a0534ad5dba63acc05ccbe69597f977f11c59a612cbea199112"
-dependencies = [
- "beamterm-core",
- "beamterm-data",
- "bitflags 2.13.2",
- "compact_str",
- "console_error_panic_hook",
- "glow",
- "js-sys",
- "thiserror 2.0.21",
- "unicode-width 0.2.3",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "beamterm-unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f44155933cdd0625a699c554c504aab30a571e4df68f3532fb95bf9cf53b935"
-dependencies = [
- "unicode-width 0.2.3",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -909,16 +852,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
-]
-
-[[package]]
-name = "console_error_panic_hook"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
-dependencies = [
- "cfg-if",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1863,9 +1796,6 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
-dependencies = [
- "getrandom 0.4.3",
-]
 
 [[package]]
 name = "fdeflate"
@@ -2993,7 +2923,7 @@ dependencies = [
  "iroh-base",
  "iroh-dns",
  "iroh-metrics",
- "lru 0.18.5",
+ "lru",
  "n0-error",
  "n0-future",
  "noq",
@@ -3349,15 +3279,6 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
-dependencies = [
- "hashbrown 0.16.1",
-]
-
-[[package]]
-name = "lru"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
@@ -3593,7 +3514,6 @@ dependencies = [
  "ashpd",
  "base64 0.22.1",
  "clap",
- "console_error_panic_hook",
  "crc32fast",
  "egui",
  "egui-wgpu",
@@ -3620,7 +3540,6 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "ratatui-wgpu",
- "ratzilla",
  "regex",
  "reqwest",
  "rfd",
@@ -3647,10 +3566,6 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.3",
  "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
  "wgpu",
  "windows-sys 0.61.2",
  "winit",
@@ -3672,7 +3587,7 @@ dependencies = [
  "derive_more",
  "ipconfig",
  "jni 0.22.4",
- "lru 0.18.5",
+ "lru",
  "n0-error",
  "n0-future",
  "ndk-context",
@@ -5422,7 +5337,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.14.0",
  "kasuari",
- "lru 0.18.5",
+ "lru",
  "palette",
  "serde",
  "strum 0.28.0",
@@ -5533,22 +5448,6 @@ dependencies = [
  "time",
  "unicode-segmentation",
  "unicode-width 0.2.3",
-]
-
-[[package]]
-name = "ratzilla"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d53309a50b2cfb9828d1ea653b77fc6d2fe08137b05e65aa070ab87630e35b49"
-dependencies = [
- "beamterm-renderer",
- "bitvec",
- "compact_str",
- "console_error_panic_hook",
- "ratatui",
- "thiserror 2.0.21",
- "unicode-width 0.2.3",
- "web-sys",
 ]
 
 [[package]]
@@ -5827,12 +5726,6 @@ name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
-
-[[package]]
-name = "rustc-std-workspace-core"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa9c45b374136f52f2d6311062c7146bff20fec063c3f5d46a410bd937746955"
 
 [[package]]
 name = "rustc_version"
@@ -7612,9 +7505,6 @@ name = "unicode-width"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
-dependencies = [
- "rustc-std-workspace-core",
-]
 
 [[package]]
 name = "unicode-xid"

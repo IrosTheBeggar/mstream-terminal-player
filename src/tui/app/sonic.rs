@@ -43,47 +43,6 @@ impl App {
         }
     }
 
-    /// `J` on a track: the fast way in. What's playing is the natural place
-    /// to set off from, so this usually opens the tab with both ends filled
-    /// and the path already being plotted.
-    pub(super) fn start_journey(&mut self) -> Vec<Effect> {
-        if !self.capabilities.discovery_path {
-            self.error("this server can't plot sonic paths — it has no discovery index");
-            return Vec::new();
-        }
-        // The full-screen Discover panel has a highlighted row of its own,
-        // and it is the one on screen — `a` already prefers it for the same
-        // reason. Without this, `J` there travelled to whatever the hidden
-        // browser happened to be pointing at.
-        let picked = self.now_discover_selected().or_else(|| self.selected_track());
-        let Some(picked) = picked else {
-            self.error("highlight a track to travel to");
-            return Vec::new();
-        };
-
-        // Aiming somewhere new is a new path, not an edit of the last one.
-        self.sonic.view = SonicView::Setup;
-        self.sonic.stops.clear();
-        self.sonic.fetched = false;
-        self.sonic.note = None;
-        self.sonic.end = Some(picked);
-        // What is playing is the natural start — when it is this server's
-        // (clause 1); a row from another server leaves the start open.
-        if self.sonic.start.is_none() && self.playing_is_sessions() {
-            self.sonic.start = self.now_playing.clone();
-        }
-        self.sonic_stack.restart();
-
-        let mut effects = self.open_sonic_tab();
-        // Both ends known means there is nothing left to ask, so ask.
-        if self.sonic.ready() {
-            effects.extend(self.build_sonic_path());
-        } else {
-            self.info("choose where to set off from, then build the path");
-        }
-        effects
-    }
-
     /// Everything about the path forgotten — what a fresh connection gets,
     /// and what "Start over" does.
     pub(crate) fn reset_sonic_path(&mut self) {
@@ -472,9 +431,9 @@ impl App {
         }
     }
 
-    /// The ← route into adjustment, the same shape [`App::settings_step`]
-    /// has: `Some` only when the cursor stands on the length row, so Back
-    /// keeps meaning back everywhere else on the tab.
+    /// The ← route into adjustment: `Some` only when the cursor stands on
+    /// the length row, so Back keeps meaning back everywhere else on the
+    /// tab.
     pub(super) fn sonic_step(&mut self, delta: i32) -> Option<Vec<Effect>> {
         if self.tab != Tab::SonicPath || self.focus != Focus::Browser {
             return None;
@@ -538,8 +497,6 @@ impl App {
         self.capture = None;
         match who {
             Capture::Sonic(side) => self.capture_sonic_side(side, track),
-            // Back to the tab that asked, on the two ways of looking.
-            Capture::Discover => self.seed_discover(track),
             // The opening song: the DJ arms for the server it was chosen
             // from and the session starts there (auto-dj contract, clause 4).
             Capture::DjSeed => self.dj_seed_chosen(track),

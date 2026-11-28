@@ -63,7 +63,7 @@ impl App {
             // reason to write them all again (performance audit #106).
             self.queue.touch();
         }
-        for pane in [&mut self.files, &mut self.library, &mut self.search, &mut self.discover] {
+        for pane in [&mut self.files, &mut self.library, &mut self.search] {
             pane.for_each_track_mut(|track| {
                 if track.filepath == filepath {
                     f(&mut track.metadata);
@@ -103,7 +103,7 @@ impl App {
         if let Some(item) = self.queue.items.iter().find(|i| i.filepath == filepath) {
             return Some(item.metadata.rating);
         }
-        for pane in [&self.files, &self.library, &self.search, &self.discover] {
+        for pane in [&self.files, &self.library, &self.search] {
             for entry in &pane.entries {
                 if let Entry::Track { track, .. } = entry
                     && track.filepath == filepath

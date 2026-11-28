@@ -2186,15 +2186,19 @@ mod tests {
         #[test]
         fn the_listeners_seek_or_next_while_a_press_resolves_cancels_it() {
             use crate::tui::app::Action;
-            for action in [Action::SeekForward, Action::NextTrack] {
+            for action in ["seek", "next"] {
                 let mut app = room(listing(true));
                 main_playing(&mut app, &["a.mp3", "b.mp3"]);
                 let (ticket, ..) = resolve_cmd(&app.peer_recs_press(2, Instant::now()));
-                let effects = app.handle_action(action.clone());
+                let effects = match action {
+                    "seek" => app.seek_to(app.status.position + 5.0),
+                    _ => app.handle_action(Action::NextTrack),
+                };
+                assert!(!effects.is_empty(), "{action}: the listener's command went out");
                 app.note_pending(&effects);
-                assert!(!app.peer_recs_clip_live(), "{action:?}: {effects:?}");
+                assert!(!app.peer_recs_clip_live(), "{action}: {effects:?}");
                 let late = found(&mut app, ticket, "http://cdn/3.mp3");
-                assert!(!clip_sent(&late), "{action:?}: nothing plays later");
+                assert!(!clip_sent(&late), "{action}: nothing plays later");
             }
         }
 

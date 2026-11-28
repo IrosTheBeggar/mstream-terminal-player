@@ -964,16 +964,10 @@ impl App {
     /// The chooser's keys (clause 2): ↑↓ walk its three rows, Space toggles
     /// the remember box, Enter answers, Esc leaves the DJ off.
     pub(super) fn handle_dj_chooser_action(&mut self, action: Action) -> Vec<Effect> {
-        if action == Action::Quit {
-            self.should_quit = true;
-            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
-        }
         let Some(chooser) = self.dj_chooser.as_mut() else { return Vec::new() };
         match action {
             Action::Up => chooser.row = chooser.row.saturating_sub(1),
             Action::Down => chooser.row = (chooser.row + 1).min(DJ_CHOOSER_ROWS - 1),
-            Action::First => chooser.row = 0,
-            Action::Last => chooser.row = DJ_CHOOSER_ROWS - 1,
             Action::PlayPause => chooser.remember = !chooser.remember,
             Action::Cancel => {
                 self.dj_chooser = None;
@@ -1664,10 +1658,6 @@ impl App {
     /// clears for the next, Enter on nothing or Esc leaves, Backspace past
     /// the start leaves too.
     pub(super) fn handle_dj_keyword_action(&mut self, action: Action) -> Vec<Effect> {
-        if action == Action::Quit {
-            self.should_quit = true;
-            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
-        }
         match action {
             Action::Input(c) => {
                 if let Some(text) = self.dj_keyword.as_mut() {
@@ -2118,10 +2108,6 @@ impl App {
     /// a chooser you leave with the same key you pick with is a chooser you
     /// keep leaving by accident.
     pub(super) fn handle_genre_action(&mut self, action: Action) -> Vec<Effect> {
-        if action == Action::Quit {
-            self.should_quit = true;
-            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
-        }
         let sources = self.dj_panel.sources.is_some();
         let Some(picker) = self.dj_panel.sources.as_mut().or(self.dj_panel.genres.as_mut()) else {
             return Vec::new();
@@ -2135,8 +2121,6 @@ impl App {
             Action::Down => {
                 picker.row = (picker.row + 1).min(picker.all.len().saturating_sub(1));
             }
-            Action::First => picker.row = 0,
-            Action::Last => picker.row = picker.all.len().saturating_sub(1),
             Action::PlayPause => {
                 let Some(name) = picker.all.get(picker.row).cloned() else { return Vec::new() };
                 if sources {

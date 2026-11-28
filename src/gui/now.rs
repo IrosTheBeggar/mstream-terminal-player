@@ -1,5 +1,5 @@
-//! The Now Playing screen: the TUI's full-screen view, whole, under the
-//! GUI's top bar (docs/ux-contracts/now-playing.md) — the facts column
+//! The Now Playing screen: the full-screen view (`tui::ui`), whole, under
+//! the GUI's top bar (docs/ux-contracts/now-playing.md) — the facts column
 //! with the cover beneath, the tabbed panel (Queue · Lyrics · Discover ·
 //! Auto-DJ · Visualizer, as the session offers them), the rule, the
 //! mirrored waveform band with the scrubber, the modes on the last row —
@@ -7,10 +7,10 @@
 //! bar's own frames under the cover. The GUI's queue panel and bar stand
 //! down here; the view has its own queue tab and its own seek control.
 //!
-//! The App's `fullscreen` flag is up while the screen is, so the App's
-//! full-screen keys mean here what they mean in the TUI: Enter on the
-//! queue tab plays, ↑↓ walk the tab's list, `i` picks the Queue tab, and
-//! the visualizer asks for its thirty frames a second.
+//! The App's `fullscreen` flag is up while the screen is, so the App
+//! reads its actions as the view's: Enter on the queue tab plays, ↑↓ walk
+//! the tab's list, `i` picks the Queue tab, and the visualizer asks for
+//! its thirty frames a second.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -57,7 +57,7 @@ pub(crate) fn view_rect(area: Rect, banner: bool, footer: bool) -> Rect {
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     let regions = now_regions(view);
     let mosaic = gui.now.cover.is_some_and(|cover| gui.ui.covered_last_frame(cover));
-    let extras = NowExtras { reserve: TRANSPORT_ROWS, mosaic, no_hints: true };
+    let extras = NowExtras { reserve: TRANSPORT_ROWS, mosaic };
     let layout = render_now_view(frame, &regions, &mut gui.app, &extras);
     gui.now.band = layout.band;
     gui.now.cover = layout.cover;

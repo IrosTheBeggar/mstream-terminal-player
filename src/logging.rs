@@ -3,43 +3,43 @@
 //! iroh, reqwest, hyper and stream-download all speak `tracing` — relay
 //! connects, holepunch attempts, path upgrades, reconnects — and without a
 //! subscriber every word of it is discarded. This installs one at startup,
-//! writing to a file and never to the terminal: the TUI's screen stays a
-//! screen, and serve mode's stderr stays the concise log it already is.
+//! writing to a file and never to the terminal: the player's screen stays
+//! a screen, and serve mode's stderr stays the concise log it already is.
 //!
-//! The level can change while the player runs — the Settings tab has a Logs
-//! room — so the subscriber is always installed, wearing a reloadable filter
-//! that costs nothing while it says `off`, over a writer whose file can
-//! arrive later than the subscriber did.
+//! The level and the write switch can change while the player runs
+//! (`set_level`, `set_write`), so the subscriber is always installed,
+//! wearing a reloadable filter that costs nothing while it says `off`, over
+//! a writer whose file can arrive later than the subscriber did.
 //!
 //! Ways in, strongest first:
 //!
 //!   MSTREAM_LOG=/path/to/file    → exactly that file, truncated
 //!   MSTREAM_LOG=1                 → the default location, rotated
-//!   [log] level = "debug"         → config.toml, written by the Settings tab
+//!   [log] level = "debug"         → config.toml
 //!
-//! With only a level (config or Settings), the file is the default location:
+//! With only a level (config), the file is the default location:
 //! `<cache>/logs/mstream-player.log`, the last few runs kept beside it as
 //! `.1` through `.4`. `RUST_LOG` chooses *what* is said when set (the usual
 //! filter grammar); otherwise the level speaks for everything.
 //!
 //! This is the third-party channel. The player's own transition decisions
 //! have their own recorder (`MSTREAM_ENGINE_TRACE`, engine::trace), which
-//! also collects the `stderrln!` diagnostics the TUI would otherwise
+//! also collects the `stderrln!` diagnostics the player would otherwise
 //! silence — the two files answer different questions and stay separate.
 //!
-//! Two destinations, one capture. Every event the level admits is kept in a
-//! bounded in-memory ring — which is what **View log** reads, so a session
-//! can be inspected without writing a byte to disk — and, when **Write log**
-//! is on, the same formatted line also goes to the file. The level therefore
-//! governs both: it is what gets captured at all, not merely what gets
-//! persisted. The ring dies with the process; the file is what survives to
-//! be sent to someone.
+//! The run-time switches have no caller at present. The terminal player's
+//! Settings tab drove them, and it is gone; the GUI has no control for the
+//! log yet. They are kept, by the owner's choice (2026-11-23), for the
+//! control the GUI may grow, each under its own `allow(dead_code)`: `set_write`
+//! and `set_level`, the readers beside them, and the ring's tail and marks
+//! they pour from. A switch that gains a caller loses its allowance.
 //!
-//! The browser build keeps the level type and the switches — the Settings
-//! tab that drives them is drawing code wasm compiles unchanged — and drops
-//! the half that needs a filesystem. Nothing installs a subscriber there,
-//! so Write log honestly answers "no file could be opened", and a browser's
-//! own devtools console stays where its diagnostics live.
+//! Two destinations, one capture. Every event the level admits is kept in a
+//! bounded in-memory ring and, when the write switch is on, the same
+//! formatted line also goes to the file — a file that opens later starts
+//! with what the ring already holds. The level therefore governs both: it
+//! is what gets captured at all, not merely what gets persisted. The ring
+//! dies with the process; the file is what survives to be sent to someone.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -90,6 +90,7 @@ impl Level {
     }
 
     /// One step louder or quieter, clamped at the ends.
+    #[allow(dead_code)] // a run-time switch, kept unused: see the module note
     pub fn step(self, delta: i32) -> Level {
         let here = Level::ALL.iter().position(|l| *l == self).unwrap_or(0) as i32;
         let there = (here + delta).clamp(0, Level::ALL.len() as i32 - 1);
@@ -164,6 +165,7 @@ impl Ring {
     }
 
     /// The last `max` lines, oldest first — the shape the viewer reads.
+    #[allow(dead_code)] // a run-time switch, kept unused: see the module note
     fn tail(&self, max: usize) -> Vec<String> {
         let skip = self.lines.len().saturating_sub(max);
         self.lines.iter().skip(skip).cloned().collect()
@@ -172,6 +174,7 @@ impl Ring {
     /// The lines pushed at or after `mark` that the ring still holds. A
     /// mark older than the ring's memory yields everything it has, which is
     /// the honest answer: what fell out is gone.
+    #[allow(dead_code)] // a run-time switch, kept unused: see the module note
     fn since(&self, mark: u64) -> Vec<String> {
         let oldest = self.total - self.lines.len() as u64;
         let skip = mark.saturating_sub(oldest) as usize;
@@ -228,21 +231,19 @@ fn scrub(text: &str) -> String {
 }
 
 /// The last `max` lines the ring holds, oldest first.
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 pub fn tail(max: usize) -> Vec<String> {
     RING.lock().unwrap().tail(max)
 }
 
-/// How many lines have been captured this session.
-pub fn captured() -> usize {
-    RING.lock().unwrap().lines.len()
-}
-
 /// How many lines have ever been captured — the mark writing resumes from.
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 fn ring_total() -> u64 {
     RING.lock().unwrap().total
 }
 
 /// What the ring has held since `mark`.
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 fn ring_since(mark: u64) -> Vec<String> {
     RING.lock().unwrap().since(mark)
 }
@@ -354,6 +355,7 @@ static HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
 static STATE: Mutex<State> =
     Mutex::new(State { write: false, level: Level::Info, path: None, gap_mark: None });
 
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 struct State {
     write: bool,
     level: Level,
@@ -484,6 +486,7 @@ enum Opening {
     /// APPEND — `File::create` here would truncate away everything already
     /// written, which is exactly what turning the switch off and on again
     /// used to do (PR #5 review).
+    #[allow(dead_code)] // a run-time switch, kept unused: see the module note
     Resume,
 }
 
@@ -632,6 +635,7 @@ pub fn init(run: Run) -> Option<PathBuf> {
 /// embeddings where `init` never ran — a file opened for either would
 /// receive nothing, so the switch honestly refuses rather than littering.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 fn subscriber_ready() -> bool {
     HANDLE.get().is_some()
 }
@@ -643,6 +647,7 @@ fn subscriber_ready() -> bool {
 
 /// Let go of the file, leaving the ring capturing.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 fn close_sink() {
     *SINK.lock().unwrap() = None;
 }
@@ -652,6 +657,7 @@ fn close_sink() {}
 
 /// Point the live subscriber at the level now chosen.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 fn apply_filter(level: Level) {
     if let Some(handle) = HANDLE.get() {
         let _ = handle.reload(filter_for(level));
@@ -683,6 +689,7 @@ enum Opening {
 /// rotated) if the session started without one; turning it off lets go of
 /// the file and leaves the ring filling. Returns the file now in use when
 /// on.
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 pub fn set_write(on: bool) -> Option<PathBuf> {
     if !subscriber_ready() {
         return None;
@@ -722,6 +729,7 @@ pub fn set_write(on: bool) -> Option<PathBuf> {
 
 /// Change how loud the log is. Takes hold at once, written or not — the
 /// level is what the ring captures as much as what the file receives.
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 pub fn set_level(level: Level) {
     let mut state = STATE.lock().unwrap();
     state.level = level;
@@ -731,16 +739,19 @@ pub fn set_level(level: Level) {
 }
 
 /// Whether anything is being written right now.
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 pub fn writing() -> bool {
     STATE.lock().unwrap().write
 }
 
 /// How loud the log is set to be, written or not.
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 pub fn level() -> Level {
     STATE.lock().unwrap().level
 }
 
 /// Where the log is going, if anywhere — for the boot and goodbye lines.
+#[allow(dead_code)] // a run-time switch, kept unused: see the module note
 pub fn active() -> Option<PathBuf> {
     let state = STATE.lock().unwrap();
     if state.write { state.path.clone() } else { None }

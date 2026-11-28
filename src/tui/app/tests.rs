@@ -191,7 +191,7 @@ fn labels(app: &App) -> Vec<&str> {
 /// Playlists are a library node like any other now, so getting to them is
 /// the same drill as getting to artists — which is the point of the move.
 fn browsing_playlists(app: &mut App, names: &[&str]) {
-    app.handle_action(Action::SelectTab(1));
+    app.select_tab(1);
     let at = app
         .library
         .entries
@@ -227,7 +227,6 @@ fn a_filter_narrows_the_list_without_losing_the_way_out() {
     // result so it is never filtered away.
     assert_eq!(labels(&app), vec!["..", "Bassnectar", "Basshunter", "bass solo.mp3"]);
     assert_eq!(app.pane().counts(), (3, 4));
-    assert_eq!(app.input_mode(), InputMode::Editing, "the prompt has the keys");
 
     // Narrowing further happens on the keystroke, with nothing to submit.
     app.handle_action(Action::Input('h'));
@@ -290,7 +289,6 @@ fn a_filter_survives_being_typed_but_not_a_new_listing() {
     app.handle_action(Action::Submit);
     assert!(!app.filtering, "the prompt closes");
     assert_eq!(app.pane().filter, "alp", "and what was typed stays");
-    assert_eq!(app.input_mode(), InputMode::Normal, "the list has the keys back");
     assert_eq!(labels(&app), vec!["..", "Alpha"]);
 
     // A different list is not the list the filter was typed against.
@@ -389,7 +387,7 @@ fn every_tab_filters_its_own_list() {
     type_filter(&mut app, "alp");
     app.handle_action(Action::Submit);
 
-    app.handle_action(Action::SelectTab(1));
+    app.select_tab(1);
     app.apply_event(Event::Library {
         generation: app.session_gen(),
         dest: Tab::Library,
@@ -401,7 +399,7 @@ fn every_tab_filters_its_own_list() {
     app.handle_action(Action::Submit);
     assert_eq!(labels(&app), vec!["..", "Portishead"]);
 
-    app.handle_action(Action::SelectTab(0));
+    app.select_tab(0);
     assert_eq!(app.pane().filter, "alp", "and keeps its own when you come back");
     assert_eq!(labels(&app), vec!["..", "Alpha"]);
 }
@@ -572,17 +570,12 @@ fn a_shuffled_queue_still_ends_when_repeat_is_off() {
 }
 
 #[test]
-fn jump_to_playing_puts_the_queue_on_screen_before_handing_it_the_cursor() {
-    // `i` used to move focus without showing the column, leaving the
-    // arrows driving a list nobody could see, Enter restarting the
-    // current track, and `d` deleting an unseen row.
+fn jump_to_playing_hands_the_queue_the_cursor() {
     let mut app = connected_app();
     app.replace_queue(vec![track("a"), track("b")]);
     app.handle_action(Action::PlayPause);
-    assert!(!app.queue_column, "the column starts hidden");
 
     app.handle_action(Action::JumpToPlaying);
-    assert!(app.queue_column, "the cursor's list is put on screen with it");
     assert_eq!(app.focus, Focus::Queue);
     assert_eq!(app.queue.state.selected(), app.queue.current);
 }
@@ -595,38 +588,30 @@ fn jump_to_playing_in_the_fullscreen_view_turns_to_the_queue_tab() {
     let mut app = connected_app();
     app.replace_queue(vec![track("a")]);
     app.handle_action(Action::PlayPause);
-    app.handle_action(Action::ToggleNowPlaying);
+    app.fullscreen = !app.fullscreen;
     app.now_tab = NowTab::Visualizer;
 
     app.handle_action(Action::JumpToPlaying);
     assert_eq!(app.now_tab(), NowTab::Queue, "the tab with the cursor comes up");
     assert_eq!(app.focus, Focus::Browser, "the other screen's focus is left alone");
-    assert!(!app.queue_column, "and no hidden column is armed behind the view");
 }
 
 #[test]
-fn the_jump_keys_follow_the_fullscreen_view_like_the_arrows_do() {
-    // In the full-screen view Tab means "next panel tab", so focus can
-    // never reach the queue there: G dispatched on focus alone looked
-    // dead while it silently moved the browser nobody could see.
+fn escape_with_nothing_to_call_off_does_not_swallow_the_next_one() {
+    // Esc with nothing up used to open the key list — a flag only the
+    // terminal player drew, and whose next Esc closed it and did nothing
+    // else, a pick armed in between included.
     let mut app = connected_app();
-    app.apply_event(Event::Listing(Box::new(listing("/lib/", &["sub"], &["a.mp3"]))));
-    app.replace_queue(vec![track("a"), track("b"), track("c")]);
-    app.handle_action(Action::ToggleNowPlaying);
-    app.now_tab = NowTab::Queue;
-
-    let browser_at = app.files.state.selected();
-    app.handle_action(Action::Last);
-    assert_eq!(app.queue.state.selected(), Some(2), "G reaches the end of the queue");
-    app.handle_action(Action::First);
-    assert_eq!(app.queue.state.selected(), Some(0), "g comes back to the top");
-    assert_eq!(app.files.state.selected(), browser_at, "the hidden browser never moved");
+    assert!(app.handle_action(Action::Cancel).is_empty(), "nothing to call off is nothing");
+    app.capture = Some(Capture::TasteSeed);
+    app.handle_action(Action::Cancel);
+    assert!(app.capture.is_none(), "the next Esc calls the pick off");
 }
 
 /// Put the cursor on the Auto-DJ tab of the full-screen view, which is the
 /// only place its settings are edited now.
 fn on_the_dj_tab(app: &mut App) {
-    app.handle_action(Action::ToggleNowPlaying);
+    app.fullscreen = !app.fullscreen;
     while app.now_tab() != NowTab::AutoDj {
         app.handle_action(Action::NowTabNext);
     }
@@ -635,12 +620,6 @@ fn on_the_dj_tab(app: &mut App) {
 /// Index of the Sonic Path tab among the visible ones.
 fn sonic_tab(app: &App) -> usize {
     app.tabs().iter().position(|t| *t == Tab::SonicPath).expect("sonic path is available")
-}
-
-/// Index of the Settings tab, which slides along the strip as the optional
-/// tabs in front of it come and go.
-fn settings_tab(app: &App) -> usize {
-    app.tabs().iter().position(|t| *t == Tab::Settings).expect("settings is always there")
 }
 
 #[test]
@@ -781,71 +760,6 @@ fn adding_to_an_empty_idle_queue_starts_playback() {
     let effects = app.handle_action(Action::AddToQueue);
     assert_eq!(app.queue.items.len(), 2);
     assert!(effects.is_empty());
-}
-
-#[test]
-fn volume_is_clamped() {
-    let mut app = connected_app();
-    for _ in 0..30 {
-        app.handle_action(Action::VolumeUp);
-    }
-    assert_eq!(app.volume, 1.0);
-    for _ in 0..40 {
-        app.handle_action(Action::VolumeDown);
-    }
-    assert_eq!(app.volume, 0.0);
-}
-
-#[test]
-fn seeking_backward_never_goes_negative() {
-    let mut app = connected_app();
-    app.status.source = "http://host/a.mp3".into();
-    app.status.position = 2.0;
-    assert_eq!(
-        app.handle_action(Action::SeekBackward),
-        vec![Effect::Audio(AudioCmd::Seek(0.0))]
-    );
-}
-
-#[test]
-fn seeking_while_idle_does_nothing() {
-    let mut app = connected_app();
-    assert!(app.handle_action(Action::SeekForward).is_empty());
-}
-
-#[test]
-fn the_tunnel_path_reaches_the_header_and_resets_with_the_session() {
-    use crate::quickconnect::TunnelPath;
-    let mut app = connected_app();
-    let id = format!("{}abc123", crate::quickconnect::TUNNEL_ID_PREFIX);
-    // A direct-URL session refuses tunnel verdicts outright: the tunnels
-    // the queue keeps open report on, and their paths belong to nobody
-    // here.
-    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Relay });
-    assert_eq!(app.tunnel_path, None, "a direct session wears no tunnel badge");
-
-    app.session.server_id = id.clone();
-    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Relay });
-    assert_eq!(app.tunnel_path, Some(TunnelPath::Relay));
-    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Direct });
-    assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
-    // Another tunnel's verdict is not this session's.
-    app.apply_event(Event::TunnelPath { id: format!("{}other", crate::quickconnect::TUNNEL_ID_PREFIX), path: TunnelPath::Relay });
-    assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
-    // The words the header will use.
-    assert_eq!(TunnelPath::Direct.label(), "direct");
-    assert_eq!(TunnelPath::Relay.label(), "relay");
-    assert_eq!(TunnelPath::Reconnecting.label(), "reconnecting…");
-    // A fresh session starts with no verdict — a direct server would
-    // otherwise wear the last tunnel's badge.
-    app.apply_event(Event::Connected {
-        server: "http://direct:3000".into(),
-        id: "http://direct:3000".into(),
-        username: None,
-        token: None,
-        ping: Box::new(crate::api::types::Ping::default()),
-    });
-    assert_eq!(app.tunnel_path, None);
 }
 
 #[test]
@@ -1014,10 +928,6 @@ fn opening_a_folder_spins_instead_of_showing_the_one_you_left() {
     assert!(app.files.entries.is_empty(), "the folder you left is not the folder you opened");
     assert!(app.files.loading, "and the wait says so");
 
-    // Which is what puts the spinner on screen rather than a claim about
-    // the new folder's contents.
-    let hint = crate::tui::ui::empty_hint(&app);
-    assert!(hint.contains("loading"), "got {hint:?}");
 
     app.apply_event(Event::Listing(Box::new(listing("library/Air", &[], &["a.mp3"]))));
     assert!(!app.files.loading);
@@ -1035,92 +945,10 @@ fn near(path: &str, similarity: f64) -> crate::api::types::SimilarTrack {
 
 /// Put the cursor on the full-screen view's Discover tab.
 fn on_the_now_discover_tab(app: &mut App) {
-    app.handle_action(Action::ToggleNowPlaying);
+    app.fullscreen = !app.fullscreen;
     while app.now_tab() != NowTab::Discover {
         app.handle_action(Action::NowTabNext);
     }
-}
-
-#[test]
-fn the_discover_tab_asks_what_to_look_around_from_before_anything_else() {
-    // The step that lets you ask about a track without playing it — which
-    // the full-screen panel cannot do, since it follows the speakers.
-    let mut app = connected_app();
-    app.replace_queue(vec![track("playing")]);
-    app.play_index(0);
-    app.handle_action(Action::SelectTab(discover_tab(&app)));
-    assert_eq!(*app.discover_node(), DiscoverNode::Root);
-    assert_eq!(labels(&app), vec!["What's playing", "Choose a song…"]);
-
-    // Taking what's playing settles the seed and offers the two ways of
-    // looking — no request yet, both menus are static.
-    let effects = app.handle_action(Action::Activate);
-    assert!(effects.is_empty(), "choosing a seed asks the server nothing: {effects:?}");
-    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
-    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "playing");
-    assert_eq!(labels(&app), vec!["..", "Similar tracks", "Similar artists"]);
-
-    // And then a list, which does cost one.
-    app.discover.state.select(Some(1));
-    let effects = app.handle_action(Action::Activate);
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, dest: DiscoverDest::Browser, seed })]
-            if seed.filepath == "playing"
-    ));
-
-    // Back walks out a level at a time, and both menus come back without
-    // asking again.
-    app.handle_action(Action::Back);
-    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
-    assert!(app.handle_action(Action::Back).is_empty());
-    assert_eq!(*app.discover_node(), DiscoverNode::Root);
-}
-
-#[test]
-fn a_discover_seed_can_be_pointed_at_rather_than_played() {
-    let mut app = connected_app();
-    browsing(&mut app, &["curious"], 0);
-    app.handle_action(Action::SelectTab(discover_tab(&app)));
-
-    app.handle_action(Action::Down); // "Choose a song…"
-    app.handle_action(Action::Activate);
-    assert_eq!(app.capture, Some(Capture::Discover));
-    assert_eq!(app.tab, Tab::Files, "and it puts you where the songs are");
-
-    let effects = app.handle_action(Action::Activate);
-    assert!(
-        !effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))),
-        "pointing at a track is not playing it"
-    );
-    assert!(app.queue.items.is_empty(), "nor queueing it");
-
-    // Back on the tab, on the seed just chosen, asking which way to look.
-    assert_eq!(app.tab, Tab::Discover);
-    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
-    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "curious");
-    assert_eq!(app.capture, None, "one track, then it disarms");
-}
-
-#[test]
-fn how_close_leads_the_row_rather_than_where_it_sits() {
-    // The rows arrive in order, so a rank says nothing a position does not.
-    let mut app = connected_app();
-    app.replace_queue(vec![track("playing")]);
-    app.play_index(0);
-    app.handle_action(Action::SelectTab(discover_tab(&app)));
-    app.handle_action(Action::Activate); // seed: what's playing
-    app.discover.state.select(Some(1));
-    app.handle_action(Action::Activate); // similar tracks
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("near-one", 0.9412), near("near-two", 0.836)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "playing".into(),
-    });
-    assert_eq!(labels(&app), vec!["..", " 94%  near-one", " 84%  near-two"]);
 }
 
 #[test]
@@ -1136,10 +964,8 @@ fn the_full_screen_panel_still_just_follows_the_speakers() {
     assert_eq!(app.now_discover.as_ref().unwrap().seed, "first");
 
     app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]),
+        tracks: vec![near("near-one", 0.94), near("near-two", 0.9)],
         note: None,
-        dest: DiscoverDest::NowPlaying,
         seed: "first".into(),
     });
     assert_eq!(app.now_discover.as_ref().unwrap().tracks.len(), 2);
@@ -1153,24 +979,8 @@ fn the_full_screen_panel_still_just_follows_the_speakers() {
     // The track changing re-aims it, and the old answer is dropped.
     app.handle_action(Action::NextTrack);
     assert_eq!(app.now_discover.as_ref().unwrap().seed, "second");
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("stale", 0.5)]),
-        note: None,
-        dest: DiscoverDest::NowPlaying,
-        seed: "first".into(),
-    });
+    app.apply_event(Event::Discover { tracks: vec![near("stale", 0.5)], note: None, seed: "first".into() });
     assert!(app.now_discover.as_ref().unwrap().tracks.is_empty());
-    assert!(app.now_discover.as_ref().unwrap().pending);
-
-    // And the browser tab's reply never lands here.
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("browser", 0.8)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "second".into(),
-    });
     assert!(app.now_discover.as_ref().unwrap().pending);
 }
 
@@ -1212,146 +1022,10 @@ fn back_at_the_root_drains_an_orphaned_column() {
 }
 
 #[test]
-fn fast_seek_presses_build_on_each_other_not_the_stale_status() {
-    let mut app = connected_app();
-    app.status.source = "http://host/a.mp3".into();
-    app.status.position = 10.0;
-    app.status.duration = 300.0;
-    // Status refreshes a few times a second; three quick presses used to
-    // read the same base and land as one minute instead of three.
-    assert_eq!(
-        app.handle_action(Action::SeekForwardFar),
-        vec![Effect::Audio(AudioCmd::Seek(70.0))]
-    );
-    assert_eq!(
-        app.handle_action(Action::SeekForwardFar),
-        vec![Effect::Audio(AudioCmd::Seek(130.0))]
-    );
-    assert_eq!(
-        app.handle_action(Action::SeekForwardFar),
-        vec![Effect::Audio(AudioCmd::Seek(190.0))]
-    );
-    // Chaining banks nothing past the bar's end — minutes that do not
-    // exist would poison every press that followed.
-    for _ in 0..3 {
-        app.handle_action(Action::SeekForwardFar);
-    }
-    assert_eq!(
-        app.handle_action(Action::SeekForwardFar),
-        vec![Effect::Audio(AudioCmd::Seek(300.0))]
-    );
-    // Once the audio thread is done with that seek, the status after it
-    // hands the base back to reality — here a landing the engine's
-    // end-of-track runway clamp stopped short of the ask — and the next
-    // press moves from where playback actually is.
-    app.apply_event(Event::Seeked { target: 300.0 });
-    app.apply_event(Event::Status(PlayerStatus {
-        source: "http://host/a.mp3".into(),
-        position: 296.0,
-        duration: 300.0,
-        playing: true,
-        ..Default::default()
-    }));
-    assert_eq!(
-        app.handle_action(Action::SeekBackward),
-        vec![Effect::Audio(AudioCmd::Seek(291.0))]
-    );
-}
-
-/// What the audio thread says about one FLAC, at `position` seconds.
-fn flac_at(position: f64) -> Event {
-    Event::Status(PlayerStatus {
-        source: "http://host/a.flac".into(),
-        position,
-        duration: 240.0,
-        playing: true,
-        ..Default::default()
-    })
-}
-
-#[test]
-fn a_press_builds_on_a_seek_still_in_flight_however_long_it_takes() {
-    let mut app = connected_app();
-    app.status.source = "http://host/a.flac".into();
-    app.status.position = 2.0;
-    app.status.duration = 240.0;
-    // `}}}` over a slow link (the PR #64 smoke, 2026-10-30): a FLAC with no
-    // seek table bisects over the network, two seconds a seek, so the
-    // audio thread runs the first alone and boils the other two down to
-    // the last behind it.
-    for _ in 0..3 {
-        app.handle_action(Action::SeekForwardFar);
-    }
-    // The first lands, says so, and its status comes; the newest is still
-    // out. The next press builds on it, not on where the first landed: once
-    // a 2.5 s window ran out, this one went to 2 s.
-    app.apply_event(Event::Seeked { target: 62.0 });
-    app.apply_event(flac_at(62.0));
-    assert_eq!(
-        app.handle_action(Action::SeekBackwardFar),
-        vec![Effect::Audio(AudioCmd::Seek(122.0))]
-    );
-    // The seek that was in flight lands. It is not this goal's, so the goal
-    // stands through its status.
-    app.apply_event(Event::Seeked { target: 182.0 });
-    app.apply_event(flac_at(182.0));
-    assert_eq!(
-        app.handle_action(Action::SeekBackward),
-        vec![Effect::Audio(AudioCmd::Seek(117.0))]
-    );
-}
-
-#[test]
-fn quick_backward_presses_outlive_the_statuses_from_before_them() {
-    let mut app = connected_app();
-    app.status.source = "http://host/a.flac".into();
-    app.status.position = 182.0;
-    app.status.duration = 240.0;
-    // A status sent before the seek reached the audio thread stands past a
-    // backward goal already, and the old check took that for the seek
-    // having landed: the next press moved from 182 s again, and two
-    // presses went back one minute.
-    assert_eq!(
-        app.handle_action(Action::SeekBackwardFar),
-        vec![Effect::Audio(AudioCmd::Seek(122.0))]
-    );
-    app.apply_event(flac_at(182.3));
-    assert_eq!(
-        app.handle_action(Action::SeekBackwardFar),
-        vec![Effect::Audio(AudioCmd::Seek(62.0))]
-    );
-    app.apply_event(flac_at(182.6));
-    assert_eq!(
-        app.handle_action(Action::SeekBackwardFar),
-        vec![Effect::Audio(AudioCmd::Seek(2.0))]
-    );
-}
-
-#[test]
-fn a_seek_key_builds_on_a_click_or_a_restart_still_in_flight() {
-    let mut app = connected_app();
-    app.status.source = "http://host/a.mp3".into();
-    app.status.position = 10.0;
-    app.status.duration = 300.0;
-    assert_eq!(app.seek_to(150.0), vec![Effect::Audio(AudioCmd::Seek(150.0))]);
-    // Before the click lands, the status still says 10 s.
-    assert_eq!(
-        app.handle_action(Action::SeekForward),
-        vec![Effect::Audio(AudioCmd::Seek(155.0))]
-    );
-    // A restart is a seek too.
-    assert_eq!(app.handle_action(Action::PrevTrack), vec![Effect::Audio(AudioCmd::Seek(0.0))]);
-    assert_eq!(
-        app.handle_action(Action::SeekForward),
-        vec![Effect::Audio(AudioCmd::Seek(5.0))]
-    );
-}
-
-#[test]
 fn every_class_a_search_matched_is_reachable() {
     use crate::api::types::{SearchGroup, SearchTrack};
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
+    app.select_tab(2);
     let hit = |p: &str| SearchTrack {
         name: p.to_string(),
         filepath: p.to_string(),
@@ -1419,133 +1093,6 @@ fn unauthorized_returns_to_the_connect_screen() {
     app.apply_event(Event::Unauthorized);
     assert!(!app.connected);
     assert!(app.session.token.is_none());
-    assert_eq!(app.input_mode(), InputMode::Editing);
-}
-
-#[test]
-fn a_public_mode_server_picked_from_the_network_connects_outright() {
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Open Server".into(),
-        base_url: "http://192.168.1.5:3000".into(),
-        version: None,
-        quick_connect: false,
-    }]));
-    app.handle_action(Action::Submit);
-
-    app.apply_event(Event::Connected {
-        server: "http://192.168.1.5:3000".into(),
-        id: "http://192.168.1.5:3000".into(),
-        username: None,
-        token: None,
-        ping: Box::new(Default::default()),
-    });
-    assert!(app.connected, "no login step when the server doesn't want one");
-}
-
-#[test]
-fn the_first_screen_offers_both_ways_in() {
-    let mut app = App::new(None, None, None);
-    assert_eq!(app.connect.stage, ConnectStage::Choosing);
-    assert_eq!(CONNECT_METHODS.len(), 2);
-
-    // Direct is the default choice.
-    app.handle_action(Action::Submit);
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-
-    // Esc returns to the chooser, where Down picks Quick Connect.
-    app.handle_action(Action::Cancel);
-    assert_eq!(app.connect.stage, ConnectStage::Choosing);
-    app.handle_action(Action::Down);
-    app.handle_action(Action::Submit);
-    assert_eq!(app.connect.stage, ConnectStage::QuickConnect);
-}
-
-#[test]
-fn the_chooser_selection_stays_in_range() {
-    let mut app = App::new(None, None, None);
-    for _ in 0..5 {
-        app.handle_action(Action::Up);
-    }
-    assert_eq!(app.connect.choice, 0);
-    for _ in 0..5 {
-        app.handle_action(Action::Down);
-    }
-    assert_eq!(app.connect.choice, CONNECT_METHODS.len() - 1);
-}
-
-#[test]
-fn opening_quick_connect_starts_a_network_search() {
-    let mut app = App::new(None, None, None);
-    app.handle_action(Action::Down); // onto Quick Connect
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(app.connect.stage, ConnectStage::QuickConnect);
-    assert!(effects.contains(&Effect::Discover));
-    assert!(app.connect.searching);
-}
-
-#[test]
-fn choosing_a_discovered_server_connects_to_it_directly() {
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Living Room".into(),
-        base_url: "http://192.168.1.71:3999".into(),
-        version: None,
-        quick_connect: true,
-    }]));
-    assert!(!app.connect.searching);
-
-    // A server on this network needs no tunnel and no code.
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Connect {
-            server: "http://192.168.1.71:3999".into(),
-            identity: "http://192.168.1.71:3999".into(),
-            token: None,
-            self_signed: false,
-            peer: None,
-            local_token: None,
-        })]
-    );
-}
-
-#[test]
-fn late_discovery_results_do_not_move_the_cursor_off_the_paste_row() {
-    // Found live: the browse takes seconds, so a pasted code can be
-    // submitted before it answers. Row 0 means "paste" with an empty list
-    // and "first server" with a populated one, so the arriving results
-    // used to retarget Enter at a server the user never chose.
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    assert!(app.connect.on_paste_row());
-
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Living Room".into(),
-        base_url: "http://192.168.1.71:3999".into(),
-        version: None,
-        quick_connect: true,
-    }]));
-    assert!(app.connect.on_paste_row(), "still aimed at the code the user pasted");
-
-    // …and Enter still dials the code rather than the newly-found server.
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::TunnelOpen {
-            id: crate::quickconnect::testing::sample_id(),
-            credential: code,
-        })]
-    );
 }
 
 #[test]
@@ -1559,141 +1106,31 @@ fn a_late_needs_login_cannot_unseat_a_live_session() {
     assert_eq!(app.session.server, "http://host:3000", "and stays on its own server");
 }
 
-#[test]
-fn typing_a_code_jumps_past_the_discovered_servers() {
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Living Room".into(),
-        base_url: "http://host:3999".into(),
-        version: None,
-        quick_connect: true,
-    }]));
-    assert_eq!(app.connect.row, 0, "starts on the first server");
-
-    app.handle_action(Action::Input('m'));
-    assert!(app.connect.on_paste_row(), "typing means the user has a code");
-
-    // …and Enter now dials rather than connecting to the highlighted server.
-    let code = crate::quickconnect::testing::sample_code();
-    for c in code[1..].chars() {
-        app.handle_action(Action::Input(c));
-    }
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::TunnelOpen {
-            id: crate::quickconnect::testing::sample_id(),
-            credential: code,
-        })]
-    );
-}
-
-#[test]
-fn the_selection_cannot_run_past_the_paste_row() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    for _ in 0..5 {
-        app.handle_action(Action::Down);
-    }
-    assert_eq!(app.connect.row, app.connect.paste_row());
-}
-
-#[test]
-fn pasting_a_pairing_code_dials_the_tunnel() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
+/// A session on the sample pairing code with its tunnel asked for, which is
+/// what a launch on a saved tunnel server does: the app, the code's identity
+/// and the code.
+fn dialling() -> (App, String, String) {
     let code = crate::quickconnect::testing::sample_code();
     let id = crate::quickconnect::testing::sample_id();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::TunnelOpen { id: id.clone(), credential: code })]);
-    assert!(app.connecting);
-    assert_eq!(app.pending_tunnel.as_deref(), Some(id.as_str()), "waiting on that tunnel");
-    assert_eq!(app.session.server_id, id, "filed under the code's identity from the start");
-    assert_eq!(app.tunnels.get(&id), Some(&TunnelState::Dialling));
-
-    // The tunnel comes up: the session connects through it, and every
-    // request over the bridge carries its loopback token.
-    let effects = app.apply_event(Event::TunnelUp {
-        id: id.clone(),
-        local_url: "http://127.0.0.1:51234".into(),
-        local_token: "lt".into(),
-    });
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Connect {
-            server: "http://127.0.0.1:51234".into(),
-            identity: id.clone(),
-            token: None,
-            self_signed: false,
-            peer: None,
-            local_token: Some("lt".into()),
-        })]
-    );
-    assert!(app.pending_tunnel.is_none());
-}
-
-#[test]
-fn a_code_that_is_not_one_is_refused_before_any_dial() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:abc".chars() {
-        app.handle_action(Action::Input(c));
-    }
-    assert!(app.handle_action(Action::Submit).is_empty());
-    assert!(!app.connecting);
-    assert!(app.message.as_ref().is_some_and(|m| m.text.contains("pairing code")), "{:?}", app.message);
-}
-
-#[test]
-fn a_tunnel_the_queue_holds_open_is_used_rather_than_dialled_again() {
-    // Contract clause 38: the worker keeps a tunnel for the queue; a code
-    // pasted for that server connects through it at once.
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    let id = crate::quickconnect::testing::sample_id();
-    app.tunnels.insert(
-        id.clone(),
-        TunnelState::Up {
-            local_url: "http://127.0.0.1:4000".into(),
-            local_token: "lt".into(),
-            status: crate::quickconnect::TunnelStatus::Connected,
-            path: None,
-        },
-    );
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    let effects = app.handle_action(Action::Submit);
+    let mut app = App::new(Some(id.clone()), None, None).with_tunnel(Some(code.clone()));
+    let effects = app.start();
     assert!(
-        matches!(effects.as_slice(), [Effect::Api(ApiCmd::Connect { server, identity, .. })]
-            if server == "http://127.0.0.1:4000" && *identity == id),
+        matches!(effects.as_slice(), [Effect::Api(ApiCmd::TunnelOpen { id: asked, .. })] if *asked == id),
         "{effects:?}"
     );
+    (app, id, code)
 }
 
 #[test]
-fn a_dial_that_fails_says_so_and_frees_the_form() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    let id = crate::quickconnect::testing::sample_id();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    app.handle_action(Action::Submit);
+fn a_dial_that_fails_says_so_and_stops_connecting() {
+    let (mut app, id, _) = dialling();
+    assert!(app.connecting);
     app.apply_event(Event::TunnelFailed {
         id: id.clone(),
         rejected: true,
         why: "tunnel handshake rejected — wrong or rotated connect secret".into(),
     });
     assert!(!app.connecting);
-    assert!(!app.connect.submitting);
     assert!(app.message.as_ref().is_some_and(|m| m.text.contains("rejected")), "{:?}", app.message);
     assert_eq!(
         app.tunnels.get(&id),
@@ -1706,39 +1143,15 @@ fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
     // The bug this pins: the loopback bridge got saved as the server, so
     // the next run dialled a port that no longer existed, and the token
     // was filed under a URL that could never match again.
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    let id = crate::quickconnect::testing::sample_id();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    app.handle_action(Action::Submit);
-
+    let (mut app, id, code) = dialling();
     app.apply_event(Event::TunnelUp {
         id: id.clone(),
         local_url: "http://127.0.0.1:51234".into(),
         local_token: "lt".into(),
     });
-    // The server behind the tunnel wants a sign-in: the form aims at the
-    // bridge, the sign-in is filed under the identity and carries the
-    // bridge's token.
+    // The server behind the tunnel wants a sign-in, and gets one: the shell
+    // sends it to the bridge, filed under the identity.
     app.apply_event(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() });
-    app.connect.username = "alice".into();
-    app.connect.password = "pw".into();
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Login {
-            server: "http://127.0.0.1:51234".into(),
-            identity: id.clone(),
-            username: "alice".into(),
-            password: "pw".into(),
-            self_signed: false,
-            local_token: Some("lt".into()),
-            peer: None,
-        })]
-    );
     app.apply_event(Event::Connected {
         server: "http://127.0.0.1:51234".into(),
         id: id.clone(),
@@ -1759,16 +1172,10 @@ fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
 fn a_public_tunnel_server_is_still_worth_saving() {
     // No login means no token and no username — but without the pairing
     // code stored, the server is unreachable next time.
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    for c in crate::quickconnect::testing::sample_code().chars() {
-        app.handle_action(Action::Input(c));
-    }
-    app.handle_action(Action::Submit);
-
+    let (mut app, id, _) = dialling();
     let effects = app.apply_event(Event::Connected {
         server: "http://127.0.0.1:5000".into(),
-        id: crate::quickconnect::testing::sample_id(),
+        id,
         username: None,
         token: None,
         ping: Box::new(Default::default()),
@@ -1779,10 +1186,9 @@ fn a_public_tunnel_server_is_still_worth_saving() {
 #[test]
 fn reconnecting_to_a_tunnel_server_dials_its_code_again() {
     let app = App::new(Some("mstream+iroh://endpointabc".into()), Some("tok".into()), None);
-    // The identity is not an address, so it must not reach the form or
-    // the endpoint — only the dialler.
+    // The identity is not an address, so it must not reach the endpoint —
+    // only the dialler.
     assert!(app.session.server.is_empty(), "nothing can be requested from an identity");
-    assert!(app.connect.server.is_empty(), "and it cannot be typed or edited");
 
     let mut app = app.with_tunnel(Some("mstr1:saved".into()));
     let effects = app.start();
@@ -2696,49 +2102,6 @@ fn a_remembered_tunnel_with_no_code_says_so_instead_of_hanging() {
 }
 
 #[test]
-fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
-    // The tunnel outlives the token: the bridge is still up in the worker,
-    // so the login form must aim at it rather than at an identity no HTTP
-    // client can dial.
-    let mut app = App::new(None, None, None);
-    app.connected = true;
-    app.session.server = "http://127.0.0.1:51234".into();
-    app.session.server_id = "mstream+iroh://endpointabc".into();
-    app.session.token = Some("stale".into());
-    app.tunnels.insert(
-        "mstream+iroh://endpointabc".into(),
-        TunnelState::Up {
-            local_url: "http://127.0.0.1:51234".into(),
-            local_token: "lt".into(),
-            status: crate::quickconnect::TunnelStatus::Connected,
-            path: None,
-        },
-    );
-
-    app.apply_event(Event::Unauthorized);
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-    assert_eq!(app.connect.server, "http://127.0.0.1:51234", "aims at the live bridge");
-
-    app.connect.username = "alice".into();
-    app.connect.password = "pw".into();
-    let effects = app.handle_action(Action::Submit);
-    // Loopback, so no plaintext warning stands between the user and a
-    // re-login they didn't ask for in the first place.
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Login {
-            server: "http://127.0.0.1:51234".into(),
-            identity: "mstream+iroh://endpointabc".into(),
-            username: "alice".into(),
-            password: "pw".into(),
-            self_signed: false,
-            local_token: Some("lt".into()),
-            peer: None,
-        })]
-    );
-}
-
-#[test]
 fn a_tunnel_is_shown_by_name_rather_than_by_port() {
     let mut app = App::new(None, None, None);
     app.session.server = "http://127.0.0.1:51234".into();
@@ -2755,93 +2118,28 @@ fn a_tunnel_is_shown_by_name_rather_than_by_port() {
 }
 
 #[test]
-fn an_empty_pairing_code_is_refused_without_a_request() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    assert!(app.handle_action(Action::Submit).is_empty());
-    assert!(!app.connecting);
-}
-
-#[test]
-fn an_open_tunnel_leads_to_the_login_form() {
+fn an_open_tunnel_that_wants_a_sign_in_says_so() {
     // The secret gates the pipe, not the API — so the tunnel coming up
     // means "now sign in", not "you're in".
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    let code = crate::quickconnect::testing::sample_code();
-    let id = crate::quickconnect::testing::sample_id();
-    for c in code.chars() {
-        app.handle_action(Action::Input(c));
-    }
-    app.handle_action(Action::Submit);
+    let (mut app, id, _) = dialling();
     app.apply_event(Event::TunnelUp {
         id: id.clone(),
         local_url: "http://127.0.0.1:51234".into(),
         local_token: "lt".into(),
     });
     app.apply_event(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() });
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-    assert_eq!(app.connect.server, "http://127.0.0.1:51234");
-    assert_eq!(app.connect.field, 1, "focus lands on the username");
     assert!(!app.connecting);
     assert_eq!(app.session.server_id, id, "already filed under its identity");
     assert!(app.message.as_ref().is_some_and(|m| m.text.contains("tunnel open")), "{:?}", app.message);
 }
 
 #[test]
-fn a_picked_server_that_wants_credentials_opens_its_login_form() {
-    // Regression: choosing a server found on the network bounced back to
-    // "how do you want to connect?", losing the server that was picked —
-    // the connect path was reporting "needs a sign-in" as an
-    // authorization failure.
-    use crate::discovery::DiscoveredServer;
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::QuickConnect;
-    app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
-        name: "Living Room".into(),
-        base_url: "http://192.168.1.71:3999".into(),
-        version: None,
-        quick_connect: true,
-    }]));
-    app.handle_action(Action::Submit);
-
-    app.apply_event(Event::NeedsLogin { server: "http://192.168.1.71:3999".into() });
-    assert_eq!(app.connect.stage, ConnectStage::Direct, "lands on the login form");
-    assert_eq!(
-        app.connect.server, "http://192.168.1.71:3999",
-        "the chosen server is kept, not blanked"
-    );
-    assert_eq!(app.connect.field, 1, "focus is on the username");
-    assert!(!app.connecting);
-}
-
-#[test]
-fn an_expired_session_offers_a_login_for_the_same_server() {
+fn an_expired_session_drops_its_token_and_stays_on_its_server() {
     let mut app = connected_app();
     app.apply_event(Event::Unauthorized);
     assert!(!app.connected);
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-    assert_eq!(app.connect.server, "http://host:3000", "stays on the server in use");
+    assert_eq!(app.session.server, "http://host:3000", "stays on the server in use");
     assert!(app.session.token.is_none());
-}
-
-#[test]
-fn connecting_without_a_username_uses_public_mode() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::Direct;
-    app.connect.server = "http://host:3000".into();
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Connect {
-            server: "http://host:3000".into(),
-            identity: "http://host:3000".into(),
-            token: None,
-            self_signed: false,
-            peer: None,
-            local_token: None,
-        })]
-    );
 }
 
 #[test]
@@ -3491,208 +2789,10 @@ fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
 }
 
 #[test]
-fn the_server_field_starts_empty_for_a_new_user() {
-    // It used to be prefilled with a guess at localhost, so the first
-    // thing anyone had to do was delete two dozen characters.
-    let app = App::new(None, None, None);
-    assert!(app.connect.server.is_empty());
-
-    // A server we actually know about is still offered.
-    let app = App::new(Some("http://host:3000".into()), None, None);
-    assert_eq!(app.connect.server, "http://host:3000");
-}
-
-#[test]
-fn connect_form_edits_the_focused_field_only() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::Direct;
-    app.handle_action(Action::Input('h'));
-    app.handle_action(Action::CycleFocus);
-    app.handle_action(Action::Input('u'));
-    assert_eq!(app.connect.server, "h");
-    assert_eq!(app.connect.username, "u");
-    assert!(app.connect.password.is_empty());
-}
-
-#[test]
-fn login_effect_carries_credentials_and_clears_the_password() {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::Direct;
-    app.connect.server = "http://host:3000".into();
-    app.connect.username = "alice".into();
-    app.connect.password = "secret".into();
-
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Login {
-            server: "http://host:3000".into(),
-            identity: "http://host:3000".into(),
-            username: "alice".into(),
-            password: "secret".into(),
-            self_signed: false,
-            local_token: None,
-            peer: None,
-        })]
-    );
-    assert!(app.connect.password.is_empty(), "password is not kept in memory after use");
-}
-
-/// A connect screen sitting on `Direct` with the given server text.
-fn at_direct(server: &str) -> App {
-    let mut app = App::new(None, None, None);
-    app.connect.stage = ConnectStage::Direct;
-    app.connect.server = server.into();
-    app
-}
-
-#[test]
-fn a_typed_address_is_completed_before_it_is_used() {
-    // What used to happen here: "relative URL without a base", after a
-    // round trip, with the typed text still on screen.
-    let mut app = at_direct("nas:3000");
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Connect {
-            server: "http://nas:3000".into(),
-            identity: "http://nas:3000".into(),
-            token: None,
-            self_signed: false,
-            peer: None,
-            local_token: None,
-        })]
-    );
-    assert_eq!(app.connect.server, "http://nas:3000", "the field shows what was assumed");
-
-    let mut app = at_direct("music.example.com");
-    app.handle_action(Action::Submit);
-    assert_eq!(app.connect.server, "https://music.example.com");
-}
-
-#[test]
-fn an_unusable_address_is_refused_without_a_round_trip() {
-    let mut app = at_direct("ftp://host");
-    assert!(app.handle_action(Action::Submit).is_empty(), "nothing is dispatched");
-    assert!(!app.connecting, "and the screen doesn't pretend to be busy");
-    let message = app.message.as_ref().unwrap();
-    assert_eq!(message.kind, MessageKind::Error);
-    assert!(message.text.contains("http://"), "it says what to type instead");
-
-    let mut app = at_direct("   ");
-    assert!(app.handle_action(Action::Submit).is_empty());
-    assert!(app.message.as_ref().unwrap().text.contains("enter a server address"));
-}
-
-#[test]
-fn a_username_without_a_password_is_caught_here_not_by_the_server() {
-    let mut app = at_direct("http://host:3000");
-    app.connect.username = "alice".into();
-    assert!(app.handle_action(Action::Submit).is_empty());
-    let text = &app.message.as_ref().unwrap().text;
-    assert!(text.contains("password"), "got: {text}");
-    // The way out is spelled out, since public mode is a real mode.
-    assert!(text.contains("public"), "got: {text}");
-}
-
-#[test]
-fn sending_a_password_over_plain_http_asks_first() {
-    let mut app = at_direct("http://music.example.com");
-    app.connect.username = "alice".into();
-    app.connect.password = "secret".into();
-
-    // First Enter: warned, nothing sent, password still typed.
-    assert!(app.handle_action(Action::Submit).is_empty());
-    assert!(app.message.as_ref().unwrap().text.contains("unencrypted"));
-    assert_eq!(app.connect.password, "secret", "so the answer can just be yes");
-
-    // Second Enter: taken as consent.
-    let effects = app.handle_action(Action::Submit);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Login {
-            server: "http://music.example.com".into(),
-            identity: "http://music.example.com".into(),
-            username: "alice".into(),
-            password: "secret".into(),
-            self_signed: false,
-            local_token: None,
-            peer: None,
-        })]
-    );
-}
-
-#[test]
-fn consent_to_plaintext_does_not_follow_you_to_another_server() {
-    let mut app = at_direct("http://music.example.com");
-    app.connect.username = "alice".into();
-    app.connect.password = "secret".into();
-    app.handle_action(Action::Submit); // warned
-
-    app.connect.server = "http://other.example.com".into();
-    assert!(app.handle_action(Action::Submit).is_empty(), "the new host warns on its own");
-    assert!(app.message.as_ref().unwrap().text.contains("other.example.com"));
-}
-
-#[test]
-fn signing_in_to_a_lan_server_is_not_interrupted() {
-    // http on the LAN is how mStream is normally run: a warning every
-    // time would be noise, and noise is what gets clicked through.
-    for server in ["http://192.168.1.71:3999", "nas:3000", "http://localhost:3000"] {
-        let mut app = at_direct(server);
-        app.connect.username = "alice".into();
-        app.connect.password = "secret".into();
-        let effects = app.handle_action(Action::Submit);
-        assert!(
-            matches!(effects.as_slice(), [Effect::Api(ApiCmd::Login { .. })]),
-            "{server} should sign in without ceremony, got {effects:?}"
-        );
-    }
-}
-
-#[test]
-fn a_public_server_over_plain_http_needs_no_warning() {
-    // Nothing secret is being sent, so there is nothing to warn about.
-    let mut app = at_direct("http://music.example.com");
-    let effects = app.handle_action(Action::Submit);
-    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Connect { .. })]));
-}
-
-#[test]
-fn quitting_shuts_both_workers_down() {
-    let mut app = connected_app();
-    let effects = app.handle_action(Action::Quit);
-    assert!(app.should_quit);
-    assert!(effects.contains(&Effect::Audio(AudioCmd::Shutdown)));
-    assert!(effects.contains(&Effect::Api(ApiCmd::Shutdown)));
-}
-
-#[test]
-fn key_mapping_differs_between_normal_and_editing_modes() {
-    let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-
-    assert_eq!(map_key(key('j'), InputMode::Normal), Some(Action::Down));
-    assert_eq!(map_key(key('j'), InputMode::Editing), Some(Action::Input('j')));
-    assert_eq!(map_key(key('q'), InputMode::Normal), Some(Action::Quit));
-    assert_eq!(map_key(key('q'), InputMode::Editing), Some(Action::Input('q')));
-
-    // Ctrl+C always quits, even mid-typing.
-    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert_eq!(map_key(ctrl_c, InputMode::Editing), Some(Action::Quit));
-
-    assert_eq!(map_key(key('2'), InputMode::Normal), Some(Action::SelectTab(1)));
-    assert_eq!(
-        map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), InputMode::Normal),
-        Some(Action::Activate)
-    );
-}
-
-#[test]
 fn searching_from_the_query_box_emits_one_search() {
     let mut app = connected_app();
     app.handle_action(Action::StartSearch);
     assert_eq!(app.tab, Tab::Search);
-    assert_eq!(app.input_mode(), InputMode::Editing);
 
     for c in "moon".chars() {
         app.handle_action(Action::Input(c));
@@ -3709,7 +2809,7 @@ fn opening_the_playlists_node_asks_every_time() {
     // for on the way in like every other, which is the behaviour worth
     // having and came free with the move.
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(1));
+    app.select_tab(1);
     let at = app.library.entries.iter().position(|e| e.label() == "Playlists").unwrap();
     app.library.state.select(Some(at));
 
@@ -3739,7 +2839,7 @@ fn a_pane_knows_when_its_contents_are_still_on_the_wire() {
     let mut app = connected_app();
     assert!(!app.library.loading);
 
-    app.handle_action(Action::SelectTab(1));
+    app.select_tab(1);
     app.handle_action(Action::Activate); // into Artists
     assert!(app.library.loading, "asking marks the pane, not the call site");
     // Only the pane that was asked for — leaving the tab mid-flight must
@@ -3758,7 +2858,7 @@ fn a_pane_knows_when_its_contents_are_still_on_the_wire() {
 #[test]
 fn a_request_that_fails_is_no_longer_pending() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(1));
+    app.select_tab(1);
     app.handle_action(Action::Activate);
     // Nothing calls `Pane::set` on the way out of an error, so this is the
     // one path that would otherwise spin forever.
@@ -3845,7 +2945,7 @@ fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
 #[test]
 fn library_tab_opens_on_a_static_menu_without_a_request() {
     let mut app = connected_app();
-    let effects = app.handle_action(Action::SelectTab(1));
+    let effects = app.select_tab(1);
     assert!(effects.is_empty(), "the mode menu costs no round-trip");
     assert_eq!(app.library.entries.len(), 7);
     assert_eq!(app.library_node(), &LibraryNode::Root);
@@ -3872,7 +2972,7 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
 #[test]
 fn drilling_from_artists_to_an_album_of_tracks() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(1));
+    app.select_tab(1);
 
     // Artists
     let effects = app.handle_action(Action::Activate);
@@ -3949,7 +3049,7 @@ fn drilling_from_artists_to_an_album_of_tracks() {
 #[test]
 fn back_walks_the_library_stack_to_the_menu() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(1));
+    app.select_tab(1);
     app.handle_action(Action::Activate); // → Artists
     app.apply_event(Event::Library {
         generation: app.session_gen(),
@@ -3975,7 +3075,7 @@ fn back_walks_the_library_stack_to_the_menu() {
 #[test]
 fn a_reply_for_an_abandoned_view_is_discarded() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(1));
+    app.select_tab(1);
     app.handle_action(Action::Activate); // asked for Artists
     app.handle_action(Action::Back); // …then changed our mind
 
@@ -4392,197 +3492,6 @@ fn stop(path: &str, t: f64) -> crate::api::types::JourneyStop {
     }
 }
 
-fn similar_artist(name: &str, similarity: f64, ways: &[&str]) -> crate::api::types::SimilarArtist {
-    crate::api::types::SimilarArtist {
-        artist: name.into(),
-        similarity,
-        analyzed_count: 12,
-        genre_tags: vec!["ambient".into()],
-        entry_points: ways.iter().map(|p| track(p)).collect(),
-    }
-}
-
-/// Index of the Discover tab among the visible ones.
-fn discover_tab(app: &App) -> usize {
-    app.tabs().iter().position(|t| *t == Tab::Discover).expect("discover is available")
-}
-
-#[test]
-fn hierarchical_model_tags_are_shown_by_their_leaf() {
-    // Live against a real index every row read "Electronic---Dubstep,
-    // Electroni…" — the shared prefix filled the column and said nothing.
-    assert_eq!(tidy_tag("Electronic---Dubstep"), "Dubstep");
-    assert_eq!(tidy_tag("Hip Hop---Trap"), "Trap");
-    assert_eq!(tidy_tag("Jazz"), "Jazz");
-    assert_eq!(tidy_tag(""), "");
-}
-
-#[test]
-fn the_discover_tab_is_absent_where_the_server_cannot_serve_it() {
-    let app = connected_app();
-    assert!(app.tabs().contains(&Tab::Discover));
-
-    let mut plain = connected_app();
-    plain.capabilities = Default::default();
-    assert!(!plain.tabs().contains(&Tab::Discover));
-    // And the numbers stay 1..n so no key points at a gap — Files, Library,
-    // Search, Settings, with the strip's positional numbers the truth.
-    assert_eq!(plain.tabs().len(), 4);
-    assert_eq!(plain.tabs()[3], Tab::Settings);
-    assert!(plain.handle_action(Action::SelectTab(4)).is_empty(), "there is no fifth tab");
-    assert_ne!(plain.tab, Tab::Discover);
-}
-
-#[test]
-fn opening_discover_asks_rather_than_guessing_what_you_meant() {
-    // The tab used to take whatever the cursor happened to be on, which
-    // made "more like this" mean something you never said out loud — and
-    // gave you no way to say anything else. Now it asks.
-    let mut app = connected_app();
-    browsing(&mut app, &["a", "b"], 1);
-    app.handle_action(Action::SelectTab(discover_tab(&app)));
-
-    assert_eq!(app.tab, Tab::Discover);
-    assert!(app.discover_seed.is_none(), "a highlighted row is not an answer");
-    // Two ways of answering, and the menu costs no request.
-    assert_eq!(app.discover.entries.len(), 2);
-}
-
-#[test]
-fn the_seed_row_names_the_track_it_would_take() {
-    // "What's playing" is only a useful thing to choose if you can see what
-    // it would choose without choosing it.
-    let mut app = connected_app();
-    let Entry::Discover { detail, .. } = &connected_app().discover_root_entries()[0] else {
-        panic!("the first row is the seed row");
-    };
-    assert_eq!(detail, "nothing playing");
-
-    app.replace_queue(vec![track("playing")]);
-    app.play_index(0);
-    app.handle_action(Action::SelectTab(discover_tab(&app)));
-    let Entry::Discover { detail, .. } = &app.discover.entries[0] else {
-        panic!("the first row is the seed row");
-    };
-    assert_eq!(detail, &track("playing").display_name());
-
-    // And taking it puts that track — not the cursor's — under the tab.
-    app.handle_action(Action::Activate);
-    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "playing");
-    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
-}
-
-#[test]
-fn similar_tracks_are_ordinary_playable_rows() {
-    let mut app = connected_app();
-    app.replace_queue(vec![track("seed")]);
-    app.play_index(0);
-    app.handle_action(Action::SelectTab(discover_tab(&app)));
-    app.handle_action(Action::Activate); // seed: what's playing
-
-    app.discover.state.select(Some(1)); // "Similar tracks"
-    let effects = app.handle_action(Action::Activate);
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, seed, dest: DiscoverDest::Browser })]
-            if seed.filepath == "seed"
-    ));
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "seed".into(),
-    });
-    // Parent row plus the two neighbours, and Enter plays them like any
-    // other list — no new concept to learn.
-    assert_eq!(app.discover.entries.len(), 3);
-
-    // A reply about a seed the tab is no longer pointed at is dropped. The
-    // node alone cannot catch this: "similar tracks" is the same node
-    // whatever it is similar *to*, so a slow first answer would land under
-    // the second seed's title and be read as being about it.
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("about-something-else", 0.99)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "a track we walked away from".into(),
-    });
-    assert_eq!(app.discover.entries.len(), 3, "the list is still the one we asked for");
-    app.discover.state.select(Some(1));
-    let effects = app.handle_action(Action::Activate);
-    assert_eq!(app.queue.items.len(), 2);
-    assert_eq!(app.queue.current, Some(0));
-    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
-}
-
-#[test]
-fn an_artist_drills_into_its_ways_in_without_asking_again() {
-    // The entry points arrived with the artist list, so going in costs
-    // nothing — the whole reason the server sends them inline.
-    let mut app = connected_app();
-    app.replace_queue(vec![track("seed")]);
-    app.play_index(0);
-    app.handle_action(Action::SelectTab(discover_tab(&app)));
-    app.handle_action(Action::Activate); // seed: what's playing
-    app.discover.state.select(Some(2)); // "Similar artists"
-    app.handle_action(Action::Activate);
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Artists,
-        data: DiscoverData::Artists(vec![
-            similar_artist("Near Artist", 0.91, &["in-one", "in-two"]),
-            similar_artist("Other", 0.80, &[]),
-        ]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "seed".into(),
-    });
-    assert_eq!(app.discover.entries.len(), 3, "parent plus two artists");
-
-    app.discover.state.select(Some(1));
-    let effects = app.handle_action(Action::Activate);
-    assert!(effects.is_empty(), "no request — the doorways were already here");
-    assert_eq!(*app.discover_node(), DiscoverNode::Artist("Near Artist".into()));
-    assert_eq!(app.discover.entries.len(), 3, "parent plus two ways in");
-
-    // And back out again, still without asking.
-    assert!(app.handle_action(Action::Back).is_empty());
-    assert_eq!(*app.discover_node(), DiscoverNode::Artists);
-    assert_eq!(app.discover.entries.len(), 3);
-}
-
-#[test]
-fn a_discover_reply_for_a_view_already_left_is_dropped() {
-    let mut app = connected_app();
-    browsing(&mut app, &["seed"], 0);
-    app.handle_action(Action::SelectTab(discover_tab(&app)));
-    app.handle_action(Action::Activate); // into Tracks
-    app.handle_action(Action::Back); // and straight back out
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("late", 0.8)]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "seed".into(),
-    });
-    assert_eq!(*app.discover_node(), DiscoverNode::Root);
-    assert_eq!(app.discover.entries.len(), 2, "still the mode menu");
-}
-
-#[test]
-fn discovery_with_nothing_to_go_on_says_so() {
-    let mut app = connected_app();
-    app.handle_action(Action::SelectTab(discover_tab(&app)));
-    assert!(app.discover_seed.is_none(), "nothing playing, nothing chosen");
-
-    assert!(app.handle_action(Action::Activate).is_empty());
-    assert!(app.message.as_ref().unwrap().text.contains("nothing is playing"));
-}
-
 #[test]
 fn the_browser_opens_where_the_server_thinks_best() {
     // With one library the old opening screen was a list of exactly one
@@ -4930,71 +3839,29 @@ fn one_track_playing_forgives_the_failures_before_it() {
     assert_eq!(app.failures, 0, "a track that loaded clears the run");
 }
 
-#[test]
-fn j_aims_the_sonic_path_at_the_highlighted_track() {
-    // One keypress when something is already playing: that track is the
-    // obvious place to leave from, and the highlighted one is where to
-    // arrive — so there is nothing left to ask and it plots straight away.
-    let mut app = connected_app();
-    app.replace_queue(vec![track("playing")]);
-    app.play_index(0);
-    browsing(&mut app, &["far-away"], 0);
-
-    let effects = app.handle_action(Action::StartJourney);
-    assert_eq!(
-        effects,
-        vec![Effect::Api(ApiCmd::Journey {
-            start: "playing".into(),
-            end: "far-away".into(),
-            length: 14,
-        })]
-    );
-    assert_eq!(app.tab, Tab::SonicPath, "and it opens the tab it filled in");
-    assert!(app.sonic.pending);
-    assert_eq!(app.sonic.view, SonicView::Results);
-    assert_eq!(app.sonic.start.as_ref().unwrap().filepath, "playing");
-    assert_eq!(app.sonic.end.as_ref().unwrap().filepath, "far-away");
-}
-
-#[test]
-fn with_nothing_playing_j_fills_the_destination_and_waits() {
-    let mut app = connected_app();
-    browsing(&mut app, &["a", "b"], 0);
-
-    // Nowhere to set off from, so nothing is asked for — but the tab is
-    // open on the half of the answer that is known.
-    assert!(app.handle_action(Action::StartJourney).is_empty());
-    assert_eq!(app.tab, Tab::SonicPath);
-    assert_eq!(app.sonic.view, SonicView::Setup);
-    assert_eq!(app.sonic.end.as_ref().unwrap().filepath, "a");
-    assert!(app.sonic.start.is_none());
-    assert!(app.message.as_ref().unwrap().text.contains("set off from"));
-}
-
-#[test]
-fn a_sonic_path_needs_a_server_that_can_plot_one() {
-    let mut app = connected_app();
-    app.capabilities.discovery_path = false;
-    browsing(&mut app, &["a"], 0);
-
-    assert!(app.handle_action(Action::StartJourney).is_empty());
-    assert!(app.sonic.end.is_none());
-    assert!(app.message.as_ref().unwrap().text.contains("can't plot sonic paths"));
-    // And there is no tab offering to, either.
-    assert!(!app.tabs().contains(&Tab::SonicPath));
-}
-
-#[test]
-fn a_sonic_path_needs_a_track_not_a_folder() {
-    let mut app = connected_app();
-    app.files.set(vec![Entry::Dir {
-        label: "an album".into(),
-        path: "lib/an album".into(),
-    }]);
-    app.files.state.select(Some(0));
-
-    assert!(app.handle_action(Action::StartJourney).is_empty());
-    assert!(app.message.as_ref().unwrap().text.contains("highlight a track"));
+/// A Sonic Path to the highlighted track, asked for the way the room asks:
+/// the destination set and the start taken from what is playing, the tab
+/// opened, and the path built once both ends are known.
+fn plot_to_highlighted(app: &mut App) -> Vec<Effect> {
+    let Some(Entry::Track { track, .. }) = app.pane().selected() else {
+        panic!("the cursor is not on a track");
+    };
+    let picked = (**track).clone();
+    // Aiming somewhere new is a new path, not an edit of the last one.
+    app.sonic.view = SonicView::Setup;
+    app.sonic.stops.clear();
+    app.sonic.fetched = false;
+    app.sonic.note = None;
+    app.sonic.end = Some(picked);
+    if app.sonic.start.is_none() {
+        app.sonic.start = app.now_playing.clone();
+    }
+    app.sonic_stack.restart();
+    let mut effects = app.open_sonic_tab();
+    if app.sonic.ready() {
+        effects.extend(app.build_sonic_path());
+    }
+    effects
 }
 
 /// Put the cursor on the Sonic Path row with this action.
@@ -5018,7 +3885,7 @@ fn a_disabled_journey_probes_before_naming_a_reason() {
     app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
 
     let effects =
         app.consume_journey(Vec::new(), None, app.sonic.length, JourneyIssue::Disabled);
@@ -5225,7 +4092,7 @@ fn changing_the_length_asks_for_a_different_arc() {
     app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
@@ -5261,7 +4128,7 @@ fn playing_a_sonic_path_replaces_the_queue_and_starts_it() {
     app.replace_queue(vec![track("old")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
@@ -5289,7 +4156,7 @@ fn queueing_a_sonic_path_adds_to_what_is_already_there() {
     app.replace_queue(vec![track("old")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("to", 1.0)],
         note: None,
@@ -5314,7 +4181,7 @@ fn a_stop_row_is_an_ordinary_track_row() {
     app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
@@ -5347,7 +4214,7 @@ fn picking_a_song_from_the_library_fills_the_end_that_asked() {
     // anywhere, and it lands in the field instead of the queue.
     let mut app = connected_app();
     browsing(&mut app, &["chosen"], 0);
-    app.handle_action(Action::SelectTab(sonic_tab(&app)));
+    app.select_tab(sonic_tab(&app));
 
     on_sonic_row(&mut app, SonicRow::End(SonicSide::End));
     app.handle_action(Action::Activate); // into the End song's menu
@@ -5373,7 +4240,7 @@ fn picking_a_song_from_the_library_fills_the_end_that_asked() {
 fn an_armed_pick_is_called_off_by_escape() {
     let mut app = connected_app();
     browsing(&mut app, &["a"], 0);
-    app.handle_action(Action::SelectTab(sonic_tab(&app)));
+    app.select_tab(sonic_tab(&app));
     on_sonic_row(&mut app, SonicRow::End(SonicSide::Start));
     app.handle_action(Action::Activate);
     on_sonic_row(&mut app, SonicRow::PickFromLibrary);
@@ -5385,7 +4252,7 @@ fn an_armed_pick_is_called_off_by_escape() {
     assert_eq!(app.tab, Tab::SonicPath, "back where the arming was asked for");
 
     // And Enter means play again.
-    app.handle_action(Action::SelectTab(0));
+    app.select_tab(0);
     let effects = app.handle_action(Action::Activate);
     assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
 }
@@ -5395,7 +4262,7 @@ fn use_playing_song_takes_what_is_on_the_speakers() {
     let mut app = connected_app();
     app.replace_queue(vec![track("sounding")]);
     app.play_index(0);
-    app.handle_action(Action::SelectTab(sonic_tab(&app)));
+    app.select_tab(sonic_tab(&app));
     // Landing on the tab with something playing already suggests it as the
     // start, so this test drives the End field.
     assert_eq!(app.sonic.start.as_ref().unwrap().filepath, "sounding");
@@ -5413,7 +4280,7 @@ fn clearing_an_end_puts_the_row_back_to_not_set() {
     let mut app = connected_app();
     app.replace_queue(vec![track("sounding")]);
     app.play_index(0);
-    app.handle_action(Action::SelectTab(sonic_tab(&app)));
+    app.select_tab(sonic_tab(&app));
     assert!(app.sonic.start.is_some());
 
     on_sonic_row(&mut app, SonicRow::End(SonicSide::Start));
@@ -5421,7 +4288,7 @@ fn clearing_an_end_puts_the_row_back_to_not_set() {
     on_sonic_row(&mut app, SonicRow::Clear);
     app.handle_action(Action::Activate);
     assert!(app.sonic.start.is_none());
-    assert!(matches!(app.sonic_node(), SonicNode::Root), "and it comes back out");
+    assert!(matches!(app.sonic_stack.here(), SonicNode::Root), "and it comes back out");
 }
 
 #[test]
@@ -5430,7 +4297,7 @@ fn saving_a_path_as_a_playlist_asks_for_a_name_first() {
     app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
@@ -5440,7 +4307,6 @@ fn saving_a_path_as_a_playlist_asks_for_a_name_first() {
     on_sonic_row(&mut app, SonicRow::SavePlaylist);
     assert!(app.handle_action(Action::Activate).is_empty(), "nothing is written yet");
     assert!(app.sonic_playlist_name.is_some(), "the prompt is up");
-    assert_eq!(app.input_mode(), InputMode::Editing, "and it has the keyboard");
 
     // Whatever was suggested is replaced by what gets typed.
     for _ in 0..80 {
@@ -5471,7 +4337,7 @@ fn the_path_says_what_it_is_doing_and_why_it_came_back_empty() {
     app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
 
     let status = |app: &App| {
         app.sonic_pane.entries.iter().find_map(|e| match e {
@@ -5520,7 +4386,7 @@ fn start_over_clears_both_ends_and_the_path() {
     app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("to", 1.0)],
         note: None,
@@ -5541,7 +4407,7 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
     // search can land after the reply for the current one. Only the
     // query last submitted is still wanted.
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
+    app.select_tab(2);
     for c in "one".chars() {
         app.handle_action(Action::Input(c));
     }
@@ -5577,7 +4443,7 @@ fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
     let first = app.sonic.length;
     // Ask for a longer one before the first reply lands.
     on_sonic_row(&mut app, SonicRow::Length);
@@ -5610,7 +4476,7 @@ fn drilling_out_of_search_lights_the_search_tab_spinner() {
     // forget a case: the old SearchDrill command wasn't in its table at
     // all, and this spinner never lit.
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
+    app.select_tab(2);
     app.search_submitted = Some("moon".into());
     app.apply_event(Event::SearchResults {
         generation: app.session_gen(),
@@ -5635,182 +4501,12 @@ fn a_path_reply_that_arrives_after_start_over_is_dropped() {
     app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
-    app.handle_action(Action::StartJourney);
+    plot_to_highlighted(&mut app);
     app.reset_sonic_path();
 
     app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None, length: 14, issue: crate::tui::worker::JourneyIssue::None });
     assert!(app.sonic.stops.is_empty(), "a path nobody is waiting for is not drawn");
     assert_eq!(app.queue.items.len(), 1, "and nothing is queued behind the user's back");
-}
-
-/// A `[keys]` section from a config file.
-fn keys(pairs: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
-    pairs
-        .iter()
-        .map(|(name, specs)| {
-            ((*name).to_string(), specs.iter().map(|s| (*s).to_string()).collect())
-        })
-        .collect()
-}
-
-fn press(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
-}
-
-#[test]
-fn a_rebound_action_answers_to_its_new_key_and_not_the_old_one() {
-    let (map, warnings) = Keymap::default()
-        .with_overrides(&keys(&[("next-track", &["b"])]));
-    assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(map.action(press('b'), InputMode::Normal), Some(Action::NextTrack));
-    // Naming an action replaces its keys rather than adding to them, so
-    // the default is gone — that is what makes a binding movable.
-    assert_eq!(map.action(press('n'), InputMode::Normal), None);
-    // Everything unmentioned is untouched.
-    assert_eq!(map.action(press('p'), InputMode::Normal), Some(Action::PrevTrack));
-}
-
-#[test]
-fn taking_a_key_from_another_action_just_works() {
-    // Binding `d` to something new should not also require unbinding it
-    // from remove-from-queue first.
-    let (map, warnings) =
-        Keymap::default().with_overrides(&keys(&[("next-track", &["d"])]));
-    assert!(warnings.is_empty(), "no complaint about the old owner: {warnings:?}");
-    assert_eq!(map.action(press('d'), InputMode::Normal), Some(Action::NextTrack));
-    // And the action that lost it still works by its other keys, or not
-    // at all if it had none.
-    assert_eq!(map.action(press('C'), InputMode::Normal), Some(Action::ClearQueue));
-}
-
-#[test]
-fn an_action_can_be_unbound_entirely() {
-    let (map, _) = Keymap::default().with_overrides(&keys(&[("clear-queue", &[])]));
-    assert_eq!(map.action(press('C'), InputMode::Normal), None);
-    // And it drops off the help, rather than listing a key that is gone.
-    assert!(!map.help_rows().iter().any(|(_, what)| *what == "clear the queue"));
-}
-
-#[test]
-fn a_line_of_nothing_but_typos_leaves_the_binding_alone() {
-    // An explicit `[]` means "unbind this". A line where every key was
-    // unreadable means the line is wrong, and taking the key away would
-    // punish a typo far harder than it deserves.
-    let (map, warnings) =
-        Keymap::default().with_overrides(&keys(&[("volume-up", &["not a key"])]));
-    assert_eq!(map.action(press('+'), InputMode::Normal), Some(Action::VolumeUp));
-    assert!(warnings.iter().any(|w| w.contains("left as it was")), "{warnings:?}");
-
-    // But one good key among the bad still takes effect.
-    let (map, _) = Keymap::default()
-        .with_overrides(&keys(&[("volume-up", &["not a key", "V"])]));
-    assert_eq!(map.action(press('V'), InputMode::Normal), Some(Action::VolumeUp));
-    assert_eq!(map.action(press('+'), InputMode::Normal), None);
-}
-
-#[test]
-fn the_help_follows_the_bindings_that_are_actually_in_force() {
-    let (map, _) = Keymap::default().with_overrides(&keys(&[("quit", &["ctrl+q", "Z"])]));
-    let quit = map
-        .help_rows()
-        .into_iter()
-        .find(|(_, what)| *what == "quit")
-        .expect("quit is still listed");
-    assert_eq!(quit.0, "^q Z", "the help shows the new keys, in order");
-}
-
-#[test]
-fn a_broken_keys_section_costs_only_the_broken_line() {
-    let (map, warnings) = Keymap::default().with_overrides(&keys(&[
-        ("next-track", &["b"]),
-        ("teleport", &["t"]),
-        ("previous-track", &["not a key"]),
-    ]));
-    assert!(warnings.iter().any(|w| w.contains("no action called 'teleport'")), "{warnings:?}");
-    assert!(warnings.iter().any(|w| w.contains("'not a key' is not a key")), "{warnings:?}");
-    // The good line still took effect, and the player still works.
-    assert_eq!(map.action(press('b'), InputMode::Normal), Some(Action::NextTrack));
-    assert_eq!(map.action(press(' '), InputMode::Normal), Some(Action::PlayPause));
-    // The line that was all typos kept its default rather than vanishing.
-    assert_eq!(map.action(press('p'), InputMode::Normal), Some(Action::PrevTrack));
-}
-
-#[test]
-fn two_actions_claiming_one_key_is_reported() {
-    let (map, warnings) = Keymap::default()
-        .with_overrides(&keys(&[("next-track", &["z"]), ("previous-track", &["z"])]));
-    assert!(warnings.iter().any(|w| w.contains("bound to both")), "{warnings:?}");
-    // The first claim wins outright — stripping the key from each in turn
-    // would leave it doing nothing, which is nobody's intent.
-    assert_eq!(map.action(press('z'), InputMode::Normal), Some(Action::NextTrack));
-    // And the one that lost keeps the binding it already had, rather than
-    // being left with none at all.
-    assert_eq!(map.action(press('p'), InputMode::Normal), Some(Action::PrevTrack));
-}
-
-#[test]
-fn ctrl_c_cannot_be_taken_away() {
-    // The way out has to survive any config, including a hostile one.
-    let (map, _) = Keymap::default().with_overrides(&keys(&[("quit", &["Z"])]));
-    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert_eq!(map.action(ctrl_c, InputMode::Normal), Some(Action::Quit));
-    assert_eq!(map.action(ctrl_c, InputMode::Panel), Some(Action::Quit));
-    assert_eq!(map.action(ctrl_c, InputMode::Editing), Some(Action::Quit));
-}
-
-#[test]
-fn key_specs_round_trip_and_forgive_the_obvious_variants() {
-    for spec in ["j", "G", "space", "enter", "esc", "tab", "up", "pagedown", "ctrl+d", "?"] {
-        let parsed = Key::parse(spec).unwrap_or_else(|| panic!("could not read {spec:?}"));
-        // What it writes back must read as the same key — case included,
-        // since `G` and `g` are different bindings.
-        assert_eq!(Key::parse(&parsed.spec()), Some(parsed), "{spec} did not round-trip");
-    }
-    assert_eq!(Key::parse("G").unwrap().spec(), "G", "a capital stays capital");
-    // Same key, several spellings — this is a hand-edited file.
-    for spec in ["ctrl+d", "Ctrl+D", "ctrl-d", "^d"] {
-        assert_eq!(Key::parse(spec), Some(ctrl('d')), "{spec}");
-    }
-    assert_eq!(Key::parse("PgDn"), Some(key(KeyCode::PageDown)));
-    assert_eq!(Key::parse("Escape"), Some(key(KeyCode::Esc)));
-    // With Ctrl the capital is folded away: the terminal sends the
-    // lowercase form, so `ctrl+D` would otherwise never fire.
-    assert_eq!(Key::parse("ctrl+D"), Some(ctrl('d')));
-    for bad in ["", "  ", "nonsense", "ctrl+"] {
-        assert_eq!(Key::parse(bad), None, "{bad:?} is not a key");
-    }
-}
-
-#[test]
-fn the_dumped_config_is_the_config_that_would_be_read_back() {
-    // `mstream-player keys` is only useful if pasting its output changes
-    // nothing — which means the writer and the parser have to agree.
-    let dumped = Keymap::default().to_config_toml();
-    let parsed: crate::config::Config =
-        toml::from_str(&format!("version = 1\n{dumped}")).expect("valid TOML");
-    let (map, warnings) = Keymap::default().with_overrides(&parsed.keys);
-    assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(map.help_rows(), Keymap::default().help_rows(), "round trip changed something");
-}
-
-#[test]
-fn a_modifier_is_part_of_the_key_not_decoration() {
-    // Ctrl was only ever checked for `c`, so Ctrl+D arrived as plain `d`
-    // and quietly removed a queue entry when a vim user reached for
-    // half-page-down.
-    let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
-    assert_eq!(map_key(ctrl_d, InputMode::Normal), Some(Action::HalfPageDown));
-    let plain_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
-    assert_eq!(map_key(plain_d, InputMode::Normal), Some(Action::RemoveFromQueue));
-
-    // And an unbound Ctrl combination does nothing at all rather than
-    // falling through to the bare letter.
-    let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
-    assert_eq!(map_key(ctrl_r, InputMode::Normal), None);
-    // Including inside a panel, where bare letters are passed through.
-    assert_eq!(map_key(ctrl_r, InputMode::Panel), None);
-    let plain_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
-    assert_eq!(map_key(plain_p, InputMode::Panel), Some(Action::Input('p')));
 }
 
 #[test]
@@ -5852,90 +4548,12 @@ fn jumping_with_nothing_playing_says_so() {
 }
 
 #[test]
-fn the_shifted_seek_keys_move_by_a_minute() {
+fn the_genre_chooser_takes_space_rather_than_pausing_the_music() {
     let mut app = connected_app();
-    app.status.source = "http://host/a.mp3".into();
-    app.status.position = 200.0;
-
-    let effects = app.handle_action(Action::SeekForwardFar);
-    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(260.0))]);
-    // Each press builds on the last target (seek chaining), so back-far
-    // undoes forward-far exactly rather than re-reading a stale status.
-    let effects = app.handle_action(Action::SeekBackwardFar);
-    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(200.0))]);
-    // And the fine keys still move by five.
-    let effects = app.handle_action(Action::SeekForward);
-    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(205.0))]);
-}
-
-#[test]
-fn half_a_page_is_half_of_a_page() {
-    let mut app = connected_app();
-    let names: Vec<String> = (0..40).map(|i| i.to_string()).collect();
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    browsing(&mut app, &refs, 0);
-
-    app.handle_action(Action::PageDown);
-    let after_page = app.files.state.selected().unwrap();
-    app.handle_action(Action::First);
-    app.handle_action(Action::HalfPageDown);
-    assert_eq!(app.files.state.selected(), Some(after_page / 2));
-}
-
-#[test]
-fn the_genre_chooser_binds_its_own_keys_rather_than_the_players() {
-    // The one modal left. Sharing the player's bindings meant `p` arrived
-    // as "previous track" inside it.
-    let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-    assert_eq!(map_key(key('p'), InputMode::Normal), Some(Action::PrevTrack));
-    assert_eq!(map_key(key('p'), InputMode::Panel), Some(Action::Input('p')));
-    assert_eq!(
-        map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), InputMode::Panel),
-        Some(Action::Cancel)
-    );
-}
-
-#[test]
-fn the_arrows_belong_to_the_tab_and_the_numbers_do_the_navigating() {
-    let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    assert_eq!(map_key(press(KeyCode::Left), InputMode::Now), Some(Action::NowLeft));
-    assert_eq!(map_key(press(KeyCode::Right), InputMode::Now), Some(Action::NowRight));
-    assert_eq!(map_key(press(KeyCode::Tab), InputMode::Now), Some(Action::NowTabNext));
-    assert_eq!(map_key(press(KeyCode::BackTab), InputMode::Now), Some(Action::NowTabPrev));
-    // In this view the digits reach its own tabs, not the browser's — which
-    // are behind a screen nobody can see from here.
-    assert_eq!(map_key(press(KeyCode::Char('1')), InputMode::Now), Some(Action::SelectNowTab(0)));
-    assert_eq!(map_key(press(KeyCode::Char('1')), InputMode::Normal), Some(Action::SelectTab(0)));
-
-    let mut app = connected_app();
-    app.replace_queue(vec![track("a")]);
     on_the_dj_tab(&mut app);
-    app.handle_action(Action::NowRight);
-    assert!(app.dj_armed(), "→ toggled the Auto DJ row");
-    assert_eq!(app.now_tab(), NowTab::AutoDj, "and did not leave the tab");
-
-    // The way out is the same key it is on every other tab.
-    let queue = app.now_tabs().iter().position(|t| *t == NowTab::Queue).unwrap();
-    app.handle_action(Action::SelectNowTab(queue));
-    assert_eq!(app.now_tab(), NowTab::Queue);
-
-    // ←→ never navigate now, on any tab — the rule is the same everywhere.
-    app.handle_action(Action::NowLeft);
-    assert_eq!(app.now_tab(), NowTab::Queue);
-    app.handle_action(Action::NowRight);
-    assert_eq!(app.now_tab(), NowTab::Queue);
-}
-
-#[test]
-fn the_genre_chooser_owns_the_keyboard_while_it_is_open() {
-    let mut app = connected_app();
-    assert_eq!(app.input_mode(), InputMode::Normal);
-    on_the_dj_tab(&mut app);
-    assert_eq!(app.input_mode(), InputMode::Now);
 
     app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Genres).unwrap();
     app.handle_action(Action::Activate);
-    assert_eq!(app.input_mode(), InputMode::Panel);
 
     // Space toggles a genre in there rather than pausing the music.
     app.replace_queue(vec![track("a")]);
@@ -5943,7 +4561,6 @@ fn the_genre_chooser_owns_the_keyboard_while_it_is_open() {
     assert!(effects.is_empty(), "no playback from inside the chooser");
 
     app.handle_action(Action::Cancel);
-    assert_eq!(app.input_mode(), InputMode::Now);
 }
 
 #[test]
@@ -6062,7 +4679,7 @@ fn a_cleared_end_stays_cleared_when_you_come_back() {
     app.play_index(0);
 
     let sonic = sonic_tab(&app);
-    app.handle_action(Action::SelectTab(sonic));
+    app.select_tab(sonic);
     assert_eq!(
         app.sonic.start.as_ref().map(|t| t.filepath.as_str()),
         Some("playing"),
@@ -6073,14 +4690,14 @@ fn a_cleared_end_stays_cleared_when_you_come_back() {
     app.sonic.set_side(SonicSide::Start, None);
     assert!(app.sonic.start.is_none() && app.sonic.end.is_none());
 
-    app.handle_action(Action::SelectTab(0));
-    app.handle_action(Action::SelectTab(sonic));
+    app.select_tab(0);
+    app.select_tab(sonic);
     assert!(app.sonic.start.is_none(), "cleared is a choice, and it is kept");
 
     // Start over is a pristine panel again, so the seeding comes back.
     app.reset_sonic_path();
-    app.handle_action(Action::SelectTab(0));
-    app.handle_action(Action::SelectTab(sonic));
+    app.select_tab(0);
+    app.select_tab(sonic);
     assert_eq!(app.sonic.start.as_ref().map(|t| t.filepath.as_str()), Some("playing"));
 }
 
@@ -6091,7 +4708,7 @@ fn changing_the_length_stops_waiting_for_a_path_of_the_old_one() {
     // left the row saying "plotting…" for the rest of the session.
     let mut app = connected_app();
     let sonic = sonic_tab(&app);
-    app.handle_action(Action::SelectTab(sonic));
+    app.select_tab(sonic);
     app.sonic.set_side(SonicSide::Start, Some(track("a")));
     app.sonic.set_side(SonicSide::End, Some(track("b")));
     app.refresh_sonic_rows();
@@ -6698,148 +5315,6 @@ fn gapless_repeat_one_announces_its_own_seam() {
 }
 
 #[test]
-fn the_logs_room_switches_levels_and_opens_the_viewer() {
-    let mut app = connected_app();
-    app.handle_action(Action::SelectTab(5));
-    app.handle_action(Action::Down); // Crossfade → Logs
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogsMenu, .. })),
-        "the root has a Logs row"
-    );
-    app.handle_action(Action::Activate);
-    assert_eq!(*app.settings_node(), SettingsNode::Logs);
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogWrite, .. })),
-        "the cursor rests on the write switch"
-    );
-
-    // In tests no subscriber is installed, so flipping the switch on takes
-    // the degraded road: the file cannot open, the switch snaps back to
-    // off, and the row says so — which is also what a read-only disk
-    // would do in a real session.
-    app.handle_action(Action::Activate);
-    assert!(!app.log_write);
-    assert!(app.message.as_ref().unwrap().text.contains("no log file"));
-    assert_eq!(app.chosen_log_write(), Some(false), "the switch was chosen here");
-    assert_eq!(app.chosen_log_level(), None, "but the level was not — it must not persist");
-
-    // The level is its own row, adjustable whether or not anything writes
-    // yet — it is the loudness the switch will use.
-    app.handle_action(Action::Down);
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogLevel, .. }))
-    );
-    app.handle_action(Action::Activate);
-    app.handle_action(Action::Activate);
-    assert_eq!(app.log_level, crate::logging::Level::Trace);
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("trace")),
-        "the row reads the level back"
-    );
-
-    // No subscriber in a unit test means nothing was ever captured, so the
-    // viewer refuses politely — the same words a fresh session would give
-    // before anything had been logged.
-    app.handle_action(Action::Down);
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::ViewLog, .. }))
-    );
-    app.handle_action(Action::Activate);
-    assert!(app.log_view.is_none());
-    assert!(app.message.as_ref().unwrap().text.contains("nothing captured"));
-
-    // With lines in hand the viewer is modal: j scrolls it and does not
-    // move the settings cursor; q closes the viewer, not the player.
-    app.log_view = Some(LogView {
-        source: "in memory · not written to disk".into(),
-        lines: (1..=50).map(|n| format!("line {n}")).collect(),
-        scroll: usize::MAX,
-        follow: true,
-        refreshed: crate::clock::Instant::now(),
-    });
-    let before = app.pane().state.selected();
-    app.handle_action(Action::Down);
-    assert_eq!(app.pane().state.selected(), before, "the list under it holds still");
-    assert!(!app.log_view.as_ref().unwrap().follow, "scrolling detaches from the end");
-    app.handle_action(Action::Last);
-    assert!(app.log_view.as_ref().unwrap().follow, "G re-attaches");
-    app.handle_action(Action::Quit);
-    assert!(app.log_view.is_none(), "q closes the viewer");
-    assert!(!app.should_quit, "and only the viewer");
-
-    // Untouched sessions remember nothing.
-    let fresh = connected_app();
-    assert_eq!(fresh.chosen_log_write(), None);
-    assert_eq!(fresh.chosen_log_level(), None);
-}
-
-/// The two switches persist independently: walking the level in a session
-/// that the environment turned logging on for must not also write
-/// `write = true` into the config and keep it on forever after.
-#[test]
-fn choosing_a_level_does_not_persist_the_write_switch() {
-    let mut app = connected_app();
-    // As if MSTREAM_LOG=1 had started this session writing.
-    app.log_write = true;
-    app.handle_action(Action::SelectTab(5));
-    app.handle_action(Action::Down);      // Logs
-    app.handle_action(Action::Activate);  // into the room
-    app.handle_action(Action::Down);      // Log level
-    app.handle_action(Action::Activate);  // info -> debug
-
-    assert_eq!(app.log_level, crate::logging::Level::Debug);
-    assert_eq!(app.chosen_log_level(), Some(crate::logging::Level::Debug));
-    assert_eq!(app.chosen_log_write(), None, "the switch was never touched here");
-}
-
-#[test]
-fn the_settings_menu_reads_the_state_at_a_glance_and_backs_out_whole() {
-    let mut app = connected_app();
-    app.crossfade = 6.0;
-    app.handle_action(Action::SelectTab(settings_tab(&app)));
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("6s blend")),
-        "the root row summarises without opening"
-    );
-
-    // In, back out via h on the `..` row, and the menu is whole again.
-    app.handle_action(Action::Activate);
-    assert_eq!(*app.settings_node(), SettingsNode::Crossfade);
-    app.handle_action(Action::Up); // onto `..`
-    app.handle_action(Action::Back);
-    assert_eq!(*app.settings_node(), SettingsNode::Root);
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::CrossfadeMenu, .. })),
-        "back lands on the menu, not an empty pane"
-    );
-
-    // Leaving and returning keeps the live values fresh in the details.
-    app.handle_action(Action::SelectTab(0));
-    app.crossfade = 0.0;
-    app.gapless = true;
-    app.handle_action(Action::SelectTab(settings_tab(&app)));
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("gapless")),
-        "a revisit reads the values as they are now"
-    );
-}
-
-#[test]
-fn a_fractional_crossfade_snaps_to_whole_steps() {
-    // A hand-written 4.5 must step to 5 and 4 — not 5.5 forever.
-    let mut app = connected_app();
-    app.crossfade = 4.5;
-    app.handle_action(Action::SelectTab(settings_tab(&app)));
-    app.handle_action(Action::Activate); // cursor rests on Blend length
-
-    app.handle_action(Action::Activate);
-    assert_eq!(app.crossfade, 5.0, "up from 4.5 lands on the next whole second");
-    app.crossfade = 4.5;
-    app.handle_action(Action::Back);
-    assert_eq!(app.crossfade, 4.0, "down from 4.5 lands on the previous");
-}
-
-#[test]
 fn a_lone_track_under_repeat_all_gets_its_seam() {
     // One track on repeat-all loops exactly like repeat-one, and the
     // engine's candidate logic treats them alike; the app was starving
@@ -6866,8 +5341,8 @@ fn a_lone_track_under_repeat_all_gets_its_seam() {
 fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
     // The seam announces the track to itself, which is lawful only while
     // gapless-without-blend holds. Crossfade coming on must take the seam
-    // with it in the same keystroke — left standing, the engine holds a
-    // self to blend into (the pending-seam bug).
+    // with it in the next batch — left standing, the engine holds a self to
+    // blend into (the pending-seam bug).
     let mut app = connected_app();
     app.gapless = true;
     app.queue.repeat = Repeat::One;
@@ -6881,78 +5356,18 @@ fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
     }));
     assert_eq!(announced_url(&effects).as_deref(), Some(url.as_str()), "the seam stands");
 
-    app.handle_action(Action::SelectTab(settings_tab(&app)));
-    app.handle_action(Action::Activate); // cursor rests on Blend length
-    let effects = app.handle_action(Action::Activate); // crossfade 0 -> 1
+    // The shell's Settings room sets the blend on the app; whatever batch
+    // comes next settles it.
+    app.crossfade = 1.0;
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url,
+        playing: true,
+        ..Default::default()
+    }));
     assert!(
         effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
-        "the keystroke that armed the blend disarmed the seam"
+        "the batch after the blend was armed disarmed the seam: {effects:?}"
     );
-}
-
-#[test]
-fn the_settings_tab_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
-    let mut app = connected_app();
-    app.handle_action(Action::SelectTab(settings_tab(&app)));
-    assert_eq!(app.tab, Tab::Settings, "6 lands on Settings");
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::CrossfadeMenu, .. })),
-        "the root offers Crossfade"
-    );
-
-    app.handle_action(Action::Activate);
-    // Rows: [.., Blend length, Gapless]; the cursor rests past the `..`,
-    // already on the blend.
-    let effects = app.handle_action(Action::Activate); // Enter steps up
-    assert_eq!(app.crossfade, 1.0);
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 1.0)),
-        "the engine hears the nudge at once"
-    );
-    let effects = app.handle_action(Action::Back); // <- steps down on a value row
-    assert_eq!(app.crossfade, 0.0, "and back down to off, never below");
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 0.0))
-    );
-    assert_eq!(app.tab, Tab::Settings, "a value row's Back adjusts, it does not leave");
-
-    app.handle_action(Action::Down); // Gapless
-    let effects = app.handle_action(Action::Activate);
-    assert!(app.gapless);
-    assert!(
-        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetGapless(true)))),
-        "gapless toggles through the same funnel"
-    );
-    // The rows show the change without losing the cursor.
-    assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("on")),
-        "the row reads back the live value"
-    );
-
-    // The C6 pair toggle through the same rows.
-    app.handle_action(Action::Down); // Blend skips
-    let effects = app.handle_action(Action::Activate);
-    assert!(app.blend_skips);
-    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetBlendSkips(true)))));
-    app.handle_action(Action::Down); // Pause fade
-    let effects = app.handle_action(Action::Back); // toggles either way
-    assert!(app.pause_fade);
-    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetPauseFade(true)))));
-
-    // What the tab set is what the config remembers.
-    let prefs = app.prefs();
-    assert_eq!(prefs.crossfade_seconds, 0.0);
-    assert!(prefs.gapless);
-    assert!(prefs.blend_skips);
-    assert!(prefs.pause_fade);
-
-    // And the ways out: Esc steps back to the settings menu.
-    app.handle_action(Action::Cancel);
-    assert_eq!(*app.settings_node(), SettingsNode::Root);
 }
 
 #[test]
@@ -6980,18 +5395,13 @@ fn connecting_tells_the_engine_the_blend_length() {
 }
 
 #[test]
-fn the_connect_screen_swallows_playback_only_where_a_shell_shows_one() {
-    // The TUI draws the App's connect screen while no session is up, and a
-    // Space typed into it must not toggle anything; the GUI has no such
-    // screen and keeps the queue's transport live (multi-server contract,
-    // clauses 11 and 13).
+fn the_transport_answers_with_no_session_up() {
+    // No session is no bar to the transport: the queue's rows from other
+    // servers keep it live (multi-server contract, clauses 11 and 13).
     let mut app = App::new(Some("http://host:3000".into()), None, None);
     assert!(!app.connected);
     app.handle_action(Action::ToggleShuffle);
-    assert!(!app.queue.shuffle, "the connect screen swallows the key");
-    app.connect_screen = false;
-    app.handle_action(Action::ToggleShuffle);
-    assert!(app.queue.shuffle, "a shell without the screen lets it through");
+    assert!(app.queue.shuffle);
 }
 
 // ── Auto DJ (docs/ux-contracts/auto-dj.md) ──────────────────────────────────
@@ -7439,7 +5849,6 @@ fn switching_on_with_an_empty_queue_asks_and_the_opener_seeds_the_session() {
         "and nothing goes out but the ask for what was played last: {effects:?}"
     );
     assert!(app.dj_server.is_none(), "not armed until it is answered");
-    assert_eq!(app.input_mode(), InputMode::Panel);
 
     // Surprise me: the filtered opener, one song, nothing else.
     let effects = app.handle_action(Action::Activate);
@@ -7657,7 +6066,6 @@ fn the_tabs_keyword_row_takes_typed_words_and_x_removes_the_last() {
     app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Keywords).unwrap();
     app.handle_action(Action::Activate);
     assert_eq!(app.dj_keyword.as_deref(), Some(""), "Enter opens the entry");
-    assert_eq!(app.input_mode(), InputMode::Editing, "and the keys are letters");
     for c in "live".chars() {
         app.handle_action(Action::Input(c));
     }
@@ -7741,16 +6149,6 @@ fn dj_tab_settings_are_remembered() {
     assert_eq!(saved.dj.songs_per_fetch, 5);
     let restored = App::new(None, None, None).with_prefs(&saved);
     assert_eq!(restored.dj, app.dj);
-}
-
-#[test]
-fn g_and_shift_g_jump_to_the_ends_of_the_dj_tab() {
-    let mut app = connected_app();
-    on_the_dj_tab(&mut app);
-    app.handle_action(Action::Last);
-    assert_eq!(app.dj_panel.selected(), DjRow::Sample, "the last row");
-    app.handle_action(Action::First);
-    assert_eq!(app.dj_panel.selected(), DjRow::Armed);
 }
 
 #[test]
@@ -8838,7 +7236,7 @@ fn every_play_that_replaces_the_queue_is_a_new_queue_for_the_seeds() {
     }
     fn journey(app: &mut App) {
         browsing(app, &["to"], 0);
-        app.handle_action(Action::StartJourney);
+        plot_to_highlighted(app);
         let length = app.sonic.length;
         app.apply_event(Event::Journey {
             stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
@@ -10468,7 +8866,7 @@ fn a_reply_from_the_server_the_session_left_fills_nothing() {
     // and playing a hit stamped the new server as its origin. The ask is
     // stamped with the session generation; a reply must carry it.
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(1));
+    app.select_tab(1);
     app.handle_action(Action::Activate); // into Artists on the old server
     let old = app.session_gen();
     app.shed_server_state();
@@ -10523,7 +8921,7 @@ fn a_re_login_on_a_proxied_peer_signs_in_through_the_parent_and_keeps_the_peer()
     // The review's finding: the parent's token expired while a peer was
     // browsed through it; the sign-in pinged the parent plainly, so the
     // header named the peer while the browser listed the parent's library
-    // and new rows carried the wrong origin. The login names the peer.
+    // and new rows carried the wrong origin. The sign-in names the peer.
     let mut app = App::new(None, None, None);
     let parent = "http://10.0.0.5:3000";
     app.connected = true;
@@ -10533,18 +8931,8 @@ fn a_re_login_on_a_proxied_peer_signs_in_through_the_parent_and_keeps_the_peer()
     app.session.token = Some("stale".into());
 
     app.apply_event(Event::Unauthorized);
-    assert_eq!(app.connect.stage, ConnectStage::Direct);
-    assert_eq!(app.connect.server, parent, "the form aims at the parent, which holds the accounts");
-    app.connect.username = "alice".into();
-    app.connect.password = "pw".into();
-    let effects = app.handle_action(Action::Submit);
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::Api(ApiCmd::Login { identity, peer: Some(3), .. })] if identity == parent
-        ),
-        "the sign-in is the parent's and carries the peer: {effects:?}"
-    );
+    assert_eq!(app.session.server, parent, "the sign-in aims at the parent, which holds the accounts");
+    assert_eq!(app.peer_behind(parent), Some(3), "and carries the peer");
     // A sign-in at a server that is not the peer's parent carries none.
     app.session.peer = Some(("http://10.0.0.9:3000".into(), 3));
     assert_eq!(app.peer_behind(parent), None);
@@ -11343,28 +9731,6 @@ fn the_whole_list_verbs_act_on_the_tab_in_front() {
     assert_eq!(app.queue.items.len(), 2, "replaced, not appended");
     assert!(app.queue.items.iter().all(|q| q.origin.peer.is_none()));
     assert!(matches!(effects.iter().find(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), Some(_)));
-}
-
-#[test]
-fn the_rooms_verbs_leave_the_tuis_discover_state_untouched() {
-    let mut app = answered_taste();
-    app.discover_seed = Some(track("music/tui-seed.mp3"));
-    app.discover.set(vec![Entry::Parent]);
-    let before = format!(
-        "{:?}",
-        (&app.discover.entries, &app.discover_stack, &app.discover_seed, &app.discover_artists, &app.now_discover, app.capture)
-    );
-    app.activate_taste_row(TasteRow::Song(0), TasteVerb::PlayFrom);
-    app.activate_taste_row(TasteRow::Song(1), TasteVerb::Now);
-    app.activate_taste_row(TasteRow::Peer { group: 0, row: 0 }, TasteVerb::Queue);
-    app.taste_queue_all();
-    app.set_taste_window(7);
-    app.taste_seeds_closed(&["h1".into()], &[], false);
-    let after = format!(
-        "{:?}",
-        (&app.discover.entries, &app.discover_stack, &app.discover_seed, &app.discover_artists, &app.now_discover, app.capture)
-    );
-    assert_eq!(before, after, "clause 67");
 }
 
 #[test]

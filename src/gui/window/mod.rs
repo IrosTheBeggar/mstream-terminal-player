@@ -168,7 +168,7 @@ type BuildJob = (Builder<'static, CoverPost>, wgpu::Surface<'static>);
 /// a backend that never came (no wgpu adapter or backend to draw with) —
 /// every way out before the first frame. Its message lines are printed as
 /// before. A launcher that gets it falls back to the terminal route
-/// (`gui` in a terminal, or the TUI); 1 stays the code for everything else,
+/// (`gui` in a terminal); 1 stays the code for everything else,
 /// a frame that failed in a window that was up included, and 2 is clap's
 /// usage error.
 pub(crate) const NO_WINDOW: i32 = 3;

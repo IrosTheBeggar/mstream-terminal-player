@@ -1,33 +1,28 @@
-//! The interactive terminal player: terminal setup and the event loop.
+//! The player under the GUI: the [`app`] state machine and its [`worker`]s,
+//! the covers ([`art`], [`graphics`], [`canvas`]), the visualizer ([`viz`])
+//! and the Now Playing view ([`ui`]), with what a shell needs around them:
+//! the start-up from the saved config, the queue's saver, the dispatch of
+//! the App's effects, and the terminal's panic hook and title.
 //!
-//! The loop does three things per pass — dispatch pending effects to the
-//! workers, draw if anything changed, then fold in whatever input or worker
-//! events arrived. All the decisions live in [`app`].
+//! The module keeps the name of the terminal player these were written for;
+//! the GUI (`crate::gui`) is the one shell that drives them now.
 
 pub mod app;
 pub mod art;
 pub mod canvas;
 pub mod graphics;
-pub mod keymap;
 pub mod ui;
 pub mod viz;
 pub mod worker;
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
-use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind,
-    MouseButton, MouseEventKind,
-};
+use ratatui::crossterm::event::DisableMouseCapture;
 #[cfg(not(target_arch = "wasm32"))]
 use ratatui::crossterm::execute;
-#[cfg(not(target_arch = "wasm32"))]
-use ratatui::layout::Rect;
 
 use crate::config;
 use app::App;
@@ -35,32 +30,6 @@ use app::App;
 use app::Effect;
 #[cfg(not(target_arch = "wasm32"))]
 use worker::{ApiCmd, AudioCmd, Event};
-
-/// How long to wait for a key before the next pass anyway: the resolution of
-/// every timer the loop keeps, and the longest a new status — the progress
-/// bar's next step — waits to reach the screen.
-const POLL: Duration = Duration::from_millis(100);
-
-/// The same, while something is being drawn from the audio itself. Ten frames
-/// a second is fine for a progress bar and visibly steppy for a waveform, and
-/// this is the only screen that earns the extra wakeups.
-const POLL_DRAWING_AUDIO: Duration = Duration::from_millis(33);
-
-/// How often the spinner steps. Off the wall clock rather than the draw count,
-/// so it turns at one speed whether the loop is idle or churning.
-#[cfg(not(target_arch = "wasm32"))]
-const SPIN_EVERY: Duration = Duration::from_millis(90);
-
-/// How long to wait before drawing again, while anything on screen moves.
-/// Shared with the replay harness, which has to draw on the same schedule or
-/// it measures the app under one it never runs at: anything that moves on a
-/// timer sees a different number of frames there than here, and reports a
-/// different answer because of it. (The loop skips a frame only when nothing
-/// moved, so the frames the harness draws that the loop would not are the
-/// same frame again.)
-pub(crate) fn poll_interval(app: &App) -> Duration {
-    if app.drawing_audio() { POLL_DRAWING_AUDIO } else { POLL }
-}
 
 /// Everything remembered about how to start: which server, with what
 /// credentials, where we were browsing, and the player's settings.
@@ -82,15 +51,6 @@ pub(crate) struct Startup {
     pub server_id: Option<String>,
     /// The chosen entry trusts its own TLS certificate.
     pub self_signed: bool,
-    /// The `[keys]` section, unvalidated — the app reports what it can't use.
-    pub keys: std::collections::BTreeMap<String, Vec<String>>,
-    /// The `[theme]` section, likewise.
-    pub theme: config::ThemePrefs,
-    /// The `[display]` section — which glyphs the font can be trusted with,
-    /// and how much the layout is allowed to spend.
-    pub display: config::DisplayPrefs,
-    /// Whether to ask the terminal to report the mouse.
-    pub mouse: config::MousePrefs,
     /// Every saved server, with its token: what a queued track needs to be
     /// reached from a session on another server (contract clause 30).
     pub servers: Vec<app::KnownServer>,
@@ -572,71 +532,20 @@ pub(crate) fn startup(
         prefs: config.player,
         tunnel_code,
         self_signed,
-        keys: config.keys,
-        theme: config.theme,
-        display: config.display,
-        mouse: config.mouse,
         servers,
         bundled,
         queue,
     }
 }
 
-/// The bindings a `[keys]` section produces, with anything wrong reported to
-/// stderr — which the player can't do mid-draw, but a command can.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn keymap_for(
-    keys: &std::collections::BTreeMap<String, Vec<String>>,
-) -> keymap::Keymap {
-    let (keymap, warnings) = keymap::Keymap::default().with_overrides(keys);
-    for warning in &warnings {
-        eprintln!("warning: {warning}");
-    }
-    keymap
-}
-
-/// The palette in force, with anything unreadable reported to stderr — which
-/// the player cannot do mid-draw, but a start-up path can.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn theme_for(prefs: &config::ThemePrefs) -> ui::Theme {
-    let (theme, warnings) = ui::Theme::from_prefs(prefs);
-    for warning in &warnings {
-        eprintln!("warning: {warning}");
-    }
-    theme
-}
-
-/// The glyph set in force, reporting an unreadable `display.glyphs` the same
-/// way an unreadable colour is reported: on stderr, before the terminal is
-/// claimed.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn glyphs_for(prefs: &config::DisplayPrefs) -> ui::Glyphs {
-    let (glyphs, warnings) = ui::Glyphs::from_prefs(prefs);
-    for warning in &warnings {
-        eprintln!("warning: {warning}");
-    }
-    glyphs
-}
-
-/// Build the app from a resolved [`Startup`].
-///
-/// Shared with the replay harness rather than copied into it: a scripted run
-/// is only worth anything if it begins exactly where the real binary would,
-/// and a second copy of this drifted once already — it kept its own `App`
-/// construction and silently stopped restoring tunnel sessions.
-pub(crate) fn app_from(start: Startup) -> App {
-    app_for(start, false)
-}
-
-/// [`app_from`] for a shell that says whether it shows the Seeds sheet: the
-/// GUI does, and the lists the file kept load by its rules — every row Stay
-/// close kept — so the flag is set before the prefs are read (auto-dj
-/// decision 41). The TUI, the web build and the replay harness show none.
+/// Build the app from a resolved [`Startup`], for a shell that says whether
+/// it shows the Seeds sheet: the GUI does, and the lists the file kept load
+/// by its rules — every row Stay close kept — so the flag is set before the
+/// prefs are read (auto-dj decision 41).
 pub(crate) fn app_for(start: Startup, seeds_sheet: bool) -> App {
     let mut app = App::new(start.server, start.token, start.username)
         .with_seeds_sheet(seeds_sheet)
         .with_prefs(&start.prefs)
-        .with_keys(&start.keys)
         .with_tunnel(start.tunnel_code);
     app.session.self_signed = start.self_signed;
     if let Some(id) = start.server_id {
@@ -677,131 +586,10 @@ pub(crate) fn test_startup(prefs: config::PlayerPrefs) -> Startup {
         prefs,
         tunnel_code: None,
         self_signed: false,
-        keys: Default::default(),
-        theme: config::ThemePrefs::default(),
-        display: config::DisplayPrefs::default(),
-        mouse: config::MousePrefs::default(),
         servers: Vec::new(),
         bundled: None,
         queue: None,
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn run(server: Option<String>, token: Option<String>, bundled: Option<String>) -> i32 {
-    let start = startup(server, token, bundled);
-
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let (audio_tx, tap) = worker::spawn_audio(event_tx.clone());
-    let api_tx = worker::spawn_api(event_tx.clone());
-
-    ui::set_theme(theme_for(&start.theme));
-    ui::set_glyphs(glyphs_for(&start.display));
-    ui::set_sizing(ui::Sizing::from_prefs(&start.display));
-    let mouse = start.mouse.enabled;
-
-    let mut app = app_from(start);
-    app.tap = Some(tap);
-    let pending = app.start();
-
-    // The player's palette is its interface: not subject to NO_COLOR.
-    crate::console::keep_colors();
-    // ratatui's init, with each frame written whole and shown at once —
-    // a resize's clear never painted on its own (`kit::frames`).
-    let mut terminal = crate::kit::frames::init();
-    // After init and before anything is drawn — not because the query
-    // needs raw mode (the crate flips termios itself; graphics-probe calls
-    // it cooked and works), but because the alternate screen is already up,
-    // so a terminal that answers something unexpected makes its mess
-    // somewhere that gets thrown away on restore — and because init's
-    // saved state is what cleans up if the query's own restore is lost.
-    app.graphics = graphics::Graphics::probe();
-    // Asking for mouse reports takes click-drag selection away from the
-    // terminal, so a failure to turn it on is not worth refusing to start
-    // over — the player is a keyboard app that also answers a pointer.
-    if mouse && execute!(std::io::stdout(), EnableMouseCapture).is_err() {
-        eprintln!("warning: this terminal would not report the mouse");
-    }
-    crate::console::claim_terminal();
-    push_window_title();
-
-    install_panic_hook();
-
-    let result =
-        event_loop(&mut terminal, &mut app, &event_rx, &audio_tx, &api_tx, &event_tx, pending);
-    pop_window_title();
-    // Still on the alternate screen, where kitty keeps the pictures.
-    graphics::release_all();
-    if mouse {
-        // Left on, the terminal goes on emitting escape sequences at whatever
-        // runs next, which looks like the shell has been broken.
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
-    }
-    ratatui::restore();
-    crate::console::release_terminal();
-
-    // The boot line scrolled away under the alternate screen; now that the
-    // terminal is a terminal again, say it once more for the person about
-    // to go looking for the file.
-    if let Some(path) = crate::logging::active() {
-        eprintln!("diagnostics were logged to {}", path.display());
-    }
-
-    remember(&app);
-
-    match result {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("mstream-player: {e}");
-            1
-        }
-    }
-}
-
-/// What a mouse event means, given where on the screen it happened.
-///
-/// One thing: a click on the progress bar seeks there. The wheel scrolled
-/// lists for a while and was taken out again — moving a cursor three rows a
-/// notch is not what a wheel feels like it should do, and the lists are
-/// already well served by the keys.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn on_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) -> Vec<Effect> {
-    let at = ratatui::layout::Position { x: mouse.column, y: mouse.row };
-    // Every event, moves included: the bar lights under the pointer, and
-    // that only works if we know where the pointer went.
-    app.note_pointer(at);
-    match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            let bar = ui::progress_area(app, area);
-            if !bar.contains(at) {
-                return Vec::new();
-            }
-            match ui::seek_target(app, bar.width, mouse.column - bar.x) {
-                Some(position) => app.seek_to(position),
-                None => Vec::new(),
-            }
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// A mouse event as the loop takes it: Apple Terminal's release echo — the
-/// second click pair its physical release sends after every click — is
-/// dropped whole first (the kit's `EchoFilter`, on only in that terminal),
-/// so a click on the bar seeks once, where it was pressed, as it does in
-/// every other terminal; then [`on_mouse`].
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn take_mouse(
-    app: &mut App,
-    echo: &mut crate::kit::EchoFilter,
-    mouse: event::MouseEvent,
-    area: Rect,
-) -> Vec<Effect> {
-    let at = ratatui::layout::Position { x: mouse.column, y: mouse.row };
-    if echo.swallow(mouse.kind, at) {
-        return Vec::new();
-    }
-    on_mouse(app, mouse, area)
 }
 
 /// Write preferences and where we were, on the way out. Saving here rather
@@ -821,7 +609,6 @@ pub(crate) fn remember(app: &App) {
         }
     };
     config.player.adopt(app.prefs());
-    adopt_log_level(&mut config, &app);
     // Keyed on the identity, never the endpoint: a tunnel session's loopback
     // port is meaningless by the next run.
     // A tunnel identity removed from the list is not put back by
@@ -835,167 +622,6 @@ pub(crate) fn remember(app: &App) {
     }
     if let Err(e) = config::save(&config) {
         eprintln!("warning: could not save settings: {e}");
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn event_loop(
-    terminal: &mut crate::kit::frames::PageTerminal,
-    app: &mut App,
-    events: &Receiver<Event>,
-    audio_tx: &Sender<AudioCmd>,
-    api_tx: &Sender<ApiCmd>,
-    event_tx: &Sender<Event>,
-    mut pending: Vec<Effect>,
-) -> std::io::Result<()> {
-    let mut title = String::new();
-    let mut spun = Instant::now();
-    let mut saver = QueueSaver::new(app);
-    let mut expecting = crate::kit::pace::Expecting::default();
-    // Whether anything happened since the last frame that it does not show
-    // yet — input, an answer, a timer of the App's — and when it was drawn.
-    // A pass with nothing new skips the draw (performance audit #102): a
-    // paused player's screen is the same frame ten times a second, each a
-    // full render and a diff of every cell for no byte of output.
-    let mut dirty = true;
-    let mut drawn = Instant::now();
-    // The terminal's mouse dialect (Apple Terminal's release echo).
-    let mut echo = crate::kit::EchoFilter::new(crate::kit::apple_dialect());
-    loop {
-        // A save changes what the book knows — a peer just reconciled, a
-        // token just signed in for — and the queue's rows resolve against it.
-        let saving = pending.iter().any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. }));
-        if pending.iter().any(awaits_answer) {
-            expecting.arm();
-        }
-        dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
-        if saving && let Ok(fresh) = config::load() {
-            let credentials = config::load_credentials().unwrap_or_default();
-            app.servers = known_servers(&fresh, &credentials);
-            dirty = true;
-        }
-        saver.tick(app);
-        let ticked = app.tick();
-        dirty |= !ticked.is_empty();
-        pending.extend(ticked);
-
-        if spun.elapsed() >= SPIN_EVERY {
-            app.spinner = app.spinner.wrapping_add(1);
-            spun = Instant::now();
-            // A turn is only news to a frame that shows the spinner.
-            dirty |= app.spinner_shown.get();
-        }
-
-        // The player spends most of its life behind another window, where the
-        // title bar is the only part of it still on screen.
-        let wanted = window_title(app);
-        if wanted != title {
-            set_window_title(&wanted);
-            title = wanted;
-        }
-
-        if dirty || moving(app) || drawn.elapsed() >= crate::kit::pace::REDRAW_ANYWAY {
-            terminal.draw(|frame| ui::render(frame, app))?;
-            graphics::release_dropped();
-            drawn = Instant::now();
-            dirty = false;
-        }
-
-        if event::poll(expecting.wait(poll_interval(app)))? {
-            dirty = true;
-            // Everything already queued is handled before the next draw.
-            // Mouse capture arms any-motion tracking, so a sweep of the
-            // pointer is one event per cell crossed — serviced one frame
-            // apiece, with every keystroke waiting in line behind them.
-            let mut inputs = vec![event::read()?];
-            while event::poll(Duration::ZERO)? {
-                inputs.push(event::read()?);
-            }
-            for input in collapse_moves(inputs) {
-                match input {
-                    // Windows reports key releases as well as presses; without
-                    // this filter every keystroke would act twice.
-                    TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                        if let Some(action) = app.keymap.action(key, app.input_mode()) {
-                            pending.extend(app.handle_action(action));
-                        }
-                    }
-                    // Only arrives when capture is on, so there is nothing to
-                    // check here. Where a thing was drawn is worked out from the
-                    // screen size rather than remembered by the drawing, which is
-                    // what keeps this to a handful of lines.
-                    TermEvent::Mouse(mouse) => {
-                        let size = terminal.size()?;
-                        let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
-                        pending.extend(take_mouse(app, &mut echo, mouse, area));
-                    }
-                    // A resize is also how a tmux reattach announces a new
-                    // terminal behind the same tty — one whose image store
-                    // never saw kitty's transmit-once upload. Let graphics
-                    // re-send where that matters; ratatui handles the
-                    // layout side itself.
-                    TermEvent::Resize(..) => app.graphics.refresh(),
-                    _ => {}
-                }
-            }
-        }
-
-        while let Ok(event) = events.try_recv() {
-            // A status that says what the last one said changes nothing on
-            // screen: paused or stopped, the audio thread repeats itself
-            // every tick.
-            let repeat = matches!(&event, Event::Status(status) if *status == app.status);
-            let effects = app.apply_event(event);
-            dirty |= !repeat || !effects.is_empty();
-            pending.extend(effects);
-        }
-
-        if app.should_quit {
-            dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
-            saver.flush(app);
-            return Ok(());
-        }
-    }
-}
-
-/// Whether the screen moves on its own, with nothing happening: the
-/// visualizer still settling, the log following its file. Every pass draws
-/// while it does, as every pass did before frames could be skipped — both
-/// advance inside the drawing.
-#[cfg(not(target_arch = "wasm32"))]
-fn moving(app: &App) -> bool {
-    app.drawing_audio() || app.log_view.as_ref().is_some_and(|view| view.follow)
-}
-
-/// Runs of pointer moves collapse to where the pointer ended up. The places
-/// it passed through between two draws could never have been seen, and each
-/// one kept is a full frame of work. Everything else — clicks, keys, and the
-/// order they came in — is kept exactly.
-#[cfg(not(target_arch = "wasm32"))]
-fn collapse_moves(inputs: Vec<TermEvent>) -> Vec<TermEvent> {
-    let mut kept: Vec<TermEvent> = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        if let TermEvent::Mouse(now) = &input
-            && now.kind == MouseEventKind::Moved
-            && let Some(TermEvent::Mouse(last)) = kept.last_mut()
-            && last.kind == MouseEventKind::Moved
-        {
-            *last = *now;
-            continue;
-        }
-        kept.push(input);
-    }
-    kept
-}
-
-/// What the terminal's title bar should read. Paused is worth saying, because
-/// from outside the window silence and a paused track look the same.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn window_title(app: &App) -> String {
-    match &app.now_playing {
-        Some(track) if app.status.paused => format!("⏸ {}", track.display_name()),
-        Some(track) => format!("▶ {}", track.display_name()),
-        None => "mstream-player".to_string(),
     }
 }
 
@@ -1037,10 +663,9 @@ fn set_window_title(title: &str) {
 }
 
 /// The push/set/pop title discipline as one droppable claim, for sessions
-/// with a single fixed title (the setup wizard, the QR page) — the player
-/// itself calls the pieces directly because its title tracks the playing
-/// song. Unwind-safe: a panicking session still restores the title through
-/// the drop, same posture as its ground lease.
+/// with a single fixed title (the setup wizard, the QR page, the GUI in a
+/// terminal). Unwind-safe: a panicking session still restores the title
+/// through the drop, same posture as its ground lease.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct WindowTitle;
 
@@ -1077,24 +702,6 @@ fn pop_window_title() {
     let _ = std::io::stdout().flush();
 }
 
-/// Carry the session's chosen log level into a config about to be saved —
-/// only a level the user set in Settings, so an environment-forced one
-/// never silently becomes configuration. Off writes as empty, which keeps
-/// the [log] section out of the file entirely. Native beside its callers:
-/// the browser build has no config file to write.
-#[cfg(not(target_arch = "wasm32"))]
-fn adopt_log_level(config: &mut config::Config, app: &App) {
-    // Each switch persists only if this session's Settings actually set it:
-    // walking the level under MSTREAM_LOG=1 must not also write `write =
-    // true` and turn on disk logging for every run afterwards.
-    if let Some(write) = app.chosen_log_write() {
-        config.log.write = Some(write);
-    }
-    if let Some(level) = app.chosen_log_level() {
-        config.log.level = level.label().to_string();
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let mut config = config::load()?;
@@ -1104,7 +711,6 @@ pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let owner = app.session.peer.as_ref().map_or(app.session.server_id.as_str(), |(parent, _)| parent.as_str());
     config::touch_server(&mut config, owner, app.session.username.clone());
     config.player.adopt(app.prefs());
-    adopt_log_level(&mut config, app);
     config::save(&config)?;
 
     let mut credentials = config::load_credentials()?;
@@ -1210,16 +816,7 @@ pub(crate) fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{Track, TrackMetadata};
-
-    fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> event::MouseEvent {
-        event::MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
-        }
-    }
+    use crate::api::types::Track;
 
     /// `cargo test the_panic_hook -- --ignored` — swaps the process-global
     /// panic hook, so it must run alone, not beside parallel tests.
@@ -1270,139 +867,11 @@ mod tests {
         let play = Effect::Audio(AudioCmd::Play { url: "http://x/a.mp3".into(), duration_hint: None });
         assert!(awaits_answer(&play));
         assert!(awaits_answer(&Effect::Audio(AudioCmd::Seek(12.0))));
-        assert!(awaits_answer(&Effect::Api(ApiCmd::Shutdown)));
+        assert!(awaits_answer(&Effect::Api(ApiCmd::DiscoveryProbe)));
         assert!(awaits_answer(&Effect::Discover));
         assert!(!awaits_answer(&Effect::Audio(AudioCmd::SetVolume(0.5))));
         assert!(!awaits_answer(&Effect::SaveSession));
         assert!(!awaits_answer(&Effect::Trust("http://x".into())));
-    }
-
-    #[test]
-    fn a_sweep_of_pointer_moves_collapses_to_where_it_ended() {
-        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let moved = |x, y| TermEvent::Mouse(mouse_at(MouseEventKind::Moved, x, y));
-        let click = TermEvent::Mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 5));
-        let key = TermEvent::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-
-        // Two sweeps around a click and a key: each sweep keeps only its
-        // final position, and nothing changes order or goes missing.
-        let inputs = vec![
-            moved(1, 1),
-            moved(2, 1),
-            moved(3, 1),
-            click.clone(),
-            moved(4, 2),
-            moved(9, 9),
-            key.clone(),
-        ];
-        assert_eq!(collapse_moves(inputs), vec![moved(3, 1), click, moved(9, 9), key]);
-    }
-
-    #[test]
-    fn a_click_on_either_row_of_a_mirrored_bar_seeks() {
-        // On a tall terminal the bar is two rows — the shape and the
-        // scrubber — and the whole band is the control. The handler takes
-        // the column and asks `contains` about the row, so the extra row
-        // costs it nothing and buys a bigger target.
-        let height = config::DEFAULT_MIRROR_MIN_HEIGHT + 4;
-        let area = Rect { x: 0, y: 0, width: 80, height };
-        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
-        app.connected = true;
-        app.status.duration = 300.0;
-        app.status.source = "http://host/a.mp3".into();
-
-        let bar = ui::progress_area(&app, area);
-        for row in bar.y..bar.y + bar.height {
-            let effects = on_mouse(
-                &mut app,
-                mouse_at(MouseEventKind::Down(MouseButton::Left), bar.x, row),
-                area,
-            );
-            assert_eq!(
-                effects,
-                vec![Effect::Audio(AudioCmd::Seek(0.0))],
-                "row {row} of the band is the same control"
-            );
-        }
-
-        // And the row above the band is the track's name, which is not.
-        let effects = on_mouse(
-            &mut app,
-            mouse_at(MouseEventKind::Down(MouseButton::Left), bar.x, bar.y - 1),
-            area,
-        );
-        assert!(effects.is_empty(), "the name is not a scrubber");
-    }
-
-    #[test]
-    fn a_click_on_the_bar_seeks_and_nothing_else_does_anything() {
-        let area = Rect { x: 0, y: 0, width: 80, height: 24 };
-        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
-        app.connected = true;
-        app.files.set(
-            ["A", "B", "C", "D", "E", "F"]
-                .iter()
-                .map(|label| app::Entry::Dir { label: (*label).into(), path: (*label).into() })
-                .collect(),
-        );
-        app.status.duration = 300.0;
-        app.status.source = "http://host/a.mp3".into();
-
-        // A click on the bar seeks to where it was clicked.
-        let bar = ui::progress_area(&app, area);
-        let effects = on_mouse(
-            &mut app,
-            mouse_at(MouseEventKind::Down(MouseButton::Left), bar.x, bar.y),
-            area,
-        );
-        assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(0.0))], "the left edge is the start");
-
-        let effects = on_mouse(
-            &mut app,
-            mouse_at(MouseEventKind::Down(MouseButton::Left), bar.x + 20, bar.y),
-            area,
-        );
-        let Some(Effect::Audio(AudioCmd::Seek(to))) = effects.first() else {
-            panic!("expected a seek, got {effects:?}");
-        };
-        assert!(*to > 60.0 && *to < 120.0, "a fifth or so of the way in: {to}");
-
-        // A click anywhere else is not a seek, and nor is one on the clock.
-        let body = ui::regions(area).body;
-        for (column, row) in [(4, body.y + 2), (4, 0), (bar.right() - 2, bar.y)] {
-            let kind = MouseEventKind::Down(MouseButton::Left);
-            assert!(
-                on_mouse(&mut app, mouse_at(kind, column, row), area).is_empty(),
-                "({column}, {row}) should not seek"
-            );
-        }
-
-        // Moving the pointer about is not an event worth an effect.
-        assert!(on_mouse(&mut app, mouse_at(MouseEventKind::Moved, 10, 10), area).is_empty());
-    }
-
-    #[test]
-    fn in_apple_terminal_a_click_on_the_bar_seeks_once() {
-        let area = Rect { x: 0, y: 0, width: 80, height: 24 };
-        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
-        app.connected = true;
-        app.status.duration = 300.0;
-        app.status.source = "http://host/a.mp3".into();
-        let bar = ui::progress_area(&app, area);
-        // Apple Terminal's click: the instant pair, then the same again at
-        // the physical release (the kit's EchoFilter).
-        let click = [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)];
-        let seeks = |app: &mut App, echo: &mut crate::kit::EchoFilter| -> usize {
-            click
-                .iter()
-                .chain(click.iter())
-                .map(|kind| take_mouse(app, echo, mouse_at(*kind, bar.x + 20, bar.y), area).len())
-                .sum()
-        };
-        assert_eq!(seeks(&mut app, &mut crate::kit::EchoFilter::new(true)), 1, "the echo seeks nothing");
-        // Every other terminal's events are left as they come: there, the
-        // same events are two clicks.
-        assert_eq!(seeks(&mut app, &mut crate::kit::EchoFilter::new(false)), 2);
     }
 
     #[test]
@@ -1763,10 +1232,10 @@ mod tests {
         assert!(sheet.seeds.frozen());
         assert_eq!(paths(&sheet), ["p", "b"], "every row Stay close kept");
 
-        let tui = app_from(test_startup(prefs));
-        assert!(!tui.dj_shows_seeds);
-        assert!(tui.seeds.frozen(), "still Stay close");
-        assert_eq!(paths(&tui), ["p"], "the TUI lets go of what desktop Stay close kept");
+        let plain = app_for(test_startup(prefs), false);
+        assert!(!plain.dj_shows_seeds);
+        assert!(plain.seeds.frozen(), "still Stay close");
+        assert_eq!(paths(&plain), ["p"], "a shell without the sheet lets go of what Stay close kept");
     }
 
     #[test]
@@ -1828,26 +1297,5 @@ mod tests {
         remember(&app);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("music/Artist"), "got: {saved}");
-    }
-
-    #[test]
-    fn the_window_title_says_what_is_playing_and_whether_it_stopped() {
-        let mut app = App::new(Some("http://host:3000".into()), None, None);
-        assert_eq!(window_title(&app), "mstream-player");
-
-        app.now_playing = Some(Track {
-            filepath: "lib/a.mp3".into(),
-            metadata: TrackMetadata {
-                title: Some("Moonlight".into()),
-                artist: Some("Trio".into()),
-                ..Default::default()
-            },
-        });
-        assert_eq!(window_title(&app), "▶ Trio - Moonlight");
-
-        // From outside the window a paused track and silence look identical,
-        // so the title is the only place that can tell them apart.
-        app.status.paused = true;
-        assert_eq!(window_title(&app), "⏸ Trio - Moonlight");
     }
 }
