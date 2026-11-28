@@ -100,7 +100,7 @@ fn tone_color(tone: NoteTone, pal: &Pal) -> Color32 {
 
 /// The seek row (Main's SEEK ROW, D11). While something is up: the times in
 /// the monospace, dim, in slots as wide as the total, the elapsed one at its
-/// slot's right; between them the track, gold over the share played to its
+/// slot's right ([`elapsed_time`]); between them the track, gold over the share played to its
 /// thumb, an unknown length playing none of it, as the cells' playhead stands
 /// on their first cell. Where the pointer would land a press, the ghost thumb
 /// at the share that press seeks to, and in the elapsed slot the time it
@@ -123,11 +123,26 @@ fn seek_row(ui: &Ui, view: &BarView, layout: &BarLayout, cx: &BarCtx, hot: Optio
         Some(frac) => (fmt_time(frac * now.duration), pal.text),
         None => (fmt_time(now.elapsed), pal.dim),
     };
-    let elapsed = cx.cells.rect(seek.elapsed);
-    studio::text(ui, elapsed.right_center(), &time, studio::mono(TIME_SIZE), color, elapsed.width(), Align2::RIGHT_CENTER);
+    let track = cx.cells.rect(seek.track);
+    elapsed_time(ui, cx.cells.rect(seek.elapsed), track.min.x, &time, color);
     let total = cx.cells.rect(seek.total);
     studio::text(ui, total.left_center(), &fmt_time(now.duration), studio::mono(TIME_SIZE), pal.dim, total.width(), Align2::LEFT_CENTER);
-    studio::seek_track(ui, cx.cells.rect(seek.track), played_share(now), ghost.map(|frac| frac as f32), pal);
+    studio::seek_track(ui, track, played_share(now), ghost.map(|frac| frac as f32), pal);
+}
+
+/// The elapsed time, or the time a press would land at, in its `slot`: at
+/// the slot's right where it fits, as the cells pad it there. A time wider
+/// than its slot (an unknown length's past ten minutes, whose slot is as
+/// wide as its total's "0:00") the cells write on from the slot's left into
+/// the gap before the track, whole: so does the face, cut only where the
+/// track begins at `track_x`, never to "12:…" in the slot.
+fn elapsed_time(ui: &Ui, slot: egui::Rect, track_x: f32, time: &str, color: Color32) {
+    let font = studio::mono(TIME_SIZE);
+    if studio::width_of(ui, time, font.clone()) <= slot.width() {
+        studio::text(ui, slot.right_center(), time, font, color, slot.width(), Align2::RIGHT_CENTER);
+    } else {
+        studio::text(ui, slot.left_center(), time, font, color, (track_x - slot.min.x).max(1.0), Align2::LEFT_CENTER);
+    }
 }
 
 /// How much of the track is played: the share of its length elapsed, held

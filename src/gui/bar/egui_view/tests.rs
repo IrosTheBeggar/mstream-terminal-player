@@ -387,7 +387,8 @@ fn the_auto_dj_word_stands_whole_in_its_half() {
 /// than the seek (R16), no times and nothing to press, the empty cover's
 /// hairline, the cells' words for nothing playing on the card's first line.
 /// An unknown length: its time against 0:00, the thumb at the track's
-/// start, no played span.
+/// start, no played span; past ten minutes its time whole, from its slot's
+/// left into the gap before the track, as the cells write it.
 #[test]
 fn idle_and_an_unknown_length_draw_as_the_cells_treat_them() {
     let _en = crate::setup::tests::in_locale("en");
@@ -415,6 +416,32 @@ fn idle_and_an_unknown_length_draw_as_the_cells_treat_them() {
     let thumb = p.filled(pal.gold).into_iter().find(|r| r.width() == studio::THUMB_W).expect("the thumb");
     assert!((thumb.min.x - track.min.x).abs() <= 0.5, "at the track's start: {thumb:?} on {track:?}");
     assert!(!p.has("♪ 8A · 120 BPM"), "no facts, no line");
+
+    // Past ten minutes its time is wider than its slot, which is as wide as
+    // "0:00": the cells write it on from the slot's left into the gap before
+    // the track, and the face sets it there whole, not cut in the slot.
+    gui.demo = Some(Now { duration: 0.0, elapsed: 754.0, ..demo_now() });
+    let p = paint(&mut gui);
+    let seek = p.layout.seek.expect("the seek row");
+    let mut cells = bar_gui();
+    cells.demo = gui.demo.clone();
+    cells.chrome.forced = Some(Faces::default());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| render(frame, &mut cells)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let written: String = (seek.elapsed.x..seek.track.x).map(|x| buffer[(x, seek.elapsed.y)].symbol().to_string()).collect();
+    assert_eq!(written, "12:34", "the cells write it from the slot's left to the track");
+    let time = p.shapes.iter().find_map(|c| match &c.shape {
+        Shape::Text(text) if text.galley.text() == "12:34" => Some(text.clone()),
+        _ => None,
+    });
+    let time = time.expect("the elapsed time");
+    let set: String = time.galley.rows.iter().flat_map(|row| row.row.glyphs.iter().map(|glyph| glyph.chr)).collect();
+    assert_eq!(set, "12:34", "whole, every glyph drawn");
+    let at = egui::Rect::from_min_size(time.pos, time.galley.size());
+    let (slot, track) = (rect_of(&p, seek.elapsed), rect_of(&p, seek.track));
+    assert!(at.width() > slot.width(), "wider than its slot in the monospace: {at:?} in {slot:?}");
+    assert!((at.min.x - slot.min.x).abs() <= 0.5 && at.max.x <= track.min.x, "from the slot's left, short of the track at {}: {at:?}", track.min.x);
 }
 
 /// The seek row agrees with its times: the thumb at the share elapsed; the
