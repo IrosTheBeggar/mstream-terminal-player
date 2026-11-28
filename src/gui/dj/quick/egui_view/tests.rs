@@ -548,21 +548,18 @@ fn a_press_off_its_controls_is_the_frames_and_anywhere_else_puts_it_away() {
 /// both: a press on a tab while quick config is up is its catcher's alone,
 /// as the cells' catcher over the whole window takes it — Close, once, and
 /// the tab's screen does not open. Once it is put away, the same press is
-/// the tab's.
+/// the tab's. The tab is where the face in use stands it, which its words'
+/// widths set, not where the cells stand theirs: the cells' Stats tab's
+/// middle can fall in the 2 points between the face's Stats and Admin.
 #[test]
 fn a_press_on_the_strip_while_it_is_up_is_its_catchers_alone() {
     let _en = english();
     let probe = Probe::new(100, 30);
     let mut gui = quick_gui(&[]);
     gui.chrome.forced = Some(Faces { strip: true, quick: true, ..Faces::default() });
-    let labels = crate::gui::strip::TOP_KEYS.map(|key| rust_i18n::t!(key).to_string());
-    let stats = crate::gui::strip::top_rects(labels.each_ref().map(String::as_str))[1];
-    let cell = Position { x: stats.x + stats.width / 2, y: 0 };
-    assert_eq!(cells_hit(&probe, &mut gui, cell), Some(Act::DjQuick(QuickAct::Close)), "the cells' catcher over the tab");
-    let at = probe.at(cell);
     // The chrome's pass over the Gui as a frame left it, both faces in it:
-    // the presses it heard, each with its act.
-    let pass = |gui: &mut Gui, events: Vec<Event>| -> Vec<(Pos2, Option<Act>)> {
+    // the presses it heard, each with its act, and where its items stand.
+    let pass = |gui: &mut Gui, events: Vec<Event>| -> (Vec<(Pos2, Option<Act>)>, Vec<(egui::Rect, Act)>) {
         probe.draw(gui);
         let grid = probe.cells.grid;
         let views = chrome::Views {
@@ -576,7 +573,6 @@ fn a_press_on_the_strip_while_it_is_up_is_its_catchers_alone() {
             since_key: None,
             holes: chrome::holes(gui, grid),
         };
-        assert!(chrome::claims(&views.live).holds(cell), "the tab's cell is the chrome's");
         let input = RawInput { screen_rect: Some(probe.cells.points), events, ..Default::default() };
         let mut out = chrome::Out::default();
         let mut presses = Vec::new();
@@ -585,11 +581,19 @@ fn a_press_on_the_strip_while_it_is_up_is_its_catchers_alone() {
             presses.append(&mut out.presses);
         });
         output.textures_delta.clear();
-        presses
+        (presses, out.spots)
     };
+    let mut stats = None;
     for _ in 0..2 {
-        assert!(pass(&mut gui, Vec::new()).is_empty());
+        let (presses, spots) = pass(&mut gui, Vec::new());
+        assert!(presses.is_empty());
+        stats = spots.into_iter().find(|(_, act)| *act == Act::Screen(Screen::Stats)).map(|(rect, _)| rect);
     }
+    let at = stats.expect("the face's Stats tab").center();
+    let cell = probe.cells.under(at);
+    assert!(chrome::claims(&chrome::live(&gui, probe.cells.grid)).holds(cell), "the tab's cell is the chrome's");
+    assert_eq!(cells_hit(&probe, &mut gui, cell), Some(Act::DjQuick(QuickAct::Close)), "the cells' catcher over the tab");
+    let pass = |gui: &mut Gui, events: Vec<Event>| -> Vec<(Pos2, Option<Act>)> { pass(gui, events).0 };
     assert!(pass(&mut gui, vec![Event::PointerMoved(at)]).is_empty());
     let presses = pass(&mut gui, vec![button(at, true)]);
     assert_eq!(presses.iter().map(|(_, act)| act.clone()).collect::<Vec<_>>(), [Some(Act::DjQuick(QuickAct::Close))], "the catcher's, once");
