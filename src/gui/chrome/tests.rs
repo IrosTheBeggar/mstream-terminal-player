@@ -248,8 +248,9 @@ fn the_frames_duties_run_the_chromes_presses_once_preamble_first() {
 }
 
 /// The pass's body, run in a context of its own: a press on the Stats
-/// tab's cells reports its act once, though egui runs the pass again, and
-/// at its cell; every part reports where it stands.
+/// tab reports its act once, though egui runs the pass again, and at its
+/// cell; every part reports where it stands. The tab stands where the
+/// strip's face measures it, in the face in use, not in the cells' slots.
 #[test]
 fn the_pass_reports_a_press_once_with_its_act_and_its_parts() {
     let _en = crate::setup::tests::in_locale("en");
@@ -258,8 +259,6 @@ fn the_pass_reports_a_press_once_with_its_act_and_its_parts() {
     let ctx = egui::Context::default();
     crate::gui::window::panel::fonts(&ctx);
     let cells = Cells { points: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 480.0)), grid: grid(), ppp: 1.0 };
-    let stats = strip::top_rects(strip::TOP_KEYS.map(|key| rust_i18n::t!(key).to_string()).each_ref().map(String::as_str))[1];
-    let at = cells.rect(stats).center();
     let now = gui.bar_now();
     // One pass, its runs' presses added up, the screen's facts its last
     // run's, as the host keeps them.
@@ -283,6 +282,8 @@ fn the_pass_reports_a_press_once_with_its_act_and_its_parts() {
         output.textures_delta.clear();
         (out, runs)
     };
+    let (laid, _) = pass(Vec::new(), false);
+    let at = laid.spots.iter().find(|(_, act)| *act == Act::Screen(Screen::Stats)).expect("the Stats tab").0.center();
     assert!(pass(vec![egui::Event::PointerMoved(at)], false).0.presses.is_empty());
     assert!(pass(Vec::new(), false).0.presses.is_empty());
     let press = egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::default() };
@@ -290,7 +291,7 @@ fn the_pass_reports_a_press_once_with_its_act_and_its_parts() {
     assert_eq!(runs, 2, "egui ran the pass again");
     assert_eq!(out.presses.len(), 1, "once: {:?}", out.presses);
     assert_eq!(out.presses[0].1, Some(Act::Screen(Screen::Stats)));
-    assert_eq!(cells.under(out.presses[0].0), Position { x: stats.x + stats.width / 2, y: 0 });
+    assert_eq!(cells.under(out.presses[0].0), cells.under(at));
     let strip = cells.rect(row0());
     assert!(out.parts.iter().any(|part| part.rect == strip), "the strip's part");
     let layout = gui.chrome.bar.as_ref().unwrap().layout.clone();
