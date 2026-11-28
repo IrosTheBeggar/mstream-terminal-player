@@ -135,9 +135,47 @@ parent changes a peer's label only.
     It lists servers grouped (peers under their parent, a branch glyph and
     "via {parent}" beneath the peer's name), marks the current one, skips
     hidden and missing peers, and ends with Add server.
+
+    *This surface, in the desktop window:* egui draws the header's label
+    and its dropdown, the GUI's chrome (the "Top Bar and Transport in
+    egui" canvas, its ServerMenu board). The label is bare dim words
+    right-aligned before [+], the kit's chevron after them while the
+    picker exists, in the text colour and the semibold with the hand under
+    the pointer; with one server it is words alone, with no hover, no hand
+    and no picker (mp3-player-screen.md clause 16 has its room). The
+    dropdown is the kit's list that hangs, from the strip's foot with its
+    right edge a cell in from the window's, as the cells' border ends: the
+    panel's fill in the accent's hairline with the canvas's shadow, 28-point
+    rows as wide as the longest (24 cells at least, 60 at most), and no more
+    rows than the window's rows less eight, as the cells cap theirs. A row
+    is a server in the order the cells list them: the current one in amber
+    and the semibold behind the kit's pointer mark, the default with the
+    kit's gold star at the row's right, a peer as "└ name" with
+    " · [direct · ]via {parent}" dim after it on the same row, and
+    "+ Add a server" last and dim; the row under the pointer raised, its
+    words in the text colour and the semibold. Past its room the kit's
+    thumb shows where the rows stand and takes nothing; the gutter it
+    stands in is its row's. A press acts as the cells' does, on the press,
+    once: a row switches to its server, the add row opens the add form, and
+    anywhere else the catcher over the whole window puts the picker away,
+    the hand shown over it. The keys and the wheel stay the cells': Esc
+    closes it, any other key closes it and goes on, and the wheel moves its
+    first row, which the dropdown holds to its room and hands back. It
+    floats over an egui page, which stays drawn under it and hears none of
+    the pointer while it is up; a layer the cells stack over it (a sheet a
+    right press opened, the quit's gate) keeps its own cells.
+    `MSTREAM_WINDOW_CELLS=1`, a terminal and the frames before the window
+    exists keep the cells' picker.
 13. **A switch that cannot reach the server** says "Failed To Connect To
     Server" and leaves the selection standing — the choice was made, the
     server is the thing that failed.
+
+    *This surface, in the desktop window:* the App's own error on the note
+    line (Wording, `gui.srv.offline`) is set by the bar's egui face in its
+    note slot, in the error's gold, on the screens with a bar
+    (transport-bar.md clause 18); the room's offline words stay the
+    room's. The header's egui label goes on naming the chosen server, with
+    no sign that it does not answer.
 14. **Adding a server.** The record switches to a newly added Quick
     Connect server and leaves a standard add browsing where it was, unless
     it was the first server. *Settled here as "a new server becomes the
@@ -661,3 +699,25 @@ additions to drawn idioms. Revisit if discussion disagrees.
   clause 155). On a connected server the same lines now carry Keep a
   copy's ways in (discovery-page clauses 150–172): the copies land on the
   parent — your own server — never on the peer.
+- **2026-11-28 — The header's label and picker drawn by egui in the window
+  (clauses 12, 13).** The GUI's chrome came to egui with the "Top Bar and
+  Transport in egui" canvas. Deliberate, each the board plan's decision as
+  built:
+  - **The kit's list that hangs** (D8): 28-point rows with the kit's
+    pointer mark, star and raised row, and the kit's thumb past its room,
+    where the cells' dropdown shows no scroll mark at all — the wheel
+    still the only way to the rows past it.
+  - **Bare words for the label** (D7), the kit's chevron for the cells'
+    `▾`, measured in points in the face in use.
+  - **Presses on the press, once** (D23), a tap's included; the keys and
+    the wheel the cells' unchanged.
+  - **The picker floats over an egui page** (D25): the page stays drawn,
+    where the cells' dropdown stands an egui page down while it is up.
+
+  Left for the owner, drawn as the code behaves (the plan's rulings):
+  "via {parent}" stands after the peer's name on its row, not beneath it
+  as clause 12 says (R8); the picker has no keys of its own (R5); the
+  label has no sign of a server that does not answer (R6); the open
+  dropdown's edge stands a cell in from the window's while [+] ends two
+  cells in (R11); "{peer} via {parent}" and "quick connect · {id}" are
+  English in every locale (R7).

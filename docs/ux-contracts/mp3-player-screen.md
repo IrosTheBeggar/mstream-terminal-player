@@ -408,8 +408,41 @@ comes from the cache, or a download, beside them.
     Player 28% ` (the user's pick of 2026-10-19 over a chip at the top
     bar's right; card 07 §7, choice 3). The server label's cut rule
     measures the strip with it. The mark goes at the sync's end.
+
+    In the desktop window egui draws the strip, the GUI's chrome (the
+    "Top Bar and Transport in egui" canvas; its server menu is
+    multi-server.md's clause 12, its Visualizer item visualizer-window.md's
+    entry point 1), in row 0's footprint: one 16-point row on the ground,
+    a hairline at its foot. The tabs stand from the grid's second column,
+    each its name in the system's UI face at 12.5 points with 10 points
+    either side and 2 between them; the screen that is up wears the raised
+    fill, its name in the text colour and the semibold, and a 2-point amber
+    rule along the strip's foot; the others are dim, in the text colour and
+    the semibold under the pointer. A sync's percentage stands 4 points
+    after MP3 Player's name in the monospace (Hack 12) on the name's
+    baseline, amber while it runs and dim while it waits, on the marked
+    tab too. [+] is the kit's plus in its cells, dim, raised in the text
+    colour under the pointer, with its tooltip after the dwell. The label
+    is right-aligned to end a blank cell short of [+] and starts no nearer
+    the Visualizer item than a blank cell: bare dim words, the kit's
+    chevron 6 points after them while there is a menu to open, in the text
+    colour and the semibold with the hand under the pointer; a single
+    server's label takes no hover and no hand, and no label has a tooltip.
+    Every slot is measured in points in the face in use, the sync's figure
+    among them, so the label is cut with an ellipsis, its chevron kept,
+    only where those points run out, and goes whole where not even its
+    first letter and the ellipsis fit. A press on a tab, the Visualizer
+    item, [+] or a label with a menu does what a press on its cells does,
+    on the press and once, a tap's too, and only where the cells would
+    take it: none during a write (clause 9), none under a layer the cells
+    stack over the strip; the up tab's press changes nothing and still
+    shows the hand. The wheel and a right press stay the cells'. Nothing is
+    greyed while the strip takes no press: it is drawn at rest, its marks
+    and its lamp kept. `MSTREAM_WINDOW_CELLS=1`, a terminal and the frames
+    before the window exists keep the strip in cells, as this clause tells
+    it above.
 17. **The tab wears the slab** while the screen is up, as the other tabs
-    do.
+    do; in the window, clause 16's marked look.
 
 ### The card
 
@@ -1718,9 +1751,10 @@ comes from the cache, or a download, beside them.
 
 68. **In the desktop window, egui draws the tab's page**, in the Studio
     look of the "MP3 Player in egui" canvas, over the cells the GUI leaves
-    blank; everything else stays cells: the top bar, the footer with the
-    page's hint (clause 15: the cells' own hint, given way at the same 99
-    cells), a GUI modal (the quit gate, clause 57) and the server menu. The
+    blank; the top strip and the server menu are egui's too, as the GUI's
+    chrome (clause 16), and everything else stays cells: the footer with
+    the page's hint (clause 15: the cells' own hint, given way at the same
+    99 cells) and a GUI modal (the quit gate, clause 57). The
     page's area is the one region: its blank first row, the subjects row
     with two subjects or more (clause 25), one card under it — the board in
     view, a card in view, or the card with no board (clause 30) — and the
@@ -1755,9 +1789,12 @@ comes from the cache, or a download, beside them.
 
     `MSTREAM_WINDOW_CELLS=1` (no panel), a terminal, the standalone `device
     flash` (clause 31) and the frames before the window exists keep the
-    whole tab in cells, as clauses 1–67 tell it. A GUI overlay over the
-    region — a GUI modal, the server menu, a GUI tooltip — stands it down
-    while it is up, as on the other egui pages.
+    whole tab in cells, as clauses 1–67 tell it. A GUI overlay in cells
+    over the region — a GUI modal, and with the chrome in cells the server
+    menu and a GUI tooltip — stands it down while it is up, as on the other
+    egui pages. The chrome's own server menu and the strip's tooltips float
+    over the page instead, which stays drawn beneath them; while the menu
+    is up the page hears none of the pointer.
 69. **The model stays the model.** Keys never reach egui: the page's
     keymap still moves the view, opens Details, answers the gates, walks
     the sheets' stops and edits their fields (clause 12), and egui draws
@@ -3557,3 +3594,31 @@ setting no locale, prints in English.
       1 needs an update";
     - the footer's hint gives way at the cells' 99 (`hint_line`) where the
       window has the room for more.
+- **2026-11-28 — The strip drawn by egui in the window (clauses 16, 17,
+  68).** The GUI's chrome came to egui with the "Top Bar and Transport in
+  egui" canvas; the strip keeps row 0's one row (the owner's ruling of
+  2026-11-27, the board plan's D1, over a 32-point strip that would have
+  moved every screen's rows). The looks the canvas chose that the cells do
+  not have, each the plan's decision as built:
+  - **The up tab is marked, not slabbed** (D2): the raised fill and an
+    amber rule along the strip's foot, the labels in their own case, where
+    the cells lay a blue slab under the bold label.
+  - **Amber, not blue** (D3), as the egui pages under the strip wear it;
+    the Library's cells beside it keep their blue (the mixed seam is the
+    owner's ruling R12).
+  - **Studio's hover** (D4): words to the text colour and the semibold.
+  - **The sync's figure keeps its tone on the up tab** (D6): with no slab
+    there is nothing for it to fight.
+  - **The label's room is measured in points** (D7), the sync's figure
+    with it, so it is cut where the face's points run out rather than at
+    a count of cells.
+  - **Presses on the press, once** (D23), a tap's included, as the cells
+    act.
+  - **No greying** (D22): an inert strip is drawn at rest.
+
+  Left for the owner, drawn as the code behaves: whether the promise that
+  `http://localhost:3000 ▾` stands whole at 100 columns holds during a
+  sync, which the cells break in es at any percentage and in fr and pl at
+  100 % (R1; the face measures its own points); and the up tab's press,
+  which does nothing but still shows the hand, while T, M and K on their
+  own tab go back to the Library (R2).

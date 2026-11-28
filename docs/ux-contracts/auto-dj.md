@@ -960,6 +960,64 @@ pick in place of its Add song sheet. What the lists DO is clause 23.)*
     - A server removed from the app drops its rows, pins included; a
       server renamed takes its rows along.
 
+### Drawn by egui in the window
+
+67. **In the GUI's desktop window egui draws quick config** (clause 58),
+    part of the GUI's chrome with the bar it hangs from (transport-bar.md
+    clauses 15–20), in the Studio look of the "Top Bar and Transport in
+    egui" canvas's QuickConfig board, line by line from the cells' own
+    view, so the two faces say the same words under the same conditions.
+    It hangs as the kit hangs a list: the panel's fill in the accent's
+    hairline with the canvas's shadow, as wide as the cells' popover (42
+    cells from the 14th), rising from the split's rule with its foot 4
+    points over the seek line and never over row 1, its shadow kept off
+    the strip and the bar; rows 20 points tall, the gaps between groups 8
+    and its padding 10, so its tallest case (four servers, sonic on)
+    stands whole under the strip at the GUI's floor with key hints on. A
+    line that would not stand whole inside the padding is left out, as the
+    cells leave out a line past their popover.
+    - **PLAY FROM** in the kit's small capitals, dim; each server the
+      kit's round mark, chosen in the accent on the current one, and its
+      name, a peer's behind `└`, the current one in the semibold; the mark
+      and the name take the press, not the row.
+    - **Sonic similarity**: the kit's tick box, on in the ok green, and its
+      name take the press; its value at the row's end in its tone (the
+      floor with its figure in the monospace, or why a session dropped
+      it), the name cut short of the value rather than run under it. Its
+      match bar under the name: the kit's quiet `−` and `+`, and a level
+      segment for each of the cells' cells, lit in the accent up to the
+      floor and in the hot accent while the keyboard's hand is on the bar
+      or the pointer over its segments; `−` steps a point down, `+` a
+      point up, a segment sets its floor; the ends brighten under the
+      pointer.
+    - **Seeds**, **Smart filters** and Play from's row to the sheet: the
+      whole row takes the press; the name, the value in its tone ending 16
+      points before the row's end, cut where the name leaves it short, and
+      the kit's pointer there, dim; the name in the semibold and the
+      pointer in the text colour under the pointer or the keyboard's hand.
+    - **All Auto DJ settings** the amber text button with the kit's pointer
+      8 points after its words; the hot accent and the semibold under the
+      pointer.
+    - A setting the server cannot do rests dim, its reason dim and whole
+      at the row's end, and takes no hover, no hand and no press.
+
+    The keyboard's hand is the view's, worn as the Admin canvas wears it
+    (the raised fill and the accent's ring), never egui's focus; every key
+    stays the cells'. A press works what the cells register there, on the
+    press and once, a tap's too: a stop on its mark and words or its whole
+    row, the bar's ends and segments their step and floor; nothing on the
+    popover's frame off them, as the cells' guard; and anywhere else in
+    the window Close, the bar's own controls, the split's chevron and the
+    top strip among them, as the cells' catcher takes them. Nothing lights,
+    shows the hand or takes a press where quick config does not hold the
+    pointer: during an MP3 write, or under a layer the cells stack over it
+    (a sheet, the Seeds sheet, the First song question, the quit's gate).
+    Right presses and the wheel stay the grid's, which swallows them while
+    it is up, as in cells. On the Admin screen it floats over the room's
+    egui face, which stays drawn beneath it and hears none of the pointer.
+    `MSTREAM_WINDOW_CELLS=1`, a terminal and the frames before the window
+    exists keep it in cells, as clause 58 tells it.
+
 ## Wording
 
 The record ships `autoDj*` keys in all ten locales — carried over at
@@ -2456,3 +2514,19 @@ where this player differs, the build settled it so:
   up to 20, 19, 18 and 17 — the last only at 100×24 with the footer on,
   where Files and Search rise into rows 1 and 2 for a fourth step. The
   row keeps its `•` and its `D`.
+- **2026-11-28 — Quick config drawn by egui in the window (clause 67)**,
+  with the GUI's chrome (the "Top Bar and Transport in egui" canvas).
+  Deliberate, the board plan's decision D18 as built: the kit's hung
+  frame and shadow where the cells draw an accent box; 20-point rows,
+  8-point gaps and 10 of padding, Studio's rows being too tall for the
+  room over the bar; the match bar as level segments with quiet ends; the
+  keyboard's hand the raised fill and the accent's ring; a press on the
+  popover's frame off its controls takes nothing, as the cells' guard,
+  the guard being the frame as drawn rather than the cells' rect. Left for
+  the owner, drawn as the code behaves, except that a long Sonic label is
+  cut short of its value rather than run into it (the plan's R23): the
+  chosen server's mark in the accent where the kit's choices are the ok
+  green; Play from hidden for one server with several libraries; Smart
+  filters a press that does nothing until the probe answers; Sonic off
+  showing no "Off"; and the split's chevron pointing closed/open rather
+  than toward the popover (R18).
