@@ -544,6 +544,64 @@ fn a_press_off_its_controls_is_the_frames_and_anywhere_else_puts_it_away() {
     }
 }
 
+/// With the strip drawn by egui in the same pass, as the window draws them
+/// both: a press on a tab while quick config is up is its catcher's alone,
+/// as the cells' catcher over the whole window takes it — Close, once, and
+/// the tab's screen does not open. Once it is put away, the same press is
+/// the tab's.
+#[test]
+fn a_press_on_the_strip_while_it_is_up_is_its_catchers_alone() {
+    let _en = english();
+    let probe = Probe::new(100, 30);
+    let mut gui = quick_gui(&[]);
+    gui.chrome.forced = Some(Faces { strip: true, quick: true, ..Faces::default() });
+    let labels = crate::gui::strip::TOP_KEYS.map(|key| rust_i18n::t!(key).to_string());
+    let stats = crate::gui::strip::top_rects(labels.each_ref().map(String::as_str))[1];
+    let cell = Position { x: stats.x + stats.width / 2, y: 0 };
+    assert_eq!(cells_hit(&probe, &mut gui, cell), Some(Act::DjQuick(QuickAct::Close)), "the cells' catcher over the tab");
+    let at = probe.at(cell);
+    // The chrome's pass over the Gui as a frame left it, both faces in it:
+    // the presses it heard, each with its act.
+    let pass = |gui: &mut Gui, events: Vec<Event>| -> Vec<(Pos2, Option<Act>)> {
+        probe.draw(gui);
+        let grid = probe.cells.grid;
+        let views = chrome::Views {
+            strip: Some(crate::gui::strip::view(gui)),
+            menu: None,
+            bar: None,
+            hot: None,
+            quick: view(gui, grid),
+            live: chrome::live(gui, grid),
+            hover: false,
+            since_key: None,
+            holes: chrome::holes(gui, grid),
+        };
+        assert!(chrome::claims(&views.live).holds(cell), "the tab's cell is the chrome's");
+        let input = RawInput { screen_rect: Some(probe.cells.points), events, ..Default::default() };
+        let mut out = chrome::Out::default();
+        let mut presses = Vec::new();
+        let mut output = probe.ctx.run_ui(input, |ui| {
+            chrome::draw(ui, probe.cells, &views, &mut out);
+            presses.append(&mut out.presses);
+        });
+        output.textures_delta.clear();
+        presses
+    };
+    for _ in 0..2 {
+        assert!(pass(&mut gui, Vec::new()).is_empty());
+    }
+    assert!(pass(&mut gui, vec![Event::PointerMoved(at)]).is_empty());
+    let presses = pass(&mut gui, vec![button(at, true)]);
+    assert_eq!(presses.iter().map(|(_, act)| act.clone()).collect::<Vec<_>>(), [Some(Act::DjQuick(QuickAct::Close))], "the catcher's, once");
+    gui.chrome.presses = presses.into_iter().map(|(at, act)| (probe.cells.under(at), act)).collect();
+    chrome::after_draw(&mut gui);
+    assert!(gui.dj.quick.is_none() && gui.screen == Screen::Library, "put away, the Stats screen not opened");
+    let _ = pass(&mut gui, vec![button(at, false)]);
+    // Put away, the same press is the tab's.
+    let presses = pass(&mut gui, vec![button(at, true)]);
+    assert_eq!(presses.iter().map(|(_, act)| act.clone()).collect::<Vec<_>>(), [Some(Act::Screen(Screen::Stats))], "the tab's, with nothing over it");
+}
+
 /// Where quick config does not hold the pointer — nowhere during an MP3
 /// write, not under what the cells stacked over it — nothing lights, no
 /// hand shows and no press is taken, though the press lands on a control.
