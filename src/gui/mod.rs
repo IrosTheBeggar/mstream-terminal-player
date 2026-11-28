@@ -20,6 +20,9 @@
 
 mod albums;
 mod bar;
+// The top strip, the bar and their popups drawn by egui in the window.
+#[cfg(feature = "window")]
+mod chrome;
 pub(crate) mod control;
 mod actions;
 mod admin;
@@ -42,6 +45,7 @@ mod servers;
 mod server_log;
 mod sonic;
 mod stats;
+mod strip;
 mod torrent;
 mod torrent_meta;
 mod vizwin;
@@ -81,6 +85,9 @@ use crate::tui::worker::{AudioCmd, Event};
 use crate::tui::{self, worker};
 
 use bar::{BarView, Now};
+// The strip's geometry, which the shell's tests measure.
+#[cfg(test)]
+use strip::{TOP_KEYS, top_rects, top_strip_end};
 
 /// Below this the layout has nowhere honest to put the bar. The installer's
 /// own window is 100×30; anyone smaller gets the mini player — the cover
@@ -550,6 +557,17 @@ fn fmt_blend(seconds: f32) -> String {
 
 // ── State ───────────────────────────────────────────────────────────────────
 
+/// Which of the chrome's parts egui draws this frame, in the GUI's own
+/// window (src/gui/chrome.rs): the strip (with its tooltips and the server
+/// menu), the bar, quick config. None in a terminal, and wherever a part's
+/// egui face cannot draw, when the cells draw it as they always have.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Faces {
+    pub strip: bool,
+    pub bar: bool,
+    pub quick: bool,
+}
+
 pub(crate) struct Gui {
     /// The shared player state machine — the same App the TUI drives.
     app: App,
@@ -603,6 +621,11 @@ pub(crate) struct Gui {
     /// (window/panel.rs). The Stats screen is its first tenant.
     #[cfg(feature = "window")]
     panel: Option<std::sync::Arc<window::panel::Panel>>,
+    /// Which of the chrome's parts egui draws this frame.
+    faces: Faces,
+    /// The chrome's egui face's state between frames (src/gui/chrome.rs).
+    #[cfg(feature = "window")]
+    chrome: chrome::ChromeUi,
     /// The Admin screen: its hallway, the room it hosts and the log.
     admin: admin::AdminUi,
     /// The MP3 Player screen's firmware page, while the screen is up.
@@ -721,6 +744,9 @@ impl Gui {
             stats: stats::StatsUi::default(),
             #[cfg(feature = "window")]
             panel: None,
+            faces: Faces::default(),
+            #[cfg(feature = "window")]
+            chrome: chrome::ChromeUi::default(),
             admin: admin::AdminUi::new(),
             device: device::DeviceUi::default(),
             vizwin: vizwin::VizWindow::new(),
@@ -1486,24 +1512,30 @@ impl Gui {
         }
     }
 
-    /// The note to show and its colour: the shell's own first (DIM, or
-    /// Yellow for an error), else the App's words in their kind's — busy
-    /// LightBlue and a landing Green among them (the kit's Status line;
-    /// discovery-page clause 118).
-    fn note_words(&self) -> Option<(String, Style)> {
+    /// The note to show and its tone: the shell's own first (dim, or the
+    /// gold for an error), else the App's words in their kind's — busy in
+    /// the accent and a landing in the ok green among them (the kit's
+    /// Status line; discovery-page clause 118).
+    fn note(&self) -> Option<(String, bar::NoteTone)> {
+        use bar::NoteTone;
         if let Some((text, is_err)) = self.note.clone() {
-            return Some((text, if is_err { Style::default().fg(th().gold) } else { dim() }));
+            return Some((text, if is_err { NoteTone::Error } else { NoteTone::Dim }));
         }
         self.app.message.as_ref().map(|m| {
-            let style = match m.kind {
-                MessageKind::Error => Style::default().fg(th().gold),
-                MessageKind::Info => dim(),
-                MessageKind::Busy => accent(),
-                MessageKind::Success => Style::default().fg(th().ok),
-                MessageKind::Plain => Style::default(),
+            let tone = match m.kind {
+                MessageKind::Error => NoteTone::Error,
+                MessageKind::Info => NoteTone::Dim,
+                MessageKind::Busy => NoteTone::Busy,
+                MessageKind::Success => NoteTone::Success,
+                MessageKind::Plain => NoteTone::Plain,
             };
-            (m.text.clone(), style)
+            (m.text.clone(), tone)
         })
+    }
+
+    /// [`Gui::note`] in its colour, as the cells draw it.
+    fn note_words(&self) -> Option<(String, Style)> {
+        self.note().map(|(text, tone)| (text, tone.style()))
     }
 
     fn bar_paused(&self) -> bool {
@@ -1534,106 +1566,6 @@ fn demo_now() -> Now {
 }
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
-
-/// The top bar's tabs at the left — Library, Stats, Admin, MP3 Player: the
-/// kit's tab slab for the screen that is up, dim text for the others,
-/// bright under the pointer. Now Playing has no tab (it opens on `0`), so
-/// while it is up no tab wears the slab. While the MP3 Player tab's page
-/// writes, the strip is drawn inert — nothing lights, nothing answers a
-/// click — since the tab cannot be left (mp3-player-screen contract,
-/// clause 9).
-fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
-    // While a sync runs the MP3 Player tab wears its percentage after its
-    // name, in the accent, dim while paused (mp3-player-screen contract,
-    // clause 16; the pick of 2026-10-19 over a chip at the bar's right).
-    let mark = device::sync_mark(gui);
-    let mp3 = match &mark {
-        Some((_, pct, _)) => format!("{} {pct}%", t!("gui.top.mp3")),
-        None => t!("gui.top.mp3").to_string(),
-    };
-    let tabs = [
-        (Screen::Library, t!("gui.top.library").to_string()),
-        (Screen::Stats, t!("sta.title").to_string()),
-        (Screen::Admin, t!("gui.top.admin").to_string()),
-        (Screen::Device, mp3),
-    ];
-    let viz = t!("gui.top.viz");
-    let rects = top_rects([&tabs[0].1, &tabs[1].1, &tabs[2].1, &tabs[3].1, &viz]);
-    let live = !device::writing(gui);
-    for ((screen, label), rect) in tabs.into_iter().zip(rects) {
-        let style = if gui.screen == screen {
-            sel().add_modifier(Modifier::BOLD)
-        } else if live && gui.ui.hovers(rect) {
-            bright_bold()
-        } else {
-            dim()
-        };
-        put(frame, rect.x, 0, &format!(" {label} "), style);
-        if let Some((_, pct, paused)) = mark.as_ref().filter(|_| screen == Screen::Device && gui.screen != screen) {
-            let words = format!("{pct}%");
-            let x = rect.right().saturating_sub(crate::kit::width(&words) as u16 + 1);
-            let tone = if *paused { dim() } else { Style::default().fg(th().accent) };
-            put(frame, x, 0, &words, tone);
-        }
-        if live {
-            gui.ui.click(rect, Act::Screen(screen));
-        }
-    }
-    // The Visualizer item: not a screen but a window (visualizer-window
-    // contract, entry 1) — lit while one is open, bright under the pointer.
-    let rect = rects[4];
-    let style = if vizwin::is_open(gui) {
-        Style::default().fg(th().accent).add_modifier(Modifier::BOLD)
-    } else if live && gui.ui.hovers(rect) {
-        bright_bold()
-    } else {
-        dim()
-    };
-    put(frame, rect.x, 0, &format!(" {viz} "), style);
-    if live {
-        gui.ui.click(rect, Act::VizWindow);
-        gui.ui.tip_keyed(rect, t!("gui.top.viz_tip").to_string());
-    }
-}
-
-/// Where the top bar's items stand, left to right from x 1 with a cell
-/// between them: each its label's cells and a space either side. Cells,
-/// not characters: a Japanese or Chinese label is two cells a character,
-/// and counting characters left the Admin tab's right half dead under the
-/// Visualizer item's rect.
-fn top_rects<const N: usize>(labels: [&str; N]) -> [Rect; N] {
-    let mut x = 1;
-    labels.map(|label| {
-        let rect = Rect { x, y: 0, width: crate::kit::width(label) as u16 + 2, height: 1 };
-        x += rect.width + 1;
-        rect
-    })
-}
-
-/// The top bar's labels, left to right: the four tabs, then the
-/// Visualizer item.
-const TOP_KEYS: [&str; 5] =
-    ["gui.top.library", "sta.title", "gui.top.admin", "gui.top.mp3", "gui.top.viz"];
-
-/// Where the top bar's strip ends — the cell after the Visualizer item —
-/// in the language on screen: the header's server label starts a blank
-/// cell past it, cut short where it would not (servers::draw_header;
-/// mp3-player-screen contract, clause 16).
-#[cfg(test)]
-pub(super) fn top_strip_end() -> u16 {
-    top_strip_end_with("")
-}
-
-/// [`top_strip_end`] with the MP3 Player tab wearing `mark` (a sync's
-/// percentage, clause 16): the server label's cut measures the strip with
-/// it.
-pub(super) fn top_strip_end_with(mark: &str) -> u16 {
-    let mut labels = TOP_KEYS.map(|key| t!(key).to_string());
-    if !mark.is_empty() {
-        labels[3] = format!("{} {mark}", labels[3]);
-    }
-    top_rects([&labels[0], &labels[1], &labels[2], &labels[3], &labels[4]])[4].right()
-}
 
 /// One run of text at a cell, clipped at the frame's edge — written into
 /// the buffer directly: the hub's primitive runs a few hundred times a
@@ -1831,6 +1763,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
 
 fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
+    gui.faces = Faces::default();
+    #[cfg(feature = "window")]
+    gui.chrome.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
     gui.stats.drawn = false; // and the Stats screen's says it drew
     // A Discover modal — or Keep a copy and the Copies list, over any room
@@ -1839,13 +1774,18 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // pointer, so nothing of them lights or ripens a tooltip under it; the
     // modals get it back as they draw.
     // The Peer recs room's taste-bar modals do the same, and so does the
-    // track-actions sheet over any room (peer-recs build plan D24).
+    // track-actions sheet over any room (peer-recs build plan D24). So do
+    // the DJ's layers, which own the pointer while they are up — quick
+    // config, its sheets, the First song question and its lists — and
+    // which a press anywhere off them only puts away: the room under quick
+    // config lit its rows' verbs and ripened their tooltips.
     let pointer = gui.ui.pointer;
     let inert = gui.screen == Screen::Library
         && ((gui.active == DISCOVER_NAV && discover::modal_open(gui))
             || (gui.active == PEER_RECS_NAV && peer_recs::modal_open(gui))
             || actions::modal_open(gui)
             || moods::is_open(gui)
+            || dj::modal_open(gui)
             || ytdl::window_open(gui)
             || keep_doors::window_open(gui));
     if inert {
@@ -1886,9 +1826,20 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // The size the hit zones outside a draw reason from — a drawable one.
     gui.last_width = area.width;
     gui.last_height = area.height;
+    // In the GUI's own window egui draws the chrome's parts at the frame's
+    // end (src/gui/chrome.rs); where it does, the cells mark the part's
+    // slot in their draw order instead of drawing it.
+    #[cfg(feature = "window")]
+    {
+        gui.faces = chrome::faces(gui);
+    }
 
-    draw_top_tabs(frame, gui);
-    servers::draw_header(frame, gui, area);
+    if gui.faces.strip {
+        #[cfg(feature = "window")]
+        chrome::strip_mark(gui);
+    } else {
+        strip::draw(frame, gui, area);
+    }
 
     // An armed pick is a mode, and it shows where the picking happens: a
     // banner row above the room (or the stage), the room one row lower for
@@ -1983,6 +1934,7 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // words); the keyboard tips, when shown, take the very last row. The
     // Now Playing screen has no bar and draws its note on its own row.
     if matches!(gui.screen, Screen::Library | Screen::Admin)
+        && !gui.faces.bar
         && let Some((text, style)) = gui.note_words()
     {
         let note = bar::note_rect(area, gui.footer());
@@ -2095,22 +2047,21 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // carries its own scrubber and transport, and the Stats page takes the
     // whole height.
     if matches!(gui.screen, Screen::Library | Screen::Admin) {
-        let has_art = playing_cover_ready(&gui.app);
         let now = gui.bar_now();
-        let view = BarView {
-            now: now.as_ref(),
-            paused: gui.bar_paused(),
-            volume: gui.app.volume,
-            shuffle: gui.app.queue.shuffle,
-            repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
-            autodj: gui.app.dj_armed(),
-            quick_open: gui.dj.quick.is_some(),
-            queue_open: gui.queue_open,
-            has_art,
-            footer: gui.footer(),
-        };
-        bar::draw(frame, &mut gui.ui, area, &view);
-        if has_art {
+        let view = bar_view(gui, now.as_ref());
+        let has_art = view.has_art;
+        // Drawn and registered in cells whichever face shows it: the bar's
+        // presses, right press and hand are the cells registry's. Where
+        // egui paints it, its cells are blanked and its layout kept for the
+        // paint, and the cover is egui's.
+        #[cfg(feature = "window")]
+        let (before, pointer) = (gui.ui.mark(), gui.ui.pointer.is_some());
+        let layout = bar::draw(frame, &mut gui.ui, area, &view);
+        if gui.faces.bar {
+            crate::kit::blank(frame, layout.rect);
+            #[cfg(feature = "window")]
+            chrome::bar_mark(gui, before, pointer, layout);
+        } else if has_art {
             let cover = bar::cover_rect(area, gui.footer());
             // The mosaic where an overlay stood last frame — the rule every
             // other cover follows, since a picture's cells are skipped.
@@ -2132,7 +2083,12 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     keep_doors::draw_window(frame, gui, area);
     torrent::draw_modals(frame, gui, area);
     ytdl::draw_modals(frame, gui, area);
-    servers::draw_dropdown(frame, gui, area);
+    if gui.faces.strip {
+        #[cfg(feature = "window")]
+        chrome::menu_mark(gui);
+    } else {
+        servers::draw_dropdown(frame, gui, area);
+    }
     servers::draw_modals(frame, gui, area);
     dj::draw_modals(frame, gui, area);
     actions::draw_modals(frame, gui, area);
@@ -2151,6 +2107,11 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
         gui.ui.overlay(footprint);
     }
 
+    // The chrome's egui pass, once everything the cells stack over it has
+    // registered (src/gui/chrome.rs).
+    #[cfg(feature = "window")]
+    chrome::host(frame, gui);
+
     // The Peer recs room says what this frame showed of it: Shown, Covered
     // or Away (peer-recs contract §1.8).
     peer_recs::frame_tick(gui);
@@ -2166,11 +2127,37 @@ fn over_control(gui: &Gui) -> bool {
 
 /// Whether the playing track's cover is decoded and waiting in the cache.
 fn playing_cover_ready(app: &App) -> bool {
+    playing_art(app).is_some()
+}
+
+/// The playing track's cover, once it is decoded.
+fn playing_art(app: &App) -> Option<&crate::tui::art::Art> {
     app.now_playing
         .as_ref()
         .and_then(|track| track.metadata.album_art.as_deref())
         .and_then(|file| app.art.get(file))
-        .is_some_and(|art| art.is_some())
+        .and_then(|art| art.as_ref())
+}
+
+/// The bar's view of the Gui, with `now` what the bar shows playing
+/// ([`Gui::bar_now`]). It holds no borrow of the Gui, so the cells draw it
+/// on the Gui's own surface; the cover is left out (`art`), which a face
+/// that draws the picture itself puts in ([`playing_art`]).
+fn bar_view<'a>(gui: &Gui, now: Option<&'a Now>) -> BarView<'a> {
+    BarView {
+        now,
+        paused: gui.bar_paused(),
+        volume: gui.app.volume,
+        shuffle: gui.app.queue.shuffle,
+        repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
+        autodj: gui.app.dj_armed(),
+        quick_open: gui.dj.quick.is_some(),
+        queue_open: gui.queue_open,
+        has_art: playing_cover_ready(&gui.app),
+        footer: gui.footer(),
+        note: gui.note(),
+        art: None,
+    }
 }
 
 /// The card's album art: real pixels through the graphics probe where the
@@ -3700,6 +3687,13 @@ where
             gui.hot = true;
         }
     }
+    // The presses the window's chrome took, which the input half never
+    // heard: each runs the cells' press preamble, then its act, as a press
+    // on the cells does (src/gui/chrome.rs).
+    #[cfg(feature = "window")]
+    if chrome::after_draw(gui) {
+        ctx.dirty = true;
+    }
 
     // The Stats screen's page pumps its worker and its controls here too,
     // and the Admin screen its room and its log.
@@ -3715,6 +3709,8 @@ where
     // Settings changed a moment ago, now resting: written.
     gui.save_rested();
     let over = over_control(gui) || page.over || admin_over || device.over;
+    #[cfg(feature = "window")]
+    let over = chrome::hand(gui, over);
     if over != ctx.hand {
         ctx.hand = over;
         host.pointer(ctx.hand);
@@ -3756,6 +3752,11 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
     match event {
         TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
             gui.ui.dismiss_tooltip();
+            // The chrome's tooltips likewise keep away for the dwell.
+            #[cfg(feature = "window")]
+            {
+                gui.chrome.key_at = Some(Instant::now());
+            }
             gui.ui.caret_touch();
             if handle_key(gui, key) {
                 // A quit by a key during a sync asks first; Ctrl+C stops at
@@ -3805,17 +3806,9 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             // dragged thumb lost the same way lets go too, untold, as a
             // release would have.
             admin::let_go_unseen(gui);
-            if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                if gui.ui.gripping()
-                    && let Some(act) = gui.ui.release_at(at)
-                    && gui.act(act)
-                {
-                    ctx.saver.flush(&gui.app);
-                    return Flow::Quit;
-                }
-                if gui.ui.holding_bar() {
-                    gui.ui.release();
-                }
+            if matches!(mouse.kind, MouseEventKind::Down(_)) && gui.press_lets_go(at) {
+                ctx.saver.flush(&gui.app);
+                return Flow::Quit;
             }
             // A press-drag on a drag region (the Admin log's lines), and
             // a press on one of the GUI's own scroll bars (the Admin
@@ -3853,19 +3846,8 @@ fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
             }
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    gui.ui.caret_touch();
-                    if !gui.ui.begin_press(at) {
+                    if !gui.press_begins(at) {
                         return Flow::Continue;
-                    }
-                    // A click in the content column hands the keys
-                    // back from the queue (track-actions contract,
-                    // clause 19).
-                    if gui.app.focus == crate::tui::app::Focus::Queue
-                        && !actions::modal_open(gui)
-                        && !(gui.queue_open && at.x >= gui.queue_panel_x())
-                    {
-                        gui.app.focus = crate::tui::app::Focus::Browser;
-                        gui.queue_view.stow();
                     }
                     if let Some(act) = gui.ui.hit(at)
                         && gui.act(act)
@@ -4053,6 +4035,69 @@ fn moving(gui: &mut Gui) -> bool {
 }
 
 impl Gui {
+    /// A press of any button at `at`, before any page owner takes it: a
+    /// grip whose release was lost (a terminal that drops the Up when the
+    /// focus leaves mid-drag) ends at the press's cell, and a held arrow or
+    /// a dragged thumb lost the same way lets go, untold, as a release
+    /// would have. True when the grip's end quit.
+    fn press_lets_go(&mut self, at: Position) -> bool {
+        if self.ui.gripping()
+            && let Some(act) = self.ui.release_at(at)
+            && self.act(act)
+        {
+            return true;
+        }
+        if self.ui.holding_bar() {
+            self.ui.release();
+        }
+        false
+    }
+
+    /// A left press at `at`, once no page took it, before its hit: the
+    /// caret shows solid, the surface begins the press (false where it
+    /// swallows a terminal's phantom re-click, which goes no further), and
+    /// a press outside the open queue panel's columns hands the keys back
+    /// from the queue (track-actions contract, clause 19).
+    fn press_begins(&mut self, at: Position) -> bool {
+        self.ui.caret_touch();
+        if !self.ui.begin_press(at) {
+            return false;
+        }
+        if self.app.focus == crate::tui::app::Focus::Queue
+            && !actions::modal_open(self)
+            && !(self.queue_open && at.x >= self.queue_panel_x())
+        {
+            self.app.focus = crate::tui::app::Focus::Browser;
+            self.queue_view.stow();
+        }
+        true
+    }
+
+    /// What a left press in cells does before its hit, for a press the
+    /// window's chrome took (src/gui/chrome.rs), which the input half never
+    /// hears: everything [`input`] does there, in its order. False where the
+    /// press goes no further. No act quits at this commit, so the grip's end
+    /// cannot either.
+    ///
+    /// Of the page owners [`input`] asks before the GUI's surface, only the
+    /// MP3 Player tab's ever takes a press on the cells the chrome claims:
+    /// during a write it holds every press, the top bar's among them, and
+    /// lights nothing (`device::pointer`). The chrome claims nothing while a
+    /// write runs, but its claims are the last frame's: a press it took on
+    /// them after a key began a write comes here, and stops where a press
+    /// on the cells stops.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub(super) fn press_preamble(&mut self, at: Position) -> bool {
+        admin::let_go_unseen(self);
+        let _ = self.press_lets_go(at);
+        let gripping = self.ui.gripping() || self.ui.holding_bar();
+        let press = event::MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: at.x, row: at.y, modifiers: KeyModifiers::NONE };
+        if !gripping && device::pointer(self, press) {
+            return false;
+        }
+        self.press_begins(at)
+    }
+
     /// Where the queue panel begins, matched to `draw_queue`'s separator
     /// on the last drawn frame — the wheel's queue-vs-content split.
     pub(crate) fn queue_panel_x(&self) -> u16 {
@@ -4712,7 +4757,12 @@ impl window::face::Face for GuiFace {
         finish(&mut self.gui, &self.ctx);
     }
 
+    /// What the last frame registered at `at`: the chrome's item there
+    /// where egui's chrome claims the cell, else the cells registry's.
     fn hit_debug(&self, at: Position) -> Option<String> {
+        if let Some(act) = chrome::hit_debug(&self.gui, at) {
+            return act.map(|act| format!("{act:?}"));
+        }
         self.gui.ui.hit(at).map(|act| format!("{act:?}"))
     }
 
@@ -6001,6 +6051,33 @@ mod tests {
         assert!(!stats::pointer(&mut gui, at(MouseEventKind::Up(left), 30, 0)));
     }
 
+    /// A press the window's chrome takes runs the cells' preamble, as a
+    /// press the input half hears does: one on a tab hands the keys back
+    /// from the queue, its cursor stowed, and one inside the open queue
+    /// panel's columns leaves them there. The input half's own press does
+    /// the same through the same code.
+    #[test]
+    fn a_press_the_chrome_takes_hands_the_keys_back_from_the_queue_as_a_cells_press_does() {
+        use crate::tui::app::Focus;
+        let mut gui = browsing_gui();
+        draw(&mut gui);
+        let inside = Position { x: gui.queue_panel_x() + 2, y: 6 };
+        let tab = Position { x: 3, y: 0 };
+        let hold = |gui: &mut Gui| {
+            gui.app.focus = Focus::Queue;
+            gui.queue_view.held = true;
+        };
+        hold(&mut gui);
+        assert!(gui.press_preamble(inside));
+        assert_eq!((gui.app.focus, gui.queue_view.held), (Focus::Queue, true), "inside the queue's columns the keys stay");
+        assert!(gui.press_preamble(tab));
+        assert_eq!((gui.app.focus, gui.queue_view.held), (Focus::Browser, false), "a press on a tab gives them back");
+        hold(&mut gui);
+        press_at(&mut gui, tab.x, tab.y);
+        release_at(&mut gui, tab.x, tab.y);
+        assert_eq!((gui.app.focus, gui.queue_view.held), (Focus::Browser, false), "as a press in cells does");
+    }
+
     #[test]
     fn a_picks_banner_over_the_stats_page_keeps_its_row_and_its_x_takes_the_click() {
         let _en = crate::setup::tests::in_locale("en");
@@ -7234,6 +7311,40 @@ mod tests {
             gui.ui.pointer = Some(Position { x: 4, y: 3 });
             assert!(!lit(&mut gui), "{:?}: under the sheet it does not", NAV[room]);
             assert_eq!(gui.ui.pointer, Some(Position { x: 4, y: 3 }), "the sheet gets the pointer back");
+        }
+    }
+
+    /// The DJ's layers make the Library beneath inert as the sheet does:
+    /// quick config over any room, and the DJ room's sheets and First
+    /// song's list, own the pointer while they are up, and a press off them
+    /// only puts them away or is swallowed, so nothing under them lights —
+    /// the Files room's rows lit their verbs and ripened their tooltips
+    /// under quick config.
+    #[test]
+    fn the_djs_layers_make_the_library_inert() {
+        let _en = crate::setup::tests::in_locale("en");
+        let layers = [
+            (FILES_NAV, Act::DjQuick(dj::QuickAct::Toggle)),
+            (DJ_NAV, Act::DjQuick(dj::QuickAct::Toggle)),
+            (DJ_NAV, Act::DjRowKey(dj::Row::Batch)),
+            (DJ_NAV, Act::DjRowKey(dj::Row::FirstSong)),
+        ];
+        for (room, open) in layers {
+            let mut gui = six_tools_gui();
+            gui.active = room;
+            gui.ui.pointer = Some(Position { x: 4, y: 3 });
+            let lit = |gui: &mut Gui| {
+                let buffer = draw_buffer(gui);
+                let cell = &buffer[(3, 3)];
+                assert_eq!(cell.symbol(), "S", "{:?}: the probe is on Search", NAV[room]);
+                cell.fg == th().bright && cell.modifier.contains(Modifier::BOLD)
+            };
+            assert!(lit(&mut gui), "{:?}: the row lights under the pointer", NAV[room]);
+            let _ = gui.act(open.clone());
+            assert!(dj::modal_open(&gui), "{:?}: {open:?} put a layer up", NAV[room]);
+            gui.ui.pointer = Some(Position { x: 4, y: 3 });
+            assert!(!lit(&mut gui), "{:?}: under {open:?}'s layer the row does not light", NAV[room]);
+            assert_eq!(gui.ui.pointer, Some(Position { x: 4, y: 3 }), "the layer gets the pointer back");
         }
     }
 

@@ -22,6 +22,22 @@ phone tunes it, and find it as you left it next time.
    screen: the terminal stays where it was, and a window opens beside it.
    While the window is open the item is lit, and a click brings the
    window to the front.
+
+   In the GUI's desktop window egui draws the item, as part of the GUI's
+   chrome (mp3-player-screen.md clause 16 has the strip): after the tabs,
+   past a hairline 10 points tall with 8 points either side; a 6-point
+   LED, amber while the window is open and unlit while it is closed, and
+   6 points after it the word in the UI face at 12.5 points — closed, dim
+   at rest and in the text colour under the pointer; open, the text colour
+   and the semibold, which the pointer does not change. Its tooltip is the
+   cells' words, `gui.top.viz_tip`, after the cells' dwell (500 ms) and
+   never in the dwell after a key: the key's " — V" only while the GUI
+   names keys, the key in the monospace in the secondary ink on the words'
+   baseline, in Studio's box 4 points under the item, centred under it
+   and pulled in at the window's edge, wrapped only past the cells' 40
+   cells as the grid measures them. A press is the cells' click, on the
+   press and once; none during an MP3 write, nor under a layer the cells
+   stack over the strip.
 2. **`V`** from any screen, the same.
 
 ## States & flows
@@ -256,3 +272,21 @@ the phone.
   set a whole number of refreshes apart was tried first and held one
   frame in fifteen for one refresh or three, a judder twice a second.
   60–118 Hz displays are paced as before.
+- **2026-11-28 — The item drawn by egui in the GUI's window** (entry point
+  1), with the rest of the GUI's chrome (the "Top Bar and Transport in
+  egui" canvas). Lit is not a tab's mark (the board plan's D5): the LED and
+  the semibold while the window lives, a hairline setting the item apart
+  from the screens' tabs, where the cells light the word in the accent.
+  The tooltip keeps the cells' words and dwell (D10). Left for the owner,
+  drawn as the code behaves: the item stands fifth, after the MP3 Player
+  tab, not after the Stats tab as entry point 1 says (the plan's R8); the
+  tooltip says "Open …" while the window is open too, when a click only
+  raises it (R9); and a failed open on the Stats or the MP3 Player tab
+  shows its gold note nowhere until a screen with the bar's note comes up
+  (R3).
+- **2026-11-28, later — The item's tooltip keeps the cells' dwell** (entry
+  point 1) on the item however the pointer moves on it, and shows on
+  time: egui's own dwell, counted from the pointer's last move, hid it at
+  a point's move, and its wake was lost in the pass the pointer came to
+  rest in, so it waited for the next redraw (mp3-player-screen.md's
+  deviation of the same day).

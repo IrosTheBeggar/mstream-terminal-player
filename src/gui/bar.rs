@@ -22,6 +22,10 @@ use rust_i18n::t;
 
 use super::{Act, bright_bold, put};
 
+/// The bar painted by egui in the GUI's own window (src/gui/chrome.rs).
+#[cfg(feature = "window")]
+pub(crate) mod egui_view;
+
 /// Rows the bar owns at the bottom of the screen: the seek line, three
 /// rows of tall frames, and a bottom row holding the volume, the note and
 /// the card's fourth line. The screen's tips line, when it shows, is the
@@ -58,7 +62,7 @@ pub(crate) struct Now {
 }
 
 /// The slice of player state the bar draws from.
-pub(super) struct BarView<'a> {
+pub(crate) struct BarView<'a> {
     pub now: Option<&'a Now>,
     pub paused: bool,
     /// 0.0..=1.0.
@@ -77,6 +81,198 @@ pub(super) struct BarView<'a> {
     /// The screen keeps its tips line under the bar: the bar sits one row
     /// higher.
     pub footer: bool,
+    /// The note on the bar's bottom row and its tone: the shell's own
+    /// first, else the App's words (`Gui::note`). The cells' note is the
+    /// shell's to draw, after the screen; the egui face draws this one.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub note: Option<(String, NoteTone)>,
+    /// The playing track's cover, decoded (`has_art`'s picture), for a face
+    /// that draws it itself rather than through the shell's cover slot.
+    #[cfg_attr(not(feature = "window"), allow(dead_code))]
+    pub art: Option<&'a crate::tui::art::Art>,
+}
+
+/// A note's tone: the shell's own note Dim, its error and the App's Error
+/// in the gold; the App's Info Dim, Busy in the accent, a landing's
+/// Success in the ok green, Plain in the text colour (the kit's Status
+/// line; discovery-page clause 118).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoteTone {
+    Dim,
+    Error,
+    Busy,
+    Success,
+    Plain,
+}
+
+impl NoteTone {
+    /// The tone in cells.
+    pub(super) fn style(self) -> Style {
+        match self {
+            NoteTone::Dim => dim(),
+            NoteTone::Error => Style::default().fg(th().gold),
+            NoteTone::Busy => super::accent(),
+            NoteTone::Success => Style::default().fg(th().ok),
+            NoteTone::Plain => Style::default(),
+        }
+    }
+}
+
+/// The bar in cells, as the cells face draws it and registers its acts
+/// there: every control's box, so a face that paints the bar in another
+/// medium paints each control in the very cells a press on it works.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BarLayout {
+    /// The bar's five rows, from its seek line.
+    pub rect: Rect,
+    /// The seek line's parts; None while nothing plays, when the line is
+    /// the gold rule across the row.
+    pub seek: Option<SeekLayout>,
+    /// auto-dj's split: the word `Act::AutoDj`, the chevron
+    /// `Act::DjQuick(QuickAct::Toggle)`.
+    pub dj: SplitLayout,
+    /// Repeat, prev, play/pause, next, shuffle: three rows each.
+    pub group: [(Rect, Act); 5],
+    pub volume: VolumeLayout,
+    /// Where the shell's note stands ([`note_rect`]).
+    pub note: Rect,
+    pub card: CardLayout,
+}
+
+/// The seek line: the elapsed time's slot, the track's cells (a press on
+/// cell `i` of `cells` is `Act::Seek(cell_fraction(i, cells))`), the
+/// total's slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SeekLayout {
+    pub elapsed: Rect,
+    pub track: Rect,
+    pub cells: usize,
+    pub total: Rect,
+}
+
+/// The split button: its whole frame, the word's half (which takes the
+/// rule's column), the chevron's, and the rule's column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SplitLayout {
+    pub frame: Rect,
+    pub word: Rect,
+    pub chevron: Rect,
+    pub rule_x: u16,
+}
+
+/// The volume group: `-` (`Act::VolDown`), ten cells (`Act::VolSet(i)`),
+/// `+` (`Act::VolUp`) and the readout, which takes no press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VolumeLayout {
+    pub minus: Rect,
+    pub cells: [Rect; 10],
+    pub plus: Rect,
+    pub readout: Rect,
+}
+
+/// The card: its whole rect (`Act::ToggleQueue`, and `Act::NowMore` on a
+/// right press while something is up on it), the cover's cells, its four
+/// lines of words and the queue's chevron.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CardLayout {
+    pub rect: Rect,
+    pub cover: Rect,
+    pub lines: [Rect; 4],
+    pub chevron: Rect,
+}
+
+/// The auto-dj word, as the cells have always worn it.
+const DJ_WORD: &str = " auto-dj ";
+
+/// The transport group's five labels and what each does, left to right.
+fn group_labels(v: &BarView) -> [(Cow<'static, str>, Act); 5] {
+    let legacy = legacy_conhost();
+    let (shuffle, repeat) = if legacy {
+        (Cow::Owned(t!("gui.shuffle_word").to_string()), Cow::Owned(t!("gui.repeat_word").to_string()))
+    } else {
+        (Cow::Borrowed("⇄"), Cow::Borrowed("↻"))
+    };
+    let (prev, play, next) = play_glyphs(v.paused);
+    [
+        (repeat, Act::Repeat),
+        (Cow::Borrowed(prev), Act::Prev),
+        (Cow::Borrowed(play), Act::PlayPause),
+        (Cow::Borrowed(next), Act::Next),
+        (shuffle, Act::Shuffle),
+    ]
+}
+
+/// The seek line's parts in the span from `x`, `width` cells wide: both
+/// time slots as wide as the total, and the cells between them.
+fn seek_spans(x: u16, y: u16, width: u16, now: &Now) -> SeekLayout {
+    let slot = fmt_time(now.duration).chars().count().max(4) as u16;
+    let cells = width.saturating_sub(2 * (slot + 1));
+    SeekLayout {
+        elapsed: Rect { x, y, width: slot, height: 1 },
+        track: Rect { x: x + slot + 1, y, width: cells, height: 1 },
+        cells: cells as usize,
+        total: Rect { x: (x + width).saturating_sub(slot), y, width: slot, height: 1 },
+    }
+}
+
+/// Where every control of the bar stands in `area` for `v`: the boxes the
+/// cells face draws and registers.
+pub(crate) fn layout(area: Rect, v: &BarView) -> BarLayout {
+    let top = top(area, v.footer);
+    let rect = Rect { x: 0, y: top, width: area.width, height: BAR_ROWS };
+    let seek = v.now.map(|now| seek_spans(1, top, area.width.saturating_sub(2), now));
+    let y = top + 1;
+    let word_w = DJ_WORD.len() as u16;
+    let dj = SplitLayout {
+        frame: Rect { x: DJ_X, y, width: word_w + 6, height: 3 },
+        word: Rect { x: DJ_X, y, width: word_w + 2, height: 3 },
+        chevron: Rect { x: DJ_X + word_w + 2, y, width: 4, height: 3 },
+        rule_x: DJ_X + word_w + 1,
+    };
+    let labels = group_labels(v);
+    let widths = labels.each_ref().map(|(label, _)| crate::kit::width(label) as u16 + 4);
+    let group_w: u16 = widths.iter().sum::<u16>() + (widths.len() as u16 - 1);
+    let free_from = DJ_X + dj.frame.width + 1;
+    let free_to = card_x(area).saturating_sub(1);
+    let mut x = free_from + free_to.saturating_sub(free_from).saturating_sub(group_w) / 2;
+    let group = labels.map(|(label, act)| {
+        let width = crate::kit::width(&label) as u16 + 4;
+        let rect = Rect { x, y, width, height: 3 };
+        x += width + 1;
+        (rect, act)
+    });
+    let vy = top + 4;
+    let volume = VolumeLayout {
+        minus: Rect { x: 1, y: vy, width: 1, height: 1 },
+        cells: std::array::from_fn(|i| Rect { x: 3 + i as u16, y: vy, width: 1, height: 1 }),
+        plus: Rect { x: 14, y: vy, width: 1, height: 1 },
+        readout: Rect { x: 16, y: vy, width: 4, height: 1 },
+    };
+    let cx = card_x(area);
+    let tx = cx + COVER_W + 2;
+    let text_w = area.width.saturating_sub(4).saturating_sub(tx);
+    let card = CardLayout {
+        rect: Rect { x: cx, y, width: CARD_W, height: COVER_H },
+        cover: Rect { x: cx, y, width: COVER_W, height: COVER_H },
+        lines: [
+            Rect { x: tx, y, width: text_w, height: 1 },
+            Rect { x: tx, y: y + 1, width: text_w, height: 1 },
+            Rect { x: tx, y: y + 2, width: text_w, height: 1 },
+            Rect { x: tx, y: y + 3, width: area.width.saturating_sub(1).saturating_sub(tx), height: 1 },
+        ],
+        chevron: Rect { x: area.width.saturating_sub(3), y, width: 1, height: 1 },
+    };
+    BarLayout { rect, seek, dj, group, volume, note: note_rect(area, v.footer), card }
+}
+
+/// The card's second line: the artist and the year, or whichever of the
+/// two the track has.
+pub(crate) fn byline(now: &Now) -> String {
+    match now.year {
+        Some(year) if !now.artist.is_empty() => format!("{} · {year}", now.artist),
+        Some(year) => year.to_string(),
+        None => now.artist.clone(),
+    }
 }
 
 /// The bar's first row — the seek line — for this frame.
@@ -85,7 +281,7 @@ pub(super) fn top(area: Rect, footer: bool) -> u16 {
 }
 
 fn card_x(area: Rect) -> u16 {
-    area.width - CARD_W
+    area.width.saturating_sub(CARD_W)
 }
 
 /// The card's cover cells — where the screen paints the album art after
@@ -195,14 +391,11 @@ pub(super) fn tall_compact(
 /// always has, DIM off and OK green on, and the chevron opens quick config
 /// over the bar. Each half brightens under the pointer on its own. Returns
 /// the frame's width.
-fn dj_split(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, on: bool, open: bool) -> u16 {
-    const WORD: &str = " auto-dj ";
-    let word_w = WORD.len() as u16;
-    let width = word_w + 6;
-    let rect = Rect { x, y, width, height: 3 };
+fn dj_split(frame: &mut Frame, s: &mut Surface<Act>, at: &SplitLayout, on: bool, open: bool) -> u16 {
+    let (x, y) = (at.frame.x, at.frame.y);
+    let rect = at.frame;
     // The word's half takes the rule's column, the chevron's the rest.
-    let word = Rect { x, y, width: word_w + 2, height: 3 };
-    let chevron = Rect { x: x + word_w + 2, y, width: 4, height: 3 };
+    let (word, chevron) = (at.word, at.chevron);
     let (color, bold) = match (on, s.hovers(word)) {
         (_, true) => (th().bright, true),
         (true, false) => (th().ok, true),
@@ -213,13 +406,13 @@ fn dj_split(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, on: bool, o
         Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(frame_style),
         rect,
     );
-    let rule = x + word_w + 1;
+    let rule = at.rule_x;
     let (tee_down, bar, tee_up) = if legacy_conhost() { ("+", "|", "+") } else { ("┬", "│", "┴") };
     put(frame, rule, y, tee_down, frame_style);
     put(frame, rule, y + 1, bar, frame_style);
     put(frame, rule, y + 2, tee_up, frame_style);
     let word_style = if bold { frame_style.add_modifier(Modifier::BOLD) } else { frame_style };
-    put(frame, x + 1, y + 1, WORD, word_style);
+    put(frame, x + 1, y + 1, DJ_WORD, word_style);
     let glyph = match (legacy_conhost(), open) {
         (false, false) => "▴",
         (false, true) => "▾",
@@ -230,7 +423,7 @@ fn dj_split(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, on: bool, o
     put(frame, rule + 2, y + 1, glyph, chevron_style);
     s.click(word, Act::AutoDj);
     s.click(chevron, Act::DjQuick(super::dj::QuickAct::Toggle));
-    width
+    rect.width
 }
 
 /// The empty cover slot: a DIM rounded frame holding the cells real pixels
@@ -248,25 +441,29 @@ pub(super) fn cover_slot(frame: &mut Frame, x: u16, y: u16, width: u16, height: 
 /// The volume group, 19 cells on the tall controls' center line: `-` and
 /// `+` step by 0.05, the ten cells set directly, the readout says where
 /// it stands.
-fn draw_volume(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, volume: f32) {
+fn draw_volume(frame: &mut Frame, s: &mut Surface<Act>, at: &VolumeLayout, volume: f32) {
     let legacy = legacy_conhost();
     let (full, empty) = if legacy { ('■', '·') } else { ('▰', '▱') };
-    let minus = Rect { x, y, width: 1, height: 1 };
-    put(frame, x, y, "-", if s.hovers(minus) { bright_bold() } else { dim() });
+    let minus = at.minus;
+    put(frame, minus.x, minus.y, "-", if s.hovers(minus) { bright_bold() } else { dim() });
     s.click(minus, Act::VolDown);
     let filled = volume_cells(volume);
-    for i in 0..10u16 {
-        let cell = Rect { x: x + 2 + i, y, width: 1, height: 1 };
-        let on = (i as usize) < filled;
+    for (i, cell) in at.cells.iter().enumerate() {
+        let on = i < filled;
         let style = if on { Style::default().fg(th().accent) } else { dim() };
         let glyph = if on { full } else { empty };
-        put(frame, cell.x, y, &glyph.to_string(), style);
-        s.click(cell, Act::VolSet(i as u8));
+        put(frame, cell.x, cell.y, &glyph.to_string(), style);
+        s.click(*cell, Act::VolSet(i as u8));
     }
-    let plus = Rect { x: x + 13, y, width: 1, height: 1 };
-    put(frame, x + 13, y, "+", if s.hovers(plus) { bright_bold() } else { dim() });
+    let plus = at.plus;
+    put(frame, plus.x, plus.y, "+", if s.hovers(plus) { bright_bold() } else { dim() });
     s.click(plus, Act::VolUp);
-    put(frame, x + 15, y, &format!("{:3}%", (volume * 100.0).round() as u32), dim());
+    put(frame, at.readout.x, at.readout.y, &volume_words(volume), dim());
+}
+
+/// The volume's readout: its percentage, three figures wide.
+pub(crate) fn volume_words(volume: f32) -> String {
+    format!("{:3}%", (volume * 100.0).round() as u32)
 }
 
 /// The play/pause slot glyphs: a fixed two cells, so ▮▮ swaps in place and
@@ -286,15 +483,15 @@ pub(super) fn play_glyphs(paused: bool) -> (&'static str, &'static str, &'static
 /// after it rather than under it. The time under the pointer previews in
 /// the elapsed slot.
 pub(super) fn seek_line(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, width: u16, now: &Now) {
+    let spans = seek_spans(x, y, width, now);
     let total = fmt_time(now.duration);
-    let slot = total.chars().count().max(4);
+    let slot = usize::from(spans.elapsed.width);
     put(frame, x, y, &format!("{:>slot$}", fmt_time(now.elapsed)), dim());
-    let cells = width.saturating_sub(2 * (slot as u16 + 1)) as usize;
-    let preview = draw_seek_cells(frame, s, x + slot as u16 + 1, y, cells, now);
+    let preview = draw_seek_cells(frame, s, spans.track.x, y, spans.cells, now);
     if let Some(time) = preview {
         put(frame, x, y, &format!("{time:>slot$}"), bright_bold());
     }
-    put(frame, (x + width).saturating_sub(slot as u16), y, &total, dim());
+    put(frame, spans.total.x, y, &total, dim());
 }
 
 /// The seek line's cells: the gold rule across the playing span, a click
@@ -340,10 +537,12 @@ fn draw_seek_cells(
 
 // ── The bar ─────────────────────────────────────────────────────────────────
 
-/// Draw the bar into its rows of `area` (see [`BAR_ROWS`]).
-pub(super) fn draw(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, v: &BarView) {
-    let top = top(area, v.footer);
-    draw_gold_bar(frame, s, area, top, v);
+/// Draw the bar into its rows of `area` (see [`BAR_ROWS`]), its acts
+/// registered on `s`: the layout it drew and registered.
+pub(super) fn draw(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, v: &BarView) -> BarLayout {
+    let layout = layout(area, v);
+    draw_gold_bar(frame, s, area, &layout, v);
+    layout
 }
 
 fn gold_rule(frame: &mut Frame, y: u16, width: u16) {
@@ -355,28 +554,23 @@ fn gold_rule(frame: &mut Frame, y: u16, width: u16) {
 /// — and the ▾/▴ chevron, four rows tall at the right edge. One click
 /// target; a right click (or `m`) is the playing track's sheet — the card
 /// wears no verb of its own.
-fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &BarView) {
-    let x = card_x(area);
-    let rect = Rect { x, y, width: CARD_W, height: COVER_H };
+fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, at: &CardLayout, v: &BarView) {
+    let (x, y) = (at.rect.x, at.rect.y);
+    let rect = at.rect;
     let hover = s.hovers(rect);
     // With art in hand the frame would only bleed around the picture's
     // edges — the screen paints the cover over these cells after the bar.
     if !v.has_art {
-        cover_slot(frame, x, y, COVER_W, COVER_H);
+        cover_slot(frame, x, y, at.cover.width, at.cover.height);
     }
-    let tx = x + COVER_W + 2;
+    let tx = at.lines[0].x;
     // The words stop short of the chevron's column.
-    let text_w = (area.width - 4).saturating_sub(tx) as usize;
+    let text_w = usize::from(at.lines[0].width);
     let (title_style, sub_style) = card_styles(hover, v.now.is_some());
     match v.now {
         Some(now) => {
             put(frame, tx, y, &clip(&now.title, text_w), title_style);
-            let byline = match now.year {
-                Some(year) if !now.artist.is_empty() => format!("{} · {year}", now.artist),
-                Some(year) => year.to_string(),
-                None => now.artist.clone(),
-            };
-            put(frame, tx, y + 1, &clip(&byline, text_w), sub_style);
+            put(frame, tx, y + 1, &clip(&byline(now), text_w), sub_style);
             put(frame, tx, y + 2, &clip(&now.spec, text_w), dim());
             let mut fx = tx;
             if let Some(rating) = now.rating.filter(|r| *r > 0) {
@@ -392,7 +586,7 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
         None => put(frame, tx, y, &t!("gui.nothing_playing"), sub_style),
     }
     let chevron = chevron_glyph(v.queue_open);
-    put(frame, area.width - 3, y, chevron, if hover { bright_bold() } else { dim() });
+    put(frame, at.chevron.x, y, chevron, if hover { bright_bold() } else { dim() });
     s.click(rect, Act::ToggleQueue);
     if v.now.is_some() {
         s.context(rect, Act::NowMore);
@@ -403,8 +597,8 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
 /// centred group of frames — repeat, prev, play, next, shuffle — in the
 /// span before the card, and the bottom row: the volume, then the screen's
 /// note, then the card's last line.
-fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, v: &BarView) {
-    let line = top;
+fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, at: &BarLayout, v: &BarView) {
+    let line = at.rect.y;
     match v.now {
         Some(now) => seek_line(frame, s, 1, line, area.width.saturating_sub(2), now),
         // Idle, the line is exactly the wizard's gold rule.
@@ -414,27 +608,15 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
     // Auto DJ stands near the left edge in its frame; the rest is one group
     // of frames — repeat, then prev, play, next, then shuffle — centred in
     // the span between it and the card, so the group holds the middle at
-    // any width.
-    let y = top + 1;
-    let legacy = legacy_conhost();
-    let shuffle_word = t!("gui.shuffle_word").to_string();
-    let repeat_word = t!("gui.repeat_word").to_string();
-    let (shuffle, repeat) = if legacy { (shuffle_word.as_str(), repeat_word.as_str()) } else { ("⇄", "↻") };
-    let dj_w = dj_split(frame, s, DJ_X, y, v.autodj, v.quick_open);
-    let (prev, play, next) = play_glyphs(v.paused);
-    let group = [repeat, prev, play, next, shuffle];
-    let group_w: u16 = group.iter().map(|l| crate::kit::width(l) as u16 + 4).sum::<u16>() + (group.len() as u16 - 1);
-    let free_from = DJ_X + dj_w + 1;
-    let free_to = card_x(area).saturating_sub(1);
-    let mut x = free_from + free_to.saturating_sub(free_from).saturating_sub(group_w) / 2;
-    x += tall_compact(frame, s, x, y, repeat, TallKind::Toggle(v.repeat), Act::Repeat) + 1;
-    x += tall_compact(frame, s, x, y, prev, TallKind::Strong, Act::Prev) + 1;
-    x += tall_compact(frame, s, x, y, play, TallKind::Primary, Act::PlayPause) + 1;
-    x += tall_compact(frame, s, x, y, next, TallKind::Strong, Act::Next) + 1;
-    tall_compact(frame, s, x, y, shuffle, TallKind::Toggle(v.shuffle), Act::Shuffle);
-    draw_volume(frame, s, 1, top + 4, v.volume);
+    // any width (`layout`).
+    dj_split(frame, s, &at.dj, v.autodj, v.quick_open);
+    let kinds = [TallKind::Toggle(v.repeat), TallKind::Strong, TallKind::Primary, TallKind::Strong, TallKind::Toggle(v.shuffle)];
+    for (((label, _), (rect, act)), kind) in group_labels(v).iter().zip(&at.group).zip(kinds) {
+        tall_compact(frame, s, rect.x, rect.y, label, kind, act.clone());
+    }
+    draw_volume(frame, s, &at.volume, v.volume);
 
-    draw_card(frame, s, area, y, v);
+    draw_card(frame, s, area, &at.card, v);
 }
 
 /// The card's last facts after the stars: the key and the tempo, where the
@@ -549,6 +731,89 @@ mod tests {
                 for x in max as u16..40 {
                     assert_eq!(buffer[(x, 0)].symbol(), "#", "{shown:?} in {max} wrote cell {x}");
                 }
+            }
+        }
+    }
+
+    /// Every box of the bar's layout is where the cells register its act,
+    /// every cell of it: the split's halves, the five tall controls, the
+    /// volume's ends and cells, the seek line's cells (its two times take no
+    /// press), the card whole, and the card's right press while something
+    /// is up on it — at the window's opening size, at the floor with the
+    /// tips row under the bar and without it, and wide; playing and idle.
+    #[test]
+    fn the_layout_is_where_the_cells_register_every_act() {
+        use ratatui::layout::Position;
+        use ratatui::{Terminal, backend::TestBackend};
+        let now = Now {
+            title: "Cassini IV".into(),
+            artist: "Vela".into(),
+            album: "Cassini".into(),
+            elapsed: 47.0,
+            duration: 302.0,
+            year: Some(2019),
+            spec: "FLAC · 912 kbps".into(),
+            rating: Some(8),
+            key: Some("8A".into()),
+            bpm: Some(120),
+        };
+        for (w, h, footer) in [(100, 30, false), (100, 24, true), (100, 24, false), (160, 50, false)] {
+            for playing in [true, false] {
+                let v = BarView {
+                    now: playing.then_some(&now),
+                    paused: playing,
+                    volume: 0.7,
+                    shuffle: false,
+                    repeat: true,
+                    autodj: false,
+                    quick_open: false,
+                    queue_open: true,
+                    has_art: false,
+                    footer,
+                    note: None,
+                    art: None,
+                };
+                let mut s: Surface<Act> = Surface::new();
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                let mut drawn = None;
+                terminal.draw(|frame| drawn = Some(draw(frame, &mut s, frame.area(), &v))).unwrap();
+                let at = drawn.unwrap();
+                assert_eq!(at, layout(Rect::new(0, 0, w, h), &v), "{w}×{h}: drawn as laid out");
+                assert_eq!(at.rect, Rect { x: 0, y: top(Rect::new(0, 0, w, h), footer), width: w, height: BAR_ROWS });
+                let every = |rect: Rect, act: Act| {
+                    for y in rect.top()..rect.bottom() {
+                        for x in rect.left()..rect.right() {
+                            assert_eq!(s.hit(Position { x, y }), Some(act.clone()), "{w}×{h} playing {playing}: {x},{y} of {rect:?}");
+                        }
+                    }
+                };
+                every(at.dj.word, Act::AutoDj);
+                every(at.dj.chevron, Act::DjQuick(super::super::dj::QuickAct::Toggle));
+                for (rect, act) in &at.group {
+                    every(*rect, act.clone());
+                }
+                every(at.volume.minus, Act::VolDown);
+                every(at.volume.plus, Act::VolUp);
+                for (i, cell) in at.volume.cells.iter().enumerate() {
+                    every(*cell, Act::VolSet(i as u8));
+                }
+                assert_eq!(s.hit(Position { x: at.volume.readout.x, y: at.volume.readout.y }), None, "the readout takes no press");
+                every(at.card.rect, Act::ToggleQueue);
+                let context = s.hit_context(Position { x: at.card.cover.x, y: at.card.cover.y });
+                assert_eq!(context, playing.then_some(Act::NowMore), "the card's right press while something is up on it");
+                match at.seek {
+                    Some(seek) => {
+                        assert!(playing);
+                        for i in 0..seek.cells {
+                            every(Rect { x: seek.track.x + i as u16, width: 1, ..seek.track }, Act::Seek(cell_fraction(i, seek.cells)));
+                        }
+                        assert_eq!(seek.track.width as usize, seek.cells);
+                        assert_eq!(s.hit(Position { x: seek.elapsed.x, y: seek.elapsed.y }), None);
+                        assert_eq!(s.hit(Position { x: seek.total.right() - 1, y: seek.total.y }), None);
+                    }
+                    None => assert!(!playing, "idle, the line is the rule and takes no press"),
+                }
+                assert!(at.card.chevron.x < w && at.card.lines.iter().all(|line| line.right() <= w));
             }
         }
     }

@@ -1371,6 +1371,30 @@ mod tests {
         assert_eq!(gui.screen, Screen::Stats);
     }
 
+    /// A press the window's chrome took on a tab goes as far as a click on
+    /// the cells' tab: on to its act before a write, and during one, though
+    /// the chrome's claims were read before a key began it, no further than
+    /// the click goes, lighting nothing.
+    #[test]
+    fn a_press_the_chrome_took_stops_where_a_click_on_the_cells_stops_during_a_write() {
+        let _en = english();
+        let mut gui = at_card();
+        let buf = render_at(&mut gui, 100, 30);
+        let x = col(&row(&buf, 0), " Library ").unwrap() + 1;
+        let tab = Position::new(x, 0);
+        assert!(gui.press_preamble(tab), "before a write the press goes on to its act");
+        assert_eq!(gui.ui.pointer, Some(tab));
+
+        let mut gui = writing_gui();
+        render_at(&mut gui, 100, 30);
+        click(&mut gui, x, 0);
+        assert_eq!(gui.ui.pointer, None, "a click on the cells' tab lights nothing");
+        assert!(!gui.press_preamble(tab), "the chrome's press goes no further");
+        assert_eq!(gui.ui.pointer, None, "nor does it light anything");
+        assert_eq!(gui.screen, Screen::Device);
+        assert!(writing(&gui));
+    }
+
     #[test]
     fn a_failed_write_lets_the_tab_go_again() {
         let _en = english();

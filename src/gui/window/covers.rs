@@ -120,6 +120,10 @@ pub(crate) struct Board {
     /// post-processor (panel.rs): a lock of its own, since the pass and the
     /// covers are taken at different moments.
     panel: Mutex<Paint>,
+    /// The chrome layer's pass likewise: the GUI's own strip, bar and
+    /// popups, painted after the page's. Never stood down by an overlay;
+    /// its pass cuts itself around them.
+    chrome: Mutex<Paint>,
 }
 
 #[derive(Default)]
@@ -156,6 +160,8 @@ impl Board {
         panel.under = false;
         panel.shown = false;
         panel.overlays.clear();
+        drop(panel);
+        self.chrome().shown = false;
     }
 
     /// The frame is over. A face that skipped its draw (nothing new,
@@ -176,11 +182,41 @@ impl Board {
             panel.area = None;
             panel.jobs = Some(Vec::new());
         }
+        drop(panel);
+        // A drawn frame that showed no chrome (the mini player) takes its
+        // paint off the screen, and its claims on the pointer with it.
+        let mut chrome = self.chrome();
+        if drew && !chrome.shown && chrome.area.is_some() {
+            chrome.area = None;
+            chrome.jobs = Some(Vec::new());
+        }
     }
 
     /// The panel's paint (panel.rs).
     pub(super) fn panel(&self) -> MutexGuard<'_, Paint> {
         self.panel.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The chrome layer's paint (panel.rs).
+    pub(super) fn chrome(&self) -> MutexGuard<'_, Paint> {
+        self.chrome.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The chrome is on screen: the last drawn frame showed it.
+    pub(super) fn chrome_on_screen(&self) -> bool {
+        self.chrome().area.is_some()
+    }
+
+    /// The chrome's pass over the grid `area` this frame. Texture changes
+    /// pile up behind any the post-processor has not taken yet.
+    pub(super) fn chrome_drawn(&self, area: Rect, pass: Paint) {
+        let mut chrome = self.chrome();
+        chrome.area = Some(area);
+        chrome.shown = true;
+        chrome.jobs = pass.jobs;
+        chrome.pixels_per_point = pass.pixels_per_point;
+        chrome.set.extend(pass.set);
+        chrome.free.extend(pass.free);
     }
 
     /// A panel is on screen and painted: the last drawn frame showed one,
@@ -190,13 +226,16 @@ impl Board {
         panel.area.is_some() && !panel.under
     }
 
-    /// The frame just drawn painted the panel: its face showed it and no
-    /// overlay stood over it. Its pass presents though no cell changed
-    /// (`needs_update`), which is how the window knows a frame of a face
-    /// drawn by egui alone was presented.
+    /// The frame just drawn painted egui: its face showed the panel and no
+    /// overlay stood over it, or it showed the chrome. Its pass presents
+    /// though no cell changed (`needs_update`), which is how the window
+    /// knows a frame of a face drawn by egui alone was presented.
     pub(super) fn panel_painted(&self) -> bool {
-        let panel = self.panel();
-        panel.shown && !panel.under
+        let page = {
+            let panel = self.panel();
+            panel.shown && !panel.under
+        };
+        page || self.chrome().shown
     }
 
     /// The face's pass over `area` this frame. Texture changes pile up
@@ -878,7 +917,7 @@ impl PostProcessor for CoverPost {
             let inner = self.board.lock();
             inner.placed != self.drawn || !inner.decoded.is_empty()
         };
-        changed || self.board.panel().is_news()
+        changed || self.board.panel().is_news() || self.board.chrome().is_news()
     }
 }
 
@@ -1063,6 +1102,28 @@ mod tests {
         board.overlay(Rect::new(10, 10, 20, 5));
         board.end_frame(true);
         assert!(!board.panel_painted(), "stood down under an overlay");
+    }
+
+    /// The chrome's paint is on screen from the frame that showed it until
+    /// a drawn frame shows none (the mini player), which takes it off the
+    /// screen, its claims on the pointer with it; a skipped draw keeps it;
+    /// no overlay stands it down, and a frame of it alone painted egui.
+    #[test]
+    fn the_chromes_paint_stays_until_a_drawn_frame_shows_none() {
+        let board = Board::default();
+        let grid = Rect::new(0, 0, 100, 30);
+        board.begin_frame();
+        board.chrome_drawn(grid, Paint::default());
+        board.overlay(Rect::new(10, 10, 20, 5));
+        board.end_frame(true);
+        assert!(board.chrome_on_screen() && board.panel_painted(), "shown, under an overlay too");
+        board.begin_frame();
+        board.end_frame(false);
+        assert!(board.chrome_on_screen(), "a skipped draw keeps it");
+        board.begin_frame();
+        board.end_frame(true);
+        assert!(!board.chrome_on_screen(), "a drawn frame without it takes it off");
+        assert_eq!(board.chrome().jobs.as_ref().map(Vec::len), Some(0), "and paints none");
     }
 
     /// A modal registered after covers were placed stands down the ones it

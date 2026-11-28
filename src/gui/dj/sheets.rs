@@ -474,6 +474,12 @@ impl BarSpec {
         let k = (self.value + self.per - self.first + self.per / 2) / self.per.max(1);
         (k as u16).min(self.cells)
     }
+
+    /// The bar as quick config's view holds it, for a face that draws it
+    /// with no sheet at hand.
+    pub(super) fn quick(&self) -> super::quick::QuickBar {
+        super::quick::QuickBar { cells: self.cells, filled: self.filled(), first: self.first, per: self.per }
+    }
 }
 
 /// The words of Skip words laid out in rows of the sheet's width: a word,

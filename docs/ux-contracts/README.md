@@ -70,6 +70,7 @@ Rules of the road:
 | [sonic-path.md](sonic-path.md) | The sonic path |
 | [stats-screen.md](stats-screen.md) | The Stats screen |
 | [track-actions.md](track-actions.md) | Track actions and the queue |
+| [transport-bar.md](transport-bar.md) | The transport bar: the seek line, the transport, the volume, the note and the card |
 | [visualizer-window.md](visualizer-window.md) | The visualizer window |
 
 Most contracts number their clauses straight through (discovery-page

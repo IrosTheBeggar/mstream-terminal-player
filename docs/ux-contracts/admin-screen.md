@@ -444,11 +444,14 @@ not.
 
 35. **In the desktop window, egui draws a room with an egui face and the
     log**, in the Studio look of the Admin screen's canvas, over cells
-    the GUI leaves blank; everything else stays cells: the top bar, the
-    hallway and its rule, the pick banner's row, the rule beside or above
-    the log (`│` in the column, `─` over the band, dim, the accent while
-    the log has the focus), the bar, the GUI's note and the footer, and a
-    room with no egui face. The window's panel shows one region a frame:
+    the GUI leaves blank. The top strip, the bar with the GUI's note, the
+    server menu and quick config are egui's too, as the GUI's chrome
+    (mp3-player-screen.md clause 16, transport-bar.md clauses 15–20,
+    multi-server.md clause 12, auto-dj.md clause 67); everything else
+    stays cells: the hallway and its rule, the pick banner's row, the rule
+    beside or above the log (`│` in the column, `─` over the band, dim,
+    the accent while the log has the focus), the footer, and a room with
+    no egui face. The window's panel shows one region a frame:
     - with the room's face and the log both on screen, the room's area
       less its first row together with the log's rect and the cells
       between them (17, 2)–(173, 39) at 176×46 with the footer on, and
@@ -483,10 +486,15 @@ not.
     them is nobody's. Keys never reach egui: they go where clause 13
     sends them, the log's to its keys (clause 16), whose steps and pages
     measure the rows egui last drew. The hand ORs in with the room's own.
-    A GUI overlay that overlaps the region — a GUI modal, the server menu,
-    a GUI tooltip — stands the whole region down while it is up
-    (window/panel.rs): nothing egui draws shows then, room and log alike;
-    under a GUI modal or the server menu there is no hand either. Under a
+    A GUI overlay in cells that overlaps the region — a GUI modal, a cells
+    tooltip such as the pick banner's [X], and with the chrome in cells the
+    server menu and the strip's tooltips — stands the whole region down
+    while it is up (window/panel.rs): nothing egui draws
+    shows then, room and log alike; under a GUI modal or the server menu
+    there is no hand either. The chrome's own server menu and quick config
+    float over the region instead, which stays drawn beneath them and
+    hears none of the pointer while either is up, and the strip's tooltips
+    hang over it. Under a
     room's modal the log neither lights nor shows the hand, takes no
     press, click or wheel, and a press on it hands it nothing; a drag held
     on its rows or its thumb when the modal came up goes on to its
@@ -908,3 +916,19 @@ from every locale. The rooms' own strings (`admin.*`, `usr.*`, `bak.*`,
     follows**: a file named for its number keeps its extension in the
     words' face (a note's "Track 12.flac" sets "12" in the monospace),
     so an ellipsis falls in the words, not after "12".
+- **2026-11-28 — The chrome drawn by egui around the rooms (clauses 35,
+  36).** The top strip, the bar, the server menu and quick config came to
+  egui as the GUI's chrome, on a layer of the panel's own over the whole
+  window, so the menu and quick config no longer stand a room's face and
+  the log down: they float over them, the region drawn and quiet beneath.
+  Left for the owner, drawn as the code behaves: under a room's own egui
+  modal the bar still lights where the pointer rests, while the room
+  takes every press (the board plan's D22 asks for no hover there;
+  transport-bar.md's open question 13); whether the chrome's popups float
+  over the region at all, which stays drawn beneath them, where the cells'
+  menu and quick config stand it down (the plan's R10, built as its D25
+  recommends, pending the ruling); and whether the chrome goes wholly
+  inert under every modal and the open menu (R4), which the build answers
+  in part: under a GUI modal here the egui bar lights nothing, where the
+  cells' bar keeps its hover lit (transport-bar.md clause 12, its open
+  question 14).

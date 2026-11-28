@@ -32,7 +32,7 @@
 //! them. A list hangs only from a box in that view, and no lower than the
 //! foot.
 
-use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use super::super::card::{CardSheet, SRow, SheetTab, card_name, codec_words, list_entries, server_name};
 use super::super::cells::card::row_help;
@@ -655,28 +655,37 @@ fn radios(ui: &Ui, x: f32, mid: f32, end: f32, choices: &[(String, bool)], (font
     }
 }
 
+/// The peer budget's ten segments, lit one for every 300 MB, and the
+/// room either side of them: from the minus's 8 points to the first, and
+/// from the last to the plus's, the segments 2 apart (the kit's level, as
+/// the volume's and quick config's match bar stand theirs); the words 12
+/// points after the plus's 8.
+const BUDGET_SEGS: u16 = 10;
+const BUDGET_END: f32 = 8.0;
+const BUDGET_AIR: f32 = 4.0;
+const BUDGET_GAP: f32 = 2.0;
+const BUDGET_WORDS: f32 = 12.0;
+
 /// The peer budget from `x` (the cells' "- ▰▰▰▱ +  1,500 MB a day per
-/// peer"): the minus, the desk's ten LEDs lit one for every 300 MB, the
-/// plus, then its words with the figure in the monospace, in the row's
-/// face and ink. The row takes the click, as the cells': 250 MB more.
+/// peer"), the same control as the volume's "- ▰▰▱ +": the kit's quiet
+/// minus and plus in the row's ink, between them ten of the kit's level
+/// segments lit in the accent one for every 300 MB and unlit beyond, then
+/// its words with the figure in the monospace, in the row's face and ink.
+/// The row takes the click, as the cells': 250 MB more.
 fn budget(ui: &Ui, x: f32, mid: f32, end: f32, mb: u64, (font, ink): (&FontId, Color32), pal: &Pal) {
-    let lit = (mb / 300).min(10) as usize;
-    step_mark(ui, pos2(x + 6.0, mid), false, ink);
-    let bar = studio::meter(ui, pos2(x + 18.0, mid), 10, lit, vec2(5.0, 10.0), 2.0, pal.accent, pal);
-    step_mark(ui, pos2(bar.max.x + 12.0, mid), true, ink);
-    let from = bar.max.x + 28.0;
+    let lit = (mb / 300).min(u64::from(BUDGET_SEGS)) as u16;
+    studio::step_mark(ui, pos2(x + BUDGET_END / 2.0, mid), false, ink);
+    let first = x + BUDGET_END + BUDGET_AIR;
+    let pitch = studio::LEVEL_SEG.x + BUDGET_GAP;
+    for k in 0..BUDGET_SEGS {
+        studio::level_segment(ui, pos2(first + f32::from(k) * pitch, mid), if k < lit { pal.accent } else { pal.unlit });
+    }
+    let plus = first + f32::from(BUDGET_SEGS) * pitch - BUDGET_GAP + BUDGET_AIR;
+    studio::step_mark(ui, pos2(plus + BUDGET_END / 2.0, mid), true, ink);
+    let from = plus + BUDGET_END + BUDGET_WORDS;
     let words = t!("dev.card.budget_mb", mb = fmt_count(mb)).to_string();
     let runs = studio::figured(&words, &[], font.clone(), mono(12.5), ink);
     studio::runs(ui, pos2(from, mid), &runs, (end - from).max(1.0), Align2::LEFT_CENTER);
-}
-
-/// A minus, or a plus, centred on `at`: the canvas's 12-point strokes.
-fn step_mark(ui: &Ui, at: Pos2, plus: bool, color: Color32) {
-    let stroke = Stroke::new(1.6, color);
-    ui.painter().line_segment([at - vec2(4.0, 0.0), at + vec2(4.0, 0.0)], stroke);
-    if plus {
-        ui.painter().line_segment([at - vec2(0.0, 4.0), at + vec2(0.0, 4.0)], stroke);
-    }
 }
 
 /// The fit's block, `h` tall, the body wide: asked, the kit's searching
@@ -1128,6 +1137,40 @@ mod tests {
         lisbon(&mut page);
         let out = probe.settle(&mut page);
         assert_drew(&out, &["PEER BUDGET", "1,500 MB a day per peer"]);
+        // The same control as the volume's "- ▰▰▱ +", in the same look: the
+        // kit's quiet − and + and ten of its level segments, five lit for
+        // 1,500 MB, before the words.
+        let words = find(&out, "1,500 MB a day per peer");
+        let pal = Pal::now();
+        let before = |r: Rect| (r.center().y - words.center().y).abs() < 8.0 && r.max.x <= words.min.x && r.min.x >= words.min.x - 130.0;
+        let segments: Vec<Color32> = out
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                Shape::Rect(r) if r.rect.size() == studio::LEVEL_SEG && before(r.rect) => Some(r.fill),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(segments, [[pal.accent; 5], [pal.unlit; 5]].concat(), "the kit's level segments, five of ten lit");
+        let steps = |out: &FullOutput, within: &dyn Fn(Rect) -> bool| -> Vec<(f32, f32)> {
+            out.shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    Shape::LineSegment { points, stroke } if within(Rect::from_two_pos(points[0], points[1])) => Some(((points[1] - points[0]).length(), stroke.width)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let ctx = egui::Context::default();
+        crate::gui::window::panel::fonts(&ctx);
+        let mut kit = ctx.run_ui(egui::RawInput::default(), |ui| {
+            studio::step_mark(ui, pos2(100.0, 100.0), false, pal.text);
+            studio::step_mark(ui, pos2(120.0, 100.0), true, pal.text);
+        });
+        kit.textures_delta.clear();
+        let kit = steps(&kit, &|_| true);
+        assert_eq!(kit.len(), 3, "the kit's minus and plus: {kit:?}");
+        assert_eq!(steps(&out, &before), kit, "the kit's quiet − and +, its strokes' lengths and weights");
         probe.click_on(&mut page, "1,500 MB a day per peer");
         assert_eq!(sheet(&page).want.budget_mb, Some(1_750));
         assert_drew(&probe.settle(&mut page), &["1,750 MB a day per peer"]);
