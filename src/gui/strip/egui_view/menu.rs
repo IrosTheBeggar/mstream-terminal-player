@@ -105,7 +105,8 @@ pub(crate) fn menu(ui: &mut Ui, view: &MenuView, cx: &MenuCtx) -> MenuOut {
     let ctx = ui.ctx().clone();
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(screen.min).constrain(false).fade_in(false);
     area.show(&ctx, |ui| {
-        let origin = ui.input(|i| i.pointer.press_origin());
+        // Where the press came down, a tap's among them ([`super::press_at`]).
+        let origin = super::press_at(ui);
         let took = |response: &Response| studio::pressed(response) && origin.is_some_and(live);
         // The catcher first, under the rows: a press off them closes it,
         // and the hand shows over it, as over the cells' catcher.

@@ -337,11 +337,26 @@ fn take(ui: &Ui, cx: &StripCtx, out: &mut StripOut, at: egui::Rect, id: Id, act:
     let under = response.hover_pos().is_some_and(on);
     let response = if under { studio::hand(response) } else { response };
     out.items.push((at, act.clone()));
-    let origin = ui.input(|i| i.pointer.press_origin());
-    if studio::pressed(&response) && origin.is_some_and(on) {
+    if studio::pressed(&response) && press_at(ui).is_some_and(on) {
         out.act = Some(act);
     }
     Item { hot: cx.hover && under, response: Some(response) }
+}
+
+/// Where this pass's primary press came down: egui's press origin while
+/// the button is held; and for a tap, whose release came in the same pass
+/// and which egui has let go of before any control asks, the press's own
+/// event, where the chrome's pass reads the press it hands the frame's
+/// duties. Without it a tap pressed nothing.
+fn press_at(ui: &Ui) -> Option<Pos2> {
+    ui.input(|i| {
+        i.pointer.press_origin().or_else(|| {
+            i.events.iter().rev().find_map(|event| match *event {
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } => Some(pos),
+                _ => None,
+            })
+        })
+    })
 }
 
 /// A tooltip's words and the key named after them, from `tip` worded whole

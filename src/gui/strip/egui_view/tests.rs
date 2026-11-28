@@ -476,6 +476,45 @@ fn a_press_on_each_item_is_its_cells_act_once() {
     assert!(rig.settle(&one).out.items.iter().all(|(_, act)| *act != Act::SrvMenu), "and are no item");
 }
 
+/// A tap whose release comes in the pass its press does, as a touchpad's
+/// tap and a click on a busy frame come: egui has let the press go by the
+/// time an item asks where it came down, and each item still takes its
+/// act, once, whether the pointer rested there first or came with the tap;
+/// a tap on a gap or on a cell the registry left no part of the strip
+/// takes none.
+#[test]
+fn a_tap_whose_release_comes_in_its_pass_is_its_items_press() {
+    let _en = in_locale("en");
+    let gui = gui_on(&[ATTIC, OFFICE]);
+    let mut rig = Rig::new(100, 30);
+    let view = strip::view(&gui);
+    let slots = rig.settle(&view).slots;
+    let label = slots.label.clone().expect("the label").rect;
+    let tap = |at: Pos2| vec![button(at, true), button(at, false)];
+    let items = [
+        (slots.tabs[1], Act::Screen(Screen::Stats)),
+        (slots.tabs[2], Act::Screen(Screen::Admin)),
+        (slots.viz, Act::VizWindow),
+        (slots.plus, Act::SrvAdd),
+        (label, Act::SrvMenu),
+    ];
+    for (at, act) in &items {
+        let _ = rig.rest(&view, at.center());
+        assert_eq!(rig.pass(&view, tap(at.center())).acts, [act.clone()], "{act:?} tapped where the pointer rested");
+        let _ = rig.rest(&view, pos2(slots.tabs[0].max.x + APART / 2.0, 8.0));
+        let came = [vec![Event::PointerMoved(at.center())], tap(at.center())].concat();
+        assert_eq!(rig.pass(&view, came).acts, [act.clone()], "{act:?} tapped as the pointer came");
+        let _ = rig.pass(&view, Vec::new());
+    }
+    let gap = pos2(slots.tabs[0].max.x + APART / 2.0, 8.0);
+    let _ = rig.rest(&view, gap);
+    assert!(rig.pass(&view, tap(gap)).acts.is_empty(), "a gap takes no tap");
+    let stats = slots.tabs[1];
+    rig.live = vec![egui::Rect::from_min_max(Pos2::ZERO, pos2(stats.min.x, 16.0)), egui::Rect::from_min_max(pos2(stats.max.x, 0.0), pos2(800.0, 16.0))];
+    let _ = rig.rest(&view, stats.center());
+    assert!(rig.pass(&view, tap(stats.center())).acts.is_empty(), "nor a cell the registry left no part of the strip");
+}
+
 /// Hover lights only what a press would work, and the hand shows there:
 /// a tab not up in the text colour and the semibold; the tab that is up and
 /// the lit Visualizer as they were, with the hand over their presses; [+]
@@ -773,6 +812,35 @@ fn a_press_applies_the_cells_act_through_the_frames_duties() {
     assert!(!gui.servers.drop_open, "Esc closes it");
 }
 
+/// A tap, its release in its press's pass, through the chrome's pass and
+/// the frame's duties: the Stats tab's switches the screen, the label's
+/// opens the menu, and a row's tap there switches to its server, as the
+/// cells' click on each does.
+#[test]
+fn a_tap_applies_the_cells_act_through_the_frames_duties() {
+    let _en = in_locale("en");
+    let ctx = context();
+    let cells = cells_at(100, 30);
+    let mut gui = gui_on(&[ATTIC, OFFICE]);
+    let tap = |gui: &mut Gui, act: &Act| {
+        frame(gui, cells);
+        let spots = chrome_pass(&ctx, gui, cells, Vec::new()).spots;
+        let at = spots.iter().rev().find(|(_, a)| a == act).unwrap_or_else(|| panic!("{act:?} drawn: {spots:?}")).0.center();
+        let _ = chrome_pass(&ctx, gui, cells, vec![Event::PointerMoved(at)]);
+        let out = chrome_pass(&ctx, gui, cells, vec![button(at, true), button(at, false)]);
+        assert_eq!(out.presses.iter().map(|(_, act)| act.clone()).collect::<Vec<_>>(), [Some(act.clone())], "one press, {act:?}'s");
+        gui.chrome.presses.extend(out.presses.iter().map(|(at, act)| (cells.under(*at), act.clone())));
+        assert!(chrome::after_draw(gui), "the frame's duties ran it");
+    };
+    tap(&mut gui, &Act::Screen(Screen::Stats));
+    assert_eq!(gui.screen, Screen::Stats);
+    tap(&mut gui, &Act::SrvMenu);
+    assert!(gui.servers.drop_open, "the label's tap opened the menu");
+    gui.app.connected = true;
+    tap(&mut gui, &Act::SrvSwitch(0));
+    assert!(!gui.servers.drop_open, "the session's own row, tapped: closed");
+}
+
 /// The menu hangs the kit's list from the strip's foot, its right edge a
 /// cell in from the window's: the servers grouped as the view orders them
 /// (a peer under its parent, its way in dim after its name), the session's
@@ -884,9 +952,18 @@ fn the_menu_scrolls_by_the_wheel_and_takes_no_press_under_the_cells() {
         out.act
     };
     assert_eq!(press(&all, gutter), Some(act.clone()), "the gutter is its row's");
-    assert_eq!(press(&all, row.center()), Some(act), "the row's");
+    assert_eq!(press(&all, row.center()), Some(act.clone()), "the row's");
     assert_eq!(press(&all, pos2(40.0, 200.0)), Some(Act::SrvCloseDrop), "off its rows the catcher's");
     assert_eq!(press(&[], row.center()), None, "nothing where the cells stack over it");
+    // A tap, its release in the pass its press came in: the same acts.
+    let tap = |live: &[egui::Rect], at: Pos2| {
+        let _ = pass(live, vec![Event::PointerMoved(at)]);
+        pass(live, vec![button(at, true), button(at, false)]).0.act
+    };
+    assert_eq!(tap(&all, row.center()), Some(act.clone()), "a tap on the row");
+    assert_eq!(tap(&all, gutter), Some(act), "on the gutter");
+    assert_eq!(tap(&all, pos2(40.0, 200.0)), Some(Act::SrvCloseDrop), "off its rows");
+    assert_eq!(tap(&[], row.center()), None, "and none where the cells stack over it");
     let _ = pass(&[], vec![Event::PointerMoved(row.center())]);
     let (_, full) = pass(&[], Vec::new());
     assert_ne!(full.platform_output.cursor_icon, egui::CursorIcon::PointingHand, "nor the hand");
