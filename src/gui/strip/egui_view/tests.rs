@@ -405,6 +405,35 @@ fn every_language_measures_the_strip_in_points_and_keeps_the_label_off_it() {
     }
 }
 
+/// In Japanese and Chinese, whose tab names the CJK face behind the UI
+/// face's draws, the tab that is up stands its name where it stands at
+/// rest, the semibold's as the regular's, and so does the lit Visualizer's
+/// word: within half a point, whole inside the strip. Japanese's up tab
+/// once stood 4 points lower, its feet through the amber rule and cut off
+/// at the strip's foot.
+#[test]
+fn a_cjk_name_stands_as_high_marked_or_lit_as_at_rest() {
+    let Some(locale) = in_own_process(&["ja", "zh"]) else { return };
+    let mut gui = gui_on(&[ATTIC, OFFICE]);
+    let mut rig = Rig::new(100, 30);
+    let ink = |shot: &Shot, words: &str| {
+        let d = find(&drawn(&shot.full), words);
+        d.galley.mesh_bounds.translate(d.rect.min.to_vec2())
+    };
+    gui.screen = Screen::NowPlaying;
+    let rest = rig.settle(&strip::view(&gui));
+    gui.screen = Screen::Library;
+    let mut view = strip::view(&gui);
+    view.viz.lit = true;
+    let up = rig.settle(&view);
+    for words in [view.tabs[0].label.clone(), view.viz.label.clone()] {
+        let (at_rest, lit) = (ink(&rest, &words), ink(&up, &words));
+        assert_eq!(find(&drawn(&up.full), &words).family, strong_family(), "{locale}: {words} in the semibold");
+        assert!((lit.center().y - at_rest.center().y).abs() <= 0.5, "{locale}: {words} stands at {lit:?}, at rest at {at_rest:?}");
+        assert!(lit.min.y >= up.slots.strip.min.y && lit.max.y <= up.slots.strip.max.y, "{locale}: {words} whole inside the strip: {lit:?}");
+    }
+}
+
 /// The label's place in the room the strip leaves it: whole where its words
 /// fit, cut where only part of them does, gone where not even a letter and
 /// the ellipsis fit; its chevron last and kept, the whole right-aligned.

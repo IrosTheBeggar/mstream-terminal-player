@@ -266,10 +266,26 @@ pub(crate) fn metrics(ui: &Ui, font: &FontId) -> Metrics {
     }
 }
 
-/// Where a laid-out line's first glyph stands on its baseline, under the
-/// galley's top. None for an empty one.
+/// Where a laid-out line stands on its baseline under the galley's top: in
+/// the face of its first run (its family's first), where egui stands a
+/// letter of that face first in the line, on the pixel it rounds to,
+/// whichever face drew the letter that is. egui stands a letter the face
+/// lacks on its fallback's baseline, set where the two faces' line boxes
+/// share a middle, so a line led by a CJK letter would report the CJK
+/// face's: 4 points over Segoe UI's at 12.5 points for Yu Gothic, and the
+/// line stood on it as far under the words beside it. None for an empty
+/// one.
 fn first_baseline(galley: &egui::Galley) -> Option<f32> {
-    galley.rows.first().and_then(|r| r.row.glyphs.first().map(|g| r.pos.y + g.pos.y))
+    let row = galley.rows.first()?;
+    let g = row.row.glyphs.first()?;
+    // As egui stands a letter of the line's own face: on that face's
+    // ascent, lowered by its run's share of the room the row's tallest run
+    // leaves it.
+    let run = galley.job.sections.iter().find(|section| !section.byte_range.is_empty());
+    let valign = run.map_or(1.0, |section| section.format.valign.to_factor());
+    let own = g.font_ascent + valign * (row.row.size.y - g.line_height);
+    let ppp = galley.pixels_per_point.max(f32::EPSILON);
+    Some(row.pos.y + (own * ppp).round() / ppp)
 }
 
 /// How far under its own middle a line centred on a point has its baseline
@@ -7232,6 +7248,46 @@ mod tests {
             for b in beside {
                 assert!((on(b) - on(para)).abs() < 0.01, "{b:?} on {para:?}'s baseline: {} and {}", on(b), on(para));
             }
+        }
+    }
+
+    /// A centred line led by a CJK letter stands where the same line led by
+    /// a Latin one stands, in every face the kit centres a line in — the UI
+    /// face, its semibold, the monospace, and runs of them — whichever CJK
+    /// face the system lends behind them (Yu Gothic for Japanese, YaHei for
+    /// Chinese on Windows), and so does a paragraph's baseline: within a
+    /// quarter of a point on the fine grid. Re-stood on the CJK face's own
+    /// baseline, the top strip's marked tab, in the semibold, stood its
+    /// Japanese name 4 points under where it stood at rest and cut its feet
+    /// off at the strip's foot.
+    #[test]
+    fn a_line_led_by_a_cjk_letter_stands_as_one_led_by_a_latin_letter() {
+        let Some(lang) = crate::setup::tests::in_own_process(&["ja", "zh"]) else { return };
+        let ctx = context();
+        ctx.set_pixels_per_point(8.0);
+        let white = Color32::WHITE;
+        let mut tops = Vec::new();
+        let mut paras = Vec::new();
+        let _ = pass(&ctx, vec2(900.0, 400.0), Vec::new(), &mut |ui| {
+            for (k, font) in [body(12.5), strong(12.5), mono(12.5), strong(13.0)].into_iter().enumerate() {
+                let y = 30.0 + 40.0 * k as f32;
+                let cjk = text(ui, pos2(10.0, y), "日本語", font.clone(), white, 400.0, Align2::LEFT_CENTER);
+                let latin = text(ui, pos2(450.0, y), "H日本語", font.clone(), white, 400.0, Align2::LEFT_CENTER);
+                tops.push((format!("{font:?}"), cjk.min.y, latin.min.y));
+            }
+            let figure = |lead: &str| vec![(format!("{lead}日本語 "), body(13.0), white), ("12".to_string(), mono(12.0), white)];
+            let cjk = runs(ui, pos2(10.0, 220.0), &figure(""), 400.0, Align2::LEFT_CENTER);
+            let latin = runs(ui, pos2(450.0, 220.0), &figure("H"), 400.0, Align2::LEFT_CENTER);
+            tops.push(("runs".to_string(), cjk.min.y, latin.min.y));
+            for font in [body(13.0), strong(13.0)] {
+                paras.push((format!("{font:?}"), Para::new("日本語", font.clone(), white).baseline(ui), Para::new("H日本語", font, white).baseline(ui)));
+            }
+        });
+        for (what, cjk, latin) in tops {
+            assert!((cjk - latin).abs() <= 0.25, "{lang} {what}: led by an ideograph its top at {cjk}, led by a capital at {latin}");
+        }
+        for (what, cjk, latin) in paras {
+            assert!((cjk - latin).abs() <= 0.25, "{lang} {what}: a paragraph's baseline {cjk} led by an ideograph, {latin} by a capital");
         }
     }
 }
