@@ -4391,8 +4391,11 @@ pub(crate) fn dwell(ctx: &egui::Context) {
 /// How far under its target a tooltip hangs, and the widest it grows.
 pub(crate) const TIP_UNDER: f32 = 4.0;
 pub(crate) const TIP_W: f32 = 300.0;
-/// A tooltip's room round its words: the canvas's 6 by 10.
+/// A tooltip's room round its words, inside its hairline: the canvas's 6
+/// by 10.
 pub(crate) const TIP_PAD: Vec2 = vec2(10.0, 6.0);
+/// A tooltip's hairline in the strong edge.
+const TIP_EDGE: f32 = 1.0;
 /// A tooltip's words.
 pub(crate) const TIP_SIZE: f32 = 12.5;
 
@@ -4412,7 +4415,7 @@ pub(crate) fn tip_under(response: &Response, words: &str, since_key: Option<std:
     }
     hang_tip(response, since_key, pal, |painter| {
         let lines = crate::kit::wrap_tip(words).join("\n");
-        painter.layout(lines, body(TIP_SIZE), pal.text, TIP_W - 2.0 * TIP_PAD.x)
+        painter.layout(lines, body(TIP_SIZE), pal.text, TIP_W - 2.0 * (TIP_PAD.x + TIP_EDGE))
     })
 }
 
@@ -4436,15 +4439,19 @@ fn hang_tip(
     let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Tooltip::tooltip_id(response.id, 0));
     let painter = ctx.layer_painter(layer);
     let galley = lay(&painter);
-    let size = galley.size() + 2.0 * TIP_PAD;
+    // The padding inside the hairline, as egui's own tooltip pads a page's
+    // in Studio's style (its frame's margin within its stroke) and the
+    // canvas its box.
+    let inside = TIP_PAD + Vec2::splat(TIP_EDGE);
+    let size = galley.size() + 2.0 * inside;
     let screen = ctx.content_rect();
     let target = response.interact_rect;
     let left = (target.center().x - size.x / 2.0).min(screen.max.x - size.x).max(screen.min.x);
     let tip = Rect::from_min_size(pos2(left, target.max.y + TIP_UNDER), size).round_to_pixels(ctx.pixels_per_point());
     let painter = painter.with_clip_rect(tip);
     painter.rect_filled(tip, square(), pal.raised);
-    painter.rect_stroke(tip, square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
-    painter.galley(tip.min + TIP_PAD, galley, pal.text);
+    painter.rect_stroke(tip, square(), Stroke::new(TIP_EDGE, pal.edge_strong), StrokeKind::Inside);
+    painter.galley(tip.min + inside, galley, pal.text);
     Some(tip)
 }
 
@@ -7417,6 +7424,19 @@ mod chrome_pieces {
         assert!(tip.center().x < target.center().x + 0.5, "it would have passed the edge centred: {tip:?}");
         let boxed = shapes.iter().filter(|shape| shape.clip_rect == tip).count();
         assert!(boxed >= 3, "the fill, the hairline and the words, clipped to the box: {boxed} of {}", shapes.len());
+        // The canvas's 6 by 10 round the words inside the hairline, as
+        // egui's own tooltip pads a page's within its frame's stroke.
+        let words = shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) => Some(Rect::from_min_size(t.pos, t.galley.size())),
+                _ => None,
+            })
+            .expect("the words");
+        let inside = TIP_PAD + Vec2::splat(TIP_EDGE);
+        assert_eq!(words.min - tip.min, inside, "the padding inside the hairline: {words:?} in {tip:?}");
+        let (right, foot) = (tip.max.x - words.max.x, tip.max.y - words.max.y);
+        assert!((right - inside.x).abs() <= 0.5 && (foot - inside.y).abs() <= 0.5, "and after the words: {right} {foot}");
         pass(&ctx, 0.9, Vec::new(), &mut |ui| run(ui, Some(std::time::Duration::from_millis(100))));
         assert_eq!(shown.get(), None, "none in the dwell after a key");
     }
