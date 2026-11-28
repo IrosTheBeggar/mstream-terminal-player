@@ -259,6 +259,16 @@ fn each_state_draws_its_words_in_its_look() {
     let viz = shot.slots.viz;
     assert!(fills(&shot.full, pal.unlit).iter().any(|r| viz.contains_rect(*r) && r.width() == LAMP), "the Visualizer's lamp unlit while its window is closed");
     assert!(strokes(&shot.full, pal.dim).iter().filter(|[a, _]| shot.slots.label.as_ref().is_some_and(|l| l.chevron.is_some_and(|c| c.contains(*a)))).count() == 2, "the menu's chevron, dim");
+    // The chevron and [+]'s plus both on the row's middle, as the board
+    // centres them.
+    let middle = |within: egui::Rect| {
+        let ys: Vec<f32> = strokes(&shot.full, pal.dim).iter().filter(|[a, b]| within.contains(*a) && within.contains(*b)).flat_map(|[a, b]| [a.y, b.y]).collect();
+        (ys.iter().copied().fold(f32::MAX, f32::min) + ys.iter().copied().fold(f32::MIN, f32::max)) / 2.0
+    };
+    let chevron = shot.slots.label.as_ref().and_then(|l| l.chevron).expect("the chevron");
+    for (what, at) in [("the chevron", chevron), ("[+]", shot.slots.plus)] {
+        assert!((middle(at) - strip.center().y).abs() < 0.01, "{what} on the row's middle: {} of {:?}", middle(at), strip);
+    }
 
     // Now Playing up: no tab marked (S4).
     gui.screen = Screen::NowPlaying;

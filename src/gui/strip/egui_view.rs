@@ -160,9 +160,12 @@ pub(crate) fn show(ui: &mut Ui, view: &StripView, cx: &StripCtx) -> StripOut {
         // sat on top of its first rows.
         let hot = server.menu && take(ui, cx, &mut out, label.rect, Id::new("server-label"), Act::SrvMenu, true).hot;
         let (font, ink) = if hot { (strong(SIZE), pal.text) } else { (body(SIZE), pal.dim) };
-        studio::text(ui, pos2(label.words_right, mid), &server.name, font.clone(), ink, label.room, Align2::RIGHT_CENTER);
+        studio::text(ui, pos2(label.words_right, mid), &server.name, font, ink, label.room, Align2::RIGHT_CENTER);
+        // On the row's middle, as [+] beside it stands its plus and the
+        // kit's select box its chevron: on the small letters' it hung low,
+        // a "v" set after the name.
         if let Some(chevron) = label.chevron {
-            studio::chevron(ui, pos2(chevron.center().x, studio::led_mid(ui, mid, &font, false)), ink, false);
+            studio::chevron(ui, pos2(chevron.center().x, mid), ink, false);
         }
     }
     out
