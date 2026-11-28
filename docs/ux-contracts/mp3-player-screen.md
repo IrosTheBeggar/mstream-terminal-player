@@ -418,14 +418,15 @@ comes from the cache, or a download, beside them.
     either side and 2 between them; the screen that is up wears the raised
     fill, its name in the text colour and the semibold, and a 2-point amber
     rule along the strip's foot; the others are dim, in the text colour and
-    the semibold under the pointer. A sync's percentage stands 4 points
+    the semibold under the pointer. A CJK name stands as high marked, lit
+    or hovered as at rest. A sync's percentage stands 4 points
     after MP3 Player's name in the monospace (Hack 12) on the name's
     baseline, amber while it runs and dim while it waits, on the marked
     tab too. [+] is the kit's plus in its cells, dim, raised in the text
     colour under the pointer, with its tooltip after the dwell. The label
     is right-aligned to end a blank cell short of [+] and starts no nearer
     the Visualizer item than a blank cell: bare dim words, the kit's
-    chevron 6 points after them while there is a menu to open, in the text
+    chevron on the row's middle 6 points after them with a menu, in the text
     colour and the semibold with the hand under the pointer; a single
     server's label takes no hover and no hand, and no label has a tooltip.
     Every slot is measured in points in the face in use, the sync's figure

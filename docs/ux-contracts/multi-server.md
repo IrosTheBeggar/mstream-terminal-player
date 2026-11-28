@@ -139,9 +139,9 @@ parent changes a peer's label only.
     *This surface, in the desktop window:* egui draws the header's label
     and its dropdown, the GUI's chrome (the "Top Bar and Transport in
     egui" canvas, its ServerMenu board). The label is bare dim words
-    right-aligned before [+], the kit's chevron after them while the
-    picker exists, in the text colour and the semibold with the hand under
-    the pointer; with one server it is words alone, with no hover, no hand
+    right-aligned before [+], the kit's chevron after them on the strip's
+    middle with a picker, in the text colour and the semibold with the hand
+    under the pointer; with one server, words alone, with no hover, no hand
     and no picker (mp3-player-screen.md clause 16 has its room). The
     dropdown is the kit's list that hangs, from the strip's foot with its
     right edge a cell in from the window's, as the cells' border ends: the

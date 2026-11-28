@@ -172,7 +172,9 @@ opens the queue.
     cells fill and unlit beyond, with no look of their own under the
     pointer; the readout in the monospace, dim, at its slot's right. The
     note in its slot as the kit sets a page's note: its words at 13 points,
-    its figures in the monospace, in its tone (clause 7, the accent amber).
+    its figures in the monospace, in its tone (clause 7, the accent amber),
+    on the readout's baseline, as the cells' bottom row stands both, so its
+    tails stay inside the bar.
 19. **The card**: the cover 64 points square at the opening size, the
     picture made into a texture once at the size the slot draws it, with
     the desk's corners; until it is decoded, a hairline square in the
@@ -283,3 +285,10 @@ the bar is built as the code behaves until each is ruled on:
     cells' press, right press, wheel and hand are its own unchanged, and
     nothing can act twice when egui runs a pass twice. No greying under a
     modal: what is inert is drawn at rest.
+- **2026-11-28, later — The live tour's fixes.** The note stands on the
+  readout's baseline (clause 18), where centred on its row it stood a
+  point under it and its tails ran out through the window's foot. The
+  card's title led by a CJK letter stands where one led by a Latin letter
+  does, the kit's line placement mended for every room. The hand shows at
+  once over quick config opened by the split's chevron, the pointer given
+  back to the chrome at the press's release (auto-dj.md clause 67).

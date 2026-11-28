@@ -745,7 +745,10 @@ is new; the Seeds sheet and its pick are clauses 64–66.)*
     close before)*, **Smart filters** (a row to its sheet), and `All Auto
     DJ settings ▸`. Every change applies at once — no draft, no Done. A
     setting the server cannot do rests with its reason. A click anywhere
-    else, the chevron again, or Esc puts it away.
+    else, the chevron again, or Esc puts it away. While it is up, as while
+    any of the DJ's layers is (a sheet, the Seeds sheet, the First song
+    question and its lists), the Library beneath draws without the
+    pointer, as under a modal: nothing of it lights or ripens a tooltip.
 59. **Learn from skips and Seeds** *(new 2026-11-17)* — Sonic
     similarity's two sub-rows, under it in MATCH (E-AutoDJ). **Learn from
     skips** is a switch, `[✓]` / `[ ]` at the values' edge, with its line
@@ -1013,10 +1016,14 @@ pick in place of its Add song sheet. What the lists DO is clause 23.)*
     pointer: during an MP3 write, or under a layer the cells stack over it
     (a sheet, the Seeds sheet, the First song question, the quit's gate).
     Right presses and the wheel stay the grid's, which swallows them while
-    it is up, as in cells. On the Admin screen it floats over the room's
-    egui face, which stays drawn beneath it and hears none of the pointer.
-    `MSTREAM_WINDOW_CELLS=1`, a terminal and the frames before the window
-    exists keep it in cells, as clause 58 tells it.
+    it is up, as in cells. Opened by a press on the split's chevron, it
+    shows the hand under a pointer that has not moved since, the press's
+    release giving the chrome back where the pointer rests. On the Admin
+    screen it floats over the room's egui face, which stays drawn beneath
+    it and hears none of the pointer; on the Library the room stays drawn
+    at rest (clause 58). `MSTREAM_WINDOW_CELLS=1`, a terminal and the
+    frames before the window exists keep it in cells, as clause 58 tells
+    it.
 
 ## Wording
 
@@ -2530,3 +2537,8 @@ where this player differs, the build settled it so:
   filters a press that does nothing until the probe answers; Sonic off
   showing no "Off"; and the split's chevron pointing closed/open rather
   than toward the popover (R18).
+- **2026-11-28, later — The Library rests under the DJ's layers** (clause
+  58): quick config, a sheet, the Seeds sheet and the First song question
+  join the modals under which the Library draws without the pointer, in
+  both faces; the Files room lit its rows' verbs and ripened their
+  tooltips under quick config, where a press only put it away.
