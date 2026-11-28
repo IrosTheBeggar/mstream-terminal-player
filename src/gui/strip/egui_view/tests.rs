@@ -615,8 +615,28 @@ fn the_tooltips_ripen_after_the_dwell_under_their_items() {
     let last = keyed.galley.job.sections.last().unwrap();
     assert_eq!((&last.format.font_id.family, last.format.color), (&FontFamily::Monospace, pal.soft), "the key in the monospace, secondary");
     assert_eq!(&keyed.galley.job.text[last.byte_range.start.0..last.byte_range.end.0], "V");
-    let one_line = rig.width("Open the visualizer in its own window — ", body(TIP_SIZE)) + rig.width("V", mono(TIP_SIZE)) <= studio::TIP_W - 2.0 * TIP_PAD.x;
-    assert_eq!(keyed.galley.rows.len() == 1, one_line, "wrapped in points at the box's widest, not at 40 cells");
+    let row = keyed.galley.rows.first().unwrap();
+    let on = |c: char| row.row.glyphs.iter().find(|g| g.chr == c).map(|g| row.pos.y + g.pos.y).expect("drawn");
+    assert!((on('V') - on('O')).abs() < 0.5, "the key on the words' baseline: {} {}", on('V'), on('O'));
+    let tail = rig.width(" — ", body(TIP_SIZE)) + rig.width("V", mono(TIP_SIZE));
+    let one_line = rig.width("Open the visualizer in its own window", body(TIP_SIZE)) + tail <= TIP_WORDS;
+    assert_eq!(keyed.galley.rows.len() == 1, one_line, "wrapped in points past the cells' 40 cells, not in their count");
+    // Past Studio's box but within the cells' 40 cells, the board's line
+    // stays one; past those it wraps.
+    let mut words = String::from("ab");
+    while rig.width(&words, body(TIP_SIZE)) + tail <= studio::TIP_W - 2.0 * TIP_PAD.x + 4.0 {
+        words.push_str(" ab");
+    }
+    assert!(rig.width(&words, body(TIP_SIZE)) + tail < TIP_WORDS - 1.0, "a line between the two");
+    let whole = view.viz.tip.clone();
+    for (tip, lines) in [(format!("{words} — V"), 1), (format!("{words} {words} — V"), 2)] {
+        view.viz.tip = tip.clone();
+        let (_, shot) = ripe(&mut rig, &view, slots.viz.center());
+        assert_eq!(find(&drawn(&shot.full), &tip).galley.rows.len(), lines, "{tip:?}");
+        let box_ = shot.out.tip.expect("ripe");
+        assert!(rig.cells.points.contains_rect(box_), "inside the window: {box_:?}");
+    }
+    view.viz.tip = whole;
     view.key_hints = false;
 
     let (_, shot) = ripe(&mut rig, &view, slots.plus.center());

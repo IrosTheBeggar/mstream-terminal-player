@@ -75,6 +75,12 @@ const RULE: f32 = 2.0;
 /// by 10).
 const TIP_SIZE: f32 = 12.5;
 const TIP_PAD: egui::Vec2 = vec2(10.0, 6.0);
+/// The widest the Visualizer's tooltip runs its words before it wraps:
+/// the cells' 40 cells (`kit::TIP_WRAP`) at the grid's 8 points a cell,
+/// where the TopTips board wraps it. Studio's [`studio::TIP_W`] box is
+/// narrower, and in a face a little wider than Segoe UI it would put the
+/// key's " — V" alone on a second line, as the cells do (topbar.Q7).
+const TIP_WORDS: f32 = crate::kit::TIP_WRAP as f32 * 8.0;
 
 /// What the strip's face is handed besides the view.
 pub(crate) struct StripCtx<'a> {
@@ -362,10 +368,10 @@ fn tip_of(ui: &Ui, out: &mut StripOut, response: &Response, words: &str, key: Op
 /// in at the window's edge, never in the dwell after a key; its words in
 /// the text colour and, where key hints keep it, ` — key` after them, the
 /// key in the monospace in the secondary ink, on the words' baseline (the
-/// TopTips board's). Wrapped in points at the box's widest
-/// ([`studio::TIP_W`]), as the board measures it, so a line a cell past the
-/// cells' 40 that fits the box stays one line. Painted on the tooltips'
-/// layer clipped to its box, which it returns while it shows.
+/// TopTips board's). Wrapped in points only past [`TIP_WORDS`], the cells'
+/// 40 cells as the board measures them, so a line a cell past the cells' 40
+/// in their count stays one line. Painted on the tooltips' layer clipped to
+/// its box, which it returns while it shows.
 fn tip(ui: &Ui, response: &Response, words: &str, key: Option<&str>, since_key: Option<Duration>, pal: &Pal) -> Option<egui::Rect> {
     let ctx = &response.ctx;
     if let Some(since) = since_key.filter(|since| *since < crate::kit::TIP_DELAY) {
@@ -388,7 +394,7 @@ fn tip(ui: &Ui, response: &Response, words: &str, key: Option<&str>, since_key: 
     for ((s, font, color), m) in parts.into_iter().zip(&metrics) {
         job.append(&s, 0.0, TextFormat { font_id: font, color, line_height: Some((m.ascent + depth).max(1.0)), ..Default::default() });
     }
-    job.wrap.max_width = studio::TIP_W - 2.0 * TIP_PAD.x;
+    job.wrap.max_width = TIP_WORDS;
     let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Tooltip::tooltip_id(response.id, 0));
     let painter = ctx.layer_painter(layer);
     let galley = painter.layout_job(job);
