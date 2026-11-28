@@ -1774,13 +1774,18 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // pointer, so nothing of them lights or ripens a tooltip under it; the
     // modals get it back as they draw.
     // The Peer recs room's taste-bar modals do the same, and so does the
-    // track-actions sheet over any room (peer-recs build plan D24).
+    // track-actions sheet over any room (peer-recs build plan D24). So do
+    // the DJ's layers, which own the pointer while they are up — quick
+    // config, its sheets, the First song question and its lists — and
+    // which a press anywhere off them only puts away: the room under quick
+    // config lit its rows' verbs and ripened their tooltips.
     let pointer = gui.ui.pointer;
     let inert = gui.screen == Screen::Library
         && ((gui.active == DISCOVER_NAV && discover::modal_open(gui))
             || (gui.active == PEER_RECS_NAV && peer_recs::modal_open(gui))
             || actions::modal_open(gui)
             || moods::is_open(gui)
+            || dj::modal_open(gui)
             || ytdl::window_open(gui)
             || keep_doors::window_open(gui));
     if inert {
@@ -7306,6 +7311,40 @@ mod tests {
             gui.ui.pointer = Some(Position { x: 4, y: 3 });
             assert!(!lit(&mut gui), "{:?}: under the sheet it does not", NAV[room]);
             assert_eq!(gui.ui.pointer, Some(Position { x: 4, y: 3 }), "the sheet gets the pointer back");
+        }
+    }
+
+    /// The DJ's layers make the Library beneath inert as the sheet does:
+    /// quick config over any room, and the DJ room's sheets and First
+    /// song's list, own the pointer while they are up, and a press off them
+    /// only puts them away or is swallowed, so nothing under them lights —
+    /// the Files room's rows lit their verbs and ripened their tooltips
+    /// under quick config.
+    #[test]
+    fn the_djs_layers_make_the_library_inert() {
+        let _en = crate::setup::tests::in_locale("en");
+        let layers = [
+            (FILES_NAV, Act::DjQuick(dj::QuickAct::Toggle)),
+            (DJ_NAV, Act::DjQuick(dj::QuickAct::Toggle)),
+            (DJ_NAV, Act::DjRowKey(dj::Row::Batch)),
+            (DJ_NAV, Act::DjRowKey(dj::Row::FirstSong)),
+        ];
+        for (room, open) in layers {
+            let mut gui = six_tools_gui();
+            gui.active = room;
+            gui.ui.pointer = Some(Position { x: 4, y: 3 });
+            let lit = |gui: &mut Gui| {
+                let buffer = draw_buffer(gui);
+                let cell = &buffer[(3, 3)];
+                assert_eq!(cell.symbol(), "S", "{:?}: the probe is on Search", NAV[room]);
+                cell.fg == th().bright && cell.modifier.contains(Modifier::BOLD)
+            };
+            assert!(lit(&mut gui), "{:?}: the row lights under the pointer", NAV[room]);
+            let _ = gui.act(open.clone());
+            assert!(dj::modal_open(&gui), "{:?}: {open:?} put a layer up", NAV[room]);
+            gui.ui.pointer = Some(Position { x: 4, y: 3 });
+            assert!(!lit(&mut gui), "{:?}: under {open:?}'s layer the row does not light", NAV[room]);
+            assert_eq!(gui.ui.pointer, Some(Position { x: 4, y: 3 }), "the layer gets the pointer back");
         }
     }
 
