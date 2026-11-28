@@ -536,6 +536,45 @@ fn the_note_slot_says_the_shells_note_first_and_each_tone_in_its_colour() {
     assert_eq!(last, Some('…'), "cut with an ellipsis");
 }
 
+/// The note stands on the volume readout's baseline, as the cells' bottom
+/// row stands both, and its tails stay in the bar's last row, within the
+/// half pixel a glyph's edge lands on: at the opening size, at the floor
+/// with the tips row under the bar, wide, and at a scale of 2. Centred on
+/// its row, its 13 points stood a point under the readout and its "p" ran
+/// out through the window's foot.
+#[test]
+fn the_note_stands_on_the_readouts_baseline_with_its_tails_in_the_bar() {
+    let _en = crate::setup::tests::in_locale("en");
+    let ctx = context();
+    let baseline = |p: &Painted, words: &str| {
+        p.shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == words => {
+                    let row = t.galley.rows.first()?;
+                    let ink = t.galley.mesh_bounds.translate(t.pos.to_vec2());
+                    Some((t.pos.y + row.pos.y + row.row.glyphs.first()?.pos.y, ink))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{words:?} drawn"))
+    };
+    for (w, h, hints, ppp) in [(100, 30, false, 1.0), (100, 30, false, 2.0), (100, 24, true, 2.0), (160, 50, false, 1.0)] {
+        for note in ["repeat: all", "Auto DJ on — picking from http://127.0.0.1:38680"] {
+            let mut gui = bar_gui();
+            gui.config.gui.key_hints = hints;
+            gui.ui.key_hints = hints;
+            gui.app.message = Some(Message { text: note.into(), kind: MessageKind::Info });
+            let p = paint_in(&ctx, &mut gui, w, h, ppp);
+            let (on, ink) = baseline(&p, note);
+            let (readout, _) = baseline(&p, "70%");
+            assert!((on - readout).abs() < 0.05, "{w}×{h} at {ppp}: {note:?} on {on}, the readout on {readout}");
+            let row = rect_of(&p, p.layout.note);
+            assert!(ink.max.y <= row.max.y + 0.5 / ppp, "{w}×{h} at {ppp}: {note:?}'s tails {ink:?} inside its row {row:?}");
+        }
+    }
+}
+
 /// Only what a press would work lights, as the cells registry reads the
 /// pointer: each half of the split its own raised fill; each control of the
 /// group its own, its frame and mark a step brighter; − and + their mark in

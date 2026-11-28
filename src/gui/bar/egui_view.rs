@@ -73,7 +73,8 @@ pub(crate) fn show(ui: &mut Ui, view: &BarView, layout: &BarLayout, cx: &BarCtx)
     group(ui, layout, view, cx, hot);
     volume(ui, &layout.volume, view.volume, cx, hot);
     if let Some((words, tone)) = &view.note {
-        studio::note_in(ui, cx.cells.rect(layout.note), words, tone_color(*tone, cx.pal));
+        let slot = cx.cells.rect(layout.note);
+        studio::note_in(ui, slot, readout_baseline(ui, slot), words, tone_color(*tone, cx.pal));
     }
     card(ui, &layout.card, view, cx, hot);
 }
@@ -259,6 +260,13 @@ fn volume(ui: &Ui, at: &VolumeLayout, volume: f32, cx: &BarCtx, hot: Option<&Act
     let readout = cx.cells.rect(at.readout);
     let words = volume_words(volume);
     studio::text(ui, readout.right_center(), words.trim_start(), studio::mono(TIME_SIZE), pal.dim, readout.width(), Align2::RIGHT_CENTER);
+}
+
+/// Where the volume's readout stands on its baseline in the bar's bottom
+/// row, whose `slot` the note shares with it: a line of the monospace
+/// centred on the row, as [`volume`] sets the readout.
+fn readout_baseline(ui: &Ui, slot: egui::Rect) -> f32 {
+    slot.center().y + studio::centred_baseline(ui, TIME_SIZE)
 }
 
 /// The now-playing card (Main's CARD, D15, D16), one control in its cells.

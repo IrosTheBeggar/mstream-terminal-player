@@ -727,15 +727,20 @@ pub(crate) fn note_line_naming(ui: &Ui, rect: Rect, busy: Option<&str>, note: Op
     note_in_naming(ui, rect, words, also, color);
 }
 
-/// A note's one line in `rect`, in `color`: its words at 13 points, its
-/// figures in the monospace a point under them, cut with an ellipsis, as
-/// [`note_line`] sets a page's note (the transport bar's note slot, whose
-/// tones are the GUI's own).
-pub(crate) fn note_in(ui: &Ui, rect: Rect, words: &str, color: Color32) {
-    note_in_naming(ui, rect, words, &[], color);
+/// A note's one line from `rect`'s left, standing on `baseline`, in
+/// `color`: its words at 13 points, its figures in the monospace a point
+/// under them, cut with an ellipsis at `rect`'s width, as [`note_line`]
+/// sets a page's note: the transport bar's note slot, whose tones are the
+/// GUI's own, on the baseline of the volume's readout beside it, as the
+/// cells' row stands both (centred on its 16-point row instead, its 13
+/// points stood a point under the readout and its tails ran out through
+/// the window's foot).
+pub(crate) fn note_in(ui: &Ui, rect: Rect, baseline: f32, words: &str, color: Color32) {
+    runs_on(ui, rect.min.x, baseline, &figured(words, &[], body(13.0), mono(12.0), color), rect.width(), Align::Min);
 }
 
-/// [`note_in`] with the names in `also` set as figures too.
+/// A page's note's one line centred on `rect`'s middle, as [`note_in`] sets
+/// its words and figures, with the names in `also` set as figures too.
 fn note_in_naming(ui: &Ui, rect: Rect, words: &str, also: &[&str], color: Color32) {
     runs(ui, rect.left_center(), &figured(words, also, body(13.0), mono(12.0), color), rect.width(), Align2::LEFT_CENTER);
 }
