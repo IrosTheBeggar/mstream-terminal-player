@@ -4369,12 +4369,13 @@ pub(crate) fn pressed(response: &Response) -> bool {
     response.ctx.input(|i| i.pointer.primary_pressed()) && (response.is_pointer_button_down_on() || response.clicked())
 }
 
-/// The cells' tooltip dwell, set once on `ctx` after [`style_once`] (whose
-/// tooltip shows at once): [`crate::kit::TIP_DELAY`] at rest on a target,
-/// anew on each target as the cells' dwell restarts on each, and counted
-/// from the pointer's last move however it moves after (egui's own wait for
-/// a still pointer asks for a pass on every move, which a host that runs
-/// passes only for news never gives it).
+/// The cells' tooltip dwell for egui's own tooltips, set once on `ctx`
+/// after [`style_once`] (whose tooltip shows at once): [`crate::kit::TIP_DELAY`]
+/// at rest on a target, anew on each target as the cells' dwell restarts on
+/// each, and counted from the pointer's last move however it moves after
+/// (egui's own wait for a still pointer asks for a pass on every move,
+/// which a host that runs passes only for news never gives it). The kit's
+/// [`tip_under`] and [`tip_keyed`] keep the cells' dwell themselves.
 pub(crate) fn dwell(ctx: &egui::Context) {
     let id = Id::new("studio-dwell");
     if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
@@ -4399,19 +4400,31 @@ const TIP_EDGE: f32 = 1.0;
 /// A tooltip's words.
 pub(crate) const TIP_SIZE: f32 = 12.5;
 
-/// The cells' tooltip for `response`, under [`dwell`]: `words` in Studio's
-/// box ([`style_once`]'s: raised, on a strong-edged hairline) [`TIP_UNDER`]
+/// What a pass made of a tooltip of the kit's ([`tip_under`],
+/// [`tip_keyed`]): its box while it shows; while it waits out a dwell, how
+/// long until it shows, when its host owes it a pass. egui keeps only the
+/// least wait a pass asks for, and after a pass that heard any input asks
+/// at once (and once more): a host that drops that ask, as the chrome's
+/// does, finds the dwell's own here.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Tip {
+    pub shown: Option<Rect>,
+    pub wake: Option<std::time::Duration>,
+}
+
+/// The cells' tooltip for `response`: `words` in Studio's box
+/// ([`style_once`]'s: raised, on a strong-edged hairline) [`TIP_UNDER`]
 /// points under the target's middle, pulled in at the screen's edge, in the
 /// cells' lines (wrapped at their 40 cells, `kit::wrap_tip`) and no wider
-/// than [`TIP_W`], once the pointer has rested on the target for the dwell,
-/// and never in the dwell after a key (`since_key`, the time since the last
-/// one), which hides it as it hides the cells'; the pass is asked for when
-/// that dwell ends. Painted on the tooltips' layer, clipped to its own box,
-/// which it returns while it shows: a host that cuts its paint around what
-/// stands over it finds the tooltip's by it.
-pub(crate) fn tip_under(response: &Response, words: &str, since_key: Option<std::time::Duration>, pal: &Pal) -> Option<Rect> {
+/// than [`TIP_W`], once the pointer has rested on the target for the cells'
+/// dwell ([`hang_tip`]), and never in the dwell after a key (`since_key`,
+/// the time since the last one), which hides it as it hides the cells'; the
+/// pass is asked for when both have ended. Painted on the tooltips' layer,
+/// clipped to its own box, which it hands back while it shows: a host that
+/// cuts its paint around what stands over it finds the tooltip's by it.
+pub(crate) fn tip_under(response: &Response, words: &str, since_key: Option<std::time::Duration>, pal: &Pal) -> Tip {
     if words.is_empty() {
-        return None;
+        return Tip::default();
     }
     hang_tip(response, since_key, pal, |painter| {
         let lines = crate::kit::wrap_tip(words).join("\n");
@@ -4419,22 +4432,47 @@ pub(crate) fn tip_under(response: &Response, words: &str, since_key: Option<std:
     })
 }
 
+/// The cells' dwell on a tooltip's target (`Surface::dwell_tick`), kept on
+/// the context from pass to pass: the target, egui's time when the pointer
+/// came onto it, and the last pass that found it there.
+#[derive(Clone, Copy)]
+struct TipDwell {
+    target: Id,
+    since: f64,
+    pass: u64,
+}
+
 /// A tooltip's box for `response` once the dwell says it shows, round the
 /// words `lay` sets on the tooltips' painter: what [`tip_under`] and
-/// [`tip_keyed`] share.
+/// [`tip_keyed`] share. The dwell is the cells': it runs while the pointer
+/// stays on the target, however the pointer moves on it, restarts on a new
+/// target, and ends with a pass that finds the pointer off every target
+/// (a pass that hangs no tooltip); a tooltip shown stays up while the
+/// pointer stays on its target. egui's own dwell counts from the pointer's
+/// last move, so a move of a point on the target hid a tooltip shown and a
+/// slow sweep never ripened one.
 fn hang_tip(
     response: &Response,
     since_key: Option<std::time::Duration>,
     pal: &Pal,
     lay: impl FnOnce(&egui::Painter) -> Arc<Galley>,
-) -> Option<Rect> {
+) -> Tip {
     let ctx = &response.ctx;
-    if let Some(since) = since_key.filter(|since| *since < crate::kit::TIP_DELAY) {
-        ctx.request_repaint_after(crate::kit::TIP_DELAY - since);
-        return None;
+    if !response.hovered() {
+        return Tip::default();
     }
-    if !egui::Tooltip::should_show_tooltip(response, false) {
-        return None;
+    let (now, pass) = (ctx.input(|i| i.time), ctx.cumulative_pass_nr());
+    let id = Id::new("studio-tip-dwell");
+    // The same pass run again counts as the one after.
+    let kept = ctx.data(|d| d.get_temp::<TipDwell>(id)).filter(|dwell| dwell.target == response.id && dwell.pass + 1 >= pass);
+    let since = kept.map_or(now, |dwell| dwell.since);
+    ctx.data_mut(|d| d.insert_temp(id, TipDwell { target: response.id, since, pass }));
+    let delay = crate::kit::TIP_DELAY;
+    let rested = std::time::Duration::from_secs_f64((now - since).max(0.0));
+    let wait = delay.saturating_sub(rested).max(since_key.map_or(std::time::Duration::ZERO, |key| delay.saturating_sub(key)));
+    if !wait.is_zero() {
+        ctx.request_repaint_after(wait);
+        return Tip { shown: None, wake: Some(wait) };
     }
     let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Tooltip::tooltip_id(response.id, 0));
     let painter = ctx.layer_painter(layer);
@@ -4452,7 +4490,7 @@ fn hang_tip(
     painter.rect_filled(tip, square(), pal.raised);
     painter.rect_stroke(tip, square(), Stroke::new(TIP_EDGE, pal.edge_strong), StrokeKind::Inside);
     painter.galley(tip.min + inside, galley, pal.text);
-    Some(tip)
+    Tip { shown: Some(tip), wake: None }
 }
 
 /// `icon` in `color`, centred on `at`, with no button round it: an icon in
@@ -4670,10 +4708,10 @@ pub(crate) const TIP_WORDS: f32 = crate::kit::TIP_WRAP as f32 * 8.0;
 /// the monospace in the secondary ink on the words' baseline (the TopTips
 /// board's). Wrapped in points only past [`TIP_WORDS`], so a line a cell
 /// past the cells' 40 in their count stays one line.
-pub(crate) fn tip_keyed(ui: &Ui, response: &Response, tip: &str, key_hints: bool, since_key: Option<std::time::Duration>, pal: &Pal) -> Option<Rect> {
+pub(crate) fn tip_keyed(ui: &Ui, response: &Response, tip: &str, key_hints: bool, since_key: Option<std::time::Duration>, pal: &Pal) -> Tip {
     let (words, key) = tip_key(tip, key_hints);
     if words.is_empty() {
-        return None;
+        return Tip::default();
     }
     hang_tip(response, since_key, pal, |painter| {
         let mut parts: Vec<Run> = vec![(words.to_string(), body(TIP_SIZE), pal.text)];
@@ -7411,7 +7449,7 @@ mod chrome_pieces {
         let shown = std::cell::Cell::new(None);
         let run = |ui: &mut Ui, since_key: Option<std::time::Duration>| {
             let response = ui.interact(target, Id::new("probe-tip"), Sense::click());
-            shown.set(tip_under(&response, "Add a server", since_key, &pal));
+            shown.set(tip_under(&response, "Add a server", since_key, &pal).shown);
         };
         pass(&ctx, 0.0, vec![moved(target.center())], &mut |ui| run(ui, None));
         pass(&ctx, 0.2, Vec::new(), &mut |ui| run(ui, None));
@@ -7439,6 +7477,58 @@ mod chrome_pieces {
         assert!((right - inside.x).abs() <= 0.5 && (foot - inside.y).abs() <= 0.5, "and after the words: {right} {foot}");
         pass(&ctx, 0.9, Vec::new(), &mut |ui| run(ui, Some(std::time::Duration::from_millis(100))));
         assert_eq!(shown.get(), None, "none in the dwell after a key");
+    }
+
+    /// The tooltip keeps the cells' dwell (`Surface::dwell_tick`), not
+    /// egui's, which counts from the pointer's last move: the pointer moving
+    /// on its target neither restarts the wait nor hides a tooltip shown, so
+    /// a slow sweep across it ripens it the dwell after the pointer came on;
+    /// a pass off the target ends the dwell, and back on it starts again.
+    /// While it waits it says when it would show, from the very pass the
+    /// pointer came on in; in the dwell after a key, when both have ended.
+    #[test]
+    fn a_tooltip_keeps_the_cells_dwell_on_its_target() {
+        let ctx = context();
+        let pal = Pal::now();
+        let target = Rect::from_min_size(pos2(100.0, 0.0), vec2(80.0, 16.0));
+        let away = pos2(10.0, 190.0);
+        let on = |dx: f32| pos2(target.min.x + 2.0 + dx, target.center().y);
+        let tip = std::cell::Cell::new(Tip::default());
+        let since_key = std::cell::Cell::new(None);
+        let mut run = |ui: &mut Ui| {
+            let response = ui.interact(target, Id::new("probe-dwell"), Sense::click());
+            tip.set(tip_under(&response, "Add a server", since_key.get(), &pal));
+        };
+        let dwell = crate::kit::TIP_DELAY.as_secs_f64();
+        let waits = |tip: Tip, left: f64, what: &str| {
+            assert_eq!(tip.shown, None, "{what}: not yet shown");
+            let wake = tip.wake.unwrap_or_else(|| panic!("{what}: a wake")).as_secs_f64();
+            assert!((wake - left).abs() < 1e-6, "{what}: the wake when it would show, {left}: {wake}");
+        };
+        // Laid out once with the pointer away, so the move's own pass finds
+        // the target under it.
+        pass(&ctx, 0.0, vec![moved(away)], &mut run);
+        assert_eq!(tip.get(), Tip::default(), "off the target: nothing");
+        pass(&ctx, 1.0, vec![moved(on(0.0))], &mut run);
+        waits(tip.get(), dwell, "the move's own pass");
+        for k in 1..5 {
+            let t = 0.1 * f64::from(k);
+            pass(&ctx, 1.0 + t, vec![moved(on(15.0 * k as f32))], &mut run);
+            waits(tip.get(), dwell - t, "sweeping across it");
+        }
+        pass(&ctx, 1.0 + dwell, vec![moved(on(75.0))], &mut run);
+        let shown = tip.get().shown.expect("ripe the dwell after the pointer came on, though it never stood still");
+        assert_eq!(tip.get().wake, None, "shown: no wake");
+        pass(&ctx, 1.0 + dwell + 0.05, vec![moved(on(74.0))], &mut run);
+        assert_eq!(tip.get().shown, Some(shown), "a point's move on the target keeps it up");
+        pass(&ctx, 2.0, vec![moved(away)], &mut run);
+        assert_eq!(tip.get(), Tip::default(), "off the target: gone");
+        pass(&ctx, 2.1, vec![moved(on(30.0))], &mut run);
+        waits(tip.get(), dwell, "back on: the dwell again");
+        // A key a moment ago: it shows once the key's dwell ends too.
+        since_key.set(Some(std::time::Duration::from_millis(50)));
+        pass(&ctx, 2.3, Vec::new(), &mut run);
+        waits(tip.get(), dwell - 0.05, "in the dwell after a key");
     }
 
     /// The transport's paint: the frame's fill only while hot, each mark
@@ -7585,7 +7675,7 @@ mod chrome_shared {
             let shown = std::cell::Cell::new(None);
             let mut run = |ui: &mut Ui| {
                 let response = ui.interact(target, Id::new("probe-keyed"), Sense::click());
-                shown.set(tip_keyed(ui, &response, tip, hints, None, &pal));
+                shown.set(tip_keyed(ui, &response, tip, hints, None, &pal).shown);
             };
             pass(&ctx, t, vec![egui::Event::PointerMoved(target.center())], &mut run);
             pass(&ctx, t + 0.2, Vec::new(), &mut run);

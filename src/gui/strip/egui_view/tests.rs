@@ -734,6 +734,60 @@ fn the_tooltips_ripen_after_the_dwell_under_their_items() {
     assert!(shot.out.tip.is_none(), "none on the label");
 }
 
+/// The pass the pointer comes to rest on an item in may be the last the
+/// host runs before its tooltip is due: egui asks there for a pass at once,
+/// as after any input, which the chrome's host drops (`panel::chrome_repaint`),
+/// and keeps no other ask beside it. So the strip says from that very pass
+/// when the dwell ends, and a pass then, with nothing new, shows the
+/// tooltip; a move of a point on the item keeps it up. A slow sweep across
+/// the item, never still, ripens it the dwell after the pointer came on, as
+/// the cells' dwell does.
+#[test]
+fn a_tooltip_shows_on_the_wake_its_dwell_asks_from_the_pass_the_pointer_came_in() {
+    let _en = in_locale("en");
+    let gui = gui_on(&[ATTIC, OFFICE]);
+    let mut rig = Rig::new(100, 30);
+    let view = strip::view(&gui);
+    let slots = rig.settle(&view).slots;
+    let dwell = crate::kit::TIP_DELAY.as_secs_f64();
+    let away = pos2(4.0, rig.cells.points.max.y - 4.0);
+    for (what, item) in [("the Visualizer", slots.viz), ("[+]", slots.plus)] {
+        rig.time += 10.0;
+        let gone = rig.pass(&view, vec![Event::PointerMoved(away)]);
+        assert_eq!((gone.out.tip, gone.out.wake), (None, None), "{what}: the pointer off the strip");
+        rig.time += 1.0;
+        let moved = rig.pass(&view, vec![Event::PointerMoved(item.center())]);
+        assert!(moved.out.tip.is_none(), "{what}: not in the dwell");
+        let asked = moved.full.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+        assert_eq!(asked, Some(Duration::ZERO), "{what}: egui's own ask is at once, the dwell folded into it");
+        let wake = moved.out.wake.unwrap_or_else(|| panic!("{what}: the dwell's wake from the move's pass")).as_secs_f64();
+        assert!((wake - dwell).abs() < 1e-6, "{what}: the whole dwell: {wake}");
+        rig.time += wake;
+        let shot = rig.pass(&view, Vec::new());
+        let tip = shot.out.tip.unwrap_or_else(|| panic!("{what}: shown on the wake"));
+        assert_eq!(shot.out.wake, None, "{what}: shown, no wake");
+        rig.time += 0.05;
+        let nudged = rig.pass(&view, vec![Event::PointerMoved(item.center() + vec2(1.0, 0.0))]);
+        assert_eq!(nudged.out.tip, Some(tip), "{what}: a point's move on the item keeps it up");
+    }
+
+    rig.time += 10.0;
+    let _ = rig.pass(&view, vec![Event::PointerMoved(away)]);
+    let start = rig.time + 1.0;
+    let step = (slots.viz.width() - 4.0) / 5.0;
+    for k in 0..5 {
+        rig.time = start + 0.1 * f64::from(k);
+        let at = pos2(slots.viz.min.x + 2.0 + step * k as f32, slots.viz.center().y);
+        let shot = rig.pass(&view, vec![Event::PointerMoved(at)]);
+        assert!(shot.out.tip.is_none(), "sweeping, {k}: not yet");
+        let wake = shot.out.wake.expect("a wake").as_secs_f64();
+        assert!((wake - (dwell - 0.1 * f64::from(k))).abs() < 1e-6, "sweeping, {k}: the dwell from the pointer's coming on: {wake}");
+    }
+    rig.time = start + dwell;
+    let shot = rig.pass(&view, vec![Event::PointerMoved(pos2(slots.viz.max.x - 2.0, slots.viz.center().y))]);
+    assert!(shot.out.tip.is_some(), "ripe the dwell after the pointer came on, though it never stood still");
+}
+
 /// The chrome's pass over the Gui's last frame, as the host runs it, with
 /// `events`: its runs' presses added up, the last run's spots and scroll.
 fn chrome_pass(ctx: &egui::Context, gui: &Gui, cells: Cells, events: Vec<Event>) -> Out {

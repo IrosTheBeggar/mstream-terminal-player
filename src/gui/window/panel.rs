@@ -456,17 +456,19 @@ impl Panel {
     /// `grid` its screen: `run` draws it once (egui may run it again) on a
     /// `Ui` the whole window, handed where the cells stand ([`Cells`]),
     /// and says where each part of its paint stands with what to cut out of
-    /// it ([`Part`]); a primitive in none of them is cut out of `every`, the
-    /// safe side. From this pass to the next, a primary press on the cells
-    /// `claims` holds is the chrome's ([`Panel::route`]). The paint waits
-    /// on the board for the post-processor, after the page's. None before
-    /// there is a window, when the face draws the chrome in cells.
+    /// it ([`Part`]), and how long until a tooltip's dwell ends, if one is
+    /// waiting ([`chrome_repaint`]); a primitive in none of the parts is cut
+    /// out of `every`, the safe side. From this pass to the next, a primary
+    /// press on the cells `claims` holds is the chrome's ([`Panel::route`]).
+    /// The paint waits on the board for the post-processor, after the
+    /// page's. None before there is a window, when the face draws the
+    /// chrome in cells.
     pub(crate) fn show_chrome(
         &self,
         grid: Rect,
         claims: Claims,
         every: &[Rect],
-        run: &mut dyn FnMut(&mut egui::Ui, Cells) -> Vec<Part>,
+        run: &mut dyn FnMut(&mut egui::Ui, Cells) -> (Vec<Part>, Option<Duration>),
     ) -> Option<ChromeShown> {
         let page_on = self.board.panel_on_screen();
         let mut live = self.lock();
@@ -485,14 +487,14 @@ impl Panel {
         let cells = Cells { points: egui::Rect::from_min_max(px.min / ppp, px.max / ppp), grid, ppp };
         let mut input = state.take_egui_input(&window);
         input.screen_rect = Some(cells.points);
-        let mut parts = Vec::new();
-        let mut output = chrome.ctx.run_ui(input, |ui| parts = run(ui, cells));
+        let (mut parts, mut wake) = (Vec::new(), None);
+        let mut output = chrome.ctx.run_ui(input, |ui| (parts, wake) = run(ui, cells));
         chrome.pending = false;
         let shown = chrome.ctx.memory(|memory| memory.areas().visible_layer_ids());
         let appeared = shown.iter().any(|layer| !areas.contains(layer));
         *areas = shown.into_iter().collect();
         let delay = output.viewport_output.get(&egui::ViewportId::ROOT).map(|viewport| viewport.repaint_delay);
-        chrome.repaint_at = chrome_repaint(delay, appeared).map(|delay| Instant::now() + delay);
+        chrome.repaint_at = chrome_repaint(delay, appeared, wake).map(|delay| Instant::now() + delay);
         // egui shows the hand over its own rows wherever they are; the cells
         // under a hole cut for an overlay of theirs have no control of the
         // chrome's, so the hand stops at what the chrome claims.
@@ -516,16 +518,21 @@ impl Panel {
 }
 
 /// When the chrome's next pass is owed, after one whose egui asked for one
-/// after `delay`: a delay egui gave is kept (a tooltip's dwell), and the
-/// immediate pass it asks after every pass that had input is not, since a
-/// move draws a frame of the GUI's anyway and egui hit-tests it against
-/// this pass's paint; but where an area `appeared` in this pass, which egui
-/// laid out unseen, the next pass is owed at once, to show it.
-fn chrome_repaint(delay: Option<Duration>, appeared: bool) -> Option<Duration> {
+/// after `delay` and whose faces said a tooltip's dwell ends after `wake`:
+/// the sooner of the two. A delay egui gave is kept, and the immediate pass
+/// it asks after every pass that had input is not, since a move draws a
+/// frame of the GUI's anyway and egui hit-tests it against this pass's
+/// paint; but egui keeps only the least delay a pass asks for, so the
+/// dwell a pointer that came to rest in this pass started is lost in that
+/// immediate ask (and in the one egui makes once more after it), and only
+/// `wake` says it. Where an area `appeared` in this pass, which egui laid
+/// out unseen, the next pass is owed at once, to show it.
+fn chrome_repaint(delay: Option<Duration>, appeared: bool, wake: Option<Duration>) -> Option<Duration> {
     if appeared {
         return Some(Duration::ZERO);
     }
-    delay.filter(|delay| !delay.is_zero() && *delay < Duration::from_secs(60))
+    let asked = delay.filter(|delay| !delay.is_zero() && *delay < Duration::from_secs(60));
+    asked.into_iter().chain(wake).min()
 }
 
 /// `jobs`, each primitive cut out of the holes of the part it belongs to:
@@ -1501,22 +1508,31 @@ mod tests {
     }
 
     /// The chrome asks for no pass for the input it just heard: the GUI
-    /// draws a frame for every move anyway. It keeps a delay egui gave (a
-    /// tooltip's dwell), and asks at once where an area came up unseen.
+    /// draws a frame for every move anyway. It keeps a delay egui gave and
+    /// the wake a tooltip's dwell gives, the sooner of the two, and asks at
+    /// once where an area came up unseen.
     #[test]
     fn the_chrome_asks_for_a_pass_only_for_a_dwell_or_an_area_that_came_up() {
-        assert_eq!(chrome_repaint(Some(Duration::ZERO), false), None, "the pass after input: none");
-        assert_eq!(chrome_repaint(None, false), None);
-        assert_eq!(chrome_repaint(Some(Duration::from_millis(500)), false), Some(Duration::from_millis(500)), "the dwell kept");
-        assert_eq!(chrome_repaint(Some(Duration::MAX), false), None, "never is never");
-        assert_eq!(chrome_repaint(Some(Duration::ZERO), true), Some(Duration::ZERO), "an area laid out unseen");
-        // egui's own: a pass that heard a move asks at once, and one that
-        // shows an area for the first time sees it among the visible ones.
+        let (half, tenth) = (Duration::from_millis(500), Duration::from_millis(100));
+        assert_eq!(chrome_repaint(Some(Duration::ZERO), false, None), None, "the pass after input: none");
+        assert_eq!(chrome_repaint(None, false, None), None);
+        assert_eq!(chrome_repaint(Some(half), false, None), Some(half), "a delay egui gave, kept");
+        assert_eq!(chrome_repaint(Some(Duration::MAX), false, None), None, "never is never");
+        assert_eq!(chrome_repaint(Some(Duration::ZERO), true, None), Some(Duration::ZERO), "an area laid out unseen");
+        assert_eq!(chrome_repaint(Some(Duration::ZERO), false, Some(half)), Some(half), "the dwell's wake through egui's immediate ask");
+        assert_eq!(chrome_repaint(Some(Duration::MAX), false, Some(half)), Some(half));
+        assert_eq!(chrome_repaint(Some(tenth), false, Some(half)), Some(tenth), "the sooner");
+        assert_eq!(chrome_repaint(Some(half), false, Some(tenth)), Some(tenth), "the sooner");
+        // egui's own: a pass that heard a move asks at once, whatever its
+        // widgets asked for after a while, and so does the pass after it; one
+        // that shows an area for the first time sees it among the visible
+        // ones.
         let ctx = egui::Context::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
         let run = |events: Vec<egui::Event>, area: bool| {
             let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
             let mut out = ctx.run_ui(input, |ui| {
+                ui.ctx().request_repaint_after(half);
                 if area {
                     egui::Area::new(egui::Id::new("probe-area")).fixed_pos(pos2(10.0, 10.0)).show(ui.ctx(), |ui| ui.label("x"));
                 }
@@ -1525,9 +1541,11 @@ mod tests {
             let visible = ctx.memory(|m| m.areas().visible_layer_ids());
             (out.viewport_output[&egui::ViewportId::ROOT].repaint_delay, visible)
         };
+        let _ = run(Vec::new(), false);
         let (delay, before) = run(vec![egui::Event::PointerMoved(pos2(5.0, 5.0))], false);
-        assert_eq!(delay, Duration::ZERO, "egui asks at once after a move");
-        let (_, after) = run(Vec::new(), true);
+        assert_eq!(delay, Duration::ZERO, "egui asks at once after a move, the half second lost");
+        let (delay, after) = run(Vec::new(), true);
+        assert_eq!(delay, Duration::ZERO, "and once more");
         assert!(after.iter().any(|layer| !before.contains(layer)), "the area is visible in its first pass");
     }
 

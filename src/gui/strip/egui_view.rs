@@ -94,6 +94,10 @@ pub(crate) struct StripOut {
     pub items: Vec<(egui::Rect, Act)>,
     /// The tooltip's box, while one shows: it cuts no hole and takes none.
     pub tip: Option<egui::Rect>,
+    /// While the pointer rests on an item whose tooltip waits out its
+    /// dwell, how long until it shows: the pass the host owes it then
+    /// (`studio::Tip`).
+    pub wake: Option<Duration>,
 }
 
 /// The strip in row 0, on `ui` (its child over row 0, clipped to it, the
@@ -137,7 +141,8 @@ pub(crate) fn show(ui: &mut Ui, view: &StripView, cx: &StripCtx) -> StripOut {
     let x = viz.min.x + PAD + LAMP + LAMP_GAP;
     studio::text(ui, pos2(x, mid), &view.viz.label, font, ink, viz.max.x - x, Align2::LEFT_CENTER);
     if let Some(response) = item.response.as_ref().filter(|_| item.hot) {
-        out.tip = studio::tip_keyed(ui, response, &view.viz.tip, view.key_hints, cx.since_key, pal);
+        let tip = studio::tip_keyed(ui, response, &view.viz.tip, view.key_hints, cx.since_key, pal);
+        (out.tip, out.wake) = (tip.shown, tip.wake);
     }
 
     let plus = slots.plus;
@@ -151,7 +156,8 @@ pub(crate) fn show(ui: &mut Ui, view: &StripView, cx: &StripCtx) -> StripOut {
     if let Some(response) = item.response.as_ref().filter(|_| item.hot)
         && out.tip.is_none()
     {
-        out.tip = studio::tip_under(response, &view.add_tip, cx.since_key, pal);
+        let tip = studio::tip_under(response, &view.add_tip, cx.since_key, pal);
+        (out.tip, out.wake) = (tip.shown, tip.wake);
     }
 
     if let (Some(server), Some(label)) = (&view.server, &slots.label) {

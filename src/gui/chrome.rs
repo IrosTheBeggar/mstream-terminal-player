@@ -282,13 +282,15 @@ pub(super) struct Views<'a> {
 /// the act a face reported for it (egui may run a pass twice, and only the
 /// first run hears them, so these add up across runs); and what describes
 /// the screen, which is the last run's: the items, the menu's scroll, the
-/// parts of the paint.
+/// parts of the paint, and when a strip tooltip's dwell ends, the pass it
+/// is owed then.
 #[derive(Default)]
 pub(super) struct Out {
     pub presses: Vec<(egui::Pos2, Option<Act>)>,
     pub spots: Vec<(egui::Rect, Act)>,
     pub scroll: Option<usize>,
     pub parts: Vec<Part>,
+    pub wake: Option<std::time::Duration>,
 }
 
 /// The pass's body on `ui`, the whole window: the strip in row 0, the bar
@@ -302,6 +304,7 @@ pub(super) fn draw(ui: &mut egui::Ui, cells: Cells, views: &Views, out: &mut Out
     out.spots.clear();
     out.parts.clear();
     out.scroll = None;
+    out.wake = None;
     let presses = studio::pass_presses(ui);
     let pal = Pal::now();
     studio::style_once(ui.ctx(), &pal);
@@ -319,6 +322,7 @@ pub(super) fn draw(ui: &mut egui::Ui, cells: Cells, views: &Views, out: &mut Out
         if let Some(tip) = shown.tip {
             out.parts.push(Part { rect: tip, holes: Vec::new() });
         }
+        out.wake = shown.wake;
         out.spots.extend(shown.items);
         acts.extend(shown.act);
     }
@@ -420,7 +424,7 @@ pub(super) fn host(frame: &Frame, gui: &mut Gui) {
             presses.extend(run.presses.into_iter().map(|(at, act)| (cells.under(at), act)));
             spots = run.spots.into_iter().map(|(rect, act)| (cells_of(cells, rect), act)).collect();
             scroll = run.scroll;
-            run.parts
+            (run.parts, run.wake)
         })
     };
     // Appended, not set: a pass run outside the loop's frame (the script's
