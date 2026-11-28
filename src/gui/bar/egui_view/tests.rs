@@ -242,8 +242,9 @@ fn the_bar_at_rest_draws_its_words_in_their_type_tone_and_cells() {
     let (color, font, at) = p.drawn("5:02");
     assert_eq!((color, font), (pal.dim, studio::mono(12.0)), "the total");
     assert!(near(at.min.x, rect_of(&p, seek.total).min.x), "at its slot's left: {at:?}");
+    // Its size is the face's to settle (the_auto_dj_word_stands_whole_in_its_half).
     let (color, font, _) = p.drawn("AUTO-DJ");
-    assert_eq!((color, font), (pal.dim, studio::strong(12.5)), "the cells' word in spaced capitals");
+    assert_eq!((color, font.family), (pal.dim, studio::strong(12.5).family), "the cells' word in spaced capitals");
     let (color, font, at) = p.drawn("70%");
     assert_eq!((color, font), (pal.dim, studio::mono(12.0)), "the readout");
     assert!(near(at.max.x, rect_of(&p, p.layout.volume.readout).max.x), "at its slot's right: {at:?}");
@@ -339,6 +340,47 @@ fn each_state_wears_its_look() {
     let p = paint(&mut gui);
     assert_eq!(p.chevron(chevron_at), (false, pal.text), "quick config up: down, lit");
     assert_eq!(p.chevron(rect_of(&p, p.layout.card.chevron).center()), (true, pal.dim), "the queue folded: up");
+}
+
+/// The split's word stands whole in its half whatever the face: at the
+/// board's 12.5 points where the face's capitals fit beside the LED there
+/// (Segoe UI's semibold does), else smaller, never cut to "AUTO-D…" as a
+/// wide bold's (DejaVu Sans Bold, Linux's) is at 12.5 in the half's cells;
+/// the LED its gap before it, both inside the half; at the opening size, the
+/// floor and wide, scaled.
+#[test]
+fn the_auto_dj_word_stands_whole_in_its_half() {
+    let _en = crate::setup::tests::in_locale("en");
+    let pal = Pal::now();
+    let ctx = context();
+    let mut whole = 0.0;
+    let mut out = ctx.run_ui(egui::RawInput::default(), |ui| whole = studio::caps_width(ui, "AUTO-DJ", WORD_SIZE));
+    // The context's first pass hands over the font atlas: let go of it.
+    out.textures_delta.clear();
+    for (w, h, ppp) in [(100, 30, 1.0), (100, 24, 1.25), (160, 50, 2.0)] {
+        let mut gui = bar_gui();
+        let p = paint_in(&ctx, &mut gui, w, h, ppp);
+        let frame = framed(rect_of(&p, p.layout.dj.frame));
+        let rule = rule_x(&p);
+        let word = p.shapes.iter().find_map(|c| match &c.shape {
+            Shape::Text(text) if text.galley.text() == "AUTO-DJ" => Some(text.clone()),
+            _ => None,
+        });
+        let word = word.expect("the word");
+        let set: String = word.galley.rows.iter().flat_map(|row| row.row.glyphs.iter().map(|glyph| glyph.chr)).collect();
+        assert_eq!(set, "AUTO-DJ", "{w}×{h}: the word whole, in a face whose capitals take {whole} points at {WORD_SIZE}");
+        let at = egui::Rect::from_min_size(word.pos, word.galley.size());
+        assert!(at.max.x <= rule - 1.0, "{w}×{h}: short of the rule at {rule}: {at:?}");
+        let lamps: Vec<egui::Rect> = p.filled(pal.unlit).into_iter().filter(|r| frame.contains_rect(*r) && r.size() == vec2(LAMP, LAMP)).collect();
+        let [lamp] = lamps[..] else { panic!("{w}×{h}: one LED in the split: {lamps:?}") };
+        assert!(lamp.min.x >= frame.min.x + 1.0, "{w}×{h}: the LED inside the frame: {lamp:?} in {frame:?}");
+        assert!((at.min.x - (lamp.max.x + LAMP_GAP)).abs() <= 0.5, "{w}×{h}: the word {LAMP_GAP} points after the LED: {at:?}, {lamp:?}");
+        let size = word.galley.job.sections[0].format.font_id.size;
+        assert!(size <= WORD_SIZE, "{w}×{h}: never over the board's size: {size}");
+        if whole + 20.0 <= rule - (frame.min.x + 1.0) {
+            assert_eq!(size, WORD_SIZE, "{w}×{h}: the board's size where the face's capitals fit");
+        }
+    }
 }
 
 /// Idle: the gold hairline across the whole row, a column wider each side

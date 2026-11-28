@@ -147,11 +147,11 @@ fn framed(band: egui::Rect) -> egui::Rect {
 /// halves and a hairline between them at the middle of the rule's column,
 /// in the strong edge, or the ok green while the DJ is armed. The word's
 /// half: its LED, unlit or ok, then the cells' word in spaced capitals, dim
-/// or ok. The chevron's half: the chevron up while quick config is down and
-/// down while it is up, dim, in the text colour while it is up. Each half
-/// takes its own raised fill under the pointer, an idle word going to the
-/// text colour (the cells light the whole frame from the word's half:
-/// ruling R18).
+/// or ok, whole in any face ([`word_size`]). The chevron's half: the chevron
+/// up while quick config is down and down while it is up, dim, in the text
+/// colour while it is up. Each half takes its own raised fill under the
+/// pointer, an idle word going to the text colour (the cells light the whole
+/// frame from the word's half: ruling R18).
 fn split(ui: &Ui, at: &SplitLayout, view: &BarView, cx: &BarCtx, hot: Option<&Act>) {
     let pal = cx.pal;
     let frame = framed(cx.cells.rect(at.frame));
@@ -178,14 +178,30 @@ fn split(ui: &Ui, at: &SplitLayout, view: &BarView, cx: &BarCtx, hot: Option<&Ac
         (false, true) => pal.text,
         (false, false) => pal.dim,
     };
-    let words_w = studio::caps_width(ui, word, WORD_SIZE);
+    let size = word_size(ui, word, rule - inner.min.x);
+    let words_w = studio::caps_width(ui, word, size);
     let left = ((frame.min.x + rule) / 2.0 - (LAMP + LAMP_GAP + words_w) / 2.0).max(inner.min.x + 1.0);
     let lamp = if view.autodj { pal.ok } else { pal.unlit };
-    studio::led(ui, pos2(left + LAMP / 2.0, studio::led_mid(ui, mid, &studio::strong(WORD_SIZE), true)), lamp);
+    studio::led(ui, pos2(left + LAMP / 2.0, studio::led_mid(ui, mid, &studio::strong(size), true)), lamp);
     let x = left + LAMP + LAMP_GAP;
-    studio::caps(ui, pos2(x, mid), word, WORD_SIZE, ink, (rule - 2.0 - x).max(1.0), Align2::LEFT_CENTER);
+    studio::caps(ui, pos2(x, mid), word, size, ink, (rule - 2.0 - x).max(1.0), Align2::LEFT_CENTER);
     let chevron = if view.quick_open || chevron_hot { pal.text } else { pal.dim };
     studio::chevron(ui, pos2((rule + frame.max.x) / 2.0, mid), chevron, !view.quick_open);
+}
+
+/// The size the split's `word` is set at in a word's half `half` points
+/// wide, from its frame's inside to the rule: the board's [`WORD_SIZE`]
+/// where the face's capitals fit beside the LED there, else as much smaller
+/// as lets them stand whole. The half is as wide as its cells whatever the
+/// face, and a wide bold (DejaVu Sans Bold, Linux's) sets the board's 12.5
+/// points wider than it holds, which egui would cut to "AUTO-D…". The rule's
+/// own point and a point each side of the words are kept, and one spare,
+/// since a size scaled down sets its letters on pixels a little apart from
+/// the share it was scaled by.
+fn word_size(ui: &Ui, word: &str, half: f32) -> f32 {
+    let room = half - 1.0 - 2.0 - LAMP - LAMP_GAP - 1.0;
+    let whole = studio::caps_width(ui, word, WORD_SIZE);
+    if whole <= room || room <= 0.0 { WORD_SIZE } else { WORD_SIZE * room / whole }
 }
 
 /// The transport group (Main's TRANSPORT GROUP, D12), each control's frame
