@@ -648,6 +648,16 @@ fn it_stands_in_the_room_at_the_floor_squeezed_and_wide() {
     for words in ["PLAY FROM", "host:3000", "loft:3000", "Seeds", "Smart filters", "All Auto DJ settings"] {
         assert!(drew(&pass.out, words), "{words:?} at the floor");
     }
+    // The tips row off: the bar a row lower, and its foot with it.
+    gui.config.gui.key_hints = false;
+    gui.ui.key_hints = false;
+    let pass = floor.settle(&mut gui);
+    let low = super::super::view(&gui, floor.cells.grid).expect("up");
+    assert_eq!(low.bar_top, 19, "the floor's bar on the last rows");
+    assert_eq!(pass.frame().max.y, floor.seek(&low) - FOOT, "its foot over the seek row");
+    assert_eq!(pass.frame().height(), 2.0 * PAD + 10.0 * ROW_H + 3.0 * GAP_H, "every line");
+    gui.config.gui.key_hints = true;
+    gui.ui.key_hints = true;
 
     let squeezed = Probe::sized(100, 24, vec2(400.0, 192.0));
     let pass = squeezed.settle(&mut gui);
@@ -666,4 +676,106 @@ fn it_stands_in_the_room_at_the_floor_squeezed_and_wide() {
     assert!(drew(&pass.out, "All Auto DJ settings"));
     let tiny = Probe::sized(100, 24, vec2(100.0, 48.0));
     let _ = tiny.settle(&mut gui);
+}
+
+/// Sonic similarity switched off: the empty tick box with its dim edge,
+/// its name in the plain face and no value, as the cells show none; the
+/// match bar and Seeds gone with it and the frame shorter by them, its foot
+/// where it was. A press on it switches it back on, and they come back.
+#[test]
+fn the_switch_turned_off_has_no_value_and_takes_its_bar_and_seeds_with_it() {
+    let _en = english();
+    let probe = Probe::new(100, 30);
+    let pal = Pal::now();
+    let mut gui = quick_gui(&[]);
+    gui.act(Act::DjQuick(QuickAct::Press(QStop::Sonic)));
+    assert!(!gui.app.dj.sonic && gui.dj.quick.is_some());
+    let pass = probe.settle(&mut gui);
+    let (out, frame) = (&pass.out, pass.frame());
+    assert!(drew(out, "Sonic similarity") && !semibold(out, "Sonic similarity"), "its name plain while off");
+    assert_eq!(color_of(out, "Sonic similarity"), pal.text, "live, not resting");
+    assert!(!texts(out).iter().any(|text| text.galley.text().contains('%')), "no value while off");
+    let boxed = |edge: Color32| {
+        out.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Rect(rect) if rect.rect.size() == Vec2::splat(studio::BOX) && rect.stroke.color == edge))
+    };
+    let ticked = out.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Path(path) if !path.closed));
+    assert!(boxed(pal.dim) && !boxed(pal.ok) && !ticked, "the box empty, its edge dim");
+    assert!(!drew(out, "Seeds") && segments(out, pal.accent, &pal) == (0, 0), "no bar, no Seeds");
+    assert_eq!(frame.height(), 2.0 * PAD + 3.0 * ROW_H + 2.0 * GAP_H);
+    assert_eq!(frame.max.y, probe.seek(&view(&gui, probe.cells.grid).expect("up")) - FOOT, "its foot where it was");
+    let at = rect_of(out, "Sonic similarity").center();
+    assert_eq!(probe.click(&mut gui, at), Some(Act::DjQuick(QuickAct::Press(QStop::Sonic))));
+    assert!(gui.app.dj.sonic && gui.dj.quick.is_some(), "on again; it stays up");
+    let pass = probe.settle(&mut gui);
+    assert!(drew(&pass.out, "Seeds") && drew(&pass.out, "55%") && segments(&pass.out, pal.accent, &pal) == (13, 12));
+}
+
+/// Past four servers, Play from's row works what the cells' row works
+/// there, across the whole row, off its words as on them: the Play from
+/// sheet opens and quick config goes, as a press on the cells' row does.
+#[test]
+fn play_from_past_four_opens_its_sheet_as_the_cells_row_does() {
+    let _en = english();
+    let probe = Probe::new(100, 30);
+    let mut gui = quick_gui(&[HOST, ATTIC, MORE[0], MORE[1], MORE[2]]);
+    let act = Act::DjQuick(QuickAct::Press(QStop::PlayFrom));
+    assert_eq!(cells_act(&probe, &mut gui, "Play from"), Some(act.clone()), "the cells' row");
+    let pass = probe.settle(&mut gui);
+    let (frame, row) = (pass.frame(), pass.spot(&act));
+    assert!(near(row.min.x, frame.min.x + PAD - REACH) && near(row.max.x, frame.max.x - PAD + REACH), "the whole row: {row:?}");
+    assert!(near(rect_of(&pass.out, "host:3000").max.x, frame.max.x - PAD - VALUE_END), "its value short of its pointer");
+    let at = pos2(rect_of(&pass.out, "Play from").max.x + VALUE_GAP, row.center().y);
+    assert!(!rect_of(&pass.out, "host:3000").contains(at), "between the words and the value");
+    assert_eq!(probe.click(&mut gui, at), Some(act));
+    assert!(gui.dj.quick.is_none() && gui.dj.sheet.as_ref().is_some_and(|open| open.sheet == crate::gui::dj::Sheet::PlayFrom), "the Play from sheet");
+}
+
+/// In Japanese, Chinese and German, measured in points: the tallest case
+/// stands whole at the floor with the tips row on; the switch's gold reason
+/// and Smart filters' chosen moods in the ok green stand whole at their
+/// ends, each name short of its value; and on a server that can do
+/// neither, both reasons stand whole where the board ends them, the names
+/// giving way.
+#[test]
+fn in_cjk_and_german_every_value_and_reason_stands_whole_beside_its_name() {
+    let Some(_) = crate::setup::tests::in_own_process(&["ja", "zh", "de"]) else { return };
+    let floor = Probe::new(100, 24);
+    let pal = Pal::now();
+    let mut gui = quick_gui(&[HOST, ATTIC, MORE[0], MORE[1]]);
+    gui.config.gui.key_hints = true;
+    gui.ui.key_hints = true;
+    gui.app.dj.moods = crate::api::types::MoodFilter::NONE.press(crate::api::types::MoodScale::Valence, "happy");
+    gui.app.queue.items = vec![Queued { origin: Origin { server: HOST.into(), peer: None }, dj: None, track: Track { filepath: "a.mp3".into(), metadata: Default::default() } }];
+    gui.act(Act::DjStartStop);
+    gui.app.lane.sonic_drop = Some(DjNote::SonicRange);
+    let pass = floor.settle(&mut gui);
+    let (out, frame) = (&pass.out, pass.frame());
+    assert_eq!(frame.height(), 2.0 * PAD + 10.0 * ROW_H + 3.0 * GAP_H, "every line");
+    assert!(frame.min.y >= 16.0, "under the strip: {frame:?}");
+    let sonic = rust_i18n::t!("gui.dj.sonic").to_string();
+    let strict = format!("! {}", rust_i18n::t!("gui.dj.too_strict"));
+    let smart = rust_i18n::t!("gui.dj.smart").to_string();
+    let (moods, _) = crate::gui::dj::moods_value(gui.app.dj.moods);
+    for words in [&rust_i18n::t!("gui.dj.play_from").to_uppercase(), &sonic, &strict, &smart, &moods, &rust_i18n::t!("gui.dj.all_settings").to_string()] {
+        assert!(drew(out, words) && !text_of(out, words).galley.elided, "{words:?} whole");
+    }
+    assert_eq!((color_of(out, &strict), color_of(out, &moods)), (pal.gold, pal.ok));
+    assert!(near(rect_of(out, &strict).max.x, frame.max.x - PAD) && near(rect_of(out, &moods).max.x, frame.max.x - PAD - VALUE_END));
+    assert!(rect_of(out, &sonic).max.x + VALUE_GAP <= rect_of(out, &strict).min.x + 0.5 && rect_of(out, &smart).max.x + VALUE_GAP <= rect_of(out, &moods).min.x + 0.5, "each name short of its value");
+
+    let probe = Probe::new(100, 30);
+    let mut gui = quick_gui(&[]);
+    let mut old = info("6.10.0");
+    old.discovery = false;
+    old.mood_filters = false;
+    probed(&mut gui, old);
+    let pass = probe.settle(&mut gui);
+    let (out, frame) = (&pass.out, pass.frame());
+    let needs = rust_i18n::t!("gui.dj.needs_server", version = crate::dj::floor_label(crate::dj::FLOOR_SONIC)).to_string();
+    let none = rust_i18n::t!("gui.dj.no_mood_data").to_string();
+    for words in [&needs, &none] {
+        assert!(!text_of(out, words).galley.elided && color_of(out, words) == pal.dim, "{words:?} whole and dim");
+    }
+    assert!(near(rect_of(out, &needs).max.x, frame.max.x - PAD) && near(rect_of(out, &none).max.x, frame.max.x - PAD - VALUE_END));
+    assert!(rect_of(out, &sonic).max.x + VALUE_GAP <= rect_of(out, &needs).min.x + 0.5 && rect_of(out, &smart).max.x + VALUE_GAP <= rect_of(out, &none).min.x + 0.5, "the names give way");
 }
