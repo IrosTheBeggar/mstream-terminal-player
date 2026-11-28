@@ -122,8 +122,9 @@ pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, page: &Page) -> Drawn {
 
     // Blur is Enter: a press anywhere but on the name being edited keeps
     // the draft before that press does what it does, as the cells' press
-    // does, a name scrolled out of view included.
-    let pressed = ui.input(|i| if i.pointer.primary_pressed() { i.pointer.press_origin() } else { None });
+    // does, a name scrolled out of view included, and a tap's too, whose
+    // release came in its pass.
+    let pressed = studio::pass_press(ui);
     if wizard.editing.is_some()
         && let Some(at) = pressed
         && field.is_none_or(|field: Rect| !field.contains(at))

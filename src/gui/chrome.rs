@@ -23,9 +23,9 @@
 //!
 //! Each part's paint is cut around the overlays the cells registered after
 //! its slot ([`holes`]), so a modal stays over the bar and the menu stays
-//! over a layer the cells draw under it. Where a part's face is not ready,
-//! there is no window, or `MSTREAM_WINDOW_CELLS=1` set the panel aside, the
-//! cells draw that part as they always have ([`faces`]).
+//! over a layer the cells draw under it. Where there is no window yet, it
+//! has no size, or `MSTREAM_WINDOW_CELLS=1` set the panel aside, the cells
+//! draw every part as they always have ([`faces`]).
 
 use std::time::Instant;
 
@@ -103,21 +103,17 @@ impl ChromeUi {
     }
 }
 
-/// Which of the chrome's parts egui draws this frame: those whose face is
-/// ready, once the window's panel would run a pass (a window attached, of
-/// some size); none without a panel, which `MSTREAM_WINDOW_CELLS=1` sets
-/// aside. The strip covers its tooltips and the server menu.
+/// Which of the chrome's parts egui draws this frame: every one, once the
+/// window's panel would run a pass (a window attached, of some size); none
+/// without a panel, which `MSTREAM_WINDOW_CELLS=1` sets aside. The strip
+/// covers its tooltips and the server menu. A test may force any of them.
 pub(super) fn faces(gui: &Gui) -> Faces {
     #[cfg(test)]
     if let Some(forced) = gui.chrome.forced {
         return forced;
     }
     let ready = gui.panel.as_ref().is_some_and(|panel| panel.ready());
-    Faces {
-        strip: ready && strip::egui_view::READY,
-        bar: ready && bar::egui_view::READY,
-        quick: ready && quick::egui_view::READY,
-    }
+    Faces { strip: ready, bar: ready, quick: ready }
 }
 
 /// The strip's slot in the cells' draw order, where egui draws it instead.
@@ -298,24 +294,15 @@ pub(super) struct Out {
 /// The pass's body on `ui`, the whole window: the strip in row 0, the bar
 /// in its rows, each in a child clipped to its cells on the ground, then
 /// the open popup over them. The presses are read off the pass's events
-/// first, as a tap's press and release may come in one pass; each is
-/// paired with the act a face reported (none where it pressed nothing, a
-/// gap of row 0 or a popup's frame). Testable without a window: a test
-/// runs it in `Context::run_ui`.
+/// first (`studio::pass_presses`), as a tap's press and release may come
+/// in one pass; each is paired with the act a face reported (none where it
+/// pressed nothing, a gap of row 0 or a popup's frame). Testable without a
+/// window: a test runs it in `Context::run_ui`.
 pub(super) fn draw(ui: &mut egui::Ui, cells: Cells, views: &Views, out: &mut Out) {
-    use egui::{Event, PointerButton};
     out.spots.clear();
     out.parts.clear();
     out.scroll = None;
-    let presses: Vec<egui::Pos2> = ui.input(|i| {
-        i.events
-            .iter()
-            .filter_map(|event| match *event {
-                Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => Some(pos),
-                _ => None,
-            })
-            .collect()
-    });
+    let presses = studio::pass_presses(ui);
     let pal = Pal::now();
     studio::style_once(ui.ctx(), &pal);
     studio::dwell(ui.ctx());

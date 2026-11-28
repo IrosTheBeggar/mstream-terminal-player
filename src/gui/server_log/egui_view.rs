@@ -37,7 +37,7 @@ use rust_i18n::t;
 use super::{Drawn, Fit, LATER_LINES, Level, LogAct, LogUi, Look, clock, counted, needs_bar, view};
 use crate::gui::window::studio::{
     Icon, Pal, THUMB_MIN, THUMB_REST, THUMB_W, TOOL_H, Tool, body, caps, caps_width, led, led_mid, mono, panel, ring, square,
-    strong, text, tool_button, tool_button_width, width_of,
+    strong, text, tip_words, tool_button, tool_button_width, width_of,
 };
 use crate::kit::Grip;
 
@@ -421,15 +421,6 @@ fn paint_bar(ui: &Ui, id: Id, log: &LogUi, at: &Geom, drawn: &[Drawn], inert: bo
     ui.painter().rect_filled(rect, CornerRadius::same((THUMB_W / 2.0) as u8), color);
 }
 
-/// What a header tooltip says: the whole of it while key names are shown,
-/// else the words before its key's tail, as the cells' `tip_keyed` cuts it.
-fn keyed(tip: &str, key_hints: bool) -> String {
-    if key_hints {
-        return tip.to_string();
-    }
-    tip.rsplit_once(" — ").map_or(tip, |(label, _)| label).to_string()
-}
-
 /// The header: the follow state at the left — the ok green's lit LED and
 /// "following", or "paused" by an unlit one, a control that follows again —
 /// and at the right copy and download, each drawn whole or not at all in
@@ -482,7 +473,9 @@ fn header(ui: &Ui, id: Id, head: Rect, log: &LogUi, look: &Look, key_hints: bool
             (response, t!("gui.admin.log.tip_download"), kind)
         };
         if kind == Tool::Live {
-            let response = response.on_hover_text(keyed(&tip, key_hints));
+            // Whole while key names are shown, else the words before its
+            // key's tail, as the cells' `tip_keyed` cuts it.
+            let response = response.on_hover_text(tip_words(&tip, key_hints));
             if response.clicked() {
                 acts.push(if k == 0 { LogAct::CopyLines } else { LogAct::Download });
             }

@@ -1821,9 +1821,9 @@ fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     // The size the hit zones outside a draw reason from — a drawable one.
     gui.last_width = area.width;
     gui.last_height = area.height;
-    // In the GUI's own window egui draws the chrome's parts whose faces are
-    // ready, at the frame's end (src/gui/chrome.rs); where it does, the
-    // cells mark the part's slot in their draw order instead of drawing it.
+    // In the GUI's own window egui draws the chrome's parts at the frame's
+    // end (src/gui/chrome.rs); where it does, the cells mark the part's
+    // slot in their draw order instead of drawing it.
     #[cfg(feature = "window")]
     {
         gui.faces = chrome::faces(gui);

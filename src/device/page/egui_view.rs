@@ -374,9 +374,8 @@ pub(super) fn unled(label: &str) -> (&str, bool) {
 /// GUI names keys, as the cells' surface registers it.
 pub(super) fn close_tip(ui: &Ui, id: Id, face: &Face) {
     if let Some(close) = ui.ctx().read_response(id.with("close")) {
-        let tip = t!("path_modal.tip_close").to_string();
-        let tip = if face.key_hints { tip } else { tip.rsplit_once(" — ").map_or(tip.clone(), |(words, _)| words.to_string()) };
-        let _ = close.on_hover_text(tip);
+        let tip = t!("path_modal.tip_close");
+        let _ = close.on_hover_text(studio::tip_words(&tip, face.key_hints));
     }
 }
 

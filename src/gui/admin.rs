@@ -798,14 +798,9 @@ struct LogFace<'a> {
 /// egui forgets where a press began once its release is in.
 #[cfg(feature = "window")]
 fn run_parts(ui: &mut egui::Ui, parts: &Parts, room: Option<&mut Box<dyn HostedRoom>>, log: Option<LogFace>) -> Seen {
-    use egui::{Align, Event, Layout as Flow, PointerButton, UiBuilder};
+    use egui::{Align, Layout as Flow, UiBuilder};
     let points = ui.max_rect();
-    let press = ui.input(|i| {
-        i.events.iter().rev().find_map(|event| match *event {
-            Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => Some(pos),
-            _ => None,
-        })
-    });
+    let press = super::window::studio::pass_press(ui);
     let mut seen = Seen { points, ..Seen::default() };
     let child = |ui: &mut egui::Ui, cells: Rect, salt: &str| {
         let rect = points_of(cells, parts.region, points);

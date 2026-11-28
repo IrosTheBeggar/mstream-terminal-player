@@ -300,7 +300,7 @@ fn rings(out: &FullOutput, frame: Rect, pal: &Pal) -> Vec<Rect> {
 
 /// The match bar's segments as drawn: lit, then unlit.
 fn segments(out: &FullOutput, lit: Color32, pal: &Pal) -> (usize, usize) {
-    let segs: Vec<Color32> = fills(out).into_iter().filter(|(rect, _)| rect.size() == vec2(SEG_W, SEG_H)).map(|(_, fill)| fill).collect();
+    let segs: Vec<Color32> = fills(out).into_iter().filter(|(rect, _)| rect.size() == studio::LEVEL_SEG).map(|(_, fill)| fill).collect();
     (segs.iter().filter(|fill| **fill == lit).count(), segs.iter().filter(|fill| **fill == pal.unlit).count())
 }
 

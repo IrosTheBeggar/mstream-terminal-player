@@ -40,7 +40,7 @@ use rust_i18n::t;
 
 use super::cells::footer_hint;
 use super::{Act, LANGS, LOGO_PNG, Modal, Outcome, ScanWidget, Screen, Wizard};
-use crate::gui::window::studio::{self, FORM_BUTTON_H, Pal, Para, body, mono};
+use crate::gui::window::studio::{self, FORM_BUTTON_H, Pal, Para, TIP_W, body, mono};
 use crate::kit::TIP_DELAY;
 
 /// The cells' floor in points: 58 by 20 of the window's 8 by 16 point
@@ -67,10 +67,9 @@ const LOGO_ROOM: f32 = 56.0 + 18.0 + 34.0 + 3.0 * 40.0;
 /// The least the wordmark is drawn at: on a column with less room for it
 /// the screen goes without.
 const LOGO_LEAST: f32 = 24.0;
-/// A tooltip's widest: the boards', the room for the cells' 40 cells of
-/// words, which [`tip`] wraps them at; and its gap to its target, the
-/// boards' 8.
-const TIP_W: f32 = 300.0;
+/// A tooltip's gap to its target, the boards' 8. Its widest is the kit's
+/// [`TIP_W`], the room for the cells' 40 cells of words, which [`tip`]
+/// wraps them at.
 const TIP_GAP: f32 = 8.0;
 
 /// What the view keeps between frames that egui's memory cannot: when a
@@ -154,7 +153,7 @@ struct Drawn {
 pub(super) fn show(ui: &mut Ui, wizard: &mut Wizard, view: &View, composition: &str, key_hints: bool) -> Shown {
     let pal = studio::begin(ui);
     faces(ui.ctx());
-    dwell(ui.ctx());
+    studio::dwell(ui.ctx());
     let full = ui.max_rect();
     let since_key = view.keyed.map(|at| at.elapsed());
     let page = Page { pal, composition, key_hints, since_key, room: parts(full).inner() };
@@ -215,29 +214,14 @@ fn faces(ctx: &egui::Context) {
     ctx.request_repaint();
 }
 
-/// The cells' dwell for every tooltip of this view, set once on egui's
-/// context (the kit's style shows one at once): [`TIP_DELAY`] at rest on
-/// its target, and anew on the next target, as the cells' dwell restarts
-/// on each.
-fn dwell(ctx: &egui::Context) {
-    let id = Id::new("setup-dwell");
-    if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
-        return;
-    }
-    ctx.all_styles_mut(|style| {
-        style.interaction.tooltip_delay = TIP_DELAY.as_secs_f32();
-        style.interaction.tooltip_grace_time = 0.0;
-    });
-    ctx.data_mut(|d| d.insert_temp(id, true));
-}
-
 /// The cells' tooltip for `response`: `words` in the kit's box under the
 /// target's middle, over it where there is no room under it, in the cells'
 /// lines (wrapped at their 40 cells, `kit::wrap_tip`, a word wider than
 /// that, a path, broken between its letters), no wider than the boards'
 /// [`TIP_W`], once the pointer has rested on the target for the cells'
-/// dwell, and never in the dwell after a key, which hides it as it hides
-/// the cells'. The next pass is asked for when that dwell ends.
+/// dwell (the kit's, `studio::dwell`, set on the pass), and never in the
+/// dwell after a key, which hides it as it hides the cells'. The next pass
+/// is asked for when that dwell ends.
 ///
 /// The room under it is the page's inside its margins ([`Page::room`]), as
 /// the boards flip one: under the bar's buttons lies only the page's
@@ -270,8 +254,7 @@ fn tip(page: &Page, response: &Response, words: &str) {
 /// whole while the wizard names its keys, cut at the dash where it does
 /// not, as the cells' surface registers them (`Surface::tip_keyed`).
 fn tip_keyed(page: &Page, response: &Response, words: &str) {
-    let words = if page.key_hints { words } else { words.rsplit_once(" — ").map_or(words, |(label, _)| label) };
-    tip(page, response, words);
+    tip(page, response, studio::tip_words(words, page.key_hints));
 }
 
 // ── The frame ─────────────────────────────────────────────────────────────

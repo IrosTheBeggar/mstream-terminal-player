@@ -19,8 +19,8 @@
 //! names the album (R20). The quit's countdown on the last row stays the
 //! cells' to write: the host cuts the bar round it.
 
-use egui::epaint::{CornerRadius, Mesh, Shape, StrokeKind};
-use egui::{Align2, Color32, FontId, Id, Pos2, Stroke, Ui, Vec2, pos2, vec2};
+use egui::epaint::{CornerRadius, StrokeKind};
+use egui::{Align2, Color32, FontId, Id, Stroke, Ui, pos2, vec2};
 use ratatui::layout::Rect;
 
 use super::{BarLayout, BarView, CardLayout, DJ_WORD, NoteTone, Now, SplitLayout, VolumeLayout, byline, facts, fmt_time, volume_cells, volume_words};
@@ -29,9 +29,6 @@ use crate::gui::dj::QuickAct;
 use crate::gui::window::panel::Cells;
 use crate::gui::window::studio::{self, Mark, Pal};
 use crate::tui::art::Art;
-
-/// Whether egui paints the bar (the host draws the cells bar until it does).
-pub(crate) const READY: bool = true;
 
 /// What the bar's face is handed besides the view and the layout.
 pub(crate) struct BarCtx<'a> {
@@ -50,17 +47,13 @@ const WORD_SIZE: f32 = 12.5;
 /// The split's LED and the room between it and the word.
 const LAMP: f32 = 6.0;
 const LAMP_GAP: f32 = 8.0;
-/// A volume segment, at the head of its cell.
-const SEGMENT: Vec2 = vec2(6.0, 10.0);
 /// The card's lines: the title in the semibold, the byline in the face,
 /// the spec and the facts in the monospace.
 const TITLE_SIZE: f32 = 13.0;
 const BYLINE_SIZE: f32 = 12.5;
 const FIGURE_SIZE: f32 = 11.5;
-/// A rating star's outer radius, its inner one's share of it, from one
-/// star's middle to the next, and the room after the fifth.
-const STAR_R: f32 = 5.0;
-const STAR_INNER: f32 = 0.45;
+/// From one rating star's middle to the next (the kit's stars,
+/// [`studio::STAR_R`] in radius), and the room after the fifth.
 const STAR_PITCH: f32 = 11.0;
 const STARS_GAP: f32 = 8.0;
 /// The cover's corners, the desk's.
@@ -226,9 +219,9 @@ fn word_size(ui: &Ui, word: &str, half: f32) -> f32 {
 /// one primary: a 2-point gold frame and a gold mark, the pause bars
 /// whenever the bar is not paused, nothing loaded included (ruling R14), the
 /// play triangle while it is, in a slot of one width. Under the pointer the
-/// raised fill and a step brighter: the strong edge to the dim, a dim mark
-/// to the text colour, the gold to the hot accent; the ok green has no
-/// brighter step.
+/// raised fill and a step brighter (`studio::brighter`): the strong edge to
+/// the dim, a dim mark to the text colour, the gold to the hot accent; the
+/// ok green has no brighter step.
 fn group(ui: &Ui, layout: &BarLayout, view: &BarView, cx: &BarCtx, hot: Option<&Act>) {
     let pal = cx.pal;
     for (rect, act) in &layout.group {
@@ -242,58 +235,30 @@ fn group(ui: &Ui, layout: &BarLayout, view: &BarView, cx: &BarCtx, hot: Option<&
             _ => (Mark::Next, pal.edge_strong, pal.text, 1.0),
         };
         let at = framed(cx.cells.rect(*rect));
-        let lit = hot == Some(act);
-        if lit {
-            ui.painter().rect_filled(at, studio::square(), pal.raised);
-        }
-        let (frame, ink) = if lit { (brighter(frame, pal), brighter(ink, pal)) } else { (frame, ink) };
-        studio::frame_button(ui, at, mark, frame, ink, weight, false, pal);
-    }
-}
-
-/// `c` a step brighter, as the boards light a control under the pointer:
-/// the strong edge to the dim, the dim to the text colour, the gold to the
-/// hot accent; the text colour and the ok green are as bright as they go.
-fn brighter(c: Color32, pal: &Pal) -> Color32 {
-    match c {
-        c if c == pal.edge_strong => pal.dim,
-        c if c == pal.dim => pal.text,
-        c if c == pal.gold => pal.accent_hot,
-        c => c,
+        studio::frame_button(ui, at, mark, frame, ink, weight, hot == Some(act), pal);
     }
 }
 
 /// The volume (Main's VOLUME, D14) on the bar's bottom row, in the cells'
-/// columns: − and + as quiet marks, dim, in the text colour under the
-/// pointer; ten LED segments, one at the head of each of their cells, as
-/// many lit amber as the cells fill (`volume_cells`) and the rest unlit,
-/// with no look of their own under the pointer, as the cells give them none
-/// (ruling R17); the readout in the monospace, dim, at its slot's right.
+/// columns: − and + as the kit's quiet steps, dim, in the text colour under
+/// the pointer; ten of the kit's level segments, one at the head of each of
+/// their cells, as many lit amber as the cells fill (`volume_cells`) and
+/// the rest unlit, with no look of their own under the pointer, as the
+/// cells give them none (ruling R17); the readout in the monospace, dim, at
+/// its slot's right.
 fn volume(ui: &Ui, at: &VolumeLayout, volume: f32, cx: &BarCtx, hot: Option<&Act>) {
     let pal = cx.pal;
     let tone = |act: Act| if hot == Some(&act) { pal.text } else { pal.dim };
-    quiet(ui, cx.cells.rect(at.minus).center(), false, tone(Act::VolDown));
+    studio::step_mark(ui, cx.cells.rect(at.minus).center(), false, tone(Act::VolDown));
     let lit = volume_cells(volume);
     for (i, cell) in at.cells.iter().enumerate() {
         let cell = cx.cells.rect(*cell);
-        let segment = egui::Rect::from_min_size(pos2(cell.min.x, cell.center().y - SEGMENT.y / 2.0), SEGMENT);
-        ui.painter().rect_filled(segment, CornerRadius::same(1), if i < lit { pal.accent } else { pal.unlit });
+        studio::level_segment(ui, cell.left_center(), if i < lit { pal.accent } else { pal.unlit });
     }
-    quiet(ui, cx.cells.rect(at.plus).center(), true, tone(Act::VolUp));
+    studio::step_mark(ui, cx.cells.rect(at.plus).center(), true, tone(Act::VolUp));
     let readout = cx.cells.rect(at.readout);
     let words = volume_words(volume);
     studio::text(ui, readout.right_center(), words.trim_start(), studio::mono(TIME_SIZE), pal.dim, readout.width(), Align2::RIGHT_CENTER);
-}
-
-/// A quiet − or + centred on `at`, as the canvas draws the volume's steps:
-/// strokes 6 points long and 1.5 thick, in the cell the cells give each (the
-/// kit's add icon is wider than it).
-fn quiet(ui: &Ui, at: Pos2, plus: bool, color: Color32) {
-    let stroke = Stroke::new(1.5, color);
-    ui.painter().line_segment([at - vec2(3.0, 0.0), at + vec2(3.0, 0.0)], stroke);
-    if plus {
-        ui.painter().line_segment([at - vec2(0.0, 3.0), at + vec2(0.0, 3.0)], stroke);
-    }
 }
 
 /// The now-playing card (Main's CARD, D15, D16), one control in its cells.
@@ -336,9 +301,9 @@ fn words(ui: &Ui, row: egui::Rect, s: &str, font: FontId, color: Color32) {
 }
 
 /// The card's fourth line in its `row`: while the track is rated, its five
-/// stars in gold ([`star`], from the cells' `stars`), centred on the facts'
-/// capitals; then, 8 points after them, the key and the tempo in the
-/// monospace, dim, cut at the row's end. Neither, nothing.
+/// stars in gold (the kit's [`studio::star`], from the cells' `stars`),
+/// centred on the facts' capitals; then, 8 points after them, the key and
+/// the tempo in the monospace, dim, cut at the row's end. Neither, nothing.
 fn rating_line(ui: &Ui, row: egui::Rect, now: &Now, pal: &Pal) {
     let mid = row.center().y;
     let figures = studio::mono(FIGURE_SIZE);
@@ -351,47 +316,13 @@ fn rating_line(ui: &Ui, row: egui::Rect, now: &Now, pal: &Pal) {
                 '½' | 'h' => 0.5,
                 _ => 0.0,
             };
-            star(ui, pos2(x + STAR_R + k as f32 * STAR_PITCH, y), fill, pal.gold);
+            studio::star(ui, pos2(x + studio::STAR_R + k as f32 * STAR_PITCH, y), fill, pal.gold);
         }
-        x += 4.0 * STAR_PITCH + 2.0 * STAR_R + STARS_GAP;
+        x += 4.0 * STAR_PITCH + 2.0 * studio::STAR_R + STARS_GAP;
     }
     if let Some(facts) = facts(now) {
         studio::text(ui, pos2(x, mid), &facts, figures, pal.dim, (row.max.x - x).max(1.0), Align2::LEFT_CENTER);
     }
-}
-
-/// A rating star, its ink's middle at `at`: filled in `color` for `fill` of
-/// it from the left (whole, half or none), its outline over that. Drawn,
-/// for none of the panel's faces has the cells' ★ or ☆ (Segoe UI, Hack and
-/// Ubuntu Light lack both), and a borrowed one would set them in another
-/// size on each platform. The fill is a fan from the middle, the star being
-/// all in sight of it; the outline's stroke smooths its edge.
-fn star(ui: &Ui, at: Pos2, fill: f32, color: Color32) {
-    use std::f32::consts::{FRAC_PI_2, PI};
-    // The ink's middle sits over the points' centre: the top point reaches
-    // the radius, the feet only its cosine of a tenth of a turn.
-    let centre = at + vec2(0.0, STAR_R * (1.0 - (PI / 5.0).cos()) / 2.0);
-    let points: Vec<Pos2> = (0..10)
-        .map(|k| {
-            let a = -FRAC_PI_2 + k as f32 * PI / 5.0;
-            let r = if k % 2 == 0 { STAR_R } else { STAR_R * STAR_INNER };
-            centre + vec2(a.cos(), a.sin()) * r
-        })
-        .collect();
-    if fill > 0.0 {
-        let mut mesh = Mesh::default();
-        mesh.colored_vertex(centre, color);
-        for point in &points {
-            mesh.colored_vertex(*point, color);
-        }
-        for k in 0..10u32 {
-            mesh.add_triangle(0, 1 + k, 1 + (k + 1) % 10);
-        }
-        let reach = egui::Rect::from_center_size(centre, Vec2::splat(2.0 * STAR_R + 2.0));
-        let shown = reach.with_max_x(reach.min.x + 1.0 + fill * 2.0 * STAR_R);
-        ui.painter().with_clip_rect(shown.intersect(ui.clip_rect())).add(Shape::mesh(mesh));
-    }
-    ui.painter().add(Shape::closed_line(points, Stroke::new(1.0, color)));
 }
 
 /// The cover in `slot` (D15): the playing track's picture as a texture, made

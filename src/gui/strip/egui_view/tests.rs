@@ -657,16 +657,16 @@ fn the_tooltips_ripen_after_the_dwell_under_their_items() {
     let row = keyed.galley.rows.first().unwrap();
     let on = |c: char| row.row.glyphs.iter().find(|g| g.chr == c).map(|g| row.pos.y + g.pos.y).expect("drawn");
     assert!((on('V') - on('O')).abs() < 0.5, "the key on the words' baseline: {} {}", on('V'), on('O'));
-    let tail = rig.width(" — ", body(TIP_SIZE)) + rig.width("V", mono(TIP_SIZE));
-    let one_line = rig.width("Open the visualizer in its own window", body(TIP_SIZE)) + tail <= TIP_WORDS;
+    let tail = rig.width(" — ", body(studio::TIP_SIZE)) + rig.width("V", mono(studio::TIP_SIZE));
+    let one_line = rig.width("Open the visualizer in its own window", body(studio::TIP_SIZE)) + tail <= studio::TIP_WORDS;
     assert_eq!(keyed.galley.rows.len() == 1, one_line, "wrapped in points past the cells' 40 cells, not in their count");
     // Past Studio's box but within the cells' 40 cells, the board's line
     // stays one; past those it wraps.
     let mut words = String::from("ab");
-    while rig.width(&words, body(TIP_SIZE)) + tail <= studio::TIP_W - 2.0 * TIP_PAD.x + 4.0 {
+    while rig.width(&words, body(studio::TIP_SIZE)) + tail <= studio::TIP_W - 2.0 * studio::TIP_PAD.x + 4.0 {
         words.push_str(" ab");
     }
-    assert!(rig.width(&words, body(TIP_SIZE)) + tail < TIP_WORDS - 1.0, "a line between the two");
+    assert!(rig.width(&words, body(studio::TIP_SIZE)) + tail < studio::TIP_WORDS - 1.0, "a line between the two");
     let whole = view.viz.tip.clone();
     for (tip, lines) in [(format!("{words} — V"), 1), (format!("{words} {words} — V"), 2)] {
         view.viz.tip = tip.clone();
@@ -882,9 +882,18 @@ fn the_menu_hangs_its_rows_grouped_from_the_strips_foot() {
     assert!(current.rect.min.x == office.rect.min.x && office.rect.min.x == add.rect.min.x, "the names in one column");
     let mark = polygons(&full, pal.accent);
     assert!(mark.iter().any(|points| points.iter().all(|p| p.x < current.rect.min.x && (p.y - current.rect.center().y).abs() < 8.0)), "the pointer mark in the lead");
-    let star = polygons(&full, pal.gold);
-    assert_eq!(star.len(), 5, "the default's star, its five points");
-    assert!(star.iter().flatten().all(|p| p.x > current.rect.max.x && (p.y - current.rect.center().y).abs() < 8.0), "at the row's right");
+    // The kit's star, whole: its fill and its outline, both gold.
+    let star: Vec<egui::Rect> = full
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            Shape::Path(path) if path.closed && path.stroke.color == egui::epaint::ColorMode::Solid(pal.gold) => Some(egui::Rect::from_points(&path.points)),
+            Shape::Mesh(mesh) if !mesh.vertices.is_empty() && mesh.vertices.iter().all(|v| v.color == pal.gold) => Some(mesh.calc_bounds()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(star.len(), 2, "the default's star, filled and outlined: {star:?}");
+    assert!(star.iter().all(|r| r.min.x > current.rect.max.x && (r.center().y - current.rect.center().y).abs() < 8.0), "at the row's right: {star:?}");
 
     let frame_rect = fills(&full, pal.panel).into_iter().max_by(|a, b| a.area().total_cmp(&b.area())).expect("the list's frame");
     assert_eq!((frame_rect.min.y, frame_rect.max.x), (16.0, 792.0), "from the strip's foot, a cell in from the window's edge");

@@ -24,17 +24,12 @@
 //! Nothing lights, shows the hand or takes a press outside where quick
 //! config holds the pointer.
 
-use egui::epaint::Shadow;
-use egui::{Align, Align2, Color32, CornerRadius, FontId, Id, Order, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Align, Align2, Color32, FontId, Id, Order, Pos2, Rect, Response, Sense, Ui, pos2, vec2};
 
 use super::{QStop, QuickAct, QuickBar, QuickLine, QuickView, Tone};
 use crate::gui::Act;
 use crate::gui::window::panel::Cells;
 use crate::gui::window::studio::{self, Pal};
-
-/// Whether egui draws quick config (the host draws it in cells until it
-/// does).
-pub(crate) const READY: bool = true;
 
 /// What quick config's face is handed besides the view.
 pub(crate) struct QuickCtx<'a> {
@@ -61,10 +56,6 @@ pub(crate) struct QuickOut {
     pub frame: Option<egui::Rect>,
 }
 
-/// The canvas's shadow under what floats over a page, as the kit lays it
-/// under a list that hangs (the kit keeps its own to itself).
-const LIFTED: Shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) };
-
 /// The board's measures, in points: a row, a gap between groups, the
 /// frame's padding, and how far over the seek row its foot stands.
 const ROW_H: f32 = 20.0;
@@ -86,12 +77,10 @@ const VALUE_GAP: f32 = 10.0;
 /// The room the way to the room's pointer takes after its words: the 8
 /// before it and its 6.
 const LEAD: f32 = 8.0 + 6.0;
-/// The match bar: its quiet ends' box, the segments' width, height and the
-/// room between them, the room from the minus's box to the first segment,
-/// and from the last segment to the plus.
+/// The match bar: its quiet ends' box, the room between two of its
+/// segments (the kit's level segments), the room from the minus's box to
+/// the first segment, and from the last segment to the plus.
 const END_W: f32 = 8.0;
-const SEG_W: f32 = 6.0;
-const SEG_H: f32 = 10.0;
 const SEG_GAP: f32 = 2.0;
 const SEG_FROM: f32 = 8.0;
 const SEG_TO: f32 = 10.0;
@@ -121,9 +110,7 @@ pub(crate) fn show(ui: &mut Ui, view: &QuickView, cx: &QuickCtx) -> QuickOut {
         }
         ui.set_clip_rect(placed.part);
         let pal = cx.pal;
-        ui.painter().add(LIFTED.as_shape(placed.frame, studio::square()));
-        ui.painter().rect_filled(placed.frame, studio::square(), pal.panel);
-        ui.painter().rect_stroke(placed.frame, studio::square(), Stroke::new(1.0, pal.accent), StrokeKind::Inside);
+        studio::hung_ground(ui, placed.frame, pal);
         let mut pen = Pen { ui, id, seat, hand: view.hand, pal, out: &mut out };
         let (left, right) = (placed.frame.min.x + PAD, placed.frame.max.x - PAD);
         for (line, rect) in view.lines.iter().zip(&placed.rows) {
@@ -168,7 +155,7 @@ fn place(view: &QuickView, cells: Cells) -> Placed {
     let top = (foot - want).max(room);
     let frame = Rect::from_min_max(pos2(across.min.x, top), pos2(across.max.x, foot));
     let bounds = Rect::from_min_max(pos2(cells.points.min.x, room), pos2(cells.points.max.x, seek));
-    let part = (frame + LIFTED.margin()).intersect(bounds);
+    let part = studio::lifted_reach(frame).intersect(bounds);
     let mut y = top + PAD;
     let rows = view
         .lines
@@ -193,13 +180,8 @@ struct Seat {
 
 impl Seat {
     fn of(ui: &Ui, live: &impl Fn(&Pos2) -> bool) -> Seat {
-        ui.input(|i| {
-            let press = i.events.iter().rev().find_map(|event| match *event {
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } => Some(pos),
-                _ => None,
-            });
-            Seat { hover: i.pointer.hover_pos().filter(live), press: press.filter(live) }
-        })
+        let hover = ui.input(|i| i.pointer.hover_pos()).filter(live);
+        Seat { hover, press: studio::pass_press(ui).filter(live) }
     }
 }
 
@@ -216,13 +198,13 @@ fn worked(response: Response, seat: &Seat) -> (bool, bool) {
 }
 
 /// The look a control wears in `rect`: the keyboard's hand's (the raised
-/// fill and the accent's ring), else the pointer's (the raised fill), else
-/// none.
+/// fill and the accent's ring), else the pointer's (the raised fill of a
+/// row of what hangs), else none.
 fn look(ui: &Ui, rect: Rect, hand: bool, hot: bool, pal: &Pal) {
     if hand {
         studio::cursor_look(ui, rect, pal);
     } else if hot {
-        ui.painter().rect_filled(rect, CornerRadius::same(2), pal.raised);
+        studio::raised_row(ui, rect, pal);
     }
 }
 
@@ -418,7 +400,7 @@ impl Pen<'_> {
         let mid = row.mid();
         let minus = row.names();
         let first = minus + END_W + SEG_FROM;
-        let pitch = SEG_W + SEG_GAP;
+        let pitch = studio::LEVEL_SEG.x + SEG_GAP;
         let n = bar.cells;
         let plus = first + f32::from(n) * pitch - SEG_GAP + SEG_TO;
         let hand = self.on(QStop::Bar);
@@ -430,16 +412,15 @@ impl Pen<'_> {
         let mut over = false;
         for k in 0..n {
             let x = first + f32::from(k) * pitch;
-            let hit = Rect::from_min_max(pos2(x - SEG_GAP / 2.0, row.rect.min.y), pos2(x + SEG_W + SEG_GAP / 2.0, row.rect.max.y));
+            let hit = Rect::from_min_max(pos2(x - SEG_GAP / 2.0, row.rect.min.y), pos2(x + studio::LEVEL_SEG.x + SEG_GAP / 2.0, row.rect.max.y));
             over |= self.control(hit, ("Set", k), Act::DjQuick(QuickAct::Set(bar.first + u32::from(k) * bar.per)));
         }
         let plus_hot = self.control(end_hit(plus), "Step(1)", Act::DjQuick(QuickAct::Step(1)));
-        end_mark(ui, pos2(minus + END_W / 2.0, mid), false, if minus_hot { pal.text } else { pal.dim });
-        end_mark(ui, pos2(plus + END_W / 2.0, mid), true, if plus_hot { pal.text } else { pal.dim });
+        studio::step_mark(ui, pos2(minus + END_W / 2.0, mid), false, if minus_hot { pal.text } else { pal.dim });
+        studio::step_mark(ui, pos2(plus + END_W / 2.0, mid), true, if plus_hot { pal.text } else { pal.dim });
         let lit = if hand || over { pal.accent_hot } else { pal.accent };
         for k in 0..n {
-            let seg = Rect::from_min_size(pos2(first + f32::from(k) * pitch, mid - SEG_H / 2.0), vec2(SEG_W, SEG_H));
-            ui.painter().rect_filled(seg, CornerRadius::same(1), if k < bar.filled { lit } else { pal.unlit });
+            studio::level_segment(ui, pos2(first + f32::from(k) * pitch, mid), if k < bar.filled { lit } else { pal.unlit });
         }
     }
 
@@ -460,16 +441,6 @@ impl Pen<'_> {
         let mid = row.mid();
         let drawn = studio::text(ui, pos2(row.left, mid), label, font.clone(), color, room, Align2::LEFT_CENTER);
         studio::pointer(ui, pos2(drawn.max.x + 8.0 + 2.5, studio::led_mid(ui, mid, &font, false)), color);
-    }
-}
-
-/// One of the match bar's quiet ends, its 8-point box centred on `at`: a
-/// minus, or a plus.
-fn end_mark(ui: &Ui, at: Pos2, plus: bool, color: Color32) {
-    let stroke = Stroke::new(1.5, color);
-    ui.painter().line_segment([at - vec2(3.0, 0.0), at + vec2(3.0, 0.0)], stroke);
-    if plus {
-        ui.painter().line_segment([at - vec2(0.0, 3.0), at + vec2(0.0, 3.0)], stroke);
     }
 }
 

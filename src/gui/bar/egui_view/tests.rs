@@ -5,8 +5,8 @@
 //! bar's rows, as the chrome's pass runs it. Every relation is measured
 //! from the face in use, never from one platform's metrics.
 
-use egui::epaint::{ClippedShape, ColorMode};
-use egui::{FullOutput, ViewportId};
+use egui::epaint::{ClippedShape, ColorMode, Shape};
+use egui::{FullOutput, Pos2, ViewportId};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event as TermEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -685,7 +685,7 @@ fn a_press_on_each_control_egui_paints_does_what_its_act_does() {
         assert!(p.outline_of(at).is_some(), "{act:?}'s frame painted at {at:?}");
         boxes.push((at.center(), act.clone()));
     }
-    let segments: Vec<egui::Rect> = p.filled(pal.accent).into_iter().chain(p.filled(pal.unlit)).filter(|r| r.size() == SEGMENT).collect();
+    let segments: Vec<egui::Rect> = p.filled(pal.accent).into_iter().chain(p.filled(pal.unlit)).filter(|r| r.size() == studio::LEVEL_SEG).collect();
     assert_eq!(segments.len(), 10, "ten segments painted");
     for (i, cell) in layout.volume.cells.iter().enumerate() {
         let segment = segments.iter().find(|s| rect_of(&p, *cell).contains_rect(**s)).expect("a segment in each cell");

@@ -3845,12 +3845,6 @@ pub(crate) fn modal_window(ui: &mut Ui, over: Rect, window: Rect, edge: Color32,
     ui.painter().rect_stroke(window, square(), Stroke::new(1.0, edge), StrokeKind::Inside);
 }
 
-/// The canvas's shadow under what floats over a page: a modal's window, a
-/// list that hangs.
-fn lifted() -> Shadow {
-    Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) }
-}
-
 /// The kit's [`pointer`] turned back, centred on `at`: the cells' "◂"
 /// before a keep, the way back to what stays.
 pub(crate) fn back_pointer(ui: &Ui, at: Pos2, color: Color32) {
@@ -4143,9 +4137,7 @@ pub(crate) fn hung_list_by(
     pal: &Pal,
     mut words: impl FnMut(&Ui, usize, Rect, bool),
 ) -> Option<usize> {
-    ui.painter().add(lifted().as_shape(frame, square()));
-    ui.painter().rect_filled(frame, square(), pal.panel);
-    ui.painter().rect_stroke(frame, square(), Stroke::new(1.0, pal.accent), StrokeKind::Inside);
+    hung_ground(ui, frame, pal);
     let gutter = hung_gutter(n, len);
     let mut picked = None;
     for k in first..first + n {
@@ -4156,7 +4148,7 @@ pub(crate) fn hung_list_by(
         if on {
             ui.painter().rect_filled(row, CornerRadius::same(2), pal.accent);
         } else if response.as_ref().is_some_and(Response::hovered) {
-            ui.painter().rect_filled(row, CornerRadius::same(2), pal.raised);
+            raised_row(ui, row, pal);
         }
         words(ui, k, row.shrink2(vec2(HUNG_PAD, 0.0)), on);
         let took = |r: &Response| match pick {
@@ -4379,7 +4371,9 @@ pub(crate) fn dwell(ctx: &egui::Context) {
 pub(crate) const TIP_UNDER: f32 = 4.0;
 pub(crate) const TIP_W: f32 = 300.0;
 /// A tooltip's room round its words: the canvas's 6 by 10.
-const TIP_PAD: Vec2 = vec2(10.0, 6.0);
+pub(crate) const TIP_PAD: Vec2 = vec2(10.0, 6.0);
+/// A tooltip's words.
+pub(crate) const TIP_SIZE: f32 = 12.5;
 
 /// The cells' tooltip for `response`, under [`dwell`]: `words` in Studio's
 /// box ([`style_once`]'s: raised, on a strong-edged hairline) [`TIP_UNDER`]
@@ -4392,18 +4386,35 @@ const TIP_PAD: Vec2 = vec2(10.0, 6.0);
 /// which it returns while it shows: a host that cuts its paint around what
 /// stands over it finds the tooltip's by it.
 pub(crate) fn tip_under(response: &Response, words: &str, since_key: Option<std::time::Duration>, pal: &Pal) -> Option<Rect> {
+    if words.is_empty() {
+        return None;
+    }
+    hang_tip(response, since_key, pal, |painter| {
+        let lines = crate::kit::wrap_tip(words).join("\n");
+        painter.layout(lines, body(TIP_SIZE), pal.text, TIP_W - 2.0 * TIP_PAD.x)
+    })
+}
+
+/// A tooltip's box for `response` once the dwell says it shows, round the
+/// words `lay` sets on the tooltips' painter: what [`tip_under`] and
+/// [`tip_keyed`] share.
+fn hang_tip(
+    response: &Response,
+    since_key: Option<std::time::Duration>,
+    pal: &Pal,
+    lay: impl FnOnce(&egui::Painter) -> Arc<Galley>,
+) -> Option<Rect> {
     let ctx = &response.ctx;
     if let Some(since) = since_key.filter(|since| *since < crate::kit::TIP_DELAY) {
         ctx.request_repaint_after(crate::kit::TIP_DELAY - since);
         return None;
     }
-    if words.is_empty() || !egui::Tooltip::should_show_tooltip(response, false) {
+    if !egui::Tooltip::should_show_tooltip(response, false) {
         return None;
     }
     let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Tooltip::tooltip_id(response.id, 0));
     let painter = ctx.layer_painter(layer);
-    let lines = crate::kit::wrap_tip(words).join("\n");
-    let galley = painter.layout(lines, body(12.5), pal.text, TIP_W - 2.0 * TIP_PAD.x);
+    let galley = lay(&painter);
     let size = galley.size() + 2.0 * TIP_PAD;
     let screen = ctx.content_rect();
     let target = response.interact_rect;
@@ -4501,18 +4512,32 @@ pub(crate) fn mark(ui: &Ui, at: Pos2, mark: Mark, color: Color32) {
 /// A transport button's look in `rect`, paint only (the cells take its
 /// press): a `weight`-point frame in `frame` with the desk's corners and
 /// `mark` in `ink` at its middle; while `hot`, the raised fill under it and
-/// the frame a step brighter.
+/// the frame and the mark a step [`brighter`], as the boards light a
+/// control under the pointer.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn frame_button(ui: &Ui, rect: Rect, mark: Mark, frame: Color32, ink: Color32, weight: f32, hot: bool, pal: &Pal) {
     let painter = ui.painter();
-    let edge = if hot {
+    let (frame, ink) = if hot {
         painter.rect_filled(rect, square(), pal.raised);
-        lift(frame, 40)
+        (brighter(frame, pal), brighter(ink, pal))
     } else {
-        frame
+        (frame, ink)
     };
-    painter.rect_stroke(rect, square(), Stroke::new(weight, edge), StrokeKind::Inside);
+    painter.rect_stroke(rect, square(), Stroke::new(weight, frame), StrokeKind::Inside);
     self::mark(ui, rect.center(), mark, ink);
+}
+
+/// `c` a step brighter, as the boards light a control under the pointer:
+/// the strong edge to the dim, the dim to the text colour, the gold to the
+/// hot accent; the text colour, the ok green and any other colour are as
+/// bright as they go.
+pub(crate) fn brighter(c: Color32, pal: &Pal) -> Color32 {
+    match c {
+        c if c == pal.edge_strong => pal.dim,
+        c if c == pal.dim => pal.text,
+        c if c == pal.gold => pal.accent_hot,
+        c => c,
+    }
 }
 
 /// The seek line's track across `track`, paint only: a 2-point line at its
@@ -4551,6 +4576,193 @@ pub(crate) fn picture_in(ui: &Ui, rect: Rect, texture: &egui::TextureHandle, rad
     let shape = egui::epaint::RectShape::filled(at, CornerRadius::same(radius), Color32::WHITE).with_texture(texture.id(), uv);
     ui.painter().add(shape);
     at
+}
+
+// ── What the chrome's faces share: a pass's press, a keyed tip, marks ────
+//
+// What the top strip, the server menu, the transport bar and quick config
+// (src/gui/strip/, src/gui/bar/ and src/gui/dj/quick/, their egui_view
+// modules) each drew for themselves and is no face's own: where a pass's
+// press came down, read off its events, which a tap needs; a tooltip that
+// names its key, and the cells' rule for a key's tail; a line's width cut
+// to its room; the ground of what hangs over a page and the pointer's look
+// on its rows; the cells' star as a shape; the quiet − and + that step a
+// level, and a level's segment. Nothing here knows the chrome.
+
+/// Where this pass's primary presses came down, in the order they came,
+/// read off the pass's own events: a tap's press and its release can come
+/// in one pass, and egui lets go of where a press began once its release
+/// is in, before any control asks. A pass egui runs again hears none, so a
+/// press is heard once.
+pub(crate) fn pass_presses(ui: &Ui) -> Vec<Pos2> {
+    ui.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|event| match *event {
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } => Some(pos),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// The last of [`pass_presses`]: where this pass's press came down, the one
+/// a control egui says was [`pressed`] took.
+pub(crate) fn pass_press(ui: &Ui) -> Option<Pos2> {
+    pass_presses(ui).pop()
+}
+
+/// A tooltip's words and the key named after them, from `tip` worded whole
+/// with its " — key" tail: the key only while key hints are on, as the
+/// cells' surface keeps it (`Surface::tip_keyed`).
+pub(crate) fn tip_key(tip: &str, key_hints: bool) -> (&str, Option<&str>) {
+    match tip.rsplit_once(" — ") {
+        Some((words, key)) if key_hints => (words, Some(key)),
+        Some((words, _)) => (words, None),
+        None => (tip, None),
+    }
+}
+
+/// `tip` as the cells show it: whole while key hints are on, else cut at
+/// its " — key" tail ([`tip_key`]).
+pub(crate) fn tip_words(tip: &str, key_hints: bool) -> &str {
+    if key_hints { tip } else { tip_key(tip, false).0 }
+}
+
+/// The widest a keyed tooltip runs its words before it wraps: the cells'
+/// 40 cells (`kit::TIP_WRAP`) at the grid's 8 points a cell, where the
+/// chrome's TopTips board wraps it. [`TIP_W`]'s box is narrower, and in a
+/// face a little wider than Segoe UI it would put a key's " — V" alone on
+/// a second line, as the cells do (topbar.Q7).
+pub(crate) const TIP_WORDS: f32 = crate::kit::TIP_WRAP as f32 * 8.0;
+
+/// [`tip_under`] for `tip` worded whole with its " — key" tail, as the top
+/// strip's Visualizer words its own: the words in the text colour and,
+/// while key hints keep it ([`tip_key`]), ` — key` after them, the key in
+/// the monospace in the secondary ink on the words' baseline (the TopTips
+/// board's). Wrapped in points only past [`TIP_WORDS`], so a line a cell
+/// past the cells' 40 in their count stays one line.
+pub(crate) fn tip_keyed(ui: &Ui, response: &Response, tip: &str, key_hints: bool, since_key: Option<std::time::Duration>, pal: &Pal) -> Option<Rect> {
+    let (words, key) = tip_key(tip, key_hints);
+    if words.is_empty() {
+        return None;
+    }
+    hang_tip(response, since_key, pal, |painter| {
+        let mut parts: Vec<Run> = vec![(words.to_string(), body(TIP_SIZE), pal.text)];
+        if let Some(key) = key {
+            parts[0].0.push_str(" — ");
+            parts.push((key.to_string(), mono(TIP_SIZE), pal.soft));
+        }
+        // One baseline for both faces, as the kit's runs stand theirs: each
+        // run's line as tall as its ascent and the deepest descent.
+        let all: Vec<Metrics> = parts.iter().map(|(_, font, _)| metrics(ui, font)).collect();
+        let depth = all.iter().map(|m| m.row - m.ascent).fold(0.0, f32::max);
+        let mut job = LayoutJob::default();
+        for ((s, font, color), m) in parts.into_iter().zip(&all) {
+            job.append(&s, 0.0, TextFormat { font_id: font, color, line_height: Some((m.ascent + depth).max(1.0)), ..Default::default() });
+        }
+        job.wrap.max_width = TIP_WORDS;
+        painter.layout_job(job)
+    })
+}
+
+/// How wide [`text`] draws `s` in `font` cut with an ellipsis to `max_w`:
+/// whole where it fits, else as far as the cut leaves it.
+pub(crate) fn cut_width(ui: &Ui, s: &str, font: FontId, max_w: f32) -> f32 {
+    let mut job = LayoutJob::single_section(s.to_string(), TextFormat { font_id: font, ..Default::default() });
+    job.wrap = TextWrapping::truncate_at_width(max_w.max(1.0));
+    ui.painter().layout_job(job).size().x
+}
+
+/// The canvas's shadow under what floats over a page: a modal's window, a
+/// list that hangs, quick config's popover.
+pub(crate) fn lifted() -> Shadow {
+    Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(115) }
+}
+
+/// Where [`lifted`]'s shadow under `frame` reaches: what a host that cuts
+/// its paint round what floats over it must leave the float.
+pub(crate) fn lifted_reach(frame: Rect) -> Rect {
+    frame + lifted().margin()
+}
+
+/// The ground of what hangs over a page, as a [`hung_list`] stands on it:
+/// [`lifted`]'s shadow under `frame`, the panel's fill and the accent's
+/// hairline (the server menu, quick config's popover).
+pub(crate) fn hung_ground(ui: &Ui, frame: Rect, pal: &Pal) {
+    ui.painter().add(lifted().as_shape(frame, square()));
+    ui.painter().rect_filled(frame, square(), pal.panel);
+    ui.painter().rect_stroke(frame, square(), Stroke::new(1.0, pal.accent), StrokeKind::Inside);
+}
+
+/// The pointer's look on a row of what hangs (a [`hung_list`]'s entry, the
+/// gutter beside it, a row of quick config's): the raised fill over `rect`,
+/// its corners softened by two.
+pub(crate) fn raised_row(ui: &Ui, rect: Rect, pal: &Pal) {
+    ui.painter().rect_filled(rect, CornerRadius::same(2), pal.raised);
+}
+
+/// A [`star`]'s outer radius, and its inner points' share of it.
+pub(crate) const STAR_R: f32 = 5.0;
+const STAR_INNER: f32 = 0.45;
+
+/// The cells' star — the rating's ★, its half and its empty ☆, the default
+/// server's ★ — as a shape of [`STAR_R`]'s radius, its ink's middle at
+/// `at`: filled in `color` for `fill` of it from the left (whole, half or
+/// none), its outline over that. Drawn, for none of the panel's faces has
+/// the cells' ★ or ☆ (Segoe UI, Hack and Ubuntu Light lack both), and a
+/// borrowed one would set them in another size on each platform. The fill
+/// is a fan from the middle, the star being all in sight of it; the
+/// outline's stroke smooths its edge.
+pub(crate) fn star(ui: &Ui, at: Pos2, fill: f32, color: Color32) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    // The ink's middle sits over the points' centre: the top point reaches
+    // the radius, the feet only its cosine of a tenth of a turn.
+    let centre = at + vec2(0.0, STAR_R * (1.0 - (PI / 5.0).cos()) / 2.0);
+    let points: Vec<Pos2> = (0..10)
+        .map(|k| {
+            let a = -FRAC_PI_2 + k as f32 * PI / 5.0;
+            let r = if k % 2 == 0 { STAR_R } else { STAR_R * STAR_INNER };
+            centre + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    if fill > 0.0 {
+        let mut mesh = egui::epaint::Mesh::default();
+        mesh.colored_vertex(centre, color);
+        for point in &points {
+            mesh.colored_vertex(*point, color);
+        }
+        for k in 0..10u32 {
+            mesh.add_triangle(0, 1 + k, 1 + (k + 1) % 10);
+        }
+        let reach = Rect::from_center_size(centre, Vec2::splat(2.0 * STAR_R + 2.0));
+        let shown = reach.with_max_x(reach.min.x + 1.0 + fill.min(1.0) * 2.0 * STAR_R);
+        ui.painter().with_clip_rect(shown.intersect(ui.clip_rect())).add(Shape::mesh(mesh));
+    }
+    ui.painter().add(Shape::closed_line(points, Stroke::new(1.0, color)));
+}
+
+/// A quiet − or + that steps a level, centred on `at` (the volume's ends,
+/// the match bar's): strokes 6 points long and 1.5 thick, in the 8 points
+/// the cells give each ([`Icon::Add`] is wider).
+pub(crate) fn step_mark(ui: &Ui, at: Pos2, plus: bool, color: Color32) {
+    let stroke = Stroke::new(1.5, color);
+    ui.painter().line_segment([at - vec2(3.0, 0.0), at + vec2(3.0, 0.0)], stroke);
+    if plus {
+        ui.painter().line_segment([at - vec2(0.0, 3.0), at + vec2(0.0, 3.0)], stroke);
+    }
+}
+
+/// A level's segment, the volume's and the match bar's (the cells' ▰ and
+/// ▱): [`LEVEL_SEG`] points, its corners softened by one.
+pub(crate) const LEVEL_SEG: Vec2 = vec2(6.0, 10.0);
+
+/// A [`LEVEL_SEG`] segment in `color`, its left middle at `at`. Returns
+/// where it was drawn.
+pub(crate) fn level_segment(ui: &Ui, at: Pos2, color: Color32) -> Rect {
+    let rect = Rect::from_min_size(pos2(at.x, at.y - LEVEL_SEG.y / 2.0), LEVEL_SEG);
+    ui.painter().rect_filled(rect, CornerRadius::same(1), color);
+    rect
 }
 
 #[cfg(test)]
@@ -7193,5 +7405,234 @@ mod chrome_pieces {
             _ => false,
         });
         assert!(textured, "a textured rect with its corners rounded");
+    }
+}
+
+/// What the chrome's faces share, each held to what it computes.
+#[cfg(test)]
+mod chrome_shared {
+    use super::*;
+
+    fn context() -> egui::Context {
+        let ctx = egui::Context::default();
+        super::super::panel::fonts(&ctx);
+        style_once(&ctx, &Pal::now());
+        dwell(&ctx);
+        ctx
+    }
+
+    const SCREEN: Vec2 = vec2(400.0, 200.0);
+
+    /// One pass at `time` seconds with `events`; its shapes.
+    fn pass(ctx: &egui::Context, time: f64, events: Vec<egui::Event>, run: &mut dyn FnMut(&mut Ui)) -> Vec<egui::epaint::ClippedShape> {
+        let screen = Rect::from_min_size(Pos2::ZERO, SCREEN);
+        let input = egui::RawInput { screen_rect: Some(screen), time: Some(time), events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| run(ui));
+        out.textures_delta.clear();
+        out.shapes
+    }
+
+    fn button(at: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() }
+    }
+
+    /// A pass hears where its press came down, a tap's too, whose release
+    /// came with it and which egui no longer holds the origin of; a pass
+    /// with the button held from before hears none, nor does a pass egui
+    /// runs again; of two presses the last is the press.
+    #[test]
+    fn a_pass_hears_its_press_a_taps_among_them() {
+        let ctx = context();
+        let (at, other) = (pos2(50.0, 40.0), pos2(300.0, 150.0));
+        let heard = std::cell::RefCell::new(Vec::new());
+        let origin = std::cell::RefCell::new(Vec::new());
+        let mut run = |ui: &mut Ui| {
+            heard.borrow_mut().push(pass_press(ui));
+            origin.borrow_mut().push(ui.input(|i| i.pointer.press_origin()));
+        };
+        pass(&ctx, 0.0, vec![egui::Event::PointerMoved(at), button(at, true), button(at, false)], &mut run);
+        assert_eq!((heard.borrow()[0], origin.borrow()[0]), (Some(at), None), "a tap: heard, though egui let go of its origin");
+        pass(&ctx, 0.5, vec![button(at, true)], &mut run);
+        pass(&ctx, 0.6, Vec::new(), &mut run);
+        assert_eq!((heard.borrow()[1], heard.borrow()[2]), (Some(at), None), "a press, then the button held: once");
+        pass(&ctx, 0.7, vec![button(at, false)], &mut run);
+        let mut runs = 0;
+        let mut twice = Vec::new();
+        pass(&ctx, 1.0, vec![button(other, true)], &mut |ui| {
+            runs += 1;
+            twice.push(pass_press(ui));
+            ui.ctx().request_discard("a second run");
+        });
+        assert_eq!(runs, 2, "egui ran the pass again");
+        assert_eq!(twice, vec![Some(other), None], "the second run hears nothing");
+        pass(&ctx, 1.1, vec![button(other, false)], &mut |_| {});
+        let mut both = Vec::new();
+        pass(&ctx, 2.0, vec![button(at, true), button(at, false), button(other, true)], &mut |ui| both = pass_presses(ui));
+        assert_eq!(both, vec![at, other], "both, in order");
+        let mut last = None;
+        pass(&ctx, 2.1, vec![button(other, false), button(at, true), button(at, false), button(other, true)], &mut |ui| last = pass_press(ui));
+        assert_eq!(last, Some(other), "the last one");
+    }
+
+    /// A tip worded with its key's tail keeps the key only while key hints
+    /// are on; one with no tail is its words.
+    #[test]
+    fn a_tips_key_shows_only_with_key_hints() {
+        let tip = "Open the visualizer in its own window — V";
+        assert_eq!(tip_key(tip, true), ("Open the visualizer in its own window", Some("V")));
+        assert_eq!(tip_key(tip, false), ("Open the visualizer in its own window", None));
+        assert_eq!(tip_key("Add a server", true), ("Add a server", None));
+        assert_eq!(tip_words(tip, true), tip);
+        assert_eq!(tip_words(tip, false), "Open the visualizer in its own window");
+        // Only the last dash names a key: words with a dash of their own
+        // keep it.
+        assert_eq!(tip_key("Copy — the whole log — y", false), ("Copy — the whole log", None));
+    }
+
+    /// The keyed tooltip waits out the dwell, then sets its key after its
+    /// words on their baseline, in the monospace in the secondary ink, only
+    /// while key hints are on; inside the screen, clipped to the box it
+    /// returns.
+    #[test]
+    fn a_keyed_tip_sets_its_key_after_its_words() {
+        let ctx = context();
+        let pal = Pal::now();
+        let target = Rect::from_min_size(pos2(300.0, 0.0), vec2(80.0, 16.0));
+        let tip = "Open it here — V";
+        for (round, hints) in [true, false].into_iter().enumerate() {
+            let t = 10.0 * round as f64;
+            let shown = std::cell::Cell::new(None);
+            let mut run = |ui: &mut Ui| {
+                let response = ui.interact(target, Id::new("probe-keyed"), Sense::click());
+                shown.set(tip_keyed(ui, &response, tip, hints, None, &pal));
+            };
+            pass(&ctx, t, vec![egui::Event::PointerMoved(target.center())], &mut run);
+            pass(&ctx, t + 0.2, Vec::new(), &mut run);
+            assert_eq!(shown.get(), None, "not before the dwell");
+            let shapes = pass(&ctx, t + 0.8, Vec::new(), &mut run);
+            let boxed = shown.get().expect("after it");
+            assert!(boxed.max.x <= SCREEN.x && (boxed.min.y - (target.max.y + TIP_UNDER)).abs() <= 1.0, "{boxed:?}");
+            let galley = shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    Shape::Text(text) if s.clip_rect == boxed => Some(text.galley.clone()),
+                    _ => None,
+                })
+                .expect("its words, clipped to the box");
+            assert_eq!(galley.rows.len(), 1, "one line: {:?}", galley.job.text);
+            let sections = &galley.job.sections;
+            if hints {
+                assert_eq!(galley.job.text, tip);
+                let key = sections.last().unwrap();
+                let range = key.byte_range.start.0..key.byte_range.end.0;
+                assert_eq!((&galley.job.text[range], key.format.color, &key.format.font_id.family), ("V", pal.soft, &FontFamily::Monospace));
+                let glyphs = &galley.rows[0].row.glyphs;
+                let (first, last) = (glyphs.first().unwrap(), glyphs.last().unwrap());
+                assert!((first.pos.y - last.pos.y).abs() < 0.5, "the key on the words' baseline: {} {}", first.pos.y, last.pos.y);
+            } else {
+                assert_eq!((galley.job.text.as_str(), sections.len()), ("Open it here", 1), "no key without key hints");
+            }
+            pass(&ctx, t + 5.0, vec![egui::Event::PointerMoved(pos2(10.0, 190.0))], &mut |_| {});
+        }
+    }
+
+    /// A line's width cut to its room is the width [`text`] draws it at:
+    /// whole where it fits, no wider than the room where it is cut.
+    #[test]
+    fn a_cut_lines_width_is_the_width_it_draws() {
+        let ctx = context();
+        let font = body(12.5);
+        let words = "http://a-rather-long-server-name.example.org:3000";
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let whole = width_of(ui, words, font.clone());
+            assert_eq!(cut_width(ui, words, font.clone(), whole + 10.0), whole, "whole where it fits");
+            for room in [40.0, 90.0, whole / 2.0] {
+                let drawn = text(ui, pos2(0.0, 20.0), words, font.clone(), Color32::WHITE, room, Align2::LEFT_CENTER);
+                let cut = cut_width(ui, words, font.clone(), room);
+                assert_eq!(cut, drawn.width(), "as text draws it in {room}");
+                assert!(cut <= room + 0.01 && cut < whole, "cut to {room}: {cut}");
+            }
+        });
+        out.textures_delta.clear();
+    }
+
+    /// A step brighter is the boards' step: the strong edge to the dim, the
+    /// dim to the text colour, the gold to the hot accent, and no further;
+    /// a transport frame under the pointer takes it on its frame and mark.
+    #[test]
+    fn a_step_brighter_is_the_boards_step() {
+        let ctx = context();
+        let pal = Pal::now();
+        assert_eq!(brighter(pal.edge_strong, &pal), pal.dim);
+        assert_eq!(brighter(pal.dim, &pal), pal.text);
+        assert_eq!(brighter(pal.gold, &pal), pal.accent_hot);
+        assert_eq!((brighter(pal.text, &pal), brighter(pal.ok, &pal)), (pal.text, pal.ok), "as bright as they go");
+        let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(40.0, 44.0));
+        let shapes = pass(&ctx, 0.0, Vec::new(), &mut |ui| frame_button(ui, rect, Mark::Prev, pal.edge_strong, pal.dim, 1.0, true, &pal));
+        let frame = shapes.iter().find_map(|s| match &s.shape {
+            Shape::Rect(r) if r.rect == rect && r.stroke.width > 0.0 => Some(r.stroke.color),
+            _ => None,
+        });
+        assert_eq!(frame, Some(pal.dim), "the frame a step brighter");
+        let marks = shapes.iter().filter(|s| matches!(&s.shape, Shape::Path(p) if p.fill == pal.text)).count();
+        assert!(marks >= 1, "the mark a step brighter");
+    }
+
+    /// The shadow's reach holds the whole of the shadow painted under a
+    /// frame: a host that leaves the float its reach cuts none of it.
+    #[test]
+    fn the_shadows_reach_holds_its_shadow() {
+        let frame = Rect::from_min_size(pos2(100.0, 40.0), vec2(160.0, 90.0));
+        let shadow = lifted().as_shape(frame, square()).visual_bounding_rect();
+        let reach = lifted_reach(frame);
+        assert!(reach.expand(0.5).contains_rect(shadow), "{shadow:?} in {reach:?}");
+        assert!(reach.max.y - frame.max.y > frame.min.y - reach.min.y, "deeper under it than over it: {reach:?}");
+    }
+
+    /// A star stands its ink's middle where it is asked, its two side points
+    /// a radius out either side of it, less their tenth of a turn; half of
+    /// one fills its left half only; none of one is its outline.
+    #[test]
+    fn a_star_fills_its_share_from_the_left() {
+        let ctx = context();
+        let at = pos2(60.0, 50.0);
+        for (fill, filled) in [(1.0, true), (0.5, true), (0.0, false)] {
+            let shapes = pass(&ctx, 0.0, Vec::new(), &mut |ui| star(ui, at, fill, Color32::GOLD));
+            let outline = shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    Shape::Path(p) if p.closed => Some(Rect::from_points(&p.points)),
+                    _ => None,
+                })
+                .expect("its outline");
+            assert!((outline.center().y - at.y).abs() < 0.01, "its ink's middle at {at:?}: {outline:?}");
+            let across = 2.0 * STAR_R * (std::f32::consts::PI / 10.0).cos();
+            assert!((outline.center().x - at.x).abs() < 0.01 && (outline.width() - across).abs() < 0.05, "{outline:?}");
+            let mesh = shapes.iter().find(|s| matches!(&s.shape, Shape::Mesh(_)));
+            assert_eq!(mesh.is_some(), filled, "{fill}: filled or not");
+            if let Some(mesh) = mesh {
+                let shown = mesh.clip_rect.max.x;
+                let want = outline.min.x + fill * 2.0 * STAR_R;
+                assert!((shown - want).abs() <= 1.5, "{fill} of it from the left: {shown} for {want}");
+            }
+        }
+    }
+
+    /// A step's mark stands in its 8 points, a plus as tall as wide; a
+    /// level's segment is its size with its left middle where it is asked.
+    #[test]
+    fn a_steps_mark_and_a_levels_segment_stand_where_they_say() {
+        let ctx = context();
+        let at = pos2(40.0, 40.0);
+        for plus in [false, true] {
+            let shapes = pass(&ctx, 0.0, Vec::new(), &mut |ui| step_mark(ui, at, plus, Color32::WHITE));
+            let ink = shapes.iter().map(|s| s.shape.visual_bounding_rect()).fold(Rect::NOTHING, |a, b| a.union(b));
+            assert!(ink.width() <= 8.0 && (ink.center() - at).length() < 0.5, "{plus}: {ink:?}");
+            assert_eq!(ink.height() > 4.0, plus, "{plus}: {ink:?}");
+        }
+        let mut rect = Rect::NOTHING;
+        let shapes = pass(&ctx, 0.1, Vec::new(), &mut |ui| rect = level_segment(ui, at, Color32::WHITE));
+        assert_eq!(rect, Rect::from_min_size(pos2(at.x, at.y - LEVEL_SEG.y / 2.0), LEVEL_SEG));
+        assert!(shapes.iter().any(|s| matches!(&s.shape, Shape::Rect(r) if r.rect == rect && r.corner_radius == CornerRadius::same(1))));
     }
 }

@@ -17,10 +17,7 @@
 //! nothing; the gutter it stands in is its row's, as the cells' row runs the
 //! menu's whole width.
 
-use std::f32::consts::{FRAC_PI_2, PI};
-
-use egui::epaint::CornerRadius;
-use egui::{Align2, Color32, FontId, Id, Pos2, Response, Sense, Shape, Stroke, Ui, pos2, vec2};
+use egui::{Align2, Color32, FontId, Id, Pos2, Response, Sense, Ui, pos2, vec2};
 use ratatui::layout::Rect;
 
 use crate::gui::Act;
@@ -55,15 +52,14 @@ pub(crate) struct MenuOut {
     pub frame: Option<egui::Rect>,
 }
 
-/// The shadow's reach round a hung list's frame.
-const SHADOW: f32 = 16.0;
 /// The rows' words: a text button's size.
 const SIZE: f32 = 13.5;
 /// The room before every row's words where the session's server wears the
 /// pointer mark (a text button's lead), so the names stand in one column.
 const LEAD: f32 = 16.0;
-/// The default's star, and the air before it.
-const STAR: f32 = 10.0;
+/// The default's star (the kit's, [`studio::STAR_R`] twice across), and the
+/// air before it.
+const STAR: f32 = 2.0 * studio::STAR_R;
 const STAR_GAP: f32 = 12.0;
 /// The menu's narrowest and widest, in cells, as the cells bound theirs.
 const LEAST: f32 = 24.0;
@@ -86,7 +82,7 @@ pub(crate) fn menu(ui: &mut Ui, view: &MenuView, cx: &MenuCtx) -> MenuOut {
     let right = cx.cells.rect(Rect { x: (grid.x + grid.width).saturating_sub(1), y: grid.y, width: 1, height: 1 }).min.x;
     let w = studio::hung_width(words_w, n, len).max(LEAST * cell.x).min(MOST * cell.x).min(right - screen.min.x - cell.x).max(1.0);
     let frame = studio::hung_frame(pos2(right - w, top), w, n);
-    let grown = frame.expand(SHADOW);
+    let grown = studio::lifted_reach(frame);
     // The rows as the kit hangs them: the frame's room round them, each the
     // frame's width less it, the thumb's gutter among it.
     let inset = (frame.height() - n as f32 * studio::HUNG_ROW_H) / 2.0;
@@ -105,8 +101,8 @@ pub(crate) fn menu(ui: &mut Ui, view: &MenuView, cx: &MenuCtx) -> MenuOut {
     let ctx = ui.ctx().clone();
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(screen.min).constrain(false).fade_in(false);
     area.show(&ctx, |ui| {
-        // Where the press came down, a tap's among them ([`super::press_at`]).
-        let origin = super::press_at(ui);
+        // Where the press came down, a tap's among them.
+        let origin = studio::pass_press(ui);
         let took = |response: &Response| studio::pressed(response) && origin.is_some_and(live);
         // The catcher first, under the rows: a press off them closes it,
         // and the hand shows over it, as over the cells' catcher.
@@ -134,7 +130,7 @@ pub(crate) fn menu(ui: &mut Ui, view: &MenuView, cx: &MenuCtx) -> MenuOut {
         // the kit made before it paints the row's words.
         let paint = |ui: &Ui, k: usize, room: egui::Rect, _cursor: bool| {
             if beside[k] {
-                ui.painter().rect_filled(room.expand2(vec2(studio::HUNG_PAD, 0.0)), CornerRadius::same(2), cx.pal.raised);
+                studio::raised_row(ui, room.expand2(vec2(studio::HUNG_PAD, 0.0)), cx.pal);
             }
             let hovered = ui.ctx().read_response(id_of(k)).is_some_and(|response| response.hovered());
             lines[k].paint(ui, room, open && (beside[k] || hovered), cx.pal);
@@ -216,23 +212,9 @@ impl Line {
         let x = room.min.x + LEAD;
         studio::runs(ui, pos2(x, mid), &self.runs(font.clone(), ink, pal.dim), (room.max.x - star - x).max(1.0), Align2::LEFT_CENTER);
         if self.star {
-            star_mark(ui, pos2(room.max.x - STAR / 2.0, studio::led_mid(ui, mid, &font, true)), pal.gold);
+            // The cells' "★", the kit's star whole, on the capitals'
+            // middle as the bar's rating stands its stars.
+            studio::star(ui, pos2(room.max.x - STAR / 2.0, studio::led_mid(ui, mid, &font, true)), 1.0, pal.gold);
         }
-    }
-}
-
-/// The default server's star, [`STAR`] points across, centred on `at`: the
-/// cells' "★", which no face the panel borrows is sure to hold, drawn as
-/// its five points, each a convex kite from the middle.
-fn star_mark(ui: &Ui, at: Pos2, color: Color32) {
-    let (outer, inner) = (STAR / 2.0, STAR / 2.0 * 0.4);
-    let point = |k: usize, r: f32| {
-        let a = -FRAC_PI_2 + k as f32 * PI / 5.0;
-        at + vec2(r * a.cos(), r * a.sin())
-    };
-    for tip in 0..5 {
-        let k = tip * 2;
-        let kite = vec![at, point(k + 9, inner), point(k, outer), point(k + 1, inner)];
-        ui.painter().add(Shape::convex_polygon(kite, color, Stroke::NONE));
     }
 }

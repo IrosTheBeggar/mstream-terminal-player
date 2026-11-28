@@ -28,9 +28,6 @@
 
 use std::time::Duration;
 
-use egui::emath::GuiRounding;
-use egui::epaint::StrokeKind;
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, FontId, Id, Pos2, Response, Sense, Stroke, Ui, pos2, vec2};
 use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
@@ -43,10 +40,6 @@ use crate::gui::{Act, Screen};
 mod menu;
 
 pub(crate) use menu::{MenuCtx, menu};
-
-/// Whether egui draws the strip, its tooltips and the server menu (the
-/// host draws the cells strip until it does).
-pub(crate) const READY: bool = true;
 
 /// The strip's words: the tabs, the Visualizer and the server label.
 const SIZE: f32 = 12.5;
@@ -71,16 +64,6 @@ const CHEVRON_W: f32 = 10.0;
 const ADD_SQUARE: f32 = 16.0;
 /// The marked tab's amber rule along the strip's foot.
 const RULE: f32 = 2.0;
-/// A tooltip's words, and the room round them in its box (the canvas's 6
-/// by 10).
-const TIP_SIZE: f32 = 12.5;
-const TIP_PAD: egui::Vec2 = vec2(10.0, 6.0);
-/// The widest the Visualizer's tooltip runs its words before it wraps:
-/// the cells' 40 cells (`kit::TIP_WRAP`) at the grid's 8 points a cell,
-/// where the TopTips board wraps it. Studio's [`studio::TIP_W`] box is
-/// narrower, and in a face a little wider than Segoe UI it would put the
-/// key's " — V" alone on a second line, as the cells do (topbar.Q7).
-const TIP_WORDS: f32 = crate::kit::TIP_WRAP as f32 * 8.0;
 
 /// What the strip's face is handed besides the view.
 pub(crate) struct StripCtx<'a> {
@@ -154,8 +137,7 @@ pub(crate) fn show(ui: &mut Ui, view: &StripView, cx: &StripCtx) -> StripOut {
     let x = viz.min.x + PAD + LAMP + LAMP_GAP;
     studio::text(ui, pos2(x, mid), &view.viz.label, font, ink, viz.max.x - x, Align2::LEFT_CENTER);
     if let Some(response) = item.response.as_ref().filter(|_| item.hot) {
-        let (words, key) = keyed(&view.viz.tip, view.key_hints);
-        tip_of(ui, &mut out, response, words, key, cx);
+        out.tip = studio::tip_keyed(ui, response, &view.viz.tip, view.key_hints, cx.since_key, pal);
     }
 
     let plus = slots.plus;
@@ -270,20 +252,12 @@ fn fit_label(ui: &Ui, name: &str, menu: bool, start: f32, end: f32, strip: egui:
         if studio::width_of(ui, &format!("{first}…"), body(SIZE)) > room {
             return None;
         }
-        cut_width(ui, name, body(SIZE), room)
+        studio::cut_width(ui, name, body(SIZE), room)
     };
     let words_right = end - mark;
     let rect = egui::Rect::from_min_max(pos2(words_right - words, strip.min.y), pos2(end, strip.max.y));
     let chevron = menu.then(|| egui::Rect::from_min_max(pos2(end - CHEVRON_W, strip.min.y), pos2(end, strip.max.y)));
     Some(Label { rect, words_right, room, chevron })
-}
-
-/// How wide `s` lays out in `font` cut with an ellipsis to `max_w`, as
-/// [`studio::text`] cuts it.
-fn cut_width(ui: &Ui, s: &str, font: FontId, max_w: f32) -> f32 {
-    let mut job = LayoutJob::single_section(s.to_string(), TextFormat { font_id: font, ..Default::default() });
-    job.wrap = TextWrapping::truncate_at_width(max_w.max(1.0));
-    ui.painter().layout_job(job).size().x
 }
 
 /// A tab's words centred in its slot `at`: its name in `font` and `ink`,
@@ -324,7 +298,8 @@ fn live_at(cx: &StripCtx, at: Pos2) -> bool {
 /// the hand shows where the pointer stands on a live cell of it, and it
 /// lights there while hover may ([`StripCtx::hover`]); the press that
 /// lands on a live cell of it is taken, on the press, as the cells take
-/// theirs. Where none of it is live it senses nothing and is drawn at rest.
+/// theirs, a tap's too ([`studio::pass_press`]: without it a tap pressed
+/// nothing). Where none of it is live it senses nothing and is drawn at rest.
 /// Only the item's own points answer for it: egui would give it the press
 /// and the hover of a gap beside it, within its reach for a fingertip, and
 /// the cells' gaps answer nothing.
@@ -337,92 +312,10 @@ fn take(ui: &Ui, cx: &StripCtx, out: &mut StripOut, at: egui::Rect, id: Id, act:
     let under = response.hover_pos().is_some_and(on);
     let response = if under { studio::hand(response) } else { response };
     out.items.push((at, act.clone()));
-    if studio::pressed(&response) && press_at(ui).is_some_and(on) {
+    if studio::pressed(&response) && studio::pass_press(ui).is_some_and(on) {
         out.act = Some(act);
     }
     Item { hot: cx.hover && under, response: Some(response) }
-}
-
-/// Where this pass's primary press came down: egui's press origin while
-/// the button is held; and for a tap, whose release came in the same pass
-/// and which egui has let go of before any control asks, the press's own
-/// event, where the chrome's pass reads the press it hands the frame's
-/// duties. Without it a tap pressed nothing.
-fn press_at(ui: &Ui) -> Option<Pos2> {
-    ui.input(|i| {
-        i.pointer.press_origin().or_else(|| {
-            i.events.iter().rev().find_map(|event| match *event {
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } => Some(pos),
-                _ => None,
-            })
-        })
-    })
-}
-
-/// A tooltip's words and the key named after them, from `tip` worded whole
-/// with its " — key" tail: the tail only while key hints are on, as
-/// `Surface::tip_keyed` keeps it.
-fn keyed(tip: &str, key_hints: bool) -> (&str, Option<&str>) {
-    match tip.rsplit_once(" — ") {
-        Some((words, key)) if key_hints => (words, Some(key)),
-        Some((words, _)) => (words, None),
-        None => (tip, None),
-    }
-}
-
-/// The tooltip of an item the pointer lights, the first this pass.
-fn tip_of(ui: &Ui, out: &mut StripOut, response: &Response, words: &str, key: Option<&str>, cx: &StripCtx) {
-    if out.tip.is_none() {
-        out.tip = tip(ui, response, words, key, cx.since_key, cx.pal);
-    }
-}
-
-/// The Visualizer's tooltip for `response`, under the cells' dwell
-/// (`studio::dwell`): Studio's box as `studio::tip_under` hangs it,
-/// [`studio::TIP_UNDER`] points under the item, centred under it and pulled
-/// in at the window's edge, never in the dwell after a key; its words in
-/// the text colour and, where key hints keep it, ` — key` after them, the
-/// key in the monospace in the secondary ink, on the words' baseline (the
-/// TopTips board's). Wrapped in points only past [`TIP_WORDS`], the cells'
-/// 40 cells as the board measures them, so a line a cell past the cells' 40
-/// in their count stays one line. Painted on the tooltips' layer clipped to
-/// its box, which it returns while it shows.
-fn tip(ui: &Ui, response: &Response, words: &str, key: Option<&str>, since_key: Option<Duration>, pal: &Pal) -> Option<egui::Rect> {
-    let ctx = &response.ctx;
-    if let Some(since) = since_key.filter(|since| *since < crate::kit::TIP_DELAY) {
-        ctx.request_repaint_after(crate::kit::TIP_DELAY - since);
-        return None;
-    }
-    if words.is_empty() || !egui::Tooltip::should_show_tooltip(response, false) {
-        return None;
-    }
-    let mut parts: Vec<(String, FontId, Color32)> = vec![(words.to_string(), body(TIP_SIZE), pal.text)];
-    if let Some(key) = key {
-        parts[0].0.push_str(" — ");
-        parts.push((key.to_string(), mono(TIP_SIZE), pal.soft));
-    }
-    // One baseline for both faces, as the kit's runs stand theirs: each
-    // run's line as tall as its ascent and the deepest descent.
-    let metrics: Vec<studio::Metrics> = parts.iter().map(|(_, font, _)| studio::metrics(ui, font)).collect();
-    let depth = metrics.iter().map(|m| m.row - m.ascent).fold(0.0, f32::max);
-    let mut job = LayoutJob::default();
-    for ((s, font, color), m) in parts.into_iter().zip(&metrics) {
-        job.append(&s, 0.0, TextFormat { font_id: font, color, line_height: Some((m.ascent + depth).max(1.0)), ..Default::default() });
-    }
-    job.wrap.max_width = TIP_WORDS;
-    let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Tooltip::tooltip_id(response.id, 0));
-    let painter = ctx.layer_painter(layer);
-    let galley = painter.layout_job(job);
-    let size = galley.size() + 2.0 * TIP_PAD;
-    let screen = ctx.content_rect();
-    let target = response.interact_rect;
-    let left = (target.center().x - size.x / 2.0).min(screen.max.x - size.x).max(screen.min.x);
-    let tip = egui::Rect::from_min_size(pos2(left, target.max.y + studio::TIP_UNDER), size).round_to_pixels(ctx.pixels_per_point());
-    let painter = painter.with_clip_rect(tip);
-    painter.rect_filled(tip, studio::square(), pal.raised);
-    painter.rect_stroke(tip, studio::square(), Stroke::new(1.0, pal.edge_strong), StrokeKind::Inside);
-    painter.galley(tip.min + TIP_PAD, galley, pal.text);
-    Some(tip)
 }
 
 #[cfg(test)]
